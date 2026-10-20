@@ -13,6 +13,18 @@ import (
 // original descriptor view. A matching parameterized capture keeps its stronger
 // source view; Object parameters do not need a cast.
 func lambdaCaptureDescriptorViews(impl *values.JavaClassMember, captured []values.JavaValue) []values.JavaValue {
+	return lambdaCaptureDescriptorProjection(impl, captured, true)
+}
+
+// Capture ownership is fixed when the factory is decoded. Source types keep
+// changing until local-web solving and snapshot declaration have finished.
+// Recover only the body's final expression view here; changing a declared
+// binder's type would also change javac's physical capture parameters.
+func lambdaCaptureFinalDescriptorViews(impl *values.JavaClassMember, captured []values.JavaValue) []values.JavaValue {
+	return lambdaCaptureDescriptorProjection(impl, captured, false)
+}
+
+func lambdaCaptureDescriptorProjection(impl *values.JavaClassMember, captured []values.JavaValue, initializeSnapshot bool) []values.JavaValue {
 	if impl == nil {
 		return captured
 	}
@@ -62,7 +74,7 @@ func lambdaCaptureDescriptorViews(impl *values.JavaClassMember, captured []value
 		if name, ok := types.RawClassFQN(v.Type()); !ok || name != "java.lang.Object" {
 			continue
 		}
-		if snapshot, owned := v.(*values.JavaRef); owned && snapshot != nil {
+		if snapshot, owned := v.(*values.JavaRef); initializeSnapshot && owned && snapshot != nil {
 			if _, ordinal, pending := snapshot.OriginalPendingDynamicOperand(snapshot.Val); pending && ordinal == i {
 				// This is the factory's own fresh operand copy, not the
 				// enclosing source declaration. Retain its original capture

@@ -229,7 +229,11 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				var cv *values.CustomValue
 				cv = values.NewStreamingCustomValue(func(funcCtx *class_context.ClassContext, out *workbudget.Writer) error {
 					target, rawBridge := t19LambdaReturnCastStrings(funcCtx, cv, retTypevarCast)
-					return writeObservedLambdaSource(funcCtx, out, source, methodStr, captured, target, rawBridge)
+					// Keep the original capture identities in cv.Captures and the
+					// source binder. Only final textual substitutions acquire
+					// descriptor casts after their source types have settled.
+					views := lambdaCaptureFinalDescriptorViews(classMember, captured)
+					return writeObservedLambdaSource(funcCtx, out, source, methodStr, views, target, rawBridge)
 				}, func() types.JavaType {
 					return typ
 				}, lambdaReplace)
