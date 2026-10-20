@@ -9,6 +9,14 @@ import (
 	"strings"
 )
 
+// ProjectOriginalSamTarget projects a generic declaration onto the two original
+// metafactory descriptors. It supplies a type only: the caller must separately
+// prove the declaration's identity, source member binding, eager operands and
+// complete bootstrap protocol. It never evaluates a JavaValue/source callback.
+func ProjectOriginalSamTarget(owner, classSignature, samSignature, erased, instantiated string, provider callbinding.Provider) types.JavaType {
+	return inferDeclaredSamInstantiation(strings.ReplaceAll(owner, "/", "."), classSignature, samSignature, erased, instantiated, provider)
+}
+
 func inferDeclaredLambdaTarget(d *Decompiler, raw types.JavaType, erased, instantiated values.JavaValue) types.JavaType {
 	if known := inferLambdaTypeFromInstantiated(raw, instantiated); known != nil {
 		return known

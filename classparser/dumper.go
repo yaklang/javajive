@@ -4252,6 +4252,7 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			if nativeConstructorErr != nil {
 				return nil, nativeConstructorErr
 			}
+			statementList = c.constructorBoundReferenceSource(codeAttr, statementList, params, method)
 			constructorPlan, constructorErr := c.planConstructorSourceBoundary(codeAttr, statementList, params, method, regeneratedCapture)
 			if constructorErr != nil {
 				return nil, constructorErr
