@@ -23,7 +23,11 @@ type LambdaReferenceAdapter struct {
 type LambdaBodySource struct {
 	// ReferenceTarget marks a separately proved compiler-owned method reference.
 	// It is not an arrow body and must not borrow SAM parameter-name receipts.
-	ReferenceTarget     types.JavaType
+	ReferenceTarget types.JavaType
+	// Static references retain a checked TypeName from the source proof. The
+	// actual writer must reopen that namespace after final value-name binding.
+	ReferenceOwner      string
+	ReferenceQualifier  string
 	Code                string
 	FixedParameterTypes bool
 	// RecordRendered observes this actual writer's completed packet after

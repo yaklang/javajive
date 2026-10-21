@@ -194,6 +194,12 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 					// enter arrow return/cast or parameter-namespace adaptation.
 					target := source.ReferenceTarget
 					cv := values.NewStreamingCustomValue(func(ctx *class_context.ClassContext, out *workbudget.Writer) error {
+						if source.ReferenceOwner != "" {
+							qualifier, known := ctx.StaticMethodReferenceTypeName(source.ReferenceOwner)
+							if !known || qualifier != source.ReferenceQualifier {
+								return fmt.Errorf("%w: static reference type name changed after binding", ErrLambdaSourceUnsupported)
+							}
+						}
 						template := "(" + target.String(ctx) + ") (" + source.Code + ")"
 						return writeObservedLambdaSource(ctx, out, source, template, captured, "", "")
 					}, func() types.JavaType { return target }, lambdaReplace)

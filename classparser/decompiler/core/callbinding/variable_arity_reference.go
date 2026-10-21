@@ -8,8 +8,8 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
-// VariableArityReferencePlan proves only which non-generic public instance
-// declaration a bound reference selects for its instantiated SAM inputs. It
+// VariableArityReferencePlan proves only which non-generic accessible
+// declaration a bound instance or class static reference selects for its SAM inputs. It
 // grants no factory, return-adaptation, checked-exception, adapter-body, source-access, capture or
 // compiler-metadata permission. Those independent obligations remain at the
 // original factory. In particular, an array-pack body is not an overload proof.
@@ -56,13 +56,13 @@ func (q *variableArityQuery) allocate(n int64) bool {
 // they are not poly expressions. No potentially applicable method is removed
 // merely because its declared arity differs from the original target's arity.
 // Unknown metadata/conversion is never treated as a negative applicability
-// result. Generic/inaccessible/static/bridge families and override-equivalent
+// result. Generic/inaccessible/opposite-kind/bridge families and override-equivalent
 // declarations require separate source binding proofs and remain unsupported.
 func SelectVariableArityReference(w Witness, sam string, provider Provider, work *workbudget.Budget) VariableArityReferencePlan {
 	out := VariableArityReferencePlan{}
 	reject := func(reason string) VariableArityReferencePlan { out.Reason = reason; return out }
-	if provider == nil || w.Owner == "" || w.Name == "" || strings.ContainsAny(w.Name, "<>") || w.Kind != Virtual && w.Kind != Interface {
-		return reject("bound instance reference required")
+	if provider == nil || w.Owner == "" || w.Name == "" || strings.ContainsAny(w.Name, "<>") || w.Kind != Virtual && w.Kind != Interface && w.Kind != Static {
+		return reject("bound instance or class static reference required")
 	}
 	arguments, _, err := Descriptor(sam)
 	if err != nil || len(arguments) > 255 {
@@ -102,13 +102,24 @@ func SelectVariableArityReference(w Witness, sam string, provider Provider, work
 			if err != nil || len(family) >= 256 || len(method.Exceptions) > 128 || !q.charge(int64(len(method.Desc)+len(method.Signature)+len(method.Exceptions))+1) || !q.allocate(int64(len(family)+1)*256+int64(len(method.Exceptions))*16) {
 				return false
 			}
+			if w.Kind == Static && !method.Static {
+				// TypeName::method has a second, unbound-instance search with
+				// the first SAM input as receiver. Until that search has its own
+				// complete applicability proof, do not silently remove any
+				// arity-eligible instance candidate from a static reference.
+				unbound := len(arguments) - 1
+				if unbound >= 0 && (len(parameters) == unbound || method.Varargs && len(parameters) > 0 && unbound >= len(parameters)-1) {
+					return false
+				}
+				continue
+			}
 			// Arity alone can disprove applicability, including for generic
 			// methods. An eligible generic candidate needs inference, however.
 			potential := len(parameters) == len(arguments) || method.Varargs && len(parameters) > 0 && len(arguments) >= len(parameters)-1
 			if !potential {
 				continue
 			}
-			if !method.Public || method.Static || method.Bridge || method.Generic || strings.HasPrefix(class.Signature, "<") {
+			if !method.Public || method.Static != (w.Kind == Static) || method.Bridge || method.Generic || strings.HasPrefix(class.Signature, "<") || w.Kind == Static && class.IsInterface {
 				return false
 			}
 			if method.Varargs && (len(parameters) == 0 || !strings.HasPrefix(parameters[len(parameters)-1], "[")) {

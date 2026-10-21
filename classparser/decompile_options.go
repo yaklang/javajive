@@ -25,6 +25,13 @@ const (
 	NativeJavac8 SourceCompilerProfile = "javac8"
 )
 
+func (p SourceCompilerProfile) effective() SourceCompilerProfile {
+	if p == "" {
+		return ModernJavac
+	}
+	return p
+}
+
 func (p SourceCompilerProfile) validate(sourceVersion int) error {
 	switch p {
 	case "", ModernJavac:

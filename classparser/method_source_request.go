@@ -32,7 +32,9 @@ func (r methodSourceRequest) valid() bool {
 	case methodSourceDeclaration:
 		return r.captureCount == 0 && r.serial == 0 && r.factory == nil
 	case methodSourceCompilerReference:
-		return r.captureCount == 1 && r.serial != 0 && r.factory.closed() && r.factory.sealed
+		// Static references have no captured receiver. The completed typed
+		// packet separately proves which of the zero/one-port roles applies.
+		return (r.captureCount == 0 || r.captureCount == 1) && r.serial != 0 && r.factory.closed() && r.factory.sealed
 	case methodSourceLambdaBody:
 		return r.captureCount >= 0 && r.captureCount <= 255 && r.serial != 0 && (r.factory == nil || r.factory.closed())
 	default:

@@ -87,7 +87,7 @@ func NewJarFSFromLocalWithCompilerProfile(path string, target int, compiler Sour
 	}
 	z := NewJarFS(zipFS)
 	z.targetSourceVersion = target
-	z.sourceCompiler = compiler
+	z.sourceCompiler = compiler.effective()
 	z.declarationResolver = resolve
 	return z, nil
 }
@@ -108,6 +108,7 @@ func NewJarFS(zipFs *filesys.ZipFS) *JarFS {
 
 func NewJarFSWithOptions(zipFs *filesys.ZipFS, recursiveParse bool) *JarFS {
 	return &JarFS{
+		sourceCompiler:  ModernJavac,
 		ZipFS:           zipFs,
 		sourceOwnership: &sourceOwnershipCache{},
 		jarCache:        utils.NewSafeMapWithKey[string, *filesys.UnifiedFS](),

@@ -3,8 +3,10 @@ package javaclassparser
 import (
 	"slices"
 	"sort"
+	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 )
 
@@ -16,17 +18,16 @@ import (
 // existing constructor, lexical membership, accessor registration and final
 // lambda-identity protocols must all close against that actual new source.
 func (c *ClassObjectDumper) proposeLexicalLambdaMethodOrder(source string, members []string, methods []*dumpedMethods) ([]*dumpedMethods, bool) {
-	if c == nil || c.obj == nil || len(methods) > 4096 || len(members) == 0 || c.obj.AccessFlags&0x6200 != 0 || c.nativeMemberCurrent != nil || c.nativeMethodLocalCurrent != nil || c.nativeEnumConstantCurrent != nil || c.nativeCaptureFields != nil {
+	if c == nil || c.obj == nil || len(methods) > 4096 || c.obj.AccessFlags&0x6200 != 0 || c.nativeMemberCurrent != nil || c.nativeMethodLocalCurrent != nil || c.nativeEnumConstantCurrent != nil || c.nativeCaptureFields != nil {
 		return nil, false
 	}
-	p := c.nativeMemberRoot
-	if p == nil || p.failed || p.owner == "" || p.owner != c.obj.GetClassName() || p.declarationLookupOnly || c.options.SourceCompiler != NativeJavac8 && c.options.SourceCompiler != ModernJavac {
+	if c.options.SourceCompiler != NativeJavac8 && c.options.SourceCompiler != ModernJavac {
 		return nil, false
 	}
 	// The owning member packets are not inserted into this assembly yet, so
 	// only this original source scope contributes to its implementation counter.
 	events, known := c.native8LambdaSourceIdentityEvents(source, nil, methods)
-	if !known || len(events) == 0 || len(events) > 4096 || nativeLambdaSourceIdentityOrderClosed(events) || !nativeProofWork(c.Work, int64(len(methods))+int64(len(events))+1) || c.Work != nil && c.Work.CheckAlloc(int64(len(methods))*64+int64(len(events))*128) != nil {
+	if !known || len(events) == 0 || len(events) > 4096 || nativeLambdaSourceIdentityOrderClosed(events) || !c.lambdaScheduleOwnDeclarationScope() || !nativeProofWork(c.Work, int64(len(methods))+int64(len(events))+1) || c.Work != nil && c.Work.CheckAlloc(int64(len(methods))*64+int64(len(events))*128) != nil {
 		return nil, false
 	}
 	type interval struct {
@@ -159,13 +160,58 @@ func (c *ClassObjectDumper) proposeLexicalLambdaMethodOrder(source string, membe
 	return result, len(positions) == 0 && slices.Equal(fixedBefore, fixedAfter)
 }
 
+// A complete lexical family owns its existing registration certificate. A
+// plain original top-level class can own its method-declaration order without
+// owning a family. Admit that narrower case only when the original table has
+// no local/anonymous/owned member scopes whose compiler events could move.
+// An absent or incomplete family never becomes a successful family proof.
+func (c *ClassObjectDumper) lambdaScheduleOwnDeclarationScope() bool {
+	if c == nil || c.obj == nil {
+		return false
+	}
+	if p := c.nativeMemberRoot; p != nil && p.owner != "" {
+		return !p.failed && !p.declarationLookupOnly && p.owner == c.obj.GetClassName()
+	}
+	if c.nativeAnonymousRoot != nil || !nativeMemberTopLevelEvidence(c.obj, c.Work) {
+		return false
+	}
+	owner := c.obj.GetClassName()
+	tables := 0
+	for _, attribute := range c.obj.Attributes {
+		if !nativeProofWork(c.Work, 1) {
+			return false
+		}
+		if raw, ok := attribute.(*UnparsedAttribute); ok && (raw == nil || raw.Name == "InnerClasses") {
+			return false
+		}
+		if table, ok := attribute.(*InnerClassesAttribute); ok {
+			if table == nil || tables != 0 || int(table.NumberOfClasses) != len(table.Classes) || table.AttrLen != uint32(2+8*len(table.Classes)) {
+				return false
+			}
+			tables++
+			for _, row := range table.Classes {
+				if row == nil || !nativeProofWork(c.Work, 1) {
+					return false
+				}
+				inner, innerKnown := sourceBridgeClassName(c.obj, row.InnerClassInfoIndex)
+				outer, outerKnown := sourceBridgeClassName(c.obj, row.OuterClassInfoIndex)
+				name, named := sourceBridgeUTF8(c.obj, row.InnerNameIndex)
+				if !innerKnown || !outerKnown || !named || !nativeProofWork(c.Work, int64(len(inner)+len(outer)+len(name))+1) || !class_context.PreservesJava8Identifier(name) || outer == owner || strings.HasPrefix(inner, owner+"$") || strings.HasPrefix(outer, owner+"$") {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
 // An unrelated anonymous scope is not itself an obstacle to proposing an
 // ordinary declaration's position. The moving packet and each of its compiler
 // implementation bodies must, however, have no object/local-class allocation
 // or private-access registration event. This bounded structural query grants
 // no right to move a statement or to skip the family's final registrations.
 func (c *ClassObjectDumper) lambdaScheduleHasNoLexicalEvents(body *dumpedMethods, active map[*MemberInfo]bool, depth int, scanned *int) bool {
-	if c == nil || c.obj == nil || c.nativeMemberRoot == nil || body == nil || body.member == nil || body.sourceObject != c.obj || body.sourceDumper != c || c.dumpedMethodsSet[body.sourceCacheKey] != body || body.sourceReconstructionFailed() || depth < 0 || depth >= 64 || active == nil || active[body.member] || scanned == nil || *scanned < 0 || *scanned > 256<<10 || !nativeProofWork(c.Work, 1) {
+	if c == nil || c.obj == nil || !c.lambdaScheduleOwnDeclarationScope() || body == nil || body.member == nil || body.sourceObject != c.obj || body.sourceDumper != c || c.dumpedMethodsSet[body.sourceCacheKey] != body || body.sourceReconstructionFailed() || depth < 0 || depth >= 64 || active == nil || active[body.member] || scanned == nil || *scanned < 0 || *scanned > 256<<10 || !nativeProofWork(c.Work, 1) {
 		return false
 	}
 	name, named := sourceBridgeUTF8(c.obj, body.member.NameIndex)
@@ -173,9 +219,11 @@ func (c *ClassObjectDumper) lambdaScheduleHasNoLexicalEvents(body *dumpedMethods
 	if !named || !typed || name == "<init>" || name == "<clinit>" {
 		return false
 	}
-	for _, local := range c.nativeMemberRoot.methodLocals {
-		if !nativeProofWork(c.Work, 1) || local == nil || local.owner == nil || local.owner.method == name && local.owner.descriptor == desc {
-			return false
+	if c.nativeMemberRoot != nil {
+		for _, local := range c.nativeMemberRoot.methodLocals {
+			if !nativeProofWork(c.Work, 1) || local == nil || local.owner == nil || local.owner.method == name && local.owner.descriptor == desc {
+				return false
+			}
 		}
 	}
 	var code *CodeAttribute
@@ -211,7 +259,7 @@ func (c *ClassObjectDumper) lambdaScheduleHasNoLexicalEvents(body *dumpedMethods
 				return false
 			}
 			key := nativeMemberGetterKey(member.Name, member.Member, member.Description)
-			if c.nativeMemberRoot.getters[key] != nil || c.nativeMemberRoot.retainedAccessors[key] != nil {
+			if c.nativeMemberRoot != nil && (c.nativeMemberRoot.getters[key] != nil || c.nativeMemberRoot.retainedAccessors[key] != nil) {
 				return false
 			}
 		}

@@ -14,6 +14,7 @@ type WorkBudget = workbudget.Budget
 
 func copyDecompileOptions(in DecompileOptions) DecompileOptions {
 	out := in
+	out.SourceCompiler = in.SourceCompiler.effective()
 	if out.EnvSnapshot == nil {
 		out.EnvSnapshot = snapshotJDECEnv()
 	} else {

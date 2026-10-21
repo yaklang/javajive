@@ -298,6 +298,9 @@ func parseBytesCodeWithLambdaCaptureOrder(dumper *ClassObjectDumper, codeAttr *C
 		if source, closed := dumper.dumpCompilerVarargsReference(name, desc, captured, request); closed {
 			return source, nil
 		}
+		if hasPC && len(captured) == 0 && dumper.ordinaryArrowChangesStaticImplementationPorts(name, desc, request) {
+			return core.LambdaBodySource{}, fmt.Errorf("%w: ordinary arrow changes original static implementation input types", core.ErrLambdaSourceUnsupported)
+		}
 		dumped, err := dumper.dumpMethodWithSourceRequest(name, desc, id, adapter, request)
 		if err != nil {
 			return core.LambdaBodySource{}, err

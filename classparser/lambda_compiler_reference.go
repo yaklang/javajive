@@ -32,6 +32,8 @@ type compilerReferenceCaptureEmission struct {
 }
 
 type lambdaCompilerReference struct {
+	static                                           bool
+	qualifier                                        string
 	parameter                                        *values.JavaRef
 	captureEmission                                  *compilerReferenceCaptureEmission
 	originalReceiver                                 *values.JavaRef
@@ -46,6 +48,7 @@ type lambdaCompilerReference struct {
 
 type compilerReferenceSite struct {
 	samName, captured, functional, erased, actual string
+	captureCount                                  int
 	implementation                                values.JavaClassMember
 }
 
@@ -62,7 +65,7 @@ func (c *ClassObjectDumper) originalCompilerReferenceSite(f *lambdaSourceFactory
 		return out, false
 	}
 	parameters, result, err := callbinding.Descriptor(desc)
-	if err != nil || len(parameters) != 1 || !strings.HasPrefix(parameters[0], "L") || !strings.HasPrefix(result, "L") {
+	if err != nil || len(parameters) > 255 || !strings.HasPrefix(result, "L") {
 		return out, false
 	}
 	site := c.obj.ConstantPool[core.Convert2bytesToInt(op.Data[:2])-1].(*ConstantInvokeDynamicInfo)
@@ -103,7 +106,11 @@ func (c *ClassObjectDumper) originalCompilerReferenceSite(f *lambdaSourceFactory
 	if implementation == nil || implementation.Name != c.obj.GetClassName() {
 		return out, false
 	}
-	out.captured, out.functional, out.implementation = parameters[0], result, *implementation
+	out.captureCount = len(parameters)
+	if len(parameters) == 1 {
+		out.captured = parameters[0]
+	}
+	out.functional, out.implementation = result, *implementation
 	return out, true
 }
 
@@ -362,6 +369,9 @@ func (c *ClassObjectDumper) compilerReferenceParameterPort(f *lambdaSourceFactor
 }
 
 func (c *ClassObjectDumper) proveCompilerVarargsReference(name, descriptor string, captured []values.JavaValue, request methodSourceRequest, ctx *class_context.ClassContext) *lambdaCompilerReference {
+	if len(captured) == 0 {
+		return c.proveCompilerStaticVarargsReference(name, descriptor, request, ctx)
+	}
 	if c == nil || c.obj == nil || ctx == nil || ctx.InvocationMetadata == nil || len(captured) != 1 || !request.valid() || request.captureCount != 1 || !request.factory.closed() || !request.factory.sealed || isSyntheticMethod(request.factory.method.AccessFlags) {
 		return nil
 	}
@@ -370,7 +380,7 @@ func (c *ClassObjectDumper) proveCompilerVarargsReference(name, descriptor strin
 		return nil
 	}
 	site, known := c.originalCompilerReferenceSite(f)
-	if !known || site.implementation.Member != name || site.implementation.Description != descriptor {
+	if !known || site.captureCount != 1 || !strings.HasPrefix(site.captured, "L") || site.implementation.Member != name || site.implementation.Description != descriptor {
 		return nil
 	}
 	var method *MemberInfo
@@ -391,7 +401,7 @@ func (c *ClassObjectDumper) proveCompilerVarargsReference(name, descriptor strin
 		}
 	}
 	shape, known := c.originalVarargsAdapterShape(method)
-	if !known || shape.parameters[0] != site.captured || !c.compilerVarargsParameterSchema(shape) {
+	if !known || shape.receiverCount() != 1 || len(shape.parameters) == 0 || shape.parameters[0] != site.captured || !c.compilerVarargsParameterSchema(shape) {
 		return nil
 	}
 	actualParameters, actualResult, err := callbinding.Descriptor(site.actual)
@@ -498,7 +508,7 @@ func (c *ClassObjectDumper) dumpCompilerVarargsReference(name, descriptor string
 		return core.LambdaBodySource{}, false
 	}
 	proof := c.proveCompilerVarargsReference(name, descriptor, captured, request, c.FuncCtx)
-	if proof == nil || !c.compilerReferenceFlatScope() {
+	if proof == nil || proof.static && !c.compilerReferenceCounterScopeClosed() || !proof.static && !c.compilerReferenceFlatScope() {
 		return core.LambdaBodySource{}, false
 	}
 	context, known := c.FuncCtx.SnapshotForSourceProof(c.Work)
@@ -517,6 +527,10 @@ func (c *ClassObjectDumper) dumpCompilerVarargsReference(name, descriptor string
 		return core.LambdaBodySource{}, false
 	}
 	source := core.LambdaBodySource{Code: body.code, ReferenceTarget: proof.target}
+	if proof.static {
+		source.ReferenceOwner = strings.ReplaceAll(proof.shape.member.Name, "/", ".")
+		source.ReferenceQualifier = proof.qualifier
+	}
 	source.RecordRenderedWithCaptures = func(observation core.LambdaSourceRender) {
 		c.recordCompilerReferenceCapture(body, observation)
 		c.recordNativeLambdaRenderedPacket(body, body.code, observation.Packet)
@@ -530,11 +544,16 @@ func (c *ClassObjectDumper) compilerReferenceSourcePacketClosed(body *dumpedMeth
 		return false
 	}
 	p := body.compilerReference
-	if p.shape == nil || p.shape.code == nil || p.receiver == nil || p.receiver != p.originalReceiver || p.context == nil || p.target == nil || !p.factory.closed() || !p.factory.sealed || body.member != p.shape.method || body.sourceRequest.factory != p.factory || p.shape.code.MaxStack != p.maxStack || p.shape.code.MaxLocals != p.maxLocals || p.factory.code.MaxStack != p.factoryStack || p.factory.code.MaxLocals != p.factoryLocals || body.code != p.template {
+	if p.shape == nil || p.shape.code == nil || p.static && (p.receiver != nil || p.originalReceiver != nil || p.parameter != nil || p.shape.receiverCount() != 0) || !p.static && (p.receiver == nil || p.receiver != p.originalReceiver || p.shape.receiverCount() != 1) || p.context == nil || p.target == nil || !p.factory.closed() || !p.factory.sealed || body.member != p.shape.method || body.sourceRequest.factory != p.factory || p.shape.code.MaxStack != p.maxStack || p.shape.code.MaxLocals != p.maxLocals || p.factory.code.MaxStack != p.factoryStack || p.factory.code.MaxLocals != p.factoryLocals || body.code != p.template {
 		return false
 	}
-	fresh := c.proveCompilerVarargsReference(body.methodName, body.descriptor, []values.JavaValue{p.receiver}, body.sourceRequest, p.context)
-	return fresh != nil && fresh.parameter == p.parameter && fresh.shape.method == p.shape.method && fresh.shape.code == p.shape.code && slices.Equal(fresh.shape.codeBytes, p.shape.codeBytes) && fresh.shape.member == p.shape.member && fresh.shape.packCount == p.shape.packCount && slices.Equal(fresh.shape.parameters, p.shape.parameters) && fresh.template == p.template && fresh.erased == p.erased && fresh.instantiated == p.instantiated && reflect.DeepEqual(fresh.target.RawType(), p.target.RawType()) && c.compilerReferenceFlatScope()
+	var captured []values.JavaValue
+	if !p.static {
+		captured = []values.JavaValue{p.receiver}
+	}
+	fresh := c.proveCompilerVarargsReference(body.methodName, body.descriptor, captured, body.sourceRequest, p.context)
+	scopeClosed := p.static && c.compilerReferenceCounterScopeClosed() || !p.static && c.compilerReferenceFlatScope()
+	return fresh != nil && fresh.static == p.static && fresh.qualifier == p.qualifier && fresh.parameter == p.parameter && fresh.shape.method == p.shape.method && fresh.shape.code == p.shape.code && slices.Equal(fresh.shape.codeBytes, p.shape.codeBytes) && fresh.shape.member == p.shape.member && fresh.shape.packCount == p.shape.packCount && slices.Equal(fresh.shape.parameters, p.shape.parameters) && fresh.template == p.template && fresh.erased == p.erased && fresh.instantiated == p.instantiated && reflect.DeepEqual(fresh.target.RawType(), p.target.RawType()) && scopeClosed
 }
 
 // A compiler-owned reference consumes an implementation ordinal at its real
@@ -673,6 +692,21 @@ func (c *ClassObjectDumper) recordCompilerReferenceCapture(body *dumpedMethods, 
 	if frame == nil {
 		return true
 	}
+	if p.static {
+		if !observation.Complete || len(observation.Captures) != 0 || frame.body == nil || frame.body.member != p.factory.method || frame.ended || frame.invalid || p.captureEmission != nil || c.FuncCtx == nil || c.CurrentMethod != p.factory.method {
+			return false
+		}
+		context, known := c.FuncCtx.SnapshotForSourceProof(c.Work)
+		if !known {
+			return false
+		}
+		qualifier, known := context.StaticMethodReferenceTypeName(strings.ReplaceAll(p.shape.member.Name, "/", "."))
+		if !known || qualifier != p.qualifier {
+			return false
+		}
+		p.captureEmission = &compilerReferenceCaptureEmission{frame: frame, context: context, text: qualifier}
+		return true
+	}
 	if !observation.Complete || len(observation.Captures) != 1 || observation.Captures[0].Index != 0 || frame.body == nil || frame.body.member != p.factory.method || frame.ended || frame.invalid || p.captureEmission != nil || c.FuncCtx == nil || c.CurrentMethod != p.factory.method {
 		return false
 	}
@@ -696,6 +730,10 @@ func (c *ClassObjectDumper) compilerReferenceFinalCaptureClosed(body, parent *du
 	emission := p.captureEmission
 	if emission == nil || emission.frame != parent.lambdaEmission || !emission.frame.closed() || emission.frame.body != parent || emission.frame.request != parent.sourceRequest || emission.parameter != p.parameter || p.factory.method != parent.member || emission.context == nil {
 		return false
+	}
+	if p.static {
+		qualifier, known := emission.context.StaticMethodReferenceTypeName(strings.ReplaceAll(p.shape.member.Name, "/", "."))
+		return known && emission.parameter == nil && qualifier == p.qualifier && qualifier == emission.text
 	}
 	parameter, pending, known := compilerReferenceParameterSource(p.receiver, p.factory, emission.context, c.Work)
 	return known && !pending && parameter == p.parameter && c.compilerReferenceParameterPort(p.factory, p.shape, p.receiver, p.shape.parameters[0], emission.context) && parameter.String(emission.context) == emission.text
@@ -721,7 +759,8 @@ func (c *ClassObjectDumper) compilerReferenceOriginalAccess(shape *lambdaVarargs
 	if receiver.AccessFlags&1 == 0 && !samePackage {
 		return false
 	}
-	if (receiver.AccessFlags&0x0200 != 0) != (shape.opcode == core.OP_INVOKEINTERFACE) {
+	static := shape.opcode == core.OP_INVOKESTATIC
+	if !static && (receiver.AccessFlags&0x0200 != 0) != (shape.opcode == core.OP_INVOKEINTERFACE) {
 		return false
 	}
 	for _, attribute := range receiver.Attributes {
@@ -762,7 +801,7 @@ func (c *ClassObjectDumper) compilerReferenceOriginalAccess(shape *lambdaVarargs
 		if name != shape.member.Member || desc != shape.member.Description {
 			continue
 		}
-		if matched || m.AccessFlags&0x0080 == 0 || m.AccessFlags&(0x0002|0x0008|0x0040) != 0 || m.AccessFlags&1 == 0 && nativeBinaryPackage(declaring.GetClassName()) != nativeBinaryPackage(c.obj.GetClassName()) || len(m.Attributes) > 64 {
+		if matched || m.AccessFlags&0x0080 == 0 || m.AccessFlags&0x0040 != 0 || (m.AccessFlags&0x0008 != 0) != static || m.AccessFlags&0x0002 != 0 && !(static && declaring.GetClassName() == c.obj.GetClassName()) || m.AccessFlags&1 == 0 && nativeBinaryPackage(declaring.GetClassName()) != nativeBinaryPackage(c.obj.GetClassName()) || len(m.Attributes) > 64 {
 			return false
 		}
 		signature, known := nativeMethodLocalOriginalSignature(declaring, m.Attributes, c.Work)
@@ -803,7 +842,29 @@ func (c *ClassObjectDumper) compilerReferenceOriginalAccess(shape *lambdaVarargs
 // solver's JavaRef has that bound's concrete type. Until an original source
 // qualifier is separately certified, require an empty declaration environment.
 func (c *ClassObjectDumper) compilerReferenceConcreteFactoryScope(f *lambdaSourceFactory) bool {
-	if c == nil || c.obj == nil || !f.closed() || f.object != c.obj {
+	if c == nil || c.obj == nil || !f.closed() || f.object != c.obj || len(c.obj.Methods) > 4096 || len(f.method.Attributes) > 65535 || !nativeProofWork(c.Work, int64(len(c.obj.Methods)+len(f.method.Attributes))+1) {
+		return false
+	}
+	// Sealing retains flags, descriptor and Code bytes. It does not establish
+	// declaration ownership: a detached shallow copy can retain all of them.
+	owned, codes := 0, 0
+	for _, method := range c.obj.Methods {
+		if method == nil {
+			return false
+		}
+		if method == f.method {
+			owned++
+		}
+	}
+	for _, attribute := range f.method.Attributes {
+		if code, ok := attribute.(*CodeAttribute); ok {
+			if code != f.code {
+				return false
+			}
+			codes++
+		}
+	}
+	if owned != 1 || codes != 1 {
 		return false
 	}
 	classSig, known := nativeMethodLocalOriginalSignature(c.obj, c.obj.Attributes, c.Work)

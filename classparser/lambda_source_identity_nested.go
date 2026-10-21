@@ -62,6 +62,10 @@ func (c *ClassObjectDumper) nativeLambdaDirectBlockScopes(source string, charge 
 // Close both graphs: each original receipt must occur once, at a direct child
 // event of its actual factory method, and every final source arrow must occur.
 func (c *ClassObjectDumper) native8NestedLambdaSourceIdentityEvents(source string, arrows []int, methods []*dumpedMethods, charge func(int64) bool) ([]nativeLambdaSourceIdentityEvent, bool) {
+	return c.nestedLambdaSourceFactoryEvents(source, arrows, methods, charge, false)
+}
+
+func (c *ClassObjectDumper) nestedLambdaSourceFactoryEvents(source string, arrows []int, methods []*dumpedMethods, charge func(int64) bool, references bool) ([]nativeLambdaSourceIdentityEvent, bool) {
 	type rootDeclaration struct {
 		body *dumpedMethods
 		text string
@@ -94,7 +98,7 @@ func (c *ClassObjectDumper) native8NestedLambdaSourceIdentityEvents(source strin
 		if !frame.closed() || frame.body != parent || frame.request != parent.sourceRequest || len(frame.children) > methodSourceLambdaRequestLimit || !charge(int64(len(content))+int64(len(frame.children))+1) {
 			return false
 		}
-		scopes, known := c.nativeLambdaDirectBlockScopes(content, charge)
+		scopes, known := c.nativeLambdaDirectFactoryScopes(content, references, charge)
 		if !known || len(scopes) != len(frame.children) {
 			return false
 		}
@@ -111,29 +115,43 @@ func (c *ClassObjectDumper) native8NestedLambdaSourceIdentityEvents(source strin
 			if !factory.closed() || factory.object != c.obj || factory.method != parent.member {
 				return false
 			}
-			local, known := c.nativeLambdaDirectBlockScopes(occurrence.packet, charge)
-			if !known || len(local) != 1 {
-				return false
-			}
 			scope := scopes[i]
-			header := occurrence.packet[:local[0].arrow+2]
-			start := scope.arrow + 2 - len(header)
 			position := offset + scope.arrow
-			if start < 0 || positions[position] || !charge(int64(len(header))) || content[start:scope.arrow+2] != header {
+			if positions[position] {
 				return false
 			}
-			if strings.IndexByte(occurrence.packet, 0) >= 0 {
-				if !c.composedLambdaOccurrenceClosed(receipt, parent, content, content[start:scope.end+1], charge) {
+			if scope.reference {
+				local, known := nativeLambdaSourceImplementationTokens(occurrence.packet, c.Work, true)
+				if !known || len(local) != 1 || occurrence.packet[local[0]:local[0]+2] != "::" || child.compilerReference == nil || !c.compilerReferenceFinalCaptureClosed(child, parent) {
 					return false
 				}
-			} else if !c.native8LambdaRenderedIdentityPacketClosed(receipt, source, charge, parent) {
-				return false
+				start := scope.arrow - local[0]
+				if start < 0 || len(occurrence.packet) > len(content)-start || !charge(int64(len(occurrence.packet))) || content[start:start+len(occurrence.packet)] != occurrence.packet {
+					return false
+				}
+			} else {
+				local, known := c.nativeLambdaDirectBlockScopes(occurrence.packet, charge)
+				if !known || len(local) != 1 || child.compilerReference != nil {
+					return false
+				}
+				header := occurrence.packet[:local[0].arrow+2]
+				start := scope.arrow + 2 - len(header)
+				if start < 0 || !charge(int64(len(header))) || content[start:scope.arrow+2] != header {
+					return false
+				}
+				if strings.IndexByte(occurrence.packet, 0) >= 0 {
+					if !c.composedLambdaOccurrenceClosed(receipt, parent, content, content[start:scope.end+1], charge) {
+						return false
+					}
+				} else if !c.native8LambdaRenderedIdentityPacketClosed(receipt, source, charge, parent) {
+					return false
+				}
 			}
 			used[child.member], positions[position] = true, true
-			if !walk(child, root, content[scope.open+1:scope.end], offset+scope.open+1, depth+1) {
+			if !scope.reference && !walk(child, root, content[scope.open+1:scope.end], offset+scope.open+1, depth+1) {
 				return false
 			}
-			factoryName, named := lambdaFactoryNameComponent(factory)
+			factoryName, named := c.lambdaSourceFactoryNameComponent(factory)
 			implementation, known := sourceBridgeUTF8(c.obj, receipt.method.NameIndex)
 			prefix := "lambda$" + factoryName + "$"
 			if !named || !known || len(implementation) <= len(prefix) || implementation[:len(prefix)] != prefix {

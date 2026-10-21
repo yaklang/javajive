@@ -534,6 +534,9 @@ func (c *ClassObjectDumper) computeSamePkgFQNames() map[string]bool {
 }
 
 func (c *ClassObjectDumper) DumpClass() (string, error) {
+	// The omitted profile is the public modern-javac alias. Legacy Dump and
+	// archive callers must enter the same proof/emission path as options APIs.
+	c.options.SourceCompiler = c.options.SourceCompiler.effective()
 	if c.options.EnvSnapshot == nil {
 		// Nested legacy Dump (Dump/Decompile inside DecompileWithOptions) must
 		// push a live-env sentinel and restore the outer snapshot. A top-level

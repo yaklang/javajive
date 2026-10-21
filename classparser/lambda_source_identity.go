@@ -115,7 +115,10 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 	for _, receipt := range c.lambdaMethodSourceBodies {
 		if receipt != nil && receipt.request.factory != nil && receipt.request.factory.method != nil && (receipt.request.factory.method.AccessFlags == 0x100a || receipt.request.factory.method.AccessFlags == 0x1002) {
 			if hasReference {
-				return nil, false
+				if !c.compilerReferenceCounterScopeClosed() {
+					return nil, false
+				}
+				return c.nestedLambdaSourceFactoryEvents(text, arrows, methods, charge, true)
 			}
 			return c.native8NestedLambdaSourceIdentityEvents(text, arrows, methods, charge)
 		}

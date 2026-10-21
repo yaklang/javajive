@@ -11,7 +11,7 @@ import (
 
 // A varargs reference can have a compiler implementation even though no source
 // lambda body exists. This packet proves only the original adapter's transfer:
-// one bound receiver, unchanged fixed arguments, a fresh ordered argument pack,
+// an optional original receiver, unchanged fixed arguments, a fresh ordered argument pack,
 // the selected invocation, and either its unchanged result or void discard.
 // It grants no factory, source overload, accessibility or declaration-consumption
 // permission. Those obligations must be proved at the actual factory site.
@@ -27,6 +27,13 @@ type lambdaVarargsAdapter struct {
 	parameters []string
 	result     string
 	packCount  int
+}
+
+func (p *lambdaVarargsAdapter) receiverCount() int {
+	if p.opcode == core.OP_INVOKESTATIC {
+		return 0
+	}
+	return 1
 }
 
 func (c *ClassObjectDumper) originalVarargsAdapterShape(method *MemberInfo) (*lambdaVarargsAdapter, bool) {
@@ -47,7 +54,7 @@ func (c *ClassObjectDumper) originalVarargsAdapterShape(method *MemberInfo) (*la
 		return nil, false
 	}
 	parameters, result, err := callbinding.Descriptor(descriptor)
-	if owned != 1 || !typed || err != nil || len(parameters) < 1 || len(parameters) > 255 || !strings.HasPrefix(parameters[0], "L") {
+	if owned != 1 || !typed || err != nil || len(parameters) > 255 {
 		return nil, false
 	}
 	var code *CodeAttribute
@@ -83,7 +90,9 @@ func (c *ClassObjectDumper) originalVarargsAdapterShape(method *MemberInfo) (*la
 		return nil, false
 	}
 	ops := constructorMotionOps(decoder)
-	if len(ops) < 5 || len(ops) > 1024 {
+	// An empty static pack is length/array/invoke/return. Bound references
+	// additionally load their original receiver, which is checked below.
+	if len(ops) < 4 || len(ops) > 1024 {
 		return nil, false
 	}
 	invoke := -1
@@ -91,7 +100,21 @@ func (c *ClassObjectDumper) originalVarargsAdapterShape(method *MemberInfo) (*la
 		if !nativeProofWork(c.Work, 1) {
 			return nil, false
 		}
-		if op.Instr.OpCode == core.OP_INVOKEVIRTUAL || op.Instr.OpCode == core.OP_INVOKEINTERFACE {
+		if op.Instr.OpCode == core.OP_INVOKEVIRTUAL || op.Instr.OpCode == core.OP_INVOKEINTERFACE || op.Instr.OpCode == core.OP_INVOKESTATIC {
+			candidate := constructorMotionMember(c.obj, op, op.Instr.OpCode)
+			if candidate == nil {
+				return nil, false
+			}
+			formals, _, err := callbinding.Descriptor(candidate.Description)
+			if err != nil {
+				return nil, false
+			}
+			// A result boxing/unboxing conversion is a separate typed suffix.
+			// Only an invocation consuming the argument array can be the pack's
+			// target. The full prefix/suffix replay still excludes extra calls.
+			if len(formals) == 0 || !strings.HasPrefix(formals[len(formals)-1], "[") {
+				continue
+			}
 			if invoke != -1 {
 				return nil, false
 			}
@@ -102,7 +125,11 @@ func (c *ClassObjectDumper) originalVarargsAdapterShape(method *MemberInfo) (*la
 		return nil, false
 	}
 	member := constructorMotionMember(c.obj, ops[invoke], ops[invoke].Instr.OpCode)
-	if member == nil || member.Member == "<init>" || member.Member == "<clinit>" || parameters[0] != "L"+member.Name+";" {
+	receivers := 1
+	if ops[invoke].Instr.OpCode == core.OP_INVOKESTATIC {
+		receivers = 0
+	}
+	if member == nil || member.Member == "<init>" || member.Member == "<clinit>" || receivers != 0 && (len(parameters) == 0 || parameters[0] != "L"+member.Name+";") {
 		return nil, false
 	}
 	formals, returned, err := callbinding.Descriptor(member.Description)
@@ -122,7 +149,7 @@ func (c *ClassObjectDumper) originalVarargsAdapterShape(method *MemberInfo) (*la
 		}
 	}
 	fixed := len(formals) - 1
-	count := len(parameters) - 1 - fixed
+	count := len(parameters) - receivers - fixed
 	if count < 0 || count > 254 {
 		return nil, false
 	}
@@ -155,11 +182,11 @@ func (c *ClassObjectDumper) originalVarargsAdapterShape(method *MemberInfo) (*la
 		index++
 		return true
 	}
-	if !load(0, parameters[0]) {
+	if receivers != 0 && !load(0, parameters[0]) {
 		return nil, false
 	}
 	for i := 0; i < fixed; i++ {
-		if !load(i+1, formals[i]) {
+		if !load(i+receivers, formals[i]) {
 			return nil, false
 		}
 	}
@@ -176,7 +203,7 @@ func (c *ClassObjectDumper) originalVarargsAdapterShape(method *MemberInfo) (*la
 			return nil, false
 		}
 		index++
-		if !literal(i) || !load(fixed+1+i, component) || index >= invoke || ops[index].Instr.OpCode != store || len(ops[index].Data) != 0 {
+		if !literal(i) || !load(fixed+receivers+i, component) || index >= invoke || ops[index].Instr.OpCode != store || len(ops[index].Data) != 0 {
 			return nil, false
 		}
 		index++
