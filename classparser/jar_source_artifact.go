@@ -16,13 +16,15 @@ import (
 // RestoreClassMetadata for each rebuilt class before publishing the artifact.
 // Plain JarFS source admission remains unchanged.
 //
-// This contract can express ordinary synthetic storage fields and proved
-// nonserializable private lambda helper names/parameter tables without dropping
-// their reflective metadata or importing original executable code. Lambda
-// obligations require a completed ReadFile source/factory proof in this view.
+// This contract preserves ordinary synthetic storage fields and exact original
+// MethodParameters tables (including absence), under a bijection of complete
+// method identities and flags. Names retain lossless UTF-16 units. Proved
+// nonserializable private lambda helper identities additionally require a
+// completed ReadFile source/factory proof in this view.
 // An independently proved, fully rendered all-hidden anonymous constructor can
-// also restore original MethodParameters/empty-Signature absence. This grants
-// no ordinary-constructor, explicit-SUPER-argument or executable-code edit.
+// additionally restore original empty-Signature absence. Other generic method
+// signatures must already match. Regenerated bridges separately owe the same
+// symbolic load/cast/delegation/return program; table equality cannot prove it.
 // It does not
 // certify compilation, JVM verification, other ABI metadata or algorithmic
 // equivalence; those still require independent validation.
@@ -70,8 +72,9 @@ func (a *JarSourceArtifact) Close() error { return a.jar.Close() }
 
 // RestoreClassMetadata binds restoration to this archive's original bytes and
 // the exact physical source namespace. Declaration-resolver classes cannot
-// authorize edits. Only proved field/lambda/implicit-constructor metadata is restored; executable
-// Code and all other compiled attribute payloads remain unchanged.
+// authorize edits. Only field/parameter/proved-lambda/implicit-constructor
+// metadata is restored; executable Code and other compiled attribute payloads
+// remain unchanged. Generic method signatures must close exactly afterwards.
 func (a *JarSourceArtifact) RestoreClassMetadata(name string, compiled []byte) ([]byte, error) {
 	if a == nil || a.jar == nil {
 		return nil, fs.ErrInvalid
@@ -95,6 +98,14 @@ func (a *JarSourceArtifact) RestoreClassMetadata(name string, compiled []byte) (
 	if object.GetClassName()+".class" != logical {
 		return nil, fmt.Errorf("field metadata: archive path and class identity disagree")
 	}
+	var lambda *sourceLambdaMetadataPlan
+	if authority := z.sourceLambdaMetadata; authority != nil {
+		lambda = authority.plan(object.GetClassName())
+	}
+	compiled, err = restoreMethodParameterMetadata(original, compiled, lambda, reader.Work)
+	if err != nil {
+		return nil, err
+	}
 	if authority := z.sourceLambdaMetadata; authority != nil {
 		if plan := authority.constructorPlan(object.GetClassName()); plan != nil {
 			compiled, err = restoreImplicitConstructorParameterMetadata(original, compiled, plan, reader.Work)
@@ -102,8 +113,8 @@ func (a *JarSourceArtifact) RestoreClassMetadata(name string, compiled []byte) (
 				return nil, err
 			}
 		}
-		if plan := authority.plan(object.GetClassName()); plan != nil {
-			compiled, err = restoreLambdaMethodMetadata(original, compiled, plan, reader.Work)
+		if lambda != nil {
+			compiled, err = restoreLambdaMethodMetadata(original, compiled, lambda, reader.Work)
 			if err != nil {
 				return nil, err
 			}
@@ -114,6 +125,9 @@ func (a *JarSourceArtifact) RestoreClassMetadata(name string, compiled []byte) (
 		return nil, err
 	}
 	if err := sourceMethodMetadataClosed(object, result, reader.Work); err != nil {
+		return nil, err
+	}
+	if err := sourceArtifactBridgeProgramsClosed(object, result, reader.Work); err != nil {
 		return nil, err
 	}
 	return result, nil

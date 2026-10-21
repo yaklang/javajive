@@ -1,9 +1,7 @@
 package javaclassparser
 
 import (
-	"bytes"
 	"crypto/sha256"
-	"encoding/binary"
 	"fmt"
 	"slices"
 
@@ -212,9 +210,6 @@ func restoreImplicitConstructorParameterMetadata(original, compiled []byte, plan
 			return fail("unknown implicit parameter role")
 		}
 	}
-	if work.CheckAlloc(int64(len(compiled))*2) != nil || work.Charge(workbudget.CounterOutputBytes, int64(len(compiled))) != nil {
-		return nil, work.Check()
-	}
 	removeParameters := plan.omitParameters && generatedTable
 	if removeParameters {
 		if !slices.Equal(flags, plan.flags) || len(names) != len(plan.flags) {
@@ -242,50 +237,20 @@ func restoreImplicitConstructorParameterMetadata(original, compiled []byte, plan
 		return fail("unrelated constructor signature changed")
 	}
 	if !removeSignature && !removeParameters {
-		return bytes.Clone(compiled), nil
+		return applyCompiledMetadataEdits(compiled, nil, work)
 	}
-	span, recorded := layout.methods[after]
-	if !recorded || span.start < layout.poolEnd || span.end > len(compiled) || span.end-span.start < 8 {
-		return fail("unavailable compiled constructor span")
-	}
-	raw := compiled[span.start:span.end]
-	replacement := bytes.Clone(raw[:8])
-	removed := 0
-	for pos := 8; pos < len(raw); {
-		if len(raw)-pos < 6 {
-			return fail("truncated compiled attribute")
-		}
-		length := int64(binary.BigEndian.Uint32(raw[pos+2:]))
-		if length > int64(len(raw)-pos-6) {
-			return fail("invalid compiled attribute length")
-		}
-		end := pos + 6 + int(length)
-		name, known := sourceBridgeUTF8(got, binary.BigEndian.Uint16(raw[pos:]))
-		if !known || !nativeProofWork(work, int64(end-pos)) {
-			return fail("invalid compiled attribute identity")
-		}
-		if name == "MethodParameters" && removeParameters || name == "Signature" && removeSignature {
-			removed++
-		} else {
-			replacement = append(replacement, raw[pos:end]...)
-		}
-		pos = end
-	}
-	wantRemoved := 0
+	namesToRemove := map[string]bool{}
 	if removeParameters {
-		wantRemoved++
+		namesToRemove["MethodParameters"] = true
 	}
 	if removeSignature {
-		wantRemoved++
+		namesToRemove["Signature"] = true
 	}
-	if removed != wantRemoved || len(after.Attributes) < removed {
-		return fail("ambiguous compiled parameter table")
+	edit, err := compiledMethodWithoutAttributes(compiled, got, after, layout, namesToRemove, work)
+	if err != nil {
+		return nil, err
 	}
-	binary.BigEndian.PutUint16(replacement[6:], uint16(len(after.Attributes)-removed))
-	out := make([]byte, 0, len(compiled)-(len(raw)-len(replacement)))
-	out = append(out, compiled[:span.start]...)
-	out = append(out, replacement...)
-	return append(out, compiled[span.end:]...), nil
+	return applyCompiledMetadataEdits(compiled, []compiledMetadataEdit{edit}, work)
 }
 
 func sourceConstructorSignature(object *ClassObject, method *MemberInfo) (string, bool, bool) {

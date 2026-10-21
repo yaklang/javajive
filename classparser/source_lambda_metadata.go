@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"slices"
-	"sort"
 
 	"github.com/yaklang/javajive/internal/workbudget"
 )
@@ -264,31 +263,7 @@ func restoreLambdaMethodMetadata(original, compiled []byte, plan *sourceLambdaMe
 		binary.BigEndian.PutUint16(count, uint16(poolCount))
 		edits = append(edits, compiledMetadataEdit{compiledMetadataSpan{8, 10}, count}, compiledMetadataEdit{compiledMetadataSpan{layout.poolEnd, layout.poolEnd}, added})
 	}
-	sort.Slice(edits, func(i, j int) bool { return edits[i].start < edits[j].start })
-	size := len(compiled)
-	for _, edit := range edits {
-		size += len(edit.data) - (edit.end - edit.start)
-	}
-	if size > 34<<20 {
-		return nil, sourceLambdaMetadataFailure(work, "output budget exhausted")
-	}
-	if err := work.CheckAlloc(int64(size)); err != nil {
-		return nil, err
-	}
-	if err := work.Charge(workbudget.CounterOutputBytes, int64(size)); err != nil {
-		return nil, err
-	}
-	result := make([]byte, 0, size)
-	position := 0
-	for _, edit := range edits {
-		if edit.start < position || edit.end < edit.start || edit.end > len(compiled) {
-			return nil, sourceLambdaMetadataFailure(work, "overlapping byte spans")
-		}
-		result = append(result, compiled[position:edit.start]...)
-		result = append(result, edit.data...)
-		position = edit.end
-	}
-	return append(result, compiled[position:]...), nil
+	return applyCompiledMetadataEdits(compiled, edits, work)
 }
 
 // Logical rows, not CP indexes, define MethodParameters equality. Nil and an
@@ -404,8 +379,33 @@ func sourceMethodMetadataClosed(original *ClassObject, compiled []byte, work *wo
 		if !valid || !validGot || !sourceMethodMetadataTextWork(work, &textWork, wn, gn) || wt != gt || !slices.Equal(wn, gn) || !slices.Equal(wf, gf) {
 			return sourceLambdaMetadataFailure(work, "parameter tables changed without an applicable source plan")
 		}
+		ws, wp, wv := sourceMethodSignatureKey(original, method)
+		gs, gp, gv := sourceMethodSignatureKey(rebuilt, next)
+		cost := int64(len(ws)+len(gs)) + 1
+		if !wv || !gv || wp != gp || ws != gs || cost > (128<<20)-textWork || !nativeProofWork(work, cost) {
+			return sourceLambdaMetadataFailure(work, "generic method signature changed without an applicable source plan")
+		}
+		textWork += cost
 	}
 	return nil
+}
+
+func sourceMethodSignatureKey(object *ClassObject, method *MemberInfo) (string, bool, bool) {
+	value, present := "", false
+	for _, attribute := range method.Attributes {
+		if signature, ok := attribute.(*SignatureAttribute); ok {
+			if signature == nil || present {
+				return "", false, false
+			}
+			var known bool
+			value, known = sourceParameterUTF8Key(object, signature.SignatureIndex)
+			if !known || value == "" {
+				return "", false, false
+			}
+			present = true
+		}
+	}
+	return value, present, true
 }
 
 // CP strings can be shared by many parameter rows. Comparing their logical

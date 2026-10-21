@@ -51,8 +51,14 @@ func TestNativeSourceConstructorMetadataRequiresCompletedTypedFamily(t *testing.
 		if authority.constructorPlan(plan.owner) != nil {
 			t.Fatal("provisional source granted constructor permission")
 		}
-		if output, err := artifact.RestoreClassMetadata(plan.owner+".class", compiled[plan.owner+".class"]); err == nil || output != nil {
-			t.Fatal("constructor difference accepted without completed source")
+		key := plan.owner + ".class"
+		output, err := artifact.RestoreClassMetadata(key, compiled[key])
+		if plan.omitSignature {
+			if err == nil || output != nil {
+				t.Fatal("constructor Signature difference accepted without completed source")
+			}
+		} else if err != nil || lambdaParameterMetadataTables(t, output) != lambdaParameterMetadataTables(t, original[key]) {
+			t.Fatal("independent exact parameter-row restoration unavailable", err)
 		}
 	}
 	if err := authority.sourceReturned(root, append(bytes.Clone(source), ' ')); err != nil {
@@ -126,7 +132,7 @@ func TestNativeSourceConstructorMetadataRejectsChangedPortsAndAttributes(t *test
 			p.flags = append([]uint16(nil), plan.flags...)
 			proof := &p
 			inputOriginal, inputCompiled := original, compiled
-			obj, err := Parse(compiled)
+			obj, err := Parse(bytes.Clone(compiled))
 			if err != nil {
 				t.Fatal(err)
 			}

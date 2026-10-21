@@ -189,8 +189,11 @@ func TestNativeSourceLambdaMetadataRequiresCompletedPhysicalSourceNamespace(t *t
 	if native == "" {
 		t.Skip("JAVA8_JAVAC required")
 	}
-	baseSource := `public class ArtifactReleaseOwner {static long sink;static Runnable make(final long value){return ()->{sink=value;};}}`
-	versionSource := strings.ReplaceAll(baseSource, "long", "double")
+	// This gate covers helper identity as well as parameter rows. A standalone
+	// exact table editor may now restore rows under unchanged identities; it
+	// cannot infer native lambda$null versus modern lambda$static spellings.
+	baseSource := `public class ArtifactReleaseOwner {static long sink;static final java.util.function.LongFunction<Runnable> FACTORY=value->()->{sink=value;};static Runnable make(final long value){return FACTORY.apply(value);}}`
+	versionSource := strings.NewReplacer("long", "double", "LongFunction", "DoubleFunction").Replace(baseSource)
 	base := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, baseSource, "ArtifactReleaseOwner", "none", true)["ArtifactReleaseOwner.class"]
 	version := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, versionSource, "ArtifactReleaseOwner", "none", true)["ArtifactReleaseOwner.class"]
 	plainBase := compileLambdaParameterMetadataFixture(t, modern, ModernJavac, baseSource, "ArtifactReleaseOwner", "none", true)["ArtifactReleaseOwner.class"]
@@ -289,19 +292,40 @@ func TestNativeSourceLambdaMetadataDoesNotGrantUnrelatedConstructorEdits(t *test
 	if source, err := artifact.ReadFile("ArtifactLambdaOwner.class"); err != nil || strings.Contains(string(source), "decompile dump failed") {
 		t.Fatal("parent's distinct lambda obligation unavailable", err)
 	}
-	// The full artifact now has a separate typed anonymous-constructor
-	// obligation. Remove that independent capability for this negative control:
-	// the parent's lambda plan alone must still reject the constructor drift.
-	if artifact.jar.sourceLambdaMetadata.constructorPlan("ArtifactLambdaOwner$1") == nil || artifact.jar.sourceLambdaMetadata.plan("ArtifactLambdaOwner") == nil {
-		t.Fatal("independent constructor and lambda plans required for this control")
+	// The standalone lambda editor still cannot grant ordinary-constructor
+	// edits, even in its own class. Exact row restoration is now a separate
+	// identity-preserving metadata operation in the complete artifact pipeline.
+	plan := artifact.jar.sourceLambdaMetadata.plan("ArtifactLambdaOwner")
+	if plan == nil {
+		t.Fatal("parent lambda obligation required")
 	}
-	artifact.jar.sourceLambdaMetadata.constructors = nil
+	parent, err := Parse(compiled["ArtifactLambdaOwner.class"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent.ConstantPoolManager.AddUtf8Info("MethodParameters")
+	changed := 0
+	for _, method := range parent.Methods {
+		name, _ := sourceBridgeUTF8(parent, method.NameIndex)
+		if name == "<init>" {
+			method.Attributes = append(method.Attributes, &UnparsedAttribute{Name: "MethodParameters", Length: 1, Info: []byte{0}})
+			changed++
+		}
+	}
+	if changed != 1 {
+		t.Fatal("independent ordinary constructor required")
+	}
+	if output, err := restoreLambdaMethodMetadata(original["ArtifactLambdaOwner.class"], parent.Bytes(), plan, nil); err == nil || output != nil {
+		t.Fatal("lambda-only editor changed an ordinary constructor table")
+	}
 	if got, err := artifact.RestoreClassMetadata(child, original[child]); err != nil || !bytes.Equal(got, original[child]) {
 		t.Fatal("an unchanged constructor table was rejected", err)
 	}
 	before := bytes.Clone(compiled[child])
-	if got, err := artifact.RestoreClassMetadata(child, compiled[child]); err == nil || got != nil {
-		t.Fatal("parent lambda authority overwrote or ignored an unrelated constructor table", err)
+	if got, err := artifact.RestoreClassMetadata(child, compiled[child]); err != nil || lambdaParameterMetadataTables(t, got) != lambdaParameterMetadataTables(t, original[child]) {
+		t.Fatal("separate exact row restoration failed", err)
+	} else {
+		artifactLambdaMetadataCodeUnchanged(t, compiled[child], got)
 	}
 	if !bytes.Equal(before, compiled[child]) {
 		t.Fatal("rejected compiler output mutated")
