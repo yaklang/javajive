@@ -10,13 +10,15 @@ import (
 // A handle to an ordinary method does not consume a hidden enclosing
 // constructor operand. Its original symbolic owner, name, physical descriptor,
 // and invocation kind survive native member regeneration. Require a directly
-// declared, unchanged target; inherited resolution, private/special access,
+// declared, unchanged target; inherited resolution, foreign private/special access,
 // generated bridges/lambda bodies, fields, and enclosing constructors keep the existing
 // refusal. Member interfaces use a separate declaration/tag/erasure proof below.
 // Public access is unchanged. Package access additionally retains the original
 // lookup package and exact owned source declaration (JVMS 5.4.4 / JLS 6.6.1).
 // A separately proved ordinary static member has no enclosing operand
 // in its public constructor either. This grants no private lookup privilege.
+// A root's own private ordinary method uses the separate original-lookup
+// certificate below; constructor and foreign observers retain their refusal.
 func nativeMemberOrdinaryHandlesClosed(obj *ClassObject, index *nativeMemberIndex, work *workbudget.Budget, sourceMembers ...*nativeMemberClass) bool {
 	if obj == nil || index == nil || !index.valid || len(sourceMembers) > 1 || !nativeProofWork(work, 1) {
 		return false
@@ -64,6 +66,10 @@ func nativeMemberOrdinaryHandlesClosed(obj *ClassObject, index *nativeMemberInde
 			if !nativeLambdaImplementationKind(obj, m, target.kind, !target.methodRef) {
 				return false
 			}
+			closedTargets[target] = true
+			continue
+		}
+		if len(sourceMembers) == 1 && nativeMemberOwnPrivateHandleSourceClosed(obj, sourceMembers[0], m, target, work) {
 			closedTargets[target] = true
 			continue
 		}
