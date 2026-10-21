@@ -14,8 +14,9 @@ import (
 )
 
 type sourceAnonymousClassMetadataPlan struct {
-	owner, classKey string
-	originalHash    [32]byte
+	owner, classKey                           string
+	constructorDescriptor, inferredExceptions string
+	originalHash                              [32]byte
 }
 
 func sourceAnonymousMetadataPlansEqual(left, right *sourceAnonymousClassMetadataPlan) bool {
@@ -39,7 +40,9 @@ func (c *ClassObjectDumper) artifactStaticAnonymousConstructor(object *ClassObje
 	}
 	child := c.nativeJavac8AnonymousConstructor(object, owner, method, assertionRoot, members, forest, metadata, access)
 	if !sourceAnonymousStaticConstructorDomain(child, metadata, c.Work) {
-		return nil
+		if _, _, closed := c.sourceAnonymousCheckedSuperProjection(child, metadata); !closed {
+			return nil
+		}
 	}
 	child.artifactStaticMetadata = true
 	if c.artifactAnonymousClassPlan(child) == nil {
@@ -64,52 +67,64 @@ func sourceAnonymousStaticConstructorDomain(child *nativeAnonymousClass, metadat
 }
 
 func sourceAnonymousStaticConstructorCallsClosed(child *nativeAnonymousClass, metadata callbinding.Provider, work *workbudget.Budget) bool {
+	exceptions, closed := sourceAnonymousStaticConstructorCalls(child, metadata, work)
+	return closed && len(exceptions) == 0
+}
+
+// Return the independently declared SUPER exceptions. All other eager calls
+// retain the older empty-declaration domain; capture/initializer motion is
+// never authorized by an exception attribute projection.
+func sourceAnonymousStaticConstructorCalls(child *nativeAnonymousClass, metadata callbinding.Provider, work *workbudget.Budget) ([]string, bool) {
+	if child == nil || child.object == nil || child.enclosingField != "" || child.unusedEnclosing || child.sharedParameterRoles {
+		return nil, false
+	}
 	owner, method, owned := originalAnonymousOwner(child.object)
 	if !owned || method != child.method || child.descriptor == "" || child.object.AccessFlags != 0x0030 || !nativeAnonymousSelfAccessFlags(child.object, 8, work) {
-		return false
+		return nil, false
 	}
 	// Reconstruct rather than trust a supplied list of SUPER ports or an
 	// initializer marker. Foreign member/forest and lambda roles still need
 	// their own composition proof and remain outside this additional domain.
 	proof := nativeAnonymousConstructorRolesWithLambdas(child.object, owner, method, owner, work, nil, nil, metadata, 0x0030, false, nil)
 	if proof == nil || proof.descriptor != child.descriptor || proof.superDescriptor != child.superDescriptor || proof.superPC != child.superPC || proof.sharedParameterRoles || proof.enclosingField != "" || proof.memberSuper != nil {
-		return false
+		return nil, false
 	}
 	if !nativeProofWork(work, int64(len(child.fields)+len(child.superParams))+1) || !maps.Equal(proof.fields, child.fields) || !maps.Equal(proof.capturePCs, child.capturePCs) || !slices.Equal(proof.superParams, child.superParams) || proof.sourceSuperDescriptor != child.sourceSuperDescriptor {
-		return false
+		return nil, false
 	}
 	var code *CodeAttribute
 	for _, declaration := range child.object.Methods {
 		name, named := sourceBridgeUTF8(child.object, declaration.NameIndex)
 		if !named || !nativeProofWork(work, 1) {
-			return false
+			return nil, false
 		}
 		if name != "<init>" {
 			continue
 		}
 		for _, attribute := range declaration.Attributes {
 			if _, declared := attribute.(*ExceptionsAttribute); declared {
-				return false
+				return nil, false
 			}
 			if body, present := attribute.(*CodeAttribute); present {
 				if code != nil {
-					return false
+					return nil, false
 				}
 				code = body
 			}
 		}
 	}
 	if code == nil || !nativeProofWork(work, int64(len(code.Code))+1) {
-		return false
+		return nil, false
 	}
 	decoder := core.NewDecompiler(code.Code, func(index int) values.JavaValue { return GetValueFromCP(child.object.ConstantPool, index) })
 	decoder.Work = work
 	if decoder.ParseOpcode() != nil {
-		return false
+		return nil, false
 	}
+	var superExceptions []string
 	for _, op := range constructorMotionOps(decoder) {
 		if !nativeProofWork(work, 1) || op == nil || op.Instr == nil {
-			return false
+			return nil, false
 		}
 		if int(op.CurrentOffset) < proof.superPC {
 			continue // Reopened capture stores and unchanged parameter loads.
@@ -118,22 +133,36 @@ func sourceAnonymousStaticConstructorCallsClosed(child *nativeAnonymousClass, me
 		case core.OP_INVOKESPECIAL, core.OP_INVOKESTATIC, core.OP_INVOKEVIRTUAL, core.OP_INVOKEINTERFACE:
 			member := constructorMotionMember(child.object, op, op.Instr.OpCode)
 			if member == nil {
-				return false
+				return nil, false
 			}
 			exceptions, known := exactInvocationExceptions(metadata, member.Name, member.Member, member.Description)
-			if !known || len(exceptions) != 0 {
-				return false
+			if !known {
+				return nil, false
+			}
+			if int(op.CurrentOffset) == proof.superPC {
+				superExceptions = exceptions
+			} else if len(exceptions) != 0 {
+				return nil, false
 			}
 		case core.OP_INVOKEDYNAMIC:
-			return false // No eager adaptation/declared-throws proof in this domain.
+			return nil, false // No eager adaptation/declared-throws proof in this domain.
 		}
 	}
-	return true
+	return superExceptions, true
 }
 
 func (c *ClassObjectDumper) artifactAnonymousClassPlan(child *nativeAnonymousClass) *sourceAnonymousClassMetadataPlan {
-	if child == nil || !child.artifactStaticMetadata || !c.artifactLambdaMetadataAllowed() || child.object == nil || child.object.MajorVersion != 52 || child.object.MinorVersion != 0 || child.object.AccessFlags != 0x0030 || !nativeAnonymousSelfAccessFlags(child.object, 8, c.Work) || !sourceAnonymousStaticConstructorDomain(child, c.buildInvocationMetadata(), c.Work) {
+	if child == nil || !child.artifactStaticMetadata || !c.artifactLambdaMetadataAllowed() || child.object == nil || child.object.MajorVersion != 52 || child.object.MinorVersion != 0 || child.object.AccessFlags != 0x0030 || !nativeAnonymousSelfAccessFlags(child.object, 8, c.Work) {
 		return nil
+	}
+	metadata := c.buildInvocationMetadata()
+	descriptor, exceptions := "", ""
+	if !sourceAnonymousStaticConstructorDomain(child, metadata, c.Work) {
+		var closed bool
+		descriptor, exceptions, closed = c.sourceAnonymousCheckedSuperProjection(child, metadata)
+		if !closed {
+			return nil
+		}
 	}
 	static, known := nativeAnonymousOriginalContext(c.obj, child.object, child.method, c.Work)
 	if !known || !static {
@@ -144,7 +173,7 @@ func (c *ClassObjectDumper) artifactAnonymousClassPlan(child *nativeAnonymousCla
 	if !known || !keyed {
 		return nil
 	}
-	return &sourceAnonymousClassMetadataPlan{owner: child.object.GetClassName(), classKey: key, originalHash: sha256.Sum256(raw)}
+	return &sourceAnonymousClassMetadataPlan{owner: child.object.GetClassName(), classKey: key, originalHash: sha256.Sum256(raw), constructorDescriptor: descriptor, inferredExceptions: exceptions}
 }
 
 func (a *sourceLambdaMetadataAuthority) restoreAnonymousClassMetadata(original, compiled []byte, work *workbudget.Budget) ([]byte, error) {
@@ -290,6 +319,13 @@ func restoreSourceAnonymousClassMetadata(original, compiled []byte, plans map[st
 		}
 		if got.AccessFlags != want.AccessFlags {
 			edits = append(edits, compiledMetadataEdit{compiledMetadataSpan{layout.poolEnd, layout.poolEnd + 2}, []byte{0, 0x30}})
+		}
+		edit, err := sourceAnonymousConstructorExceptionEdit(want, got, compiled, plan, layout, work)
+		if err != nil {
+			return nil, err
+		}
+		if edit != nil {
+			edits = append(edits, *edit)
 		}
 	} else if want.AccessFlags != got.AccessFlags {
 		return fail("unrelated class flags changed")

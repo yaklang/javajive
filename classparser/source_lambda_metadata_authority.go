@@ -377,7 +377,7 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 		size += int64(128 + len(plan.owner) + len(plan.descriptor) + len(plan.flags)*2)
 	}
 	for _, plan := range publication.anonymous {
-		size += int64(128 + len(plan.owner) + len(plan.classKey))
+		size += int64(160 + len(plan.owner) + len(plan.classKey) + len(plan.constructorDescriptor) + len(plan.inferredExceptions))
 	}
 	if c.Work != nil && c.Work.CheckAlloc(size) != nil {
 		return false

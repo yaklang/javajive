@@ -100,7 +100,16 @@ func testArtifactLambdaMetadata(t *testing.T, sourceFixture string, namedModes [
 						if err != nil || strings.Contains(string(source), DecompileStubMarker) || strings.Contains(string(source), "// decompile dump failed") {
 							t.Fatalf("source %s: %v\n%s", owner, err, source)
 						}
-						out := sourceArtifactWriteFiles(t, map[string][]byte{"ArtifactLambdaDriver.class": original["ArtifactLambdaDriver.class"]})
+						// Unowned authored callers and dependencies retain their original
+						// bytes. No original member of the regenerated namespace may
+						// satisfy either compilation or subsequent JVM resolution.
+						dependencies := map[string][]byte{}
+						for name, raw := range original {
+							if name != owner+".class" && !strings.HasPrefix(name, owner+"$") {
+								dependencies[name] = raw
+							}
+						}
+						out := sourceArtifactWriteFiles(t, dependencies)
 						file := filepath.Join(out, owner+".java")
 						if err := os.WriteFile(file, source, 0600); err != nil {
 							t.Fatal(err)
@@ -125,6 +134,9 @@ func testArtifactLambdaMetadata(t *testing.T, sourceFixture string, namedModes [
 							t.Fatalf("original helper declarations/parameter metadata: %v", err)
 						}
 						nativeLexicalExactSignatures(t, owner+".class", original[owner+".class"], restored)
+						if constructorInvocationThrowsDeclarations(t, original[owner+".class"]) != constructorInvocationThrowsDeclarations(t, restored) {
+							t.Fatal("original complete declarations/Exceptions changed")
+						}
 						before, e1 := Parse(compiled)
 						after, e2 := Parse(restored)
 						if e1 != nil || e2 != nil || len(before.Methods) != len(after.Methods) {
@@ -164,6 +176,9 @@ func testArtifactLambdaMetadata(t *testing.T, sourceFixture string, namedModes [
 								t.Fatal("independent child's ABI/parameters changed", name, err)
 							}
 							nativeLexicalExactSignatures(t, name, raw, child)
+							if constructorInvocationThrowsDeclarations(t, raw) != constructorInvocationThrowsDeclarations(t, child) {
+								t.Fatal("original child complete declarations/Exceptions changed", name)
+							}
 							artifactLambdaMetadataCodeUnchanged(t, fresh, child)
 							if err := os.WriteFile(filepath.Join(out, name), child, 0600); err != nil {
 								t.Fatal("publish restored owned child before JVM validation", err)
