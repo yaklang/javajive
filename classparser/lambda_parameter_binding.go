@@ -34,7 +34,7 @@ func (c *ClassObjectDumper) bindLambdaParameterMetadata(p *lambdaParameterMetada
 	if c == nil || p == nil || c.FuncCtx == nil || c.CurrentMethod != p.method || c.obj != p.object || request.role != methodSourceLambdaBody || !request.valid() || request.captureCount != p.factoryCaptureCount() || !p.factory.same(request.factory) || c.FuncCtx.FunctionName != p.name || c.FuncCtx.CurrentMethodDesc != p.descriptor || c.FuncCtx.IsStatic != (p.receiverWords == 0) || len(parameters)+len(p.captures) != len(p.names) || c.Work != nil && c.Work.CheckAlloc(int64(len(parameters))*256) != nil {
 		return nil, false
 	}
-	fresh, known := c.originalLambdaParameterMetadata(p.method, c.Work)
+	fresh, known := c.originalLambdaParameterMetadataAtFactory(p.method, request.factory, c.Work)
 	if !known || fresh == nil || !fresh.factory.same(p.factory) || !slices.Equal(fresh.parentNames, p.parentNames) || !slices.Equal(fresh.names, p.names) {
 		return nil, false
 	}
@@ -136,7 +136,7 @@ func (c *ClassObjectDumper) lambdaParameterSourcePacketClosed(body *dumpedMethod
 	if body == nil {
 		return false
 	}
-	fresh, known := c.originalLambdaParameterMetadata(body.member, c.Work)
+	fresh, known := c.originalLambdaParameterMetadataAtFactory(body.member, body.sourceRequest.factory, c.Work)
 	if !known {
 		return false
 	}

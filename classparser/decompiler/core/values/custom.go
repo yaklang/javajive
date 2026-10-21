@@ -12,6 +12,7 @@ type CustomValue struct {
 	lambdaParameterNamesRequired     bool
 	originalReferenceCaptureRequired bool
 	originalLambdaFactory            *originalLambdaFactory
+	lambdaSourceIdentity             *LambdaSourceIdentity
 	serializableReferenceSource      *serializableReferenceSource
 	sourceMethodReference            *uncapturedMethodReferenceSource
 	sourcePrimitive                  *sourcePrimitiveConversion

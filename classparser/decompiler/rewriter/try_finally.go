@@ -168,6 +168,25 @@ func finallyWithoutEnd(body []statements.Statement) []statements.Statement {
 	return body
 }
 
+// A terminal void return is the normal copy's existing completion, rather
+// than part of the cleanup effect sequence. Both comparison paths use the
+// same original-PC rule; a protected or value-producing return stays intact.
+func finallyCleanupConditionalBody(rows []core.HandlerRange, body []statements.Statement) []statements.Statement {
+	body = finallyWithoutEnd(body)
+	if len(body) > 0 {
+		if ret, ok := body[len(body)-1].(*statements.ReturnStatement); ok && ret != nil && ret.JavaValue == nil && ret.HasOriginPC && ret.OriginPC >= 0 {
+			outside := true
+			for _, row := range rows {
+				outside = outside && (ret.OriginPC < int(row.StartPc) || ret.OriginPC >= int(row.EndPc))
+			}
+			if outside {
+				return body[:len(body)-1]
+			}
+		}
+	}
+	return body
+}
+
 type finallyProof struct {
 	cleanup      []statements.Statement
 	rows         []core.HandlerRange
@@ -582,7 +601,13 @@ func finallyCoveredValue(root values.JavaValue, covered func(int) bool) bool {
 				if !covered(pc) {
 					return false
 				}
-				children = captures
+				for i, capture := range captures {
+					operand := finallyLambdaCaptureOperand(capture, pc, i)
+					if operand == nil {
+						return false
+					}
+					children = append(children, operand)
+				}
 				break
 			}
 			if operand, _, _, original := x.SourcePrimitiveConversion(); original {
@@ -659,16 +684,8 @@ func (p *finallyCleanupComparison) statement(rows []core.HandlerRange, a, b stat
 		if !ok || x == nil || y == nil || !(sameFinallyStableValue(x.Condition, y.Condition, excluded, 0) || sameFinallyEffectValue(rows, x.Condition, y.Condition, excluded, depth)) {
 			return false
 		}
-		strip := func(body []statements.Statement) []statements.Statement {
-			body = finallyWithoutEnd(body)
-			if len(body) > 0 {
-				if ret, ok := body[len(body)-1].(*statements.ReturnStatement); ok && ret != nil && ret.JavaValue == nil && ret.HasOriginPC && outside(ret.OriginPC) {
-					return body[:len(body)-1]
-				}
-			}
-			return body
-		}
-		xa, xb, ya, yb := strip(x.IfBody), strip(x.ElseBody), strip(y.IfBody), strip(y.ElseBody)
+		xa, xb := finallyCleanupConditionalBody(rows, x.IfBody), finallyCleanupConditionalBody(rows, x.ElseBody)
+		ya, yb := finallyCleanupConditionalBody(rows, y.IfBody), finallyCleanupConditionalBody(rows, y.ElseBody)
 		if len(xa) != len(ya) || len(xb) != len(yb) || len(xa)+len(xb) > 16 {
 			return false
 		}

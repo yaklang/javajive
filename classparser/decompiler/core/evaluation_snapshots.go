@@ -129,6 +129,11 @@ func (d *Decompiler) snapshotDynamicResult(op *OpCode, sim StackSimulation, valu
 	}
 	d.preserveEarlierLambdaCaptureOperands(op, sim, value)
 	ref := sim.NewVar(value)
+	// This source temporary is the actual eager factory result, not a JVM
+	// local-slot definition. Retain its producer for scoped cleanup matching.
+	if lambda, known := value.(*values.CustomValue); known {
+		ref.MarkOriginalLambdaResult(int(op.CurrentOffset), lambda)
+	}
 	ref.ResetVarType(ref.Type().Copy())
 	d.disFoldRef = append(d.disFoldRef, ref)
 	d.evaluationSnapshots[op] = append(d.evaluationSnapshots[op], EvaluationSnapshot{Ref: ref, Value: value, OriginPC: int(op.CurrentOffset)})

@@ -311,7 +311,11 @@ func parseBytesCodeWithLambdaCaptureOrder(dumper *ClassObjectDumper, codeAttr *C
 		if site != nil {
 			dumper.nativeLambdaFactorySources[site].implementationBody = dumped
 		}
-		source := core.LambdaBodySource{Code: dumped.code, FixedParameterTypes: dumped.lambdaParameterBinding != nil}
+		receipt := dumper.lambdaMethodSourceBodies[dumped.member]
+		if receipt == nil || receipt.body != dumped || receipt.identity == nil {
+			return core.LambdaBodySource{}, fmt.Errorf("original lambda body identity is unavailable")
+		}
+		source := core.LambdaBodySource{Code: dumped.code, Identity: receipt.identity, FixedParameterTypes: dumped.lambdaParameterBinding != nil}
 		recordPacket := dumped.lambdaParameterBinding != nil && dumped.lambdaParameterBinding.metadata != nil && dumped.lambdaParameterBinding.metadata.factoryCaptureCount() != 0 || dumper.nativeAnonymousLambdaCurrent != nil && dumper.nativeMemberRoot != nil && len(dumper.nativeMemberRoot.getters) != 0
 		if dumper.options.SourceCompiler == NativeJavac8 || dumper.options.SourceCompiler == ModernJavac || recordPacket {
 			template := dumped.code
@@ -320,10 +324,16 @@ func parseBytesCodeWithLambdaCaptureOrder(dumper *ClassObjectDumper, codeAttr *C
 			// by an explicit artifact. A plain packet loses the parent ports.
 			if (dumper.options.SourceCompiler == NativeJavac8 || dumper.artifactLambdaMetadataAllowed()) && dumper.lambdaCaptureCompositionRequired(dumped) {
 				source.RecordRenderedWithCaptures = func(observation core.LambdaSourceRender) {
+					if !dumper.selectLambdaWriterReceipt(dumped, receipt) {
+						return
+					}
 					dumper.recordLambdaCaptureProjection(dumped, template, observation, recordPacket)
 				}
 			} else {
 				source.RecordRendered = func(rendered string) {
+					if !dumper.selectLambdaWriterReceipt(dumped, receipt) {
+						return
+					}
 					if recordPacket {
 						dumper.recordNativeLambdaRenderedPacket(dumped, template, rendered)
 					}

@@ -5,6 +5,7 @@ package values
 // renderer equivalence. Source-body/binding receipts remain a separate gate.
 // Public Flag/PC/capture annotations alone cannot create the witness.
 type originalLambdaFactory struct {
+	signature          [3]string
 	pc                 int
 	captures           []JavaValue
 	methodRef, noOuter bool

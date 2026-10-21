@@ -21,6 +21,7 @@ type LambdaReferenceAdapter struct {
 // receipt. It grants no factory, invocation, adaptation or ownership role.
 // A later generic consumer must not retarget explicit source SAM formals.
 type LambdaBodySource struct {
+	Identity *values.LambdaSourceIdentity
 	// ReferenceTarget marks a separately proved compiler-owned method reference.
 	// It is not an arrow body and must not borrow SAM parameter-name receipts.
 	ReferenceTarget types.JavaType

@@ -267,6 +267,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				}
 				cv.CapturesKnown = true
 				cv.Captures = captured
+				cv.BindLambdaSourceIdentity(source.Identity)
 				return retainOriginalLambdaParameterTarget(d, cv, source, typ, classMember, args1, len(captured))
 			}
 

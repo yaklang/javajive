@@ -14,6 +14,7 @@ import (
 )
 
 type JavaRef struct {
+	originalLambdaResult               *originalLambdaResult
 	originalDynamicOperand             *originalDynamicOperand
 	originalLocalWeb                   *originalLocalWeb
 	originalLocalDeclaration           bool

@@ -344,6 +344,7 @@ func t19InlineLambda(req CallSiteRequest, d *Decompiler, static []values.JavaVal
 	}
 	cv.CapturesKnown = true
 	cv.Captures = captured
+	cv.BindLambdaSourceIdentity(source.Identity)
 	return retainOriginalLambdaParameterTarget(d, cv, source, resultType, impl, static, len(captured))
 }
 
@@ -624,6 +625,9 @@ func t19PreserveMarkers(req CallSiteRequest, value values.JavaValue, resultType 
 	if cv, ok := values.UnpackSoltValue(value).(*values.CustomValue); ok && cv.Flag == "lambda" {
 		cv.OriginPC, cv.HasOriginPC = req.OriginPC, true
 		cv.MarkOriginalLambdaFactory(req.OriginPC)
+		if req.Identity.Name == "metafactory" && len(req.StaticArgs) == 3 {
+			cv.BindOriginalLambdaFactorySignature(req.CallSiteName, req.CallSiteDescriptor, t19MethodTypeDesc(req.StaticArgs[0]))
+		}
 	}
 	if req.Identity.Name != "altMetafactory" || len(req.StaticArgs) < 5 {
 		return value

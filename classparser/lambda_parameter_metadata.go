@@ -142,13 +142,31 @@ func (p *lambdaParameterMetadata) schemaMatches(object *ClassObject, method *Mem
 // Metadata is admitted only as a regeneration requirement on the actual body
 // request. It grants no capture, access, lexical membership or publication role.
 func (c *ClassObjectDumper) originalLambdaParameterMetadata(method *MemberInfo, work *workbudget.Budget) (*lambdaParameterMetadata, bool) {
-	return c.lambdaParameterMetadataInScope(method, work, map[*MemberInfo]bool{})
+	return c.originalLambdaParameterMetadataAtFactory(method, nil, work)
+}
+
+func (c *ClassObjectDumper) originalLambdaParameterMetadataAtFactory(method *MemberInfo, factory *lambdaSourceFactory, work *workbudget.Budget) (*lambdaParameterMetadata, bool) {
+	if factory != nil && !factory.sealed {
+		// Older callback callers can reopen an already unique original site.
+		// A loose origin never selects among copies: the legacy query must
+		// independently find one sealed factory and match that exact origin.
+		projection, known := c.lambdaParameterMetadataInScope(method, work, map[*MemberInfo]bool{})
+		if !known || projection != nil && !projection.factory.same(factory) {
+			return nil, false
+		}
+		return projection, true
+	}
+	return c.lambdaParameterMetadataInFactoryScope(method, work, map[*MemberInfo]bool{}, factory)
 }
 
 // The original factory edges, rather than implementation name prefixes, define
 // nested lexical scopes. Follow each unique edge to an ordinary source method;
 // cycles, shared factories and an exhausted depth/work budget remain unknown.
 func (c *ClassObjectDumper) lambdaParameterMetadataInScope(method *MemberInfo, work *workbudget.Budget, active map[*MemberInfo]bool) (*lambdaParameterMetadata, bool) {
+	return c.lambdaParameterMetadataInFactoryScope(method, work, active, nil)
+}
+
+func (c *ClassObjectDumper) lambdaParameterMetadataInFactoryScope(method *MemberInfo, work *workbudget.Budget, active map[*MemberInfo]bool, factory *lambdaSourceFactory) (*lambdaParameterMetadata, bool) {
 	if c == nil {
 		return nil, false
 	}
@@ -168,7 +186,7 @@ func (c *ClassObjectDumper) lambdaParameterMetadataInScope(method *MemberInfo, w
 		return nil, true
 	}
 	compilerClosed := c.options.SourceCompiler == NativeJavac8 && c.options.TargetSourceVersion == 8 || c.artifactLambdaMetadataAllowed() && sourceLambdaImplementationFlags(method.AccessFlags)
-	if !compilerClosed || !native8LambdaParameterCompilerFlagClosed(c.obj, work) || !nativeLambdaBodyOriginalUseClosed(c.obj, method, work, projection) || projection.factory == nil {
+	if !compilerClosed || !native8LambdaParameterCompilerFlagClosed(c.obj, work) || !nativeLambdaBodyUseProjection(c.obj, method, work, projection, factory, false) || projection.factory == nil {
 		return nil, false
 	}
 	factoryName, named := lambdaFactoryNameComponent(projection.factory)

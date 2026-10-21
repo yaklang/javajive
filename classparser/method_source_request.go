@@ -5,6 +5,7 @@ import (
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	coreutils "github.com/yaklang/javajive/classparser/decompiler/core/utils"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
@@ -60,12 +61,13 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 }
 
 type lambdaMethodSourceReceipt struct {
-	object  *ClassObject
-	method  *MemberInfo
-	request methodSourceRequest
-	key     string
-	body    *dumpedMethods
-	shared  []*lambdaMethodSourceReceipt
+	identity *values.LambdaSourceIdentity
+	object   *ClassObject
+	method   *MemberInfo
+	request  methodSourceRequest
+	key      string
+	body     *dumpedMethods
+	shared   []*lambdaMethodSourceReceipt
 	// Optional completed render observations for private-access lowering.
 	// A cached template containing capture placeholders is not final source.
 	renderedTemplate       string
@@ -115,7 +117,7 @@ func (c *ClassObjectDumper) lambdaMethodSourcePacketClosed(method *MemberInfo, b
 	if body.sourceRequest.role == methodSourceCompilerReference {
 		return owned == 1 && c.lambdaOriginalDeclarationUsesClosed(method, work)
 	}
-	return owned == 1 && c.lambdaBodyOriginalUseClosed(method, work)
+	return owned == 1 && c.lambdaBodyOriginalUseClosedAtFactory(method, body.sourceRequest.factory, work)
 }
 
 func (c *ClassObjectDumper) recordLambdaMethodSourceBody(name, descriptor string, request methodSourceRequest, body *dumpedMethods) bool {
@@ -132,6 +134,7 @@ func (c *ClassObjectDumper) recordLambdaMethodSourceBody(name, descriptor string
 	}
 	r := &lambdaMethodSourceReceipt{object: c.obj, method: body.member, request: request, key: body.sourceCacheKey, body: body}
 	if prior := c.lambdaMethodSourceBodies[body.member]; prior != nil {
+		r.identity = prior.identity
 		if prior.request.factory.same(request.factory) {
 			r.shared = prior.shared
 		} else if c.sharedStaticLambdaSites(prior, r) {
@@ -142,6 +145,9 @@ func (c *ClassObjectDumper) recordLambdaMethodSourceBody(name, descriptor string
 			copy.shared = nil
 			r.shared = append(slices.Clone(prior.shared), &copy)
 		}
+	}
+	if r.identity == nil {
+		r.identity = values.NewLambdaSourceIdentity()
 	}
 	c.lambdaMethodSourceBodies[body.member] = r
 	return true

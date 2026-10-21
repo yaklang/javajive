@@ -137,7 +137,7 @@ func (c *ClassObjectDumper) methodParameterNameCacheClosed(s *methodParameterNam
 	var names []string
 	var known bool
 	if s.lambdaParameters {
-		projection, closed := c.originalLambdaParameterMetadata(s.method, c.Work)
+		projection, closed := c.originalLambdaParameterMetadataAtFactory(s.method, s.lambdaFactory, c.Work)
 		if !closed || projection == nil || !s.lambdaFactory.same(projection.factory) || !slices.Equal(s.lambdaParentNames, projection.parentNames) {
 			return false
 		}

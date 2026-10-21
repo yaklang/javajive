@@ -304,7 +304,10 @@ func sourceLambdaOrdinaryFactoryOnly(object *ClassObject, method *MemberInfo, me
 	if metadata == nil {
 		closed = nativeLambdaBodyOriginalUseClosed(object, method, work)
 	} else {
-		closed = nativeLambdaBodyOriginalUseClosed(object, method, work, metadata)
+		// A completed source plan edits the single physical declaration's
+		// table, shared by all original factory uses. It selects no capture
+		// scope here; that binding belongs to each source request's own PC.
+		closed = nativeLambdaBodyUseProjection(object, method, work, metadata, nil, true)
 	}
 	if !closed {
 		return false

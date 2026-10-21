@@ -14,6 +14,9 @@ import (
 // suffix. Reattempt the existing complete resource proof on a private clone;
 // neither the original handler tree nor any earlier analysis is changed.
 func RecoverCatchAllFinallyForSource(tr *statements.TryCatchStatement) (*FinallyRegion, bool) {
+	if view, known := finallyFlagSourceView(tr); known {
+		tr = view
+	}
 	if region, known := recoverFinallyDirectSource(tr); known {
 		return region, true
 	}

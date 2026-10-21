@@ -194,6 +194,21 @@ func sameFinallyEffectTreeBound(rows []core.HandlerRange, a, b values.JavaValue,
 		if !ok {
 			return false
 		}
+		if x.SameOriginalLambdaSource(y) {
+			xpc, xc, xknown := x.OriginalLambdaFactoryEvaluation()
+			ypc, yc, yknown := y.OriginalLambdaFactoryEvaluation()
+			if !xknown || !yknown || !outside(xpc, true) || !outside(ypc, true) || len(xc) != len(yc) {
+				return false
+			}
+			for i := range xc {
+				left := finallyLambdaCaptureOperand(xc[i], xpc, i)
+				right := finallyLambdaCaptureOperand(yc[i], ypc, i)
+				if left == nil || right == nil || !same(left, right) {
+					return false
+				}
+			}
+			return true
+		}
 		if operand, target, pc, known := x.OriginalInstanceOfSource(); known {
 			other, otherTarget, otherPC, otherKnown := y.OriginalInstanceOfSource()
 			return otherKnown && target == otherTarget && outside(pc, true) && outside(otherPC, true) && finallyInstanceOfReferenceOperand(operand) && finallyInstanceOfReferenceOperand(other) && same(operand, other)
@@ -206,6 +221,28 @@ func sameFinallyEffectTreeBound(rows []core.HandlerRange, a, b values.JavaValue,
 		return ok && x != nil && y != nil && typeSame(x.TargetType, y.TargetType) && x.Binding == y.Binding && outside(x.OriginPC, !x.Binding) && outside(y.OriginPC, !y.Binding) && same(x.Value, y.Value)
 	}
 	return false
+}
+
+// Named compiler metadata can require a proved immutable entry operand rather
+// than a new source snapshot. Reopen only that exact original inline receipt;
+// ref.Val, StackVar, source spelling and a lambda flag confer no such relation.
+// The caller still compares the projected eager evaluation in its own domain.
+func finallyLambdaCaptureOperand(value values.JavaValue, factoryPC, index int) values.JavaValue {
+	for depth := 0; depth < 32; depth++ {
+		if slot, known := value.(*values.SlotValue); known && slot != nil {
+			value = slot.GetValue()
+			continue
+		}
+		if ref, local := value.(*values.JavaRef); local && ref != nil && ref.StackVar != nil {
+			pc, ordinal, original := ref.OriginalInlinedDynamicOperandWitness(ref.StackVar)
+			if !original || pc != factoryPC || ordinal != index {
+				return nil
+			}
+			return ref.StackVar
+		}
+		return value
+	}
+	return nil
 }
 
 // Preserve the short-circuit tree and evaluation order. Boolean source types

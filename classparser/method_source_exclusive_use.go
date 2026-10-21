@@ -19,9 +19,27 @@ func nativeLambdaBodyOriginalUseClosed(object *ClassObject, implementation *Memb
 	var parameters *lambdaParameterMetadata
 	if len(metadata) == 1 {
 		parameters = metadata[0]
-		if parameters == nil || !parameters.schemaMatches(object, implementation, work) {
+		if parameters == nil {
 			return false
 		}
+	}
+	return nativeLambdaBodyUseProjection(object, implementation, work, parameters, nil, false)
+}
+
+// Classification may inspect a shared declaration without binding a source
+// factory. Regeneration instead selects its exact sealed original occurrence.
+// Multiple occurrences in that domain must be copies of the same CP protocol
+// in the same original Code attribute; ordinary callers retain the single-site
+// rule. No table name, implementation name or capture arity picks an origin.
+func nativeLambdaBodyUseProjection(object *ClassObject, implementation *MemberInfo, work *workbudget.Budget, parameters *lambdaParameterMetadata, selected *lambdaSourceFactory, declarationOnly bool) bool {
+	if declarationOnly && selected != nil {
+		return false
+	}
+	if parameters != nil && !parameters.schemaMatches(object, implementation, work) {
+		return false
+	}
+	if selected != nil && (!selected.closed() || !selected.sealed || selected.object != object || selected.pc+5 > len(selected.code.Code) || selected.code.Code[selected.pc] != core.OP_INVOKEDYNAMIC || selected.code.Code[selected.pc+3] != 0 || selected.code.Code[selected.pc+4] != 0) {
+		return false
 	}
 	if object == nil || implementation == nil || len(object.Methods) > 4096 || len(object.ConstantPool) > 65535 || implementation.AccessFlags&^uint16(0x100a) != 0 || implementation.AccessFlags&0x1002 != 0x1002 || !nativeProofWork(work, int64(len(object.Methods)+len(object.ConstantPool))) {
 		return false
@@ -248,7 +266,10 @@ func nativeLambdaBodyOriginalUseClosed(object *ClassObject, implementation *Memb
 					// A nested factory may reside in an actual synthetic body.
 					// This use query grants no lexical permission: its caller must
 					// close that body's own factory chain and source registration.
-					if factory != nil || !named || method.AccessFlags&(0x0040|0x0100|0x0400) != 0 || method.AccessFlags&0x1000 != 0 && method.AccessFlags != 0x100a && method.AccessFlags != 0x1002 || !typed || nt == nil {
+					if !declarationOnly && selected == nil && factory != nil || !named || method.AccessFlags&(0x0040|0x0100|0x0400) != 0 || method.AccessFlags&0x1000 != 0 && method.AccessFlags != 0x100a && method.AccessFlags != 0x1002 || !typed || nt == nil {
+						return false
+					}
+					if selected != nil && (origin.method != selected.method || origin.code != selected.code || core.Convert2bytesToInt(op.Data[:2]) != core.Convert2bytesToInt(selected.code.Code[selected.pc+1:selected.pc+3])) {
 						return false
 					}
 					factoryDescriptor, known := sourceBridgeUTF8(object, nt.DescriptorIndex)
@@ -262,8 +283,10 @@ func nativeLambdaBodyOriginalUseClosed(object *ClassObject, implementation *Memb
 						}
 						captures = captures[1:]
 					}
-					parameters.captureTypes = captures
-					factory = origin
+					if !declarationOnly && (selected == nil || origin.same(selected)) {
+						parameters.captureTypes = captures
+						factory = origin
+					}
 				}
 				usedRows[row] = true
 				sites++
@@ -271,7 +294,7 @@ func nativeLambdaBodyOriginalUseClosed(object *ClassObject, implementation *Memb
 		}
 	}
 	closed := sites != 0 && len(usedRows) == len(allowed)
-	if closed && parameters != nil {
+	if closed && parameters != nil && !declarationOnly {
 		if factory == nil || len(factory.code.Code) > 65535 || work != nil && work.CheckAlloc(int64(len(factory.code.Code))) != nil {
 			return false
 		}

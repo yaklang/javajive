@@ -45,6 +45,9 @@ func sameFinallyCleanupBlock(rows []core.HandlerRange, a, b []statements.Stateme
 	if len(scope) == 0 {
 		return false
 	}
+	if sameFinallyLambdaCleanup(rows, a, b, scope, excluded) {
+		return true
+	}
 	left, right := map[*utils.VariableId]int{}, map[*utils.VariableId]int{}
 	remaining := 2048
 	for i, st := range a {

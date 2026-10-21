@@ -35,15 +35,19 @@ func (c *ClassObjectDumper) lambdaOriginalDeclarationUsesClosed(method *MemberIn
 	if !c.lambdaOriginalNestUsesClosed(method, work) {
 		return false
 	}
-	_, known := nativeLambdaBodyDeclarationSchema(c.obj, method, work)
-	return known
+	parameters, known := nativeLambdaBodyDeclarationSchema(c.obj, method, work)
+	return known || parameters != nil && nativeLambdaBodyUseProjection(c.obj, method, work, parameters, nil, true)
 }
 
 func (c *ClassObjectDumper) lambdaBodyOriginalUseClosed(method *MemberInfo, work *workbudget.Budget) bool {
+	return c.lambdaBodyOriginalUseClosedAtFactory(method, nil, work)
+}
+
+func (c *ClassObjectDumper) lambdaBodyOriginalUseClosedAtFactory(method *MemberInfo, factory *lambdaSourceFactory, work *workbudget.Budget) bool {
 	if !c.lambdaOriginalNestUsesClosed(method, work) {
 		return false
 	}
-	parameters, known := c.originalLambdaParameterMetadata(method, work)
+	parameters, known := c.originalLambdaParameterMetadataAtFactory(method, factory, work)
 	if !known {
 		return false
 	}
