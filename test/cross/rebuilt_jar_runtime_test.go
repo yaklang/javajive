@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"crypto/sha256"
+	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
@@ -176,6 +177,45 @@ public class RebuiltJarDriver {public static void main(String[]args)throws Excep
 }
 
 func TestRebuiltJarRejectsUnknownMetadataAndKeepsPlainPacking(t *testing.T) {
+	for _, world := range []struct {
+		name    string
+		entries map[string][]byte
+		want    []string
+	}{
+		{"empty class inventory", map[string][]byte{}, []string{}},
+		{"resources are not rebuilt classes", map[string][]byte{"META-INF/MANIFEST.MF": []byte("Manifest-Version: 1.0\r\n\r\n"), "resource.txt": []byte("resource")}, []string{}},
+		{"physical class inventory", map[string][]byte{"z/Last.class": []byte("last"), "a/First.class": []byte("first"), "META-INF/versions/9/a/First.class": []byte("version"), "ignored.class/": nil}, []string{"META-INF/versions/9/a/First.class", "a/First.class", "z/Last.class"}},
+	} {
+		t.Run(world.name, func(t *testing.T) {
+			file := filepath.Join(t.TempDir(), "rebuilt.jar")
+			rebuiltFixtureJar(t, file, world.entries)
+			jar, err := zip.OpenReader(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer jar.Close()
+			names := historicalRebuiltClassInventory(&jar.Reader)
+			if !reflect.DeepEqual(names, world.want) {
+				t.Fatalf("inventory must describe the exact physical archive: %#v want %#v", names, world.want)
+			}
+			observation := historicalJarObservation{RebuiltClasses: names, Completed: true}
+			raw, err := json.Marshal(observation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var receipt map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &receipt); err != nil {
+				t.Fatal(err)
+			}
+			var entries []string
+			if err := json.Unmarshal(receipt["RebuiltClasses"], &entries); err != nil || entries == nil || !reflect.DeepEqual(entries, world.want) {
+				t.Fatal("class inventory must be a JSON array, including an empty archive", err, string(raw))
+			}
+			if observation.CompileSucceeded {
+				t.Fatal("a complete inventory observation cannot certify compilation")
+			}
+		})
+	}
 	root := t.TempDir()
 	unknown := filepath.Join(root, "unknown.jar")
 	rebuiltFixtureJar(t, unknown, map[string][]byte{"META-INF/MANIFEST.MF": []byte("Manifest-Version: 1.0\r\nMulti-Release: true\r\nMalformed\r\n\r\n")})

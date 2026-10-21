@@ -43,6 +43,19 @@ type historicalJarObservation struct {
 	Completed                                                                bool
 }
 
+func historicalRebuiltClassInventory(jar *zip.Reader) []string {
+	// An inspected archive has a known inventory, even when no class was
+	// rebuilt. Encode that as [] rather than null; success stays independent.
+	names := make([]string, 0)
+	for _, entry := range jar.File {
+		if strings.HasSuffix(entry.Name, ".class") {
+			names = append(names, entry.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 func historicalWrite(t *testing.T, path string, value any) {
 	t.Helper()
 	b, err := json.MarshalIndent(value, "", "  ")
@@ -191,13 +204,8 @@ func TestHistoricalJarAudit(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, f := range zr.File {
-				if strings.HasSuffix(f.Name, ".class") {
-					o.RebuiltClasses = append(o.RebuiltClasses, f.Name)
-				}
-			}
+			o.RebuiltClasses = historicalRebuiltClassInventory(&zr.Reader)
 			zr.Close()
-			sort.Strings(o.RebuiltClasses)
 			if len(o.RebuiltClasses) == 0 {
 				o.CompileSucceeded = false
 			}
