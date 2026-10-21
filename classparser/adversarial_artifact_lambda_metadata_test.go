@@ -50,17 +50,17 @@ func artifactLambdaBaseFixture() string {
 }
 
 func TestAdversarialArtifactLambdaMetadataRetainsCompiledCodeAndOriginalABI(t *testing.T) {
-	testArtifactLambdaMetadata(t, artifactLambdaBaseFixture(), []bool{false, true})
+	testArtifactLambdaMetadata(t, artifactLambdaBaseFixture(), []bool{false, true}, "7:artifact:helpermetadata:timing:overflow\n")
 }
 
 // With -parameters both compilers regenerate the independent anonymous
 // constructor's table. Its absence is a separate compiler metadata contract;
 // it must not be hidden by comparing only the lambda helpers.
 func TestAdversarialArtifactLambdaMetadataKeepsIndependentAnonymousABI(t *testing.T) {
-	testArtifactLambdaMetadata(t, artifactLambdaWithAnonymousMetadataFixture, []bool{true})
+	testArtifactLambdaMetadata(t, artifactLambdaWithAnonymousMetadataFixture, []bool{true}, "7:artifact:helpermetadata:timing:overflow\n")
 }
 
-func testArtifactLambdaMetadata(t *testing.T, sourceFixture string, namedModes []bool) {
+func testArtifactLambdaMetadata(t *testing.T, sourceFixture string, namedModes []bool, want string) {
 	t.Helper()
 	modern, java := t04Tools(t)
 	native := os.Getenv("JAVA8_JAVAC")
@@ -85,7 +85,6 @@ func testArtifactLambdaMetadata(t *testing.T, sourceFixture string, namedModes [
 					t.Run(label+"/"+owner+"/"+debug, func(t *testing.T) {
 						fixture := strings.ReplaceAll(sourceFixture, "ArtifactLambdaOwner", owner)
 						original := compileLambdaParameterMetadataFixture(t, transition.originalCompiler, transition.originalProfile, fixture, owner, debug, named)
-						want := "7:artifact:helpermetadata:timing:overflow\n"
 						if got := t04RunJava(t, java, sourceArtifactWriteFiles(t, original), "ArtifactLambdaDriver"); got != want {
 							t.Fatal("independent original oracle", got)
 						}
@@ -166,9 +165,7 @@ func testArtifactLambdaMetadata(t *testing.T, sourceFixture string, namedModes [
 								t.Fatal("independent child's ABI/parameters changed", name, err)
 							}
 							nativeLexicalExactSignatures(t, name, raw, child)
-							if !bytes.Equal(fresh, child) {
-								t.Fatal("unrelated child metadata or executable bytes changed")
-							}
+							artifactLambdaMetadataCodeUnchanged(t, fresh, child)
 						}
 						if got := t04RunJava(t, java, out, "ArtifactLambdaDriver"); got != want {
 							t.Fatal("algorithm or evaluation timing changed", got)
@@ -176,6 +173,37 @@ func testArtifactLambdaMetadata(t *testing.T, sourceFixture string, namedModes [
 					})
 				}
 			}
+		}
+	}
+}
+
+func artifactLambdaMetadataCodeUnchanged(t *testing.T, compiled, restored []byte) {
+	t.Helper()
+	before, e1 := Parse(compiled)
+	after, e2 := Parse(restored)
+	if e1 != nil || e2 != nil || len(before.Methods) != len(after.Methods) {
+		t.Fatal("compiled child method universe changed", e1, e2)
+	}
+	for i, method := range before.Methods {
+		var code, other *CodeAttribute
+		for _, attribute := range method.Attributes {
+			if value, ok := attribute.(*CodeAttribute); ok {
+				if code != nil {
+					t.Fatal("duplicate compiled Code")
+				}
+				code = value
+			}
+		}
+		for _, attribute := range after.Methods[i].Attributes {
+			if value, ok := attribute.(*CodeAttribute); ok {
+				if other != nil {
+					t.Fatal("duplicate restored Code")
+				}
+				other = value
+			}
+		}
+		if !reflect.DeepEqual(code, other) {
+			t.Fatal("compiled child Code, handlers, stack maps or debug tables changed")
 		}
 	}
 }

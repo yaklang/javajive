@@ -315,7 +315,10 @@ func parseBytesCodeWithLambdaCaptureOrder(dumper *ClassObjectDumper, codeAttr *C
 		recordPacket := dumped.lambdaParameterBinding != nil && dumped.lambdaParameterBinding.metadata != nil && dumped.lambdaParameterBinding.metadata.factoryCaptureCount() != 0 || dumper.nativeAnonymousLambdaCurrent != nil && dumper.nativeMemberRoot != nil && len(dumper.nativeMemberRoot.getters) != 0
 		if dumper.options.SourceCompiler == NativeJavac8 || dumper.options.SourceCompiler == ModernJavac || recordPacket {
 			template := dumped.code
-			if dumper.options.SourceCompiler == NativeJavac8 && dumper.lambdaCaptureCompositionRequired(dumped) {
+			// A metadata-bound nested capture needs the same structured writer
+			// observations even when its final compiler metadata is restored
+			// by an explicit artifact. A plain packet loses the parent ports.
+			if (dumper.options.SourceCompiler == NativeJavac8 || dumper.artifactLambdaMetadataAllowed()) && dumper.lambdaCaptureCompositionRequired(dumped) {
 				source.RecordRenderedWithCaptures = func(observation core.LambdaSourceRender) {
 					dumper.recordLambdaCaptureProjection(dumped, template, observation, recordPacket)
 				}

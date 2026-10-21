@@ -66,6 +66,7 @@ type ClassObjectDumper struct {
 	nativeAnonymousForest                 *nativeAnonymousForest
 	nativeAnonymousBindings               map[string]string
 	nativeAnonymousRoot                   *nativeAnonymousFamily
+	sourceLambdaMembers                   []sourceLambdaMemberPublication
 	nativeCaptureFields                   map[string]string
 	nativeCapturedReads                   map[string]map[int]string
 	nativeTypeParams                      []string
@@ -2161,6 +2162,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	c.recordEnumRegeneratedMembers(full, methods)
 	if !c.publishArtifactLambdaMetadata(full, members, methods) {
 		return "", fmt.Errorf("lambda postcompile metadata obligation is not closed")
+	}
+	if !c.sealArtifactLambdaPublication(full, members) {
+		return "", fmt.Errorf("lambda metadata source-family publication is not closed")
 	}
 	return full, nil
 }

@@ -37,7 +37,7 @@ func nativeMemberCompilerMetadataEligible(root *ClassObject, family *nativeMembe
 				// Plain source needs native javac8/source8. An explicit artifact
 				// instead owes a final, sealed postcompile table obligation. This
 				// decision is independent of peer names and source-cache state.
-				if len(authorities) != 1 || authorities[0] == nil || profile.effective() != ModernJavac || target != 8 || object.MajorVersion != 52 || method.AccessFlags != 0x100a {
+				if len(authorities) != 1 || authorities[0] == nil || profile.effective() != ModernJavac || target != 8 || object.MajorVersion != 52 || !sourceLambdaImplementationFlags(method.AccessFlags) {
 					return false
 				}
 				if _, bound := authorities[0].original(object, work); !bound || !sourceLambdaOrdinaryBootstrapClosed(object, work) {

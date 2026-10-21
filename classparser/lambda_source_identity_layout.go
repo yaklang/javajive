@@ -17,7 +17,10 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityLayout(source string, mem
 	if !known {
 		return source, false
 	}
-	if nativeLambdaSourceIdentityOrderClosed(events) {
+	// An explicit artifact restores proved private helper names after javac.
+	// Its mapping uses this actual source-event order, so declaration movement
+	// is unnecessary. Plain source still owes exact original compiler names.
+	if nativeLambdaSourceIdentityOrderClosed(events) || c.artifactLambdaMetadataAllowed() {
 		return source, true
 	}
 	lookupOnly := c.lambdaRegistrationDeclarationLookupOnly()

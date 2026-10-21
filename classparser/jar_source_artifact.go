@@ -17,7 +17,7 @@ import (
 // Plain JarFS source admission remains unchanged.
 //
 // This contract can express ordinary synthetic storage fields and proved
-// nonserializable static lambda helper names/parameter tables without dropping
+// nonserializable private lambda helper names/parameter tables without dropping
 // their reflective metadata or importing original executable code. Lambda
 // obligations require a completed ReadFile source/factory proof in this view.
 // It does not
@@ -47,7 +47,9 @@ func (a *JarSourceArtifact) ReadFile(name string) ([]byte, error) {
 		z, logical = z.sourceReleaseView(release), candidate
 	}
 	if z != nil && z.sourceLambdaMetadata != nil && strings.HasSuffix(logical, ".class") {
-		z.sourceLambdaMetadata.sourceReturned(strings.TrimSuffix(logical, ".class"), source)
+		if err := z.sourceLambdaMetadata.sourceReturned(strings.TrimSuffix(logical, ".class"), source); err != nil {
+			return nil, err
+		}
 	}
 	return source, nil
 }

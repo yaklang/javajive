@@ -2013,6 +2013,7 @@ func (c *ClassObjectDumper) nativeMemberSkipCheck(st statements.Statement) bool 
 }
 func (c *ClassObjectDumper) renderNativeMembers() ([]string, error) {
 	c.nativeRenderedMemberNames = nil
+	c.sourceLambdaMembers = nil
 	p := c.nativeMemberRoot
 	if p == nil || c.obj.GetClassName() != p.owner && p.children[c.obj.GetClassName()] == nil && (p.anonymousForest == nil || p.anonymousForest.units[c.obj.GetClassName()] == nil || p.anonymousForest.units[c.obj.GetClassName()].object != c.obj) {
 		return nil, nil
@@ -2126,6 +2127,11 @@ func (c *ClassObjectDumper) renderNativeMembers() ([]string, error) {
 		}
 		out = append(out, declaration)
 		c.nativeRenderedMemberNames = append(c.nativeRenderedMemberNames, name)
+		if authority := c.options.sourceLambdaMetadata; authority != nil {
+			if publication := authority.publication(name, src); publication != nil {
+				c.sourceLambdaMembers = append(c.sourceLambdaMembers, sourceLambdaMemberPublication{object: child.object, packet: declaration, publication: publication})
+			}
+		}
 	}
 	return out, nil
 }

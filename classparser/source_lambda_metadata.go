@@ -22,6 +22,14 @@ type compiledMetadataLayout struct {
 }
 
 type sourceLambdaMethodIdentity struct{ name, descriptor string }
+
+// Private implementation visibility and synthetic origin remain required.
+// An instance implementation has an implicit receiver word, not an extra
+// descriptor/MethodParameters row; the existing factory/entry proof owns it.
+func sourceLambdaImplementationFlags(flags uint16) bool {
+	return flags == 0x100a || flags == 0x1002
+}
+
 type sourceLambdaMetadataMethod struct {
 	original, generated sourceLambdaMethodIdentity
 }
@@ -85,7 +93,7 @@ func restoreLambdaMethodMetadata(original, compiled []byte, plan *sourceLambdaMe
 	projection := map[sourceLambdaMethodIdentity]sourceLambdaMethodIdentity{}
 	originals := map[sourceLambdaMethodIdentity]bool{}
 	for _, method := range plan.methods {
-		if method.original.descriptor != method.generated.descriptor || originals[method.original] || projection[method.generated].name != "" || expected[method.original] == nil || expected[method.original].AccessFlags != 0x100a || !nativeProofWork(work, 1) {
+		if method.original.descriptor != method.generated.descriptor || originals[method.original] || projection[method.generated].name != "" || expected[method.original] == nil || !sourceLambdaImplementationFlags(expected[method.original].AccessFlags) || !nativeProofWork(work, 1) {
 			return nil, sourceLambdaMetadataFailure(work, "ambiguous implementation plan")
 		}
 		projection[method.generated], originals[method.original] = method.original, true
@@ -312,7 +320,7 @@ func sourceMethodParameterTable(object *ClassObject, method *MemberInfo) ([]stri
 }
 
 func sourceLambdaOrdinaryFactoryOnly(object *ClassObject, method *MemberInfo, metadata *lambdaParameterMetadata, work *workbudget.Budget) bool {
-	if method == nil || method.AccessFlags != 0x100a {
+	if method == nil || !sourceLambdaImplementationFlags(method.AccessFlags) {
 		return false
 	}
 	closed := false

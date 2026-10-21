@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io/fs"
 	"slices"
 	"strconv"
@@ -17,11 +18,12 @@ import (
 // Only an explicit source artifact owns this capability. A declaration resolver
 // cannot enroll bytes, and each physical release owns a separate ledger.
 type sourceLambdaMetadataAuthority struct {
-	jar      *JarFS
-	mu       sync.Mutex
-	plans    map[string]*sourceLambdaMetadataPlan
-	returned map[string][32]byte
-	bytes    int64
+	jar          *JarFS
+	mu           sync.Mutex
+	plans        map[string]*sourceLambdaMetadataPlan
+	active       map[string]*sourceLambdaMetadataPlan
+	publications map[string]*sourceLambdaPublication
+	bytes        int64
 }
 
 func (a *sourceLambdaMetadataAuthority) original(object *ClassObject, work *workbudget.Budget) ([]byte, bool) {
@@ -39,26 +41,32 @@ func (a *sourceLambdaMetadataAuthority) original(object *ClassObject, work *work
 func (a *sourceLambdaMetadataAuthority) plan(owner string) *sourceLambdaMetadataPlan {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	plan := a.plans[owner]
-	if plan == nil || a.returned[owner] != plan.sourceHash {
-		return nil
-	}
-	return plan
+	return a.active[owner]
 }
 
 // DumpClass can run inside an unpublished family transaction. Its local plan
 // becomes usable only when this exact complete source is returned through the
 // artifact's public source view. Failed/provisional layouts confer no edits.
-func (a *sourceLambdaMetadataAuthority) sourceReturned(owner string, source []byte) {
+func (a *sourceLambdaMetadataAuthority) sourceReturned(owner string, source []byte) error {
 	hash := sha256.Sum256(source)
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if plan := a.plans[owner]; plan != nil && plan.sourceHash == hash {
-		if a.returned == nil {
-			a.returned = map[string][32]byte{}
-		}
-		a.returned[owner] = hash
+	publication := a.publications[owner]
+	if publication == nil || publication.sourceHash != hash {
+		return nil
 	}
+	for _, plan := range publication.plans {
+		if prior := a.active[plan.owner]; prior != nil && (prior.originalHash != plan.originalHash || !slices.Equal(prior.methods, plan.methods)) {
+			return fmt.Errorf("lambda metadata: conflicting completed source variants require a fresh artifact")
+		}
+	}
+	if a.active == nil {
+		a.active = map[string]*sourceLambdaMetadataPlan{}
+	}
+	for _, plan := range publication.plans {
+		a.active[plan.owner] = plan
+	}
+	return nil
 }
 
 func (c *ClassObjectDumper) artifactLambdaMetadataAllowed() bool {
@@ -81,7 +89,7 @@ func (c *ClassObjectDumper) originalLambdaFactoryNameComponent(factory *lambdaSo
 	if named && strings.HasPrefix(name, "lambda$"+component+"$") {
 		return component, true
 	}
-	if !c.artifactLambdaMetadataAllowed() || method.AccessFlags != 0x100a {
+	if !c.artifactLambdaMetadataAllowed() || !sourceLambdaImplementationFlags(method.AccessFlags) {
 		return component, known
 	}
 	native, valid := lambdaFactoryNameComponent(factory)
@@ -97,7 +105,7 @@ func (c *ClassObjectDumper) publishArtifactLambdaMetadata(source string, members
 		return true
 	}
 	events, known := c.native8LambdaSourceIdentityEvents(source, members, methods)
-	if !known || !nativeLambdaSourceIdentityOrderClosed(events) {
+	if !known {
 		return false
 	}
 	plan := &sourceLambdaMetadataPlan{owner: c.obj.GetClassName(), sourceHash: sha256.Sum256([]byte(source))}
@@ -165,7 +173,12 @@ func (c *ClassObjectDumper) publishArtifactLambdaMetadata(source string, members
 	authority.mu.Lock()
 	defer authority.mu.Unlock()
 	if prior := authority.plans[plan.owner]; prior != nil {
-		return prior.originalHash == plan.originalHash && prior.sourceHash == plan.sourceHash && slices.Equal(prior.methods, plan.methods)
+		if prior.originalHash != plan.originalHash {
+			return false
+		}
+		if prior.sourceHash == plan.sourceHash {
+			return slices.Equal(prior.methods, plan.methods)
+		}
 	}
 	if len(authority.plans) >= 4096 || size > (16<<20)-authority.bytes {
 		return false
@@ -175,6 +188,125 @@ func (c *ClassObjectDumper) publishArtifactLambdaMetadata(source string, members
 	}
 	authority.plans[plan.owner] = plan
 	authority.bytes += size
+	return true
+}
+
+// These bindings come only from the actual successful named-member renderer.
+// Complete packet equality reopens that typed ownership proof at the final
+// source boundary; a matching substring by itself never enrolls a class.
+type sourceLambdaMemberPublication struct {
+	object      *ClassObject
+	packet      string
+	publication *sourceLambdaPublication
+}
+
+type sourceLambdaPublication struct {
+	owner                    string
+	originalHash, sourceHash [32]byte
+	plans                    []*sourceLambdaMetadataPlan
+}
+
+func (a *sourceLambdaMetadataAuthority) publication(owner, source string) *sourceLambdaPublication {
+	hash := sha256.Sum256([]byte(source))
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	publication := a.publications[owner]
+	if publication == nil || publication.sourceHash != hash {
+		return nil
+	}
+	return publication
+}
+
+func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members []string) bool {
+	if c == nil || c.options.sourceLambdaMetadata == nil {
+		return true
+	}
+	a := c.options.sourceLambdaMetadata
+	hash := sha256.Sum256([]byte(source))
+	a.mu.Lock()
+	own := a.plans[c.obj.GetClassName()]
+	a.mu.Unlock()
+	if own != nil && own.sourceHash != hash {
+		own = nil
+	}
+	if own == nil && len(c.sourceLambdaMembers) == 0 {
+		return true
+	}
+	if !c.artifactLambdaMetadataAllowed() || len(c.sourceLambdaMembers) > 4096 || len(members) != len(c.nativeRenderedMemberNames) {
+		return false
+	}
+	publication := &sourceLambdaPublication{owner: c.obj.GetClassName(), sourceHash: hash}
+	seen := map[string]bool{}
+	add := func(plan *sourceLambdaMetadataPlan) bool {
+		if plan == nil || seen[plan.owner] || len(publication.plans) >= 4096 || !nativeProofWork(c.Work, 1) {
+			return false
+		}
+		seen[plan.owner] = true
+		publication.plans = append(publication.plans, plan)
+		return true
+	}
+	if own != nil && !add(own) {
+		return false
+	}
+	bytes := int64(0)
+	for _, member := range c.sourceLambdaMembers {
+		if member.object == nil || member.publication == nil || c.nativeMemberRoot == nil {
+			return false
+		}
+		name := member.object.GetClassName()
+		child := c.nativeMemberRoot.children[name]
+		if child == nil || child.object != member.object || child.owner != c.obj.GetClassName() || member.publication.owner != name {
+			return false
+		}
+		matches := 0
+		for i, packet := range members {
+			if c.nativeRenderedMemberNames[i] == name && packet == member.packet {
+				matches++
+			}
+		}
+		cost := int64(len(source)+len(member.packet)) + 1
+		if matches != 1 || cost > (128<<20)-bytes || !nativeProofWork(c.Work, cost) {
+			return false
+		}
+		bytes += cost
+		start := strings.Index(source, member.packet)
+		if start < 0 || strings.Contains(source[start+len(member.packet):], member.packet) {
+			return false
+		}
+		raw, bound := a.original(member.object, c.Work)
+		if !bound || sha256.Sum256(raw) != member.publication.originalHash {
+			return false
+		}
+		for _, plan := range member.publication.plans {
+			if !add(plan) {
+				return false
+			}
+		}
+	}
+	raw, bound := a.original(c.obj, c.Work)
+	if !bound {
+		return false
+	}
+	publication.originalHash = sha256.Sum256(raw)
+	size := int64(128 + len(publication.owner) + len(publication.plans)*16)
+	if c.Work != nil && c.Work.CheckAlloc(size) != nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if prior := a.publications[publication.owner]; prior != nil && prior.originalHash == publication.originalHash && prior.sourceHash == publication.sourceHash && slices.Equal(prior.plans, publication.plans) {
+		// The typed/source checks above still run on a cache hit. Reusing the
+		// same immutable publication must not spend retained-memory allowance.
+		return true
+	}
+	if size > (16<<20)-a.bytes || len(a.publications) >= 4096 {
+		return false
+	}
+	if a.publications == nil {
+		a.publications = map[string]*sourceLambdaPublication{}
+	}
+	a.publications[publication.owner] = publication
+	a.bytes += size
 	return true
 }
 

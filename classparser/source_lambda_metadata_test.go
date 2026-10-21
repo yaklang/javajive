@@ -324,6 +324,18 @@ func TestNativeSourceLambdaMetadataOpenPublishesOnlyItsCompletedSource(t *testin
 	if result, err := artifact.RestoreClassMetadata("ArtifactLambdaOwner.class", compiled); err != nil || lambdaParameterMetadataTables(t, original) != lambdaParameterMetadataTables(t, result) {
 		t.Fatal("Open's same-namespace metadata obligation unavailable", err)
 	}
+	object, err := Parse(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := NewClassObjectDumper(object)
+	d.options.TargetSourceVersion, d.options.SourceCompiler, d.options.sourceLambdaMetadata = 8, ModernJavac, artifact.jar.sourceLambdaMetadata
+	retained := artifact.jar.sourceLambdaMetadata.bytes
+	for i := 0; i < 3; i++ {
+		if !d.sealArtifactLambdaPublication(string(source), nil) || artifact.jar.sourceLambdaMetadata.bytes != retained {
+			t.Fatal("same completed source spent retained-memory allowance again")
+		}
+	}
 }
 
 func TestNativeSourceLambdaMetadataRejectsCrossClassEnclosingMethodRename(t *testing.T) {
@@ -388,5 +400,85 @@ func TestNativeSourceLambdaMetadataRejectsCrossClassEnclosingMethodRename(t *tes
 				t.Fatalf("cross-class name dependency accepted=%v variant=%s", got, variant)
 			}
 		})
+	}
+}
+
+func TestNativeSourceLambdaFamilyPublicationRequiresExactCompletedRoot(t *testing.T) {
+	native := os.Getenv("JAVA8_JAVAC")
+	if native == "" {
+		t.Skip("JAVA8_JAVAC required")
+	}
+	original := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, artifactInterfaceLambdaMetadataFixture, "ArtifactLambdaOwner", "none", true)
+	jar := filepath.Join(t.TempDir(), "source.jar")
+	if err := os.WriteFile(jar, t23Zip(t, original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := NewJarSourceArtifactFromLocal(jar, 8, ModernJavac, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer artifact.Close()
+	source, err := artifact.jar.ReadFile("ArtifactLambdaOwner.class")
+	if err != nil || strings.Contains(string(source), DecompileStubMarker) || strings.Contains(string(source), "decompile dump failed") {
+		t.Fatal("private family source", err, string(source))
+	}
+	authority := artifact.jar.sourceLambdaMetadata
+	publication := authority.publication("ArtifactLambdaOwner", string(source))
+	if publication == nil || len(publication.plans) != 2 {
+		t.Fatal("actual root/member publication missing")
+	}
+	for _, plan := range publication.plans {
+		if authority.plan(plan.owner) != nil {
+			t.Fatal("provisional family activated a plan", plan.owner)
+		}
+	}
+	if err := authority.sourceReturned("Unowned", source); err != nil {
+		t.Fatal(err)
+	}
+	if err := authority.sourceReturned("ArtifactLambdaOwner", append(bytes.Clone(source), ' ')); err != nil {
+		t.Fatal(err)
+	}
+	for _, plan := range publication.plans {
+		if authority.plan(plan.owner) != nil {
+			t.Fatal("wrong source activated a family")
+		}
+	}
+	// A conflict in the last child must not partially publish earlier plans.
+	last := publication.plans[len(publication.plans)-1]
+	conflict := *last
+	conflict.originalHash[0] ^= 1
+	authority.active = map[string]*sourceLambdaMetadataPlan{last.owner: &conflict}
+	if err := authority.sourceReturned("ArtifactLambdaOwner", source); err == nil {
+		t.Fatal("conflicting source variants accepted")
+	}
+	for _, plan := range publication.plans {
+		if plan.owner != last.owner && authority.plan(plan.owner) != nil {
+			t.Fatal("partial family publication escaped")
+		}
+	}
+	authority.active = nil
+	// Text/name equality does not replace the exact child object certified by
+	// the renderer's owning family. A copied declaration cannot enroll itself.
+	root, _ := Parse(original["ArtifactLambdaOwner.class"])
+	child, _ := Parse(original["ArtifactLambdaOwner$Rule.class"])
+	copyChild, _ := Parse(original["ArtifactLambdaOwner$Rule.class"])
+	d := NewClassObjectDumper(root)
+	d.options.TargetSourceVersion, d.options.SourceCompiler, d.options.sourceLambdaMetadata = 8, ModernJavac, authority
+	d.nativeMemberRoot = &nativeMemberFamily{owner: "ArtifactLambdaOwner", children: map[string]*nativeMemberClass{"ArtifactLambdaOwner$Rule": {object: child, owner: "ArtifactLambdaOwner"}}}
+	d.nativeRenderedMemberNames = []string{"ArtifactLambdaOwner$Rule"}
+	d.sourceLambdaMembers = []sourceLambdaMemberPublication{{object: copyChild, packet: "copied", publication: authority.publications["ArtifactLambdaOwner$Rule"]}}
+	if d.sealArtifactLambdaPublication(string(source), []string{"copied"}) {
+		t.Fatal("copied child object acquired a publication role")
+	}
+	if authority.publication("ArtifactLambdaOwner", string(source)) != publication {
+		t.Fatal("rejected child changed pending publication")
+	}
+	if err := authority.sourceReturned("ArtifactLambdaOwner", source); err != nil {
+		t.Fatal(err)
+	}
+	for _, plan := range publication.plans {
+		if authority.plan(plan.owner) != plan {
+			t.Fatal("completed root did not activate exact member plan", plan.owner)
+		}
 	}
 }
