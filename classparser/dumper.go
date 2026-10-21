@@ -2159,6 +2159,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		return "", fmt.Errorf("final serializable reference source changed after compiler layout")
 	}
 	c.recordEnumRegeneratedMembers(full, methods)
+	if !c.publishArtifactLambdaMetadata(full, members, methods) {
+		return "", fmt.Errorf("lambda postcompile metadata obligation is not closed")
+	}
 	return full, nil
 }
 

@@ -15,6 +15,7 @@ type ClassParser struct {
 	// Optional offsets for metadata-only edits of an already compiled class.
 	// Ordinary parsing retains no byte positions or additional member map.
 	fieldFlagOffsets map[*MemberInfo]int
+	metadataLayout   *compiledMetadataLayout
 }
 
 func NewClassParser(data []byte) *ClassParser {
@@ -127,6 +128,9 @@ func (this *ClassParser) readMembers() ([]*MemberInfo, error) {
 			return nil, this.reader.Err()
 		}
 	}
+	if this.metadataLayout != nil && !this.reader.failWork(this.reader.work.CheckAlloc(int64(memberCount)*48)) {
+		return nil, this.reader.Err()
+	}
 	members := make([]*MemberInfo, memberCount)
 	for i := range members {
 		members[i] = this.readMember()
@@ -146,6 +150,9 @@ func (this *ClassParser) readMember() *MemberInfo {
 	}
 	if this.fieldFlagOffsets != nil && this.attrCtx == attrCtxField {
 		this.fieldFlagOffsets[member] = offset
+	}
+	if this.metadataLayout != nil && this.attrCtx == attrCtxMethod {
+		this.metadataLayout.methods[member] = compiledMetadataSpan{offset, this.reader.Offset()}
 	}
 	return member
 }
@@ -246,9 +253,16 @@ func (this *ClassParser) readConstantPool() error {
 		return this.reader.Err()
 	}
 	cp := make([]ConstantInfo, cpCount-1)
+	if this.metadataLayout != nil {
+		if !this.reader.failWork(this.reader.work.CheckAlloc(int64(cpCount-1) * 16)) {
+			return this.reader.Err()
+		}
+		this.metadataLayout.constants = make([]compiledMetadataSpan, cpCount-1)
+	}
 
 	//索引从1开始，这里用了 <cpCount 说明index是从1到cpCount-1 及上文的1 ~ n-1
 	for i := 0; i < cpCount-1; i++ {
+		start := this.reader.Offset()
 		constantInfo, err := this.readConstantInfo()
 		if err != nil {
 			return err
@@ -257,6 +271,9 @@ func (this *ClassParser) readConstantPool() error {
 			return err
 		}
 		cp[i] = constantInfo
+		if this.metadataLayout != nil {
+			this.metadataLayout.constants[i] = compiledMetadataSpan{start, this.reader.Offset()}
+		}
 		switch cp[i].(type) {
 		case *ConstantLongInfo, *ConstantDoubleInfo:
 			//占两个位置
@@ -267,6 +284,9 @@ func (this *ClassParser) readConstantPool() error {
 		return err
 	}
 	this.classObj.ConstantPool = cp
+	if this.metadataLayout != nil {
+		this.metadataLayout.poolEnd = this.reader.Offset()
+	}
 	return nil
 }
 func (this *ClassParser) readConstantInfo() (ConstantInfo, error) {

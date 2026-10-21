@@ -317,6 +317,10 @@ func parseWithReader(reader *ClassReader) (cf *ClassObject, err error) {
 }
 
 func parseWithFieldFlagOffsets(reader *ClassReader, offsets map[*MemberInfo]int) (cf *ClassObject, err error) {
+	return parseWithMetadataLayout(reader, offsets, nil)
+}
+
+func parseWithMetadataLayout(reader *ClassReader, offsets map[*MemberInfo]int, layout *compiledMetadataLayout) (cf *ClassObject, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			var ok bool
@@ -328,7 +332,7 @@ func parseWithFieldFlagOffsets(reader *ClassReader, offsets map[*MemberInfo]int)
 			err = fmt.Errorf("parse class error: %w", e)
 		}
 	}()
-	cp := &ClassParser{reader: reader, classObj: NewClassObject(), fieldFlagOffsets: offsets}
+	cp := &ClassParser{reader: reader, classObj: NewClassObject(), fieldFlagOffsets: offsets, metadataLayout: layout}
 	obj, err := cp.Parse()
 	if err != nil {
 		return nil, err

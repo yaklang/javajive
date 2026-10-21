@@ -29,6 +29,7 @@ type JarFS struct {
 	targetSourceVersion      int
 	sourceCompiler           SourceCompilerProfile
 	sourceFieldMetadata      *sourceFieldMetadataAuthority
+	sourceLambdaMetadata     *sourceLambdaMetadataAuthority
 	sourceOwnership          *sourceOwnershipCache
 	releaseViewsMu           sync.Mutex
 	releaseViews             map[int]*JarFS
@@ -168,6 +169,7 @@ func (z *JarFS) decompileClassBytes(name string, data []byte) []byte {
 	d.options.TargetSourceVersion = z.targetSourceVersion
 	d.options.SourceCompiler = z.sourceCompiler
 	d.options.sourceFieldMetadata = z.sourceFieldMetadata
+	d.options.sourceLambdaMetadata = z.sourceLambdaMetadata
 	if path.Clean(name) == cf.GetClassName()+".class" {
 		d.nativeMemberLookup = z.nativeMemberLookup
 	}

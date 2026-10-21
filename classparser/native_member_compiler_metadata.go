@@ -10,8 +10,8 @@ import "github.com/yaklang/javajive/internal/workbudget"
 // validates every actual body/metadata requirement. Unknown roles grant nothing.
 // Only an exact, exclusively used original lambda factory establishes the role;
 // synthetic flags, method names and matching descriptors alone do not.
-func nativeMemberCompilerMetadataEligible(root *ClassObject, family *nativeMemberFamily, profile SourceCompilerProfile, target int, work *workbudget.Budget) bool {
-	if root == nil || family == nil || !nativeProofWork(work, 1) {
+func nativeMemberCompilerMetadataEligible(root *ClassObject, family *nativeMemberFamily, profile SourceCompilerProfile, target int, work *workbudget.Budget, authorities ...*sourceLambdaMetadataAuthority) bool {
+	if root == nil || family == nil || len(authorities) > 1 || !nativeProofWork(work, 1) {
 		return false
 	}
 	if profile == NativeJavac8 && target == 8 {
@@ -34,10 +34,17 @@ func nativeMemberCompilerMetadataEligible(root *ClassObject, family *nativeMembe
 			}
 			metadata, known := readLambdaParameterMetadata(object, method, work)
 			if known && metadata != nil && nativeLambdaBodyOriginalUseClosed(object, method, work, metadata) {
-				// The current source renderer admits this exact physical parameter
-				// table only under native javac8/source8. The profile decision is
-				// independent of peer source names, body order and cache state.
-				return false
+				// Plain source needs native javac8/source8. An explicit artifact
+				// instead owes a final, sealed postcompile table obligation. This
+				// decision is independent of peer names and source-cache state.
+				if len(authorities) != 1 || authorities[0] == nil || profile.effective() != ModernJavac || target != 8 || object.MajorVersion != 52 || method.AccessFlags != 0x100a {
+					return false
+				}
+				if _, bound := authorities[0].original(object, work); !bound || !sourceLambdaOrdinaryBootstrapClosed(object, work) {
+					return false
+				}
+				// Eligibility permits planning only. Publication still requires
+				// each actual final source/body/factory obligation to close.
 			}
 			if work != nil && work.Check() != nil {
 				return false

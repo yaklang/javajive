@@ -15,7 +15,7 @@ func TestAdversarialSourceCompilerMetadataAdmissionRequiresOriginalFactoryRole(t
 		t.Skip("original native8 compiler")
 	}
 	files := compileLambdaParameterMetadataFixture(t, compiler, NativeJavac8, sourceLayoutSubsetFixture, "LayoutGood", "none", true)
-	for _, variant := range []string{"modern", "unspecified profile", "native8", "native8 wrong target", "no implementation table", "not synthetic", "unused factory metadata", "work", "memory", "canceled"} {
+	for _, variant := range []string{"modern", "unspecified profile", "native8", "native8 wrong target", "artifact", "artifact foreign bytes", "artifact resolver only", "no implementation table", "not synthetic", "unused factory metadata", "work", "memory", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			object, err := Parse(bytes.Clone(files["LayoutOpaque.class"]))
 			if err != nil {
@@ -36,6 +36,7 @@ func TestAdversarialSourceCompilerMetadataAdmissionRequiresOriginalFactoryRole(t
 			}
 			profile, target := ModernJavac, 8
 			var work *workbudget.Budget
+			var authorities []*sourceLambdaMetadataAuthority
 			eligible := false
 			switch variant {
 			case "unspecified profile":
@@ -44,6 +45,27 @@ func TestAdversarialSourceCompilerMetadataAdmissionRequiresOriginalFactoryRole(t
 				profile, eligible = NativeJavac8, true
 			case "native8 wrong target":
 				profile, target = NativeJavac8, 7
+			case "artifact", "artifact foreign bytes", "artifact resolver only":
+				originals := map[string][]byte{}
+				for name, raw := range files {
+					originals[name] = bytes.Clone(raw)
+				}
+				if variant == "artifact foreign bytes" {
+					other, err := Parse(originals["LayoutOpaque.class"])
+					if err != nil {
+						t.Fatal(err)
+					}
+					other.AccessFlags ^= 0x10
+					originals["LayoutOpaque.class"] = other.Bytes()
+				}
+				if variant == "artifact resolver only" {
+					delete(originals, "LayoutOpaque.class")
+				}
+				archive := nativeArchive(t, originals)
+				defer archive.Close()
+				archive.declarationResolver = func(name string) ([]byte, bool) { raw, found := files[name+".class"]; return raw, found }
+				authorities = []*sourceLambdaMetadataAuthority{{jar: archive}}
+				eligible = variant == "artifact"
 			case "no implementation table":
 				for i, attribute := range implementation.Attributes {
 					if attribute == metadata.table {
@@ -81,7 +103,7 @@ func TestAdversarialSourceCompilerMetadataAdmissionRequiresOriginalFactoryRole(t
 			}
 			before := object.Bytes()
 			family := &nativeMemberFamily{owner: object.GetClassName(), lexicalObjects: map[string]*ClassObject{object.GetClassName(): object}}
-			if got := nativeMemberCompilerMetadataEligible(object, family, profile, target, work); got != eligible || !bytes.Equal(before, object.Bytes()) {
+			if got := nativeMemberCompilerMetadataEligible(object, family, profile, target, work, authorities...); got != eligible || !bytes.Equal(before, object.Bytes()) {
 				t.Fatalf("local eligibility=%v wanted=%v, original input must stay unchanged", got, eligible)
 			}
 		})

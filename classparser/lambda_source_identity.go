@@ -42,6 +42,9 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 	// This latch records only an attempted original initializer factory; every
 	// positive body, ordinal and source-occurrence proof is still reopened.
 	required := c.compilerReferenceFactorySeen || c.lambdaInitializerFactorySeen
+	if len(c.lambdaMethodSourceBodies) != 0 && c.artifactLambdaMetadataAllowed() {
+		required = true
+	}
 	hasReference := c.compilerReferenceFactorySeen
 	for _, receipt := range c.lambdaMethodSourceBodies {
 		if receipt != nil && receipt.body != nil && receipt.body.compilerReference != nil {
@@ -212,7 +215,7 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 		if !owned {
 			return nil, false
 		}
-		component, named := lambdaFactoryNameComponent(factory)
+		component, named := c.originalLambdaFactoryNameComponent(factory, receipt.method)
 		if !named || (component == "static" || c.options.SourceCompiler == ModernJavac) && parent.lambdaEmission == nil {
 			return nil, false
 		}

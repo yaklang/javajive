@@ -151,7 +151,7 @@ func (c *ClassObjectDumper) nestedLambdaSourceFactoryEvents(source string, arrow
 			if !scope.reference && !walk(child, root, content[scope.open+1:scope.end], offset+scope.open+1, depth+1) {
 				return false
 			}
-			factoryName, named := c.lambdaSourceFactoryNameComponent(factory)
+			factoryName, named := c.originalLambdaFactoryNameComponent(factory, receipt.method)
 			implementation, known := sourceBridgeUTF8(c.obj, receipt.method.NameIndex)
 			prefix := "lambda$" + factoryName + "$"
 			if !named || !known || len(implementation) <= len(prefix) || implementation[:len(prefix)] != prefix {
@@ -162,7 +162,7 @@ func (c *ClassObjectDumper) nestedLambdaSourceFactoryEvents(source string, arrow
 			if err != nil || ordinal < 0 || suffix != strconv.Itoa(ordinal) {
 				return false
 			}
-			events = append(events, nativeLambdaSourceIdentityEvent{ordinal: ordinal, parent: root})
+			events = append(events, nativeLambdaSourceIdentityEvent{ordinal: ordinal, parent: root, body: child})
 		}
 		return true
 	}

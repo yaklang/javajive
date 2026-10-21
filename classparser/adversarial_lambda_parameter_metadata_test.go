@@ -469,11 +469,16 @@ func lambdaParameterMetadataTables(t *testing.T, raw []byte) string {
 			row := name + descriptor
 			for index := 0; index < int(table.Info[0]); index++ {
 				entry := table.Info[1+4*index : 5+4*index]
-				text, found := sourceBridgeUTF8(object, binary.BigEndian.Uint16(entry[:2]))
-				if !found {
+				nameIndex := binary.BigEndian.Uint16(entry[:2])
+				text, found := sourceBridgeUTF8(object, nameIndex)
+				if nameIndex != 0 && !found {
 					t.Fatal("unknown original/rebuilt parameter name", name)
 				}
-				row += fmt.Sprintf(" %s:%04x", text, binary.BigEndian.Uint16(entry[2:]))
+				if nameIndex == 0 {
+					row += fmt.Sprintf(" <no-name>:%04x", binary.BigEndian.Uint16(entry[2:]))
+				} else {
+					row += fmt.Sprintf(" %q:%04x", text, binary.BigEndian.Uint16(entry[2:]))
+				}
 			}
 			rows = append(rows, row)
 		}

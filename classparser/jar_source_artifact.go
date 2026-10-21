@@ -6,17 +6,21 @@ import (
 	"io/fs"
 	"strings"
 
+	"github.com/yaklang/javajive/internal/memfile"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
-// JarSourceArtifact is a source view with an explicit postcompile field
+// JarSourceArtifact is a source view with explicit postcompile compiler
 // metadata obligation. ReadFile returns Java source under the original class
 // paths, as JarFS does. Recompile with the selected compiler profile, then call
 // RestoreClassMetadata for each rebuilt class before publishing the artifact.
 // Plain JarFS source admission remains unchanged.
 //
-// This contract can express ordinary synthetic storage fields without dropping
-// their reflective metadata or importing original executable code. It does not
+// This contract can express ordinary synthetic storage fields and proved
+// nonserializable static lambda helper names/parameter tables without dropping
+// their reflective metadata or importing original executable code. Lambda
+// obligations require a completed ReadFile source/factory proof in this view.
+// It does not
 // certify compilation, JVM verification, other ABI metadata or algorithmic
 // equivalence; those still require independent validation.
 type JarSourceArtifact struct {
@@ -29,11 +33,31 @@ func NewJarSourceArtifactFromLocal(path string, target int, compiler SourceCompi
 		return nil, err
 	}
 	z.sourceFieldMetadata = &sourceFieldMetadataAuthority{jar: z}
+	z.sourceLambdaMetadata = &sourceLambdaMetadataAuthority{jar: z}
 	return &JarSourceArtifact{jar: z}, nil
 }
 
-func (a *JarSourceArtifact) ReadFile(name string) ([]byte, error) { return a.jar.ReadFile(name) }
-func (a *JarSourceArtifact) Open(name string) (fs.File, error)    { return a.jar.Open(name) }
+func (a *JarSourceArtifact) ReadFile(name string) ([]byte, error) {
+	source, err := a.jar.ReadFile(name)
+	if err != nil {
+		return nil, err
+	}
+	z, logical := a.jar, name
+	if release, candidate, physical := physicalClassNamespace(name); physical {
+		z, logical = z.sourceReleaseView(release), candidate
+	}
+	if z != nil && z.sourceLambdaMetadata != nil && strings.HasSuffix(logical, ".class") {
+		z.sourceLambdaMetadata.sourceReturned(strings.TrimSuffix(logical, ".class"), source)
+	}
+	return source, nil
+}
+func (a *JarSourceArtifact) Open(name string) (fs.File, error) {
+	source, err := a.ReadFile(name)
+	if err != nil {
+		return nil, err
+	}
+	return memfile.New(source), nil
+}
 func (a *JarSourceArtifact) ReadDir(name string) ([]fs.DirEntry, error) {
 	return a.jar.ReadDir(name)
 }
@@ -41,7 +65,8 @@ func (a *JarSourceArtifact) Close() error { return a.jar.Close() }
 
 // RestoreClassMetadata binds restoration to this archive's original bytes and
 // the exact physical source namespace. Declaration-resolver classes cannot
-// authorize edits. No original executable code or other metadata is restored.
+// authorize edits. Only the proved field/lambda metadata is restored; executable
+// Code and all other compiled attribute payloads remain unchanged.
 func (a *JarSourceArtifact) RestoreClassMetadata(name string, compiled []byte) ([]byte, error) {
 	if a == nil || a.jar == nil {
 		return nil, fs.ErrInvalid
@@ -65,7 +90,22 @@ func (a *JarSourceArtifact) RestoreClassMetadata(name string, compiled []byte) (
 	if object.GetClassName()+".class" != logical {
 		return nil, fmt.Errorf("field metadata: archive path and class identity disagree")
 	}
-	return RestoreSyntheticFieldMetadata(original, compiled, reader.Work)
+	if authority := z.sourceLambdaMetadata; authority != nil {
+		if plan := authority.plan(object.GetClassName()); plan != nil {
+			compiled, err = restoreLambdaMethodMetadata(original, compiled, plan, reader.Work)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	result, err := RestoreSyntheticFieldMetadata(original, compiled, reader.Work)
+	if err != nil {
+		return nil, err
+	}
+	if err := sourceMethodMetadataClosed(object, result, reader.Work); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // This capability exists only in a fresh artifact source view. The original

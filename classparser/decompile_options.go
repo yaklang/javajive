@@ -92,7 +92,8 @@ type DecompileOptions struct {
 	SourceCompiler SourceCompilerProfile
 	// Only a JarSourceArtifact can grant postcompile field metadata recovery.
 	// This capability is never constructed by a plain-source public request.
-	sourceFieldMetadata *sourceFieldMetadataAuthority
+	sourceFieldMetadata  *sourceFieldMetadataAuthority
+	sourceLambdaMetadata *sourceLambdaMetadataAuthority
 
 	// EnableShadowIR builds a read-only MethodIR snapshot after SemanticCFG.
 	// The old printer remains the default source path. Default false.

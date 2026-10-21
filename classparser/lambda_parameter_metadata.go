@@ -167,7 +167,8 @@ func (c *ClassObjectDumper) lambdaParameterMetadataInScope(method *MemberInfo, w
 		}
 		return nil, true
 	}
-	if c.options.SourceCompiler != NativeJavac8 || c.options.TargetSourceVersion != 8 || !native8LambdaParameterCompilerFlagClosed(c.obj, work) || !nativeLambdaBodyOriginalUseClosed(c.obj, method, work, projection) || projection.factory == nil {
+	compilerClosed := c.options.SourceCompiler == NativeJavac8 && c.options.TargetSourceVersion == 8 || c.artifactLambdaMetadataAllowed() && method.AccessFlags == 0x100a
+	if !compilerClosed || !native8LambdaParameterCompilerFlagClosed(c.obj, work) || !nativeLambdaBodyOriginalUseClosed(c.obj, method, work, projection) || projection.factory == nil {
 		return nil, false
 	}
 	factoryName, named := lambdaFactoryNameComponent(projection.factory)
