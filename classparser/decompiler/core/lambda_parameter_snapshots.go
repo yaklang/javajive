@@ -42,6 +42,22 @@ func (d *Decompiler) inlineUnchangedLambdaOperandCopies(op *OpCode, value values
 		proved := snapshot.Operand && ref != nil && ref.StackVar == nil && ref.CustomValue == nil
 		location, position, original := ref.OriginalPendingDynamicOperand(snapshot.Value)
 		proved = proved && original && location == pc && position >= 0 && position < len(captures) && captures[position] == ref
+		if !locals && proved && snapshot.ExpectedType != nil {
+			// A hidden field rendered as its enclosing variable is captured by
+			// javac at this factory, not read later by the deferred lambda body.
+			// Keep the original factory/result and every other operand snapshot.
+			receiver, lexical := lambda.OriginalLambdaLexicalFieldReceiver(pc, position, ref, snapshot.Value, d.FunctionContext)
+			if lexical {
+				_, initialized := d.unchangedCaptureReceiverSlot(receiver)
+				actual, typed := values.SourceTypeErasure(snapshot.Value.Type(), d.FunctionContext)
+				expected, known := values.SourceTypeErasure(snapshot.ExpectedType, d.FunctionContext)
+				if initialized && typed && known && actual == expected {
+					ref.StackVar = snapshot.Value
+					ref.MarkOriginalDynamicOperandInline(pc, snapshot.Value)
+					continue
+				}
+			}
+		}
 		source, parameter := dynamicCaptureSeed(snapshot.Value).(*values.JavaRef)
 		slot, stable := d.unchangedCaptureParameterSlot(source)
 		originalSlot, sealed := source.OriginalParameterSlot()

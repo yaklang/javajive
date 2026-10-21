@@ -580,13 +580,20 @@ func (j *RefMember) String(funcCtx *class_context.ClassContext) string {
 			return source
 		}
 	}
-	if funcCtx != nil && funcCtx.SourceCapturedField != nil {
+	if funcCtx != nil && (funcCtx.SourceCapturedFieldAt != nil || funcCtx.SourceCapturedField != nil) {
 		pc := -1
 		if j.HasOriginPC {
 			pc = j.OriginPC
 		}
 		ref, direct := UnpackSoltValue(j.Object).(*JavaRef)
-		if text, known := funcCtx.SourceCapturedField(pc, j.Member, direct && ref != nil && ref.IsThis); known {
+		var text string
+		var known bool
+		if funcCtx.SourceCapturedFieldAt != nil {
+			text, known = funcCtx.SourceCapturedFieldAt(funcCtx, pc, j.Member, direct && ref != nil && ref.IsThis)
+		} else {
+			text, known = funcCtx.SourceCapturedField(pc, j.Member, direct && ref != nil && ref.IsThis)
+		}
+		if known {
 			return text
 		}
 	}

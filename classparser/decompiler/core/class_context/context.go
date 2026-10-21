@@ -84,8 +84,12 @@ type ClassContext struct {
 	// A read-only local producer certificate returns an invocation proof view.
 	// It must bind the original STORE, unchanged producer and whole-body write
 	// exclusion in this exact source method; it never evaluates the producer.
-	SourceLocalInvocation      func(value any, sourceOwner, methodName, methodDesc string) (any, bool)
-	SourceCapturedField        func(pc int, name string, receiver bool) (string, bool)
+	SourceLocalInvocation func(value any, sourceOwner, methodName, methodDesc string) (any, bool)
+	SourceCapturedField   func(pc int, name string, receiver bool) (string, bool)
+	// A retained source proof has its own method coordinates. It must not
+	// resolve this read through a closure over a later live sibling context.
+	// The older hook remains available to callers without this scoped resolver.
+	SourceCapturedFieldAt      func(source *ClassContext, pc int, name string, receiver bool) (string, bool)
 	SourceLexicalCapturedField func(value any, pc int, name string) (string, bool)
 	// A speculative type query can precede constructor source preparation.
 	// Its proof may be unavailable, but it must never commit a projection or

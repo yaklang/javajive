@@ -68,8 +68,34 @@ func (c *ClassObjectDumper) native8LambdaParameterCaptures(p *lambdaParameterMet
 			end = i
 		}
 	}
-	start := end - len(p.captureTypes) - p.receiverWords
-	if start < 0 || end < 0 || ops[end].Instr.OpCode != core.OP_INVOKEDYNAMIC {
+	if end < 0 || ops[end].Instr.OpCode != core.OP_INVOKEDYNAMIC {
+		return false
+	}
+	// A logical capture is one descriptor port, not necessarily one opcode.
+	// Hidden anonymous captures are the already-proved THIS/GETFIELD packet.
+	loads := make([]int, len(p.captureTypes))
+	fields := make([]*nativeEnumSelectorProducer, len(p.captureTypes))
+	start := end
+	for i := len(p.captureTypes) - 1; i >= 0; i-- {
+		start--
+		if start < 0 {
+			return false
+		}
+		loads[i] = start
+		if view := c.nativeAnonymousLambdaCurrent; view != nil && p.factory.method.AccessFlags&8 == 0 {
+			fields[i] = nativeAnonymousLambdaCaptureField(c.obj, view.lambdaContext.anonymousCaptures, ops, start, p.captureTypes[i], work)
+		}
+		if fields[i] != nil {
+			if !c.lambdaParameterAnonymousFieldClosed(p, fields[i], p.names[i], work) {
+				return false
+			}
+			start--
+		} else if !constructorMotionLoad(ops[start], p.captureTypes[i]) {
+			return false
+		}
+	}
+	start -= p.receiverWords
+	if start < 0 {
 		return false
 	}
 	var localReads map[int]*nativeEnumLocalRead
@@ -88,14 +114,22 @@ func (c *ClassObjectDumper) native8LambdaParameterCaptures(p *lambdaParameterMet
 		used[0], parameterWords[0] = true, true
 	}
 	for i, descriptor := range p.captureTypes {
-		if callbinding.Reference(descriptor) {
-			localDomain.descriptors[int(ops[start+p.receiverWords+i].CurrentOffset)] = descriptor
+		if fields[i] == nil && callbinding.Reference(descriptor) {
+			localDomain.descriptors[int(ops[loads[i]].CurrentOffset)] = descriptor
 		}
 	}
 	for i, descriptor := range p.captureTypes {
-		op := ops[start+p.receiverWords+i]
+		if p.flags[i] != 0x1010 || !nativeProofWork(work, 1) {
+			return false
+		}
+		if fields[i] != nil {
+			p.captures = append(p.captures, fields[i])
+			used[0], parameterWords[0] = true, true
+			continue
+		}
+		op := ops[loads[i]]
 		readSlot := core.GetRetrieveIdx(op)
-		if !nativeProofWork(work, 1) || !constructorMotionLoad(op, descriptor) || p.flags[i] != 0x1010 || used[readSlot] || (descriptor == "J" || descriptor == "D") && used[readSlot+1] {
+		if !constructorMotionLoad(op, descriptor) || used[readSlot] || (descriptor == "J" || descriptor == "D") && used[readSlot+1] {
 			return false
 		}
 		operand := &nativeEnumSelectorProducer{opcode: op.Instr.OpCode, pc: int(op.CurrentOffset), slot: readSlot, result: descriptor}
@@ -176,8 +210,17 @@ func (c *ClassObjectDumper) lambdaParameterCaptureContext(p *lambdaParameterMeta
 		}
 		pc, index, original := ref.OriginalPendingDynamicOperand(ref.Val)
 		seed, known := nativeMemberEnclosingUnpack(ref.Val, c.Work)
+		if !original || pc != p.factory.pc || index != i+p.receiverWords || !known {
+			return nil, nil, false
+		}
+		if lambdaParameterFieldCapture(p.captures[i]) {
+			if !c.lambdaParameterAnonymousFieldClosed(p, p.captures[i], p.names[i], c.Work) || !nativeAnonymousLambdaCaptureSource(p.captures[i], seed, pc, index, &context, c.Work) {
+				return nil, nil, false
+			}
+			continue
+		}
 		parameter, typed := seed.(*values.JavaRef)
-		if !original || pc != p.factory.pc || index != i+p.receiverWords || !known || !typed || parameter == nil {
+		if !typed || parameter == nil {
 			return nil, nil, false
 		}
 		if p.captures[i].local == nil {
@@ -289,7 +332,7 @@ func (b *lambdaParameterBinding) capturedNamesClosedInScope(work *workbudget.Bud
 	}
 	for i, operand := range b.metadata.captures {
 		_, forwarded := lambdaForwardedCaptureIndex(b.metadata, i)
-		if operand != nil && operand.local != nil || forwarded {
+		if operand != nil && operand.local != nil || lambdaParameterFieldCapture(operand) || forwarded {
 			if b.metadata.factory == nil || !b.captureEmission.closed() || b.captureEmission.body == nil || b.captureEmission.body.member != b.metadata.factory.method || len(b.captureDeclarationIDs) != len(b.captured) || len(b.captureSourceIDs) != len(b.captured) {
 				return false
 			}
@@ -298,6 +341,12 @@ func (b *lambdaParameterBinding) capturedNamesClosedInScope(work *workbudget.Bud
 				ref, typed := v.(*values.JavaRef)
 				if !known || !typed || ref == nil || ref.Id == nil || ref.Id != b.captureDeclarationIDs[i] {
 					return false
+				}
+				if lambdaParameterFieldCapture(b.metadata.captures[i]) {
+					if b.captureSourceIDs[i] != nil {
+						return false
+					}
+					continue
 				}
 				source, known := lambdaCaptureSourceReference(ref, b.metadata.factory.pc, i+b.metadata.receiverWords, work)
 				if !known || source.Id != b.captureSourceIDs[i] {
@@ -340,6 +389,9 @@ func (b *lambdaParameterBinding) capturedNamesInContextClosed(context *class_con
 			if b.metadata.captures[i].local == nil || !b.retainedCaptureSourceClosed(work) || !nativeLambdaReusedLocalSource(b.metadata.captures[i], b.captureBody, index, work) {
 				return false
 			}
+		}
+		if lambdaParameterFieldCapture(b.metadata.captures[i]) && !nativeAnonymousLambdaCaptureSource(b.metadata.captures[i], value, pc, index, context, work) {
+			return false
 		}
 		if _, forwarded := lambdaForwardedCaptureIndex(b.metadata, i); forwarded {
 			if !b.forwardedCaptureEntryClosed(i, ref, context, work) {

@@ -316,6 +316,11 @@ func parseBytesCodeWithLambdaCaptureOrder(dumper *ClassObjectDumper, codeAttr *C
 			return core.LambdaBodySource{}, fmt.Errorf("original lambda body identity is unavailable")
 		}
 		source := core.LambdaBodySource{Code: dumped.code, Identity: receipt.identity, FixedParameterTypes: dumped.lambdaParameterBinding != nil}
+		if ports, closed := dumper.lambdaParameterLexicalFieldCaptures(dumped.lambdaParameterBinding); closed {
+			source.LexicalFieldCaptures = ports
+		} else {
+			return core.LambdaBodySource{}, fmt.Errorf("original lambda lexical field capture is unavailable")
+		}
 		recordPacket := dumped.lambdaParameterBinding != nil && dumped.lambdaParameterBinding.metadata != nil && dumped.lambdaParameterBinding.metadata.factoryCaptureCount() != 0 || dumper.nativeAnonymousLambdaCurrent != nil && dumper.nativeMemberRoot != nil && len(dumper.nativeMemberRoot.getters) != 0
 		if dumper.options.SourceCompiler == NativeJavac8 || dumper.options.SourceCompiler == ModernJavac || recordPacket {
 			template := dumped.code

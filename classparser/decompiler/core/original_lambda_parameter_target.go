@@ -63,6 +63,9 @@ func retainOriginalLambdaParameterTarget(d *Decompiler, value *values.CustomValu
 	}
 	constrained := retainErasedFunctionalValue(value, erasure, target)
 	constrained.RequireLambdaParameterNames()
+	if len(source.LexicalFieldCaptures) != 0 && (len(source.LexicalFieldCaptures) > 64 || d.chargeNodeCopies(len(source.LexicalFieldCaptures)+1) != nil || d.Work != nil && d.Work.CheckAlloc(int64(len(source.LexicalFieldCaptures))*256) != nil || !constrained.BindLambdaLexicalFieldCaptures(source.LexicalFieldCaptures)) {
+		return nil, fmt.Errorf("%w: original lexical capture port is unavailable", errFixedLambdaParameterTarget)
+	}
 	return constrained, nil
 }
 

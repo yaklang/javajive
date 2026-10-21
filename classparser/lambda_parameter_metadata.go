@@ -233,7 +233,7 @@ func (c *ClassObjectDumper) lambdaParameterMetadataInFactoryScope(method *Member
 		}
 	}
 	for i, operand := range projection.captures {
-		if operand.local != nil {
+		if operand.local != nil || lambdaParameterFieldCapture(operand) {
 			if slices.Contains(projection.parentNames, projection.names[i]) || !nativeProofWork(work, 1) {
 				return nil, false
 			}

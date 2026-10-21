@@ -31,6 +31,11 @@ type LambdaBodySource struct {
 	ReferenceQualifier  string
 	Code                string
 	FixedParameterTypes bool
+	// These are original hidden-field ports proved by the owning anonymous
+	// source renderer to denote enclosing lexical variables. Ordinary fields
+	// never receive this permission. The core still checks eager factory,
+	// operand, receiver, type and pending snapshot identities independently.
+	LexicalFieldCaptures []*values.LambdaLexicalFieldCapture
 	// RecordRendered observes this actual writer's completed packet after
 	// capture substitution and target adaptation. It grants no body/factory
 	// permission and must not render captured operands a second time.

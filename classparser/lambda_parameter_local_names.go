@@ -17,12 +17,13 @@ func (c *ClassObjectDumper) bindLambdaLocalCaptureEmission(body *dumpedMethods, 
 	if b.metadata == nil || b.metadata.factory == nil {
 		return false
 	}
-	local := false
+	local, field := false, false
 	for _, operand := range b.metadata.captures {
 		local = local || operand != nil && operand.local != nil
+		field = field || lambdaParameterFieldCapture(operand)
 	}
 	forwarded := b.hasForwardedCaptures()
-	if !local && !forwarded {
+	if !local && !field && !forwarded {
 		return true
 	}
 	factory := b.metadata.factory
@@ -67,6 +68,9 @@ func (c *ClassObjectDumper) bindLambdaLocalCaptureEmission(body *dumpedMethods, 
 			return false
 		}
 		identities[i] = ref.Id
+		if lambdaParameterFieldCapture(b.metadata.captures[i]) {
+			continue // This source port is the proved hidden field, not a local declaration.
+		}
 		source, known := lambdaCaptureSourceReference(ref, factory.pc, i+b.metadata.receiverWords, c.Work)
 		if !known {
 			return false

@@ -1114,11 +1114,15 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 			}
 			return view
 		}
-		ctx.SourceCapturedField = func(pc int, name string, receiver bool) (string, bool) {
+		captureSource := func(source *class_context.ClassContext, pc int, name string, receiver bool) (string, bool) {
 			if _, captured := c.nativeCaptureFields[name]; !captured {
 				return "", false
 			}
-			key := ctx.FunctionName + ctx.CurrentMethodDesc
+			if source == nil || strings.ReplaceAll(source.ClassName, ".", "/") != c.obj.GetClassName() {
+				c.nativeCaptureFailed = true
+				return "", false
+			}
+			key := source.FunctionName + source.CurrentMethodDesc
 			field := c.nativeCapturedReads[key][pc]
 			text, known := c.nativeCaptureFields[field]
 			if !known || field != name || !receiver {
@@ -1129,6 +1133,10 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 				text = "(/*jdec-owned-local-capture:" + c.obj.GetClassName() + ":" + field + "*/" + text + ")"
 			}
 			return text, true
+		}
+		ctx.SourceCapturedFieldAt = captureSource
+		ctx.SourceCapturedField = func(pc int, name string, receiver bool) (string, bool) {
+			return captureSource(ctx, pc, name, receiver)
 		}
 	}
 	c.wireNativeAnonymousForestCaptures(ctx)

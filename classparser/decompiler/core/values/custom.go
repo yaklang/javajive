@@ -13,6 +13,8 @@ type CustomValue struct {
 	originalReferenceCaptureRequired bool
 	originalLambdaFactory            *originalLambdaFactory
 	lambdaSourceIdentity             *LambdaSourceIdentity
+	lambdaLexicalFieldCaptures       map[int]*LambdaLexicalFieldCapture
+	lambdaLexicalFieldIdentity       *LambdaSourceIdentity
 	serializableReferenceSource      *serializableReferenceSource
 	sourceMethodReference            *uncapturedMethodReferenceSource
 	sourcePrimitive                  *sourcePrimitiveConversion
