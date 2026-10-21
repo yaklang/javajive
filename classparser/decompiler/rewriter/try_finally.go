@@ -13,8 +13,8 @@ import (
 // variable rebinding, declaration placement and all existing child visitors.
 type FinallyRegion struct {
 	// SourcePrologue belongs only to RecoverCatchAllFinallyForSource. It
-	// initializes the private pending-Throwable state of a proved resource
-	// protocol after enclosing finally views have exposed its normal exits.
+	// initializes private pending-Throwable state or declares an existing
+	// local whose normal continuation has left the protected lexical scope.
 	SourcePrologue []statements.Statement
 	// SourceEpilogue is the original normal continuation exposed only after
 	// an enclosing finally view removed its own duplicated cleanup. It is

@@ -4841,12 +4841,16 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 					var resourcePrologue string
 					if haveFinally {
 						for _, declaration := range finally.SourcePrologue {
-							// The complete resource proof creates this new pending
-							// Throwable identity. Allocate its spelling only in the
-							// final enclosing source namespace, after all IR naming.
+							// Bind a source-only declaration in the final enclosing
+							// namespace. A bare local keeps its existing identity;
+							// initialized resource state owns a new Throwable identity.
 							store := declaration.(*statements.AssignStatement)
 							ref := store.LeftValue.(*values.JavaRef)
-							name := c.freshSourceLocalName("jdec$primary$")
+							prefix := "jdec$primary$"
+							if store.IsDeclare {
+								prefix = "jdec$local$"
+							}
+							name := c.freshSourceLocalName(prefix)
 							if funcCtx.LocalNames == nil {
 								funcCtx.LocalNames = map[*utils2.VariableId]string{}
 							}

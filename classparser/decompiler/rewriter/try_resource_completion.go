@@ -29,6 +29,17 @@ func RecoverCatchAllFinallyForSource(tr *statements.TryCatchStatement) (*Finally
 	if !known || region.Continuation != nil {
 		return nil, false
 	}
+	if !finallyContinuationKeepsLexicalBindings([]statements.Statement{&clone}, tail) {
+		prefix, declarations, complete := finallyContinuationDeclarationScope(&clone, tail, region.CatchBodies)
+		if !complete {
+			return nil, false
+		}
+		region, known = recoverFinallyDirectSource(prefix)
+		if !known || region.Continuation != nil {
+			return nil, false
+		}
+		region.SourcePrologue = append(declarations, region.SourcePrologue...)
+	}
 	region.SourceEpilogue = tail
 	return region, true
 }
