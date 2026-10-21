@@ -18,7 +18,7 @@ func (c *ClassObjectDumper) nativeLambdaDirectBlockScopes(source string, charge 
 	if c == nil || charge == nil || !charge(int64(len(source))+1) {
 		return nil, false
 	}
-	arrows, known := nativeLambdaSourceArrows(source, c.Work)
+	arrows, known := c.lambdaOwnImplementationTokens(source, false)
 	if !known {
 		return nil, false
 	}
@@ -121,7 +121,7 @@ func (c *ClassObjectDumper) nestedLambdaSourceFactoryEvents(source string, arrow
 				return false
 			}
 			if scope.reference {
-				local, known := nativeLambdaSourceImplementationTokens(occurrence.packet, c.Work, true)
+				local, known := c.lambdaOwnImplementationTokens(occurrence.packet, true)
 				if !known || len(local) != 1 || occurrence.packet[local[0]:local[0]+2] != "::" || child.compilerReference == nil || !c.compilerReferenceFinalCaptureClosed(child, parent) {
 					return false
 				}

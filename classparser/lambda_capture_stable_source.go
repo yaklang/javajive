@@ -23,7 +23,7 @@ func (c *ClassObjectDumper) completedLambdaStableSourceBindings(source string, m
 	if !candidate || !nativeProofWork(c.Work, int64(len(source))+1) {
 		return nil
 	}
-	arrows, known := nativeLambdaSourceArrows(source, c.Work)
+	arrows, known := c.lambdaOwnImplementationTokens(source, false)
 	if !known || len(arrows) > 4096 || c.Work != nil && c.Work.CheckAlloc(int64(len(arrows))*128+256) != nil {
 		return nil
 	}

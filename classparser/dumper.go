@@ -39,6 +39,7 @@ type ClassObjectDumper struct {
 	compilerReferenceFactorySeen          bool
 	methodSourceRequestSerial             uint64
 	lambdaMethodSourceBodies              map[*MemberInfo]*lambdaMethodSourceReceipt
+	lambdaAnonymousScopes                 map[*nativeAnonymousClass]*lambdaAnonymousSourceScope
 	sourceDeclarationAccess               uint16
 	sourceDeclarationAccessKnown          bool
 	nativeSourceAssertions                *nativeMemberAssertion

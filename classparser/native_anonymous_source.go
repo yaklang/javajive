@@ -1403,6 +1403,9 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 		if !c.recordArtifactConstructorPublication(p, child, sub, src) {
 			return fail()
 		}
+		if !c.recordLambdaAnonymousScope(p, child, "new "+parent) {
+			return fail()
+		}
 		return fmt.Sprintf("%snew %s(%s) /*jdec-owned-anonymous-ordinal:%d:%s*/ {%s}", registration, parent, strings.Join(tuple, ","), child.ordinal, p.owner, body), true
 	}
 }

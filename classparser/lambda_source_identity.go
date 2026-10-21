@@ -134,7 +134,7 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 		}
 	}
 	text := string(own)
-	arrows, known := nativeLambdaSourceImplementationTokens(text, c.Work, hasReference)
+	arrows, known := c.lambdaOwnImplementationTokens(text, hasReference)
 	if !known || len(arrows) == 0 {
 		return nil, false
 	}

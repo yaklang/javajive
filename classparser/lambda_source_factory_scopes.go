@@ -18,7 +18,7 @@ func (c *ClassObjectDumper) nativeLambdaDirectFactoryScopes(source string, refer
 	}
 	var tokens []int
 	if references {
-		tokens, known = nativeLambdaSourceImplementationTokens(source, c.Work, true)
+		tokens, known = c.lambdaOwnImplementationTokens(source, true)
 		if !known {
 			return nil, false
 		}

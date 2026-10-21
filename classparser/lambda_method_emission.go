@@ -197,7 +197,7 @@ func (c *ClassObjectDumper) lambdaEmissionPosition(parent, child *dumpedMethods,
 	for _, event := range frame.children {
 		hasReference = hasReference || event.body != nil && event.body.compilerReference != nil
 	}
-	arrows, known := nativeLambdaSourceImplementationTokens(declaration, c.Work, hasReference)
+	arrows, known := c.lambdaOwnImplementationTokens(declaration, hasReference)
 	if !known || len(arrows) != len(frame.children) {
 		return 0, false
 	}
@@ -210,7 +210,7 @@ func (c *ClassObjectDumper) lambdaEmissionPosition(parent, child *dumpedMethods,
 		if r == nil || r.body != event.body || r.request != event.request || r.request != event.body.sourceRequest || r.request.factory == nil || r.request.factory.method != parent.member || !r.request.factory.closed() || c.dumpedMethodsSet[r.key] != event.body || !charge(int64(len(event.packet))) {
 			return 0, false
 		}
-		local, closed := nativeLambdaSourceImplementationTokens(event.packet, c.Work, hasReference)
+		local, closed := c.lambdaOwnImplementationTokens(event.packet, hasReference)
 		if !closed || len(local) != 1 || (event.packet[local[0]:local[0]+2] == "::") != (event.body.compilerReference != nil) {
 			return 0, false
 		}
