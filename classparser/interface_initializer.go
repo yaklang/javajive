@@ -20,9 +20,10 @@ type interfaceFieldWrite struct {
 	field            *values.JavaClassMember
 }
 type interfaceInitializerSegment struct {
-	write  interfaceFieldWrite
-	prefix []statements.Statement
-	value  values.JavaValue
+	write     interfaceFieldWrite
+	prefix    []statements.Statement
+	value     values.JavaValue
+	reference *interfaceInitializerMethodReference
 }
 
 func normalizedInitializerOwner(s string) string { return strings.ReplaceAll(s, ".", "/") }
@@ -129,7 +130,7 @@ func planInterfaceInitializers(body []statements.Statement, owner string, writes
 		if err := closedInterfacePrefix(prefix, assign.JavaValue, owner); err != nil {
 			return nil, err
 		}
-		plans = append(plans, interfaceInitializerSegment{w, append([]statements.Statement{}, prefix...), assign.JavaValue})
+		plans = append(plans, interfaceInitializerSegment{write: w, prefix: append([]statements.Statement{}, prefix...), value: assign.JavaValue})
 		prefix = nil
 	}
 	if len(prefix) != 0 || len(plans) != len(writes) {
@@ -376,8 +377,8 @@ func (c *ClassObjectDumper) renderInterfaceInitializers(body []statements.Statem
 		return nil, err
 	}
 	if directExpressions {
-		for i, plan := range plans {
-			if value, proved := c.interfaceInitializerLambdaExpression(plan, code); proved {
+		for i := range plans {
+			if value, proved := c.interfaceInitializerLambdaExpression(&plans[i], code); proved {
 				plans[i].prefix, plans[i].value = nil, value
 			}
 		}
@@ -437,6 +438,12 @@ func (c *ClassObjectDumper) renderInterfaceInitializers(body []statements.Statem
 			return nil, fmt.Errorf("interface initializer source receipt exceeds budget")
 		}
 		c.interfaceLambdaInitializer = newInterfaceLambdaInitializerReceipt(frame.body, code, order, initializers)
+		for _, plan := range plans {
+			if plan.reference != nil {
+				c.interfaceLambdaInitializer.references = append(c.interfaceLambdaInitializer.references, plan.reference)
+			}
+		}
+		c.interfaceLambdaInitializer.referenceSeal = slices.Clone(c.interfaceLambdaInitializer.references)
 	}
 	return helpers, nil
 }

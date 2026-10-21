@@ -13,6 +13,7 @@ type CustomValue struct {
 	originalReferenceCaptureRequired bool
 	originalLambdaFactory            *originalLambdaFactory
 	serializableReferenceSource      *serializableReferenceSource
+	sourceMethodReference            *uncapturedMethodReferenceSource
 	sourcePrimitive                  *sourcePrimitiveConversion
 	sourceCaught                     bool
 	sourceCaughtPC                   int
@@ -111,7 +112,11 @@ func (v *CustomValue) String(funcCtx *class_context.ClassContext) string {
 		role := v.sourcePrimitive
 		return finishExpressionRender(funcCtx, guard, RenderPrimitiveConversion(role.operand, types.NewJavaPrimer(role.target), funcCtx))
 	}
-	if v.StringFunc == nil && v.WriteFunc == nil {
+	write := v.WriteFunc
+	if v.sourceMethodReference != nil {
+		write = v.sourceMethodReference.write
+	}
+	if v.StringFunc == nil && write == nil {
 		return ""
 	}
 	if guard {
@@ -119,17 +124,17 @@ func (v *CustomValue) String(funcCtx *class_context.ClassContext) string {
 			return ""
 		}
 	}
-	if guard && funcCtx.Work.HasOutputLimit() && v.WriteFunc == nil {
+	if guard && funcCtx.Work.HasOutputLimit() && write == nil {
 		funcCtx.Work.RejectUnboundedRender()
 		return ""
 	}
-	if v.WriteFunc != nil {
+	if write != nil {
 		out := workbudget.NewWriter(nil)
 		if guard {
 			out = workbudget.NewWriter(funcCtx.Work)
 			out.SetBase(funcCtx.OutputHeld)
 		}
-		if err := v.WriteFunc(funcCtx, out); err != nil {
+		if err := write(funcCtx, out); err != nil {
 			if funcCtx != nil && funcCtx.Work != nil && funcCtx.Work.Err() == nil {
 				funcCtx.Work.FailRender(err)
 			}

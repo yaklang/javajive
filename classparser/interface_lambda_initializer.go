@@ -18,8 +18,8 @@ import (
 // the field store or one argument of its immediately consumed static call.
 // No JVM local store, branch, handler, shared value or opaque source operand
 // borrows this proof. The source call and earlier argument order stay fixed.
-func (c *ClassObjectDumper) interfaceInitializerLambdaExpression(plan interfaceInitializerSegment, code *CodeAttribute) (values.JavaValue, bool) {
-	if c == nil || c.obj == nil || c.CurrentMethod == nil || code == nil || len(plan.prefix) != 1 || len(code.ExceptionTable) != 0 {
+func (c *ClassObjectDumper) interfaceInitializerLambdaExpression(plan *interfaceInitializerSegment, code *CodeAttribute) (values.JavaValue, bool) {
+	if c == nil || c.obj == nil || c.CurrentMethod == nil || code == nil || plan == nil || len(plan.prefix) != 1 || len(code.ExceptionTable) != 0 {
 		return nil, false
 	}
 	assignment, ok := plan.prefix[0].(*statements.AssignStatement)
@@ -53,7 +53,11 @@ func (c *ClassObjectDumper) interfaceInitializerLambdaExpression(plan interfaceI
 		}
 		closedFactory = true
 	}
+	var reference *interfaceInitializerMethodReference
 	if !closedFactory {
+		reference = c.interfaceInitializerOriginalMethodReference(factory, code, pc)
+	}
+	if !closedFactory && reference == nil {
 		return nil, false
 	}
 	consumerPC := plan.write.pc
@@ -159,23 +163,29 @@ func (c *ClassObjectDumper) interfaceInitializerLambdaExpression(plan interfaceI
 			return nil, false
 		}
 	}
-	return replacement, uses == 1 && (call == nil || resultUses == 1) && foundFactory && foundConsumer && foundStore
+	closed := uses == 1 && (call == nil || resultUses == 1) && foundFactory && foundConsumer && foundStore
+	if closed {
+		plan.reference = reference
+	}
+	return replacement, closed
 }
 
 // An interface's actual field writers retain its original clinit occurrence
 // owner. This receipt does not invent a source static block or move a factory
 // into a helper (which would change its generated implementation identity).
 type interfaceLambdaInitializerReceipt struct {
-	parent      *dumpedMethods
-	code        *CodeAttribute
-	codeBytes   []byte
-	maxStack    uint16
-	maxLocals   uint16
-	names       []string
-	namesSeal   []string
-	expressions map[string]string
-	fields      []string
-	fieldSeal   []string
+	parent        *dumpedMethods
+	code          *CodeAttribute
+	codeBytes     []byte
+	maxStack      uint16
+	maxLocals     uint16
+	names         []string
+	namesSeal     []string
+	expressions   map[string]string
+	fields        []string
+	fieldSeal     []string
+	references    []*interfaceInitializerMethodReference
+	referenceSeal []*interfaceInitializerMethodReference
 }
 
 func newInterfaceLambdaInitializerReceipt(parent *dumpedMethods, code *CodeAttribute, names []string, expressions map[string]string) *interfaceLambdaInitializerReceipt {
@@ -207,6 +217,14 @@ func (c *ClassObjectDumper) interfaceLambdaInitializerClosed(parent *dumpedMetho
 	}
 	if owned != 1 || len(parent.member.Attributes) != 1 || parent.member.Attributes[0] != p.code {
 		return false
+	}
+	if len(p.references) > len(p.names) || !slices.Equal(p.references, p.referenceSeal) {
+		return false
+	}
+	for _, reference := range p.references {
+		if reference == nil || reference.factory == nil || reference.factory.method != parent.member || reference.factory.code != p.code || !reference.closed(c) {
+			return false
+		}
 	}
 	for _, name := range p.names {
 		if p.expressions[name] == "" || c.fieldDefaultValue[name] != p.expressions[name] {

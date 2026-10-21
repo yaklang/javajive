@@ -270,6 +270,9 @@ func retainErasedFunctionalValue(v *values.CustomValue, raw, target types.JavaTy
 	if v == nil || target == nil {
 		return v
 	}
+	if retained, known := v.RetainMethodReferenceTarget(raw, target, markers...); known {
+		return retained
+	}
 	copy := *v
 	copy.TypeFunc = func() types.JavaType { return raw }
 	if write := v.WriteFunc; write != nil {

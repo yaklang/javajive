@@ -59,6 +59,9 @@ func methodRefCheckedPolyTarget(d *Decompiler, req CallSiteRequest, static []val
 	}, func() types.JavaType { return erasedView })
 	value.Flag, value.NoOuterCapture, value.CapturesKnown, value.IsMethodRef = "lambda", true, true, true
 	value.InstantiatedMtdDesc = actual
+	if source := values.NewUncapturedMethodReferenceSource(values.MethodReferenceSource{Kind: impl.RefKind, Owner: impl.Name, Member: impl.Member, Descriptor: impl.Description, CallName: req.CallSiteName, CallDescriptor: req.CallSiteDescriptor, ErasedSAM: erased, Instantiated: actual}, erasedView); source != nil {
+		value = source
+	}
 	// Freeze only the creation target. Later invariant consumers may see its
 	// original erasure, but cannot widen the generated SAM's input check.
 	return retainErasedFunctionalValue(value, erasedView, target, markers...)

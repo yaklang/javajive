@@ -17,6 +17,13 @@ func NewSerializableReferenceSource(value *CustomValue, token any) *CustomValue 
 		return nil
 	}
 	copy := *value
+	// Serializable factories use their own completed-source sink. Preserve
+	// the canonical body, then let that separately certified sink observe its
+	// actual writer; it cannot also impersonate an ordinary-field receipt.
+	if copy.sourceMethodReference != nil {
+		copy.WriteFunc = copy.sourceMethodReference.write
+		copy.sourceMethodReference = nil
+	}
 	copy.serializableReferenceSource = &serializableReferenceSource{token: token, pc: pc}
 	return &copy
 }

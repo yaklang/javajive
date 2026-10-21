@@ -408,6 +408,11 @@ func t19MethodRef(req CallSiteRequest, d *Decompiler, static []values.JavaValue,
 			refVal.InstantiatedMtdDesc = desc
 		}
 	}
+	if len(capturedArgs) == 0 && len(static) == 3 {
+		if source := values.NewUncapturedMethodReferenceSource(values.MethodReferenceSource{Kind: kind, Owner: owner, Member: member, Descriptor: impl.Description, CallName: req.CallSiteName, CallDescriptor: req.CallSiteDescriptor, ErasedSAM: t19MethodTypeDesc(static[0]), Instantiated: t19MethodTypeDesc(static[2])}, refType); source != nil {
+			refVal = source
+		}
+	}
 	return retainErasedFunctionalValue(refVal, resultType, declaredTarget)
 }
 
