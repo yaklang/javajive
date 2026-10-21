@@ -491,9 +491,21 @@ func TestNativeAccessorAncestorFlagsNeedOnlyActualSymbolDependencies(t *testing.
 	if prepared == nil || len(prepared.family.getters) == 0 {
 		t.Fatal("original private getter plan")
 	}
+	// The original type cycle remains real even when its terminal physical
+	// declaration no longer needs a source-completion transaction. Keep both
+	// facts: this accessor proof follows actual ancestor symbols, not either
+	// graph's unrelated type-reference edges.
+	original, known := z.nativeMemberOriginalDependencyGraph("FlagViewRoot", prepared.reader.Work)
+	if !known || !original["FlagViewRoot"]["OtherFlagScope"] || !original["OtherFlagScope"]["FlagViewRoot"] {
+		t.Fatal("original type-reference cycle was lost")
+	}
+	components, known := nativeMemberSourceComponents(original, prepared.reader.Work)
+	if !known || len(components["FlagViewRoot"]) != 2 {
+		t.Fatal("real original type component", components["FlagViewRoot"], known)
+	}
 	participants, cyclic, known := z.nativeMemberDependencyAdmission("FlagViewRoot", prepared.reader.Work, prepared.snapshot)
-	if !known || !cyclic || len(participants) != 2 {
-		t.Fatal("real original source cycle", participants, cyclic, known)
+	if !known || cyclic || len(participants) != 1 || participants[0] != "FlagViewRoot" {
+		t.Fatal("terminal type name still blocked source completion", participants, cyclic, known)
 	}
 	outer, err := Parse(files["OtherFlagScope.class"])
 	if err != nil || z.prepareNativeMemberFamilyUnpublished(outer, prepared.snapshot) != nil {
