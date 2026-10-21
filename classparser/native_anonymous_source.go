@@ -1397,6 +1397,9 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 		// declaration. Its ordinal event therefore follows the argument subtree
 		// and precedes the body. A prefix before NEW reverses nested argument
 		// registrations even when all runtime evaluations are unchanged.
+		if !c.recordArtifactConstructorPublication(p, child, sub, src) {
+			return fail()
+		}
 		return fmt.Sprintf("%snew %s(%s) /*jdec-owned-anonymous-ordinal:%d:%s*/ {%s}", registration, parent, strings.Join(tuple, ","), child.ordinal, p.owner, body), true
 	}
 }

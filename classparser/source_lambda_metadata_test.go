@@ -289,6 +289,13 @@ func TestNativeSourceLambdaMetadataDoesNotGrantUnrelatedConstructorEdits(t *test
 	if source, err := artifact.ReadFile("ArtifactLambdaOwner.class"); err != nil || strings.Contains(string(source), "decompile dump failed") {
 		t.Fatal("parent's distinct lambda obligation unavailable", err)
 	}
+	// The full artifact now has a separate typed anonymous-constructor
+	// obligation. Remove that independent capability for this negative control:
+	// the parent's lambda plan alone must still reject the constructor drift.
+	if artifact.jar.sourceLambdaMetadata.constructorPlan("ArtifactLambdaOwner$1") == nil || artifact.jar.sourceLambdaMetadata.plan("ArtifactLambdaOwner") == nil {
+		t.Fatal("independent constructor and lambda plans required for this control")
+	}
+	artifact.jar.sourceLambdaMetadata.constructors = nil
 	if got, err := artifact.RestoreClassMetadata(child, original[child]); err != nil || !bytes.Equal(got, original[child]) {
 		t.Fatal("an unchanged constructor table was rejected", err)
 	}

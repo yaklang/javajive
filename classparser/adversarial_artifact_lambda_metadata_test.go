@@ -53,11 +53,10 @@ func TestAdversarialArtifactLambdaMetadataRetainsCompiledCodeAndOriginalABI(t *t
 	testArtifactLambdaMetadata(t, artifactLambdaBaseFixture(), []bool{false, true}, "7:artifact:helpermetadata:timing:overflow\n")
 }
 
-// With -parameters both compilers regenerate the independent anonymous
-// constructor's table. Its absence is a separate compiler metadata contract;
-// it must not be hidden by comparing only the lambda helpers.
+// Constructor metadata has its own typed allocation obligation. Compare and
+// execute every restored child, in both named and unnamed compiler modes.
 func TestAdversarialArtifactLambdaMetadataKeepsIndependentAnonymousABI(t *testing.T) {
-	testArtifactLambdaMetadata(t, artifactLambdaWithAnonymousMetadataFixture, []bool{true}, "7:artifact:helpermetadata:timing:overflow\n")
+	testArtifactLambdaMetadata(t, artifactLambdaWithAnonymousMetadataFixture, []bool{false, true}, "7:artifact:helpermetadata:timing:overflow\n")
 }
 
 func testArtifactLambdaMetadata(t *testing.T, sourceFixture string, namedModes []bool, want string) {
@@ -166,6 +165,9 @@ func testArtifactLambdaMetadata(t *testing.T, sourceFixture string, namedModes [
 							}
 							nativeLexicalExactSignatures(t, name, raw, child)
 							artifactLambdaMetadataCodeUnchanged(t, fresh, child)
+							if err := os.WriteFile(filepath.Join(out, name), child, 0600); err != nil {
+								t.Fatal("publish restored owned child before JVM validation", err)
+							}
 						}
 						if got := t04RunJava(t, java, out, "ArtifactLambdaDriver"); got != want {
 							t.Fatal("algorithm or evaluation timing changed", got)

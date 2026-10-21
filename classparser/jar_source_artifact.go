@@ -20,6 +20,9 @@ import (
 // nonserializable private lambda helper names/parameter tables without dropping
 // their reflective metadata or importing original executable code. Lambda
 // obligations require a completed ReadFile source/factory proof in this view.
+// An independently proved, fully rendered all-hidden anonymous constructor can
+// also restore original MethodParameters/empty-Signature absence. This grants
+// no ordinary-constructor, explicit-SUPER-argument or executable-code edit.
 // It does not
 // certify compilation, JVM verification, other ABI metadata or algorithmic
 // equivalence; those still require independent validation.
@@ -67,7 +70,7 @@ func (a *JarSourceArtifact) Close() error { return a.jar.Close() }
 
 // RestoreClassMetadata binds restoration to this archive's original bytes and
 // the exact physical source namespace. Declaration-resolver classes cannot
-// authorize edits. Only the proved field/lambda metadata is restored; executable
+// authorize edits. Only proved field/lambda/implicit-constructor metadata is restored; executable
 // Code and all other compiled attribute payloads remain unchanged.
 func (a *JarSourceArtifact) RestoreClassMetadata(name string, compiled []byte) ([]byte, error) {
 	if a == nil || a.jar == nil {
@@ -93,6 +96,12 @@ func (a *JarSourceArtifact) RestoreClassMetadata(name string, compiled []byte) (
 		return nil, fmt.Errorf("field metadata: archive path and class identity disagree")
 	}
 	if authority := z.sourceLambdaMetadata; authority != nil {
+		if plan := authority.constructorPlan(object.GetClassName()); plan != nil {
+			compiled, err = restoreImplicitConstructorParameterMetadata(original, compiled, plan, reader.Work)
+			if err != nil {
+				return nil, err
+			}
+		}
 		if plan := authority.plan(object.GetClassName()); plan != nil {
 			compiled, err = restoreLambdaMethodMetadata(original, compiled, plan, reader.Work)
 			if err != nil {

@@ -67,6 +67,7 @@ type ClassObjectDumper struct {
 	nativeAnonymousBindings               map[string]string
 	nativeAnonymousRoot                   *nativeAnonymousFamily
 	sourceLambdaMembers                   []sourceLambdaMemberPublication
+	sourceConstructorMembers              []sourceConstructorMemberPublication
 	nativeCaptureFields                   map[string]string
 	nativeCapturedReads                   map[string]map[int]string
 	nativeTypeParams                      []string
