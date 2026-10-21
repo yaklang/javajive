@@ -41,7 +41,7 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 	// A failed/mutated receipt must not erase the requirement it carried.
 	// This latch records only an attempted original initializer factory; every
 	// positive body, ordinal and source-occurrence proof is still reopened.
-	required := c.compilerReferenceFactorySeen || c.lambdaInitializerFactorySeen && (c.options.SourceCompiler == NativeJavac8 || c.options.SourceCompiler == ModernJavac)
+	required := c.compilerReferenceFactorySeen || c.lambdaInitializerFactorySeen
 	hasReference := c.compilerReferenceFactorySeen
 	for _, receipt := range c.lambdaMethodSourceBodies {
 		if receipt != nil && receipt.body != nil && receipt.body.compilerReference != nil {
@@ -65,7 +65,16 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 	// A zero language level means class-major inference throughout the source
 	// pipeline. Reopen that same policy here; zero is not a compiler capability
 	// refusal, and it must not silently disable an original identity obligation.
-	if c.obj == nil || len(c.obj.Methods) > 4096 || c.options.TargetSourceVersion < 0 || core.EffectiveTargetSource(c.options.TargetSourceVersion, c.obj.MajorVersion) != 8 || len(source) > 16<<20 || len(members) > 4096 || len(methods) > 4096 || len(c.lambdaMethodSourceBodies) > 4096 || !nativeProofWork(c.Work, int64(len(source))+int64(len(members))+1) || c.Work != nil && c.Work.CheckAlloc(int64(len(source))*2+4096*128) != nil {
+	if c.obj == nil || c.options.TargetSourceVersion < 0 {
+		return nil, false
+	}
+	// LambdaToMethod's per-class counter and enclosing-method naming are
+	// compiler rules, not --release 8 rules. The modern backend uses the same
+	// registration at the supported language levels; the native backend can
+	// only compile source 8. Keep future/unknown compilers outside this proof.
+	level := core.EffectiveTargetSource(c.options.TargetSourceVersion, c.obj.MajorVersion)
+	compilerKnown := c.options.SourceCompiler == NativeJavac8 && level == 8 || c.options.SourceCompiler == ModernJavac && level >= 8 && level <= 21
+	if !compilerKnown || len(c.obj.Methods) > 4096 || len(source) > 16<<20 || len(members) > 4096 || len(methods) > 4096 || len(c.lambdaMethodSourceBodies) > 4096 || !nativeProofWork(c.Work, int64(len(source))+int64(len(members))+1) || c.Work != nil && c.Work.CheckAlloc(int64(len(source))*2+4096*128) != nil {
 		return nil, false
 	}
 	for _, method := range c.obj.Methods {

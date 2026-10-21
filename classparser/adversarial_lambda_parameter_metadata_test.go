@@ -294,13 +294,21 @@ func compileLambdaParameterMetadataFixture(t *testing.T, compiler string, profil
 
 func compileLambdaParameterMetadataFixtureWithSources(t *testing.T, compiler string, profile SourceCompilerProfile, source, owner, debug string, sources map[string]string, named ...bool) map[string][]byte {
 	t.Helper()
+	return compileLambdaParameterMetadataFixtureWithSourcesAtRelease(t, compiler, profile, source, owner, debug, sources, 8, named...)
+}
+
+func compileLambdaParameterMetadataFixtureWithSourcesAtRelease(t *testing.T, compiler string, profile SourceCompilerProfile, source, owner, debug string, sources map[string]string, release int, named ...bool) map[string][]byte {
+	t.Helper()
 	dir := t.TempDir()
 	file := filepath.Join(dir, owner+".java")
 	if err := os.WriteFile(file, []byte(source), 0600); err != nil {
 		t.Fatal(err)
 	}
-	args := []string{"-proc:none", "-parameters", "--release", "8"}
+	args := []string{"-proc:none", "-parameters", "--release", fmt.Sprint(release)}
 	if profile == NativeJavac8 {
+		if release != 8 {
+			t.Fatal("native javac8 fixture requires source 8")
+		}
 		args = []string{"-proc:none", "-parameters", "-source", "8", "-target", "8"}
 	}
 	if len(named) == 1 && !named[0] {

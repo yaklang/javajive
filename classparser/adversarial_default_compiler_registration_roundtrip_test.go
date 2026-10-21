@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -69,10 +70,15 @@ func assertDefaultCompilerRegistrationOracle(t *testing.T, fixture, oraclePrefix
 
 func assertDefaultCompilerRegistrationOracleConfigured(t *testing.T, fixture, oraclePrefix string, parameters bool) {
 	t.Helper()
+	assertDefaultCompilerRegistrationOracleAtReleases(t, fixture, oraclePrefix, parameters, 8, 8)
+}
+
+func assertDefaultCompilerRegistrationOracleAtReleases(t *testing.T, fixture, oraclePrefix string, parameters bool, originalRelease, sourceRelease int) {
+	t.Helper()
 	compiler, java := t04Tools(t)
 	for _, debug := range []string{"none", "source,lines,vars"} {
 		t.Run(debug, func(t *testing.T) {
-			files := compileLambdaParameterMetadataFixture(t, compiler, ModernJavac, fixture, "DefaultCompilerCases", debug, parameters)
+			files := compileLambdaParameterMetadataFixtureWithSourcesAtRelease(t, compiler, ModernJavac, fixture, "DefaultCompilerCases", debug, nil, originalRelease, parameters)
 			original := t.TempDir()
 			for name, raw := range files {
 				if err := os.WriteFile(filepath.Join(original, name), raw, 0600); err != nil {
@@ -90,7 +96,7 @@ func assertDefaultCompilerRegistrationOracleConfigured(t *testing.T, fixture, or
 				}
 				for _, mode := range []DecompileMode{Precision, Compatibility} {
 					t.Run(name+"/"+string(mode), func(t *testing.T) {
-						result, err := DecompileWithOptions(files["DefaultCompilerCases.class"], DecompileOptions{Mode: mode, TargetSourceVersion: 8, SourceCompiler: profile, EnvSnapshot: map[string]string{}, Resolve: func(name string) ([]byte, bool) { raw, found := files[name+".class"]; return raw, found }})
+						result, err := DecompileWithOptions(files["DefaultCompilerCases.class"], DecompileOptions{Mode: mode, TargetSourceVersion: sourceRelease, SourceCompiler: profile, EnvSnapshot: map[string]string{}, Resolve: func(name string) ([]byte, bool) { raw, found := files[name+".class"]; return raw, found }})
 						if err != nil || result.Status != "complete" || len(result.StubMethods) != 0 {
 							t.Fatalf("original source scope did not close: %s %v %v", result.Status, err, result.Diagnostics)
 						}
@@ -102,7 +108,11 @@ func assertDefaultCompilerRegistrationOracleConfigured(t *testing.T, fixture, or
 						if err := os.WriteFile(path, []byte(result.Source), 0600); err != nil {
 							t.Fatal(err)
 						}
-						args := []string{"-proc:none", "--release", "8", "-g:" + debug, "-cp", original, "-d", out, path}
+						compileRelease := sourceRelease
+						if compileRelease == 0 {
+							compileRelease = originalRelease
+						}
+						args := []string{"-proc:none", "--release", strconv.Itoa(compileRelease), "-g:" + debug, "-cp", original, "-d", out, path}
 						if parameters {
 							args = append(args, "-parameters")
 						}
