@@ -7436,6 +7436,14 @@ func (d *Decompiler) ParseStatement() error {
 						beforeNode.AddNext(node)
 					}
 				}
+				// canInlineValue above owns evaluation/exception safety. Preserve
+				// the consumer's separate original STORE receipt when its entire
+				// RHS is this exact temporary, before replacing that operand.
+				if target, ok := node.Statement.(*statements.AssignStatement); ok {
+					if definition, ok := assignNode.Statement.(*statements.AssignStatement); ok {
+						target.ProjectOriginalLocalStoreInline(definition, ref, val)
+					}
+				}
 				ref.Id.Delete()
 				pair.Replace(val)
 				node.SourceConditionNode = assignNode.SourceConditionNode

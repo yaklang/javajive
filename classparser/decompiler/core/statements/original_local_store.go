@@ -65,3 +65,28 @@ func (a *AssignStatement) OriginalLocalStore() (pc, slot int, known bool) {
 	}
 	return w.pc, w.slot, true
 }
+
+// ProjectOriginalLocalStoreInline transports an existing STORE receipt through
+// the decoder's completed single-use substitution. The caller must first prove
+// that inlining this definition preserves evaluation and handler boundaries.
+// This operation grants no motion permission and does not change either AST.
+// Keep a fresh receipt so a source clone cannot alter another view's evidence.
+func (a *AssignStatement) ProjectOriginalLocalStoreInline(definition *AssignStatement, ref *values.JavaRef, value values.JavaValue) bool {
+	if _, _, known := a.OriginalLocalStore(); !known || definition == nil || ref == nil || ref.Id == nil {
+		return false
+	}
+	if ref.IsParam || ref.IsThis || ref.StackVar != nil || ref.CustomValue != nil || definition.ArrayMember != nil || !definition.IsFirst || definition.IsDeclare {
+		return false
+	}
+	if !definition.HasOriginPC || definition.OriginPC < 0 || definition.OriginPC >= a.OriginPC || definition.LeftValue != ref || originalStoreSeed(a.JavaValue) != ref {
+		return false
+	}
+	seed := originalStoreSeed(value)
+	if seed == nil || seed == ref || originalStoreSeed(definition.JavaValue) != seed || originalStoreSeed(ref.Val) != seed {
+		return false
+	}
+	copy := *a.originalLocalStore
+	copy.seed = seed
+	a.originalLocalStore = &copy
+	return true
+}
