@@ -49,6 +49,18 @@ func (c *ClassObjectDumper) snapshotRetryState() func() {
 			if body := saved.dumpedMethodsSet[copy.key]; body != nil {
 				copy.body = body
 			}
+			copy.shared = slices.Clone(receipt.shared)
+			for i, occurrence := range copy.shared {
+				if occurrence == nil {
+					continue
+				}
+				entry := *occurrence
+				entry.shared = nil
+				if body := saved.dumpedMethodsSet[entry.key]; body != nil {
+					entry.body = body
+				}
+				copy.shared[i] = &entry
+			}
 			saved.lambdaMethodSourceBodies[member] = &copy
 		}
 	}

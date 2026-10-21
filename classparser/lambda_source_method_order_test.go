@@ -90,7 +90,10 @@ func TestAdversarialLexicalLambdaMethodOrderRequiresCompletedOriginalPackets(t *
 			}
 			before := d.obj.Bytes()
 			proposal, known := d.proposeLexicalLambdaMethodOrder(source, members, methods)
-			if known != (variant == "original") {
+			// Member insertion is a later publication obligation. A complete
+			// family can propose ordinary declaration order before any member
+			// packets are inserted; absence of that slice grants no family proof.
+			if known != (variant == "original" || variant == "no members") {
 				t.Fatalf("original declaration proposal=%v", known)
 			}
 			if !bytes.Equal(before, d.obj.Bytes()) || !slices.Equal(methods, originalOrder) && variant != "duplicate parent" && variant != "missing parent" {
@@ -121,6 +124,51 @@ func TestAdversarialLexicalLambdaMethodOrderRequiresCompletedOriginalPackets(t *
 				t.Fatal("proposal changed fixed order or original factory order")
 			}
 		})
+	}
+}
+
+func TestAdversarialLambdaOrderDiscoveryDoesNotReproveAlreadyOrderedBodies(t *testing.T) {
+	compiler := os.Getenv("JAVA8_JAVAC")
+	if compiler == "" {
+		t.Skip("JAVA8_JAVAC required for the original compiler counter")
+	}
+	files := compileLambdaParameterMetadataFixture(t, compiler, NativeJavac8, lexicalInitializerLambdaFixture, "InitPacketDriver", "none", true)
+	d, methods := lexicalOrderTestPackets(t, files)
+	assemble := func(bodies []*dumpedMethods) string {
+		var packets []string
+		for _, body := range bodies {
+			packets = append(packets, body.code)
+		}
+		return "class InitPacketContract{\n" + strings.Join(packets, "\n") + "\n}"
+	}
+	ordered, known := d.proposeLexicalLambdaMethodOrder(assemble(methods), nil, methods)
+	if !known {
+		t.Fatal("original independently completed declaration packets cannot be scheduled")
+	}
+	source := assemble(ordered)
+	d.Work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1024})
+	if _, proposed := d.proposeLexicalLambdaMethodOrder(source, nil, ordered); proposed || d.Work.Err() != nil {
+		t.Fatal("optional unchanged-order discovery consumed the full source proof budget", proposed, d.Work.Err())
+	}
+	// Discovery is not publication: the unchanged-order inventory cannot
+	// authorize a packet whose original typed body receipt was later changed.
+	d.Work = nil
+	changed := false
+	for _, receipt := range d.lambdaMethodSourceBodies {
+		if receipt.body.lambdaParameterBinding != nil {
+			// Select a packet with a sealed native parameter binding. A map's
+			// first entry could instead be an unbound zero-parameter arrow;
+			// a comment there changes neither its ports nor compiler identity.
+			receipt.body.code += " /* changed after rendering */"
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		t.Fatal("original native typed parameter receipt absent")
+	}
+	if _, closed := d.native8LambdaSourceIdentityEvents(source, nil, ordered); closed {
+		t.Fatal("cheap order discovery replaced the final source certificate")
 	}
 }
 

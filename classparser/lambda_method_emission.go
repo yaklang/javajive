@@ -107,7 +107,7 @@ func (c *ClassObjectDumper) recordLambdaMethodEmission(body *dumpedMethods, temp
 		// If an arrow really appears here, final arrow/event cardinality rejects it.
 		return true
 	}
-	r := c.lambdaMethodSourceBodies[body.member]
+	r := c.lambdaReceiptForBody(body)
 	if frame.ended || frame.invalid || frame.body == nil || frame.request != frame.body.sourceRequest || body.sourceDumper != c || body.sourceObject != c.obj || template != body.code || r == nil || r.body != body || r.request != body.sourceRequest || r.key != body.sourceCacheKey || c.dumpedMethodsSet[r.key] != body || !r.request.factory.closed() || packet == "" || len(packet) > 1<<20 || len(frame.children) >= methodSourceLambdaRequestLimit || int64(len(packet)) > (4<<20)-frame.bytes || !nativeProofWork(c.Work, int64(len(packet))+1) || c.Work != nil && c.Work.CheckAlloc(frame.bytes+int64(len(packet))+int64(len(frame.children)+1)*96) != nil {
 		frame.invalid = true
 		return false
@@ -138,6 +138,9 @@ func (c *ClassObjectDumper) recordLambdaMethodEmission(body *dumpedMethods, temp
 func (c *ClassObjectDumper) lambdaParentDeclaration(source string, parent *dumpedMethods) (string, int, bool) {
 	if c == nil || parent == nil || len(source) > 16<<20 || !nativeProofWork(c.Work, int64(len(source))+int64(len(parent.code))+1) {
 		return "", 0, false
+	}
+	if parent.enumLambdaInitializer != nil {
+		return c.enumLambdaInitializerSourceSpan(source, parent)
 	}
 	if parent.code == "" {
 		return c.interfaceLambdaInitializerSourceSpan(source, parent)
@@ -203,7 +206,7 @@ func (c *ClassObjectDumper) lambdaEmissionPosition(parent, child *dumpedMethods,
 		if event.body == nil {
 			return 0, false
 		}
-		r := c.lambdaMethodSourceBodies[event.body.member]
+		r := c.lambdaReceiptForBody(event.body)
 		if r == nil || r.body != event.body || r.request != event.request || r.request != event.body.sourceRequest || r.request.factory == nil || r.request.factory.method != parent.member || !r.request.factory.closed() || c.dumpedMethodsSet[r.key] != event.body || !charge(int64(len(event.packet))) {
 			return 0, false
 		}

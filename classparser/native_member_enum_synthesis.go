@@ -380,6 +380,19 @@ func nativeMemberEnumSynthesisWithParameterNames(obj *ClassObject, flags uint16,
 	if obj == nil || (!canonical && !constantBodies) || obj.GetSupperClassName() != "java/lang/Enum" || !nativeProofWork(work, 1) {
 		return nil
 	}
+	return nativeEnumDeclarationSynthesis(obj, resolve, work, named, constantBodies)
+}
+
+// The executable enum protocol is independent of lexical membership. Member
+// admission checks its original InnerClasses flags above; a standalone source
+// ledger may reuse the same Code/constructor/array proof without manufacturing
+// a static member declaration or borrowing an owning family's permissions.
+func nativeEnumDeclarationSynthesis(obj *ClassObject, resolve func(string) (*ClassObject, bool), work *workbudget.Budget, named, constantBodies bool) *nativeMemberEnumSynthesis {
+	finalEnum := obj != nil && obj.AccessFlags&0x4030 == 0x4030 && obj.AccessFlags & ^uint16(0x4031) == 0
+	bodyEnum := obj != nil && constantBodies && resolve != nil && obj.AccessFlags&0x4020 == 0x4020 && obj.AccessFlags & ^uint16(0x4431) == 0 && obj.AccessFlags&0x10 == 0
+	if obj == nil || (!finalEnum && !bodyEnum) || obj.GetSupperClassName() != "java/lang/Enum" || !nativeProofWork(work, 1) {
+		return nil
+	}
 	assertions, valid := nativeEnumAssertionInitialization(obj, resolve, work)
 	if !valid {
 		return nil

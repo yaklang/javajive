@@ -5,7 +5,22 @@ package javaclassparser
 // belong to this exact input source. A name elsewhere, a same-spelled sibling,
 // a preview render or an unproved original value supplies no protection.
 func (c *ClassObjectDumper) completedLambdaStableSourceBindings(source string, methods []*dumpedMethods) map[int]map[string]bool {
-	if c == nil || c.obj == nil || len(source) > 16<<20 || len(methods) > 4096 || len(c.lambdaMethodSourceBodies) > 4096 || !nativeProofWork(c.Work, int64(len(source))+1) {
+	if c == nil || c.obj == nil || len(source) > 16<<20 || len(methods) > 4096 || len(c.lambdaMethodSourceBodies) == 0 || len(c.lambdaMethodSourceBodies) > 4096 || !nativeProofWork(c.Work, int64(len(c.lambdaMethodSourceBodies))) {
+		return nil
+	}
+	// Modern ordinary arrows have no native parameter-name bindings. Classes
+	// without any captured binding need no protection map at all, regardless of
+	// source size or the number of completed (but factory-free) method frames.
+	// Charge the whole inventory before candidate selection so map iteration
+	// order cannot choose whether a request exhausts its budget.
+	candidate := false
+	for _, receipt := range c.lambdaMethodSourceBodies {
+		if receipt != nil && receipt.body != nil && receipt.body.lambdaParameterBinding != nil {
+			binding := receipt.body.lambdaParameterBinding
+			candidate = candidate || binding.metadata != nil && len(binding.captured) != 0
+		}
+	}
+	if !candidate || !nativeProofWork(c.Work, int64(len(source))+1) {
 		return nil
 	}
 	arrows, known := nativeLambdaSourceArrows(source, c.Work)
@@ -39,7 +54,7 @@ func (c *ClassObjectDumper) completedLambdaStableSourceBindings(source string, m
 	stable := map[int]map[string]bool{}
 	entries := 0
 	for _, parent := range methods {
-		if parent == nil || parent.sourceDumper != c || parent.sourceObject != c.obj || c.dumpedMethodsSet[parent.sourceCacheKey] != parent || !parent.lambdaEmission.closed() || !charge(int64(len(source))+int64(len(parent.code))+1) {
+		if parent == nil || parent.sourceDumper != c || parent.sourceObject != c.obj || c.dumpedMethodsSet[parent.sourceCacheKey] != parent || !parent.lambdaEmission.closed() || len(parent.lambdaEmission.children) == 0 || !charge(int64(len(source))+int64(len(parent.code))+1) {
 			continue
 		}
 		declaration, start, known := c.lambdaParentDeclaration(source, parent)

@@ -16,6 +16,8 @@ import (
 type nativeLambdaSourceIdentityEvent struct {
 	ordinal int
 	parent  *dumpedMethods
+	body    *dumpedMethods
+	packet  string
 }
 
 func (c *ClassObjectDumper) native8LambdaSourceIdentitiesClosed(source string, members []string, methods []*dumpedMethods) bool {
@@ -74,7 +76,19 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 		// ordinal apparently correct. Private synthetic declarations
 		// still need actual consumed body receipts, not just a matching prefix.
 		if (method.AccessFlags == 0x100a || method.AccessFlags == 0x1002) && c.lambdaMethodSourceBodies[method] == nil && !(c.serializableReferenceSourceClosed && c.serializableReferencePlan != nil && c.serializableReferencePlan.helper == method) {
-			return nil, false
+			// Enum regeneration separately owns its original backing-array
+			// helper. A private synthetic flag alone does not make that helper
+			// a consumed lambda body. Reopen its existing typed compiler proof;
+			// no other missing declaration acquires an exemption.
+			if c.obj.AccessFlags&0x4000 == 0 || c.obj.GetSupperClassName() != "java/lang/Enum" {
+				return nil, false
+			}
+			name, named := sourceBridgeUTF8(c.obj, method.NameIndex)
+			descriptor, typed := sourceBridgeUTF8(c.obj, method.DescriptorIndex)
+			regenerated, err := nativeEnumRegeneratedMethod(c.obj, method, name, descriptor, c.Work)
+			if !named || !typed || !regenerated || err != nil {
+				return nil, false
+			}
 		}
 	}
 	// Bound aggregate searches even for internal callers without a request
@@ -124,7 +138,13 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 		}
 	}
 	byArrow := map[int]nativeLambdaSourceIdentityEvent{}
-	for method, receipt := range c.lambdaMethodSourceBodies {
+	receipts, published := c.publishedFlatLambdaReceipts(methods)
+	if !published {
+		return nil, false
+	}
+	consumed := map[*MemberInfo]bool{}
+	for _, receipt := range receipts {
+		method := receipt.method
 		if receipt == nil || receipt.object != c.obj || receipt.method != method || receipt.body == nil || !c.lambdaMethodSourcePacketClosed(method, receipt.body, c.Work) {
 			return nil, false
 		}
@@ -144,7 +164,7 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 				parent = candidate
 			}
 		}
-		if parent == nil || parent.sourceDumper != c || parent.sourceObject != c.obj || parent.sourceRequest.role != methodSourceDeclaration || parent.sourceCacheKey == "" || c.dumpedMethodsSet[parent.sourceCacheKey] != parent || parent.sourceReconstructionFailed() || !c.methodParameterNameCacheClosed(parent.parameterNameStamp) || parent.code == "" && !c.interfaceLambdaInitializerClosed(parent) || receipt.body.code == "" || !charge(int64(len(text))+int64(len(parent.code))+int64(len(receipt.body.code))) {
+		if parent == nil || parent.sourceDumper != c || parent.sourceObject != c.obj || parent.sourceRequest.role != methodSourceDeclaration || parent.sourceCacheKey == "" || c.dumpedMethodsSet[parent.sourceCacheKey] != parent || parent.sourceReconstructionFailed() || !c.methodParameterNameCacheClosed(parent.parameterNameStamp) || parent.code == "" && !c.interfaceLambdaInitializerClosed(parent) && !c.enumLambdaInitializerClosed(parent) || receipt.body.code == "" || !charge(int64(len(text))+int64(len(parent.code))+int64(len(receipt.body.code))) {
 			return nil, false
 		}
 		if receipt.body.compilerReference != nil && !c.compilerReferenceFinalCaptureClosed(receipt.body, parent) {
@@ -206,9 +226,18 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 		if !named || !known || !prefixed || err != nil || ordinal < 0 || suffix != strconv.Itoa(ordinal) {
 			return nil, false
 		}
-		byArrow[position] = nativeLambdaSourceIdentityEvent{ordinal: ordinal, parent: parent}
+		block := ""
+		if canonical := c.lambdaMethodSourceBodies[method]; canonical != nil && len(canonical.shared) != 0 {
+			var closed bool
+			block, closed = c.sharedLambdaFinalBlock(parent, receipt.body, declaration, position-start, charge)
+			if !closed {
+				return nil, false
+			}
+		}
+		byArrow[position] = nativeLambdaSourceIdentityEvent{ordinal: ordinal, parent: parent, body: receipt.body, packet: block}
+		consumed[method] = true
 	}
-	if len(byArrow) != len(arrows) {
+	if len(byArrow) != len(arrows) || len(consumed) != len(c.lambdaMethodSourceBodies) {
 		return nil, false
 	}
 	ordered := make([]nativeLambdaSourceIdentityEvent, 0, len(arrows))
@@ -219,7 +248,7 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 		}
 		ordered = append(ordered, event)
 	}
-	return ordered, true
+	return c.normalizeSharedLambdaCounters(ordered)
 }
 
 // Capture substitution is observed by the existing completed writer. Reopen

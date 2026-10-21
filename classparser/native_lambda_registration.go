@@ -82,7 +82,7 @@ func (c *ClassObjectDumper) recordNativeLambdaRenderedPacket(body *dumpedMethods
 	if c == nil || body == nil || template == "" || rendered == "" || strings.IndexByte(rendered, 0) >= 0 || len(rendered) > 1<<20 || body.code != template {
 		return false
 	}
-	r := c.lambdaMethodSourceBodies[body.member]
+	r := c.lambdaReceiptForBody(body)
 	if r == nil || r.body != body || r.object != c.obj || r.method != body.member || r.request != body.sourceRequest || r.key != body.sourceCacheKey || r.request.factory == nil || !r.request.factory.closed() || !c.lambdaMethodSourcePacketClosed(body.member, body, c.Work) || r.renderedUnknown {
 		return false
 	}

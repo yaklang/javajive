@@ -1554,21 +1554,38 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 				}
 				ordinaryFields = append(ordinaryFields, field.annotations+field.code)
 			}
+			trackEnumFactories := false
+			if isEnum {
+				for _, method := range methods {
+					trackEnumFactories = trackEnumFactories || method != nil && method.enumLambdaInitializer != nil
+				}
+			}
+			var enumPackets []enumLambdaConstantPacket
 			for idx, enumSimple := range enumFields {
 				constStr := enumSimple.annotations + enumSimple.fieldName
 				if args := c.enumConstantArgs(enumSimple.fieldName); args != "" {
 					constStr += "(" + args + ")"
 				}
+				body := enumConstantBodies[enumSimple.fieldName]
+				separator := ",\n"
+				if idx == len(enumFields)-1 {
+					separator = ";\n"
+				}
 				attrsB.WriteString("\t")
 				attrsB.WriteString(constStr)
-				if body := enumConstantBodies[enumSimple.fieldName]; body != "" {
-					attrsB.WriteString(body)
+				attrsB.WriteString(body)
+				attrsB.WriteString(separator)
+				if trackEnumFactories {
+					cost := int64(len(constStr)+len(body)+3) + int64(len(enumFields))*64
+					if c.Work != nil && c.Work.CheckAlloc(cost) != nil {
+						return ""
+					}
+					packet := "\t" + constStr + body + separator
+					enumPackets = append(enumPackets, enumLambdaConstantPacket{name: enumSimple.fieldName, source: packet})
 				}
-				if idx == len(enumFields)-1 {
-					attrsB.WriteString(";\n")
-				} else {
-					attrsB.WriteString(",\n")
-				}
+			}
+			if trackEnumFactories && !c.bindEnumLambdaInitializerPackets(methods, enumPackets) {
+				return ""
 			}
 			if isEnum && len(enumFields) == 0 && (len(ordinaryFields) > 0 || len(methods) > 0) {
 				// Java requires a separator before enum body declarations when the constant list is empty:
@@ -2141,6 +2158,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	if c.serializableReferencePlan != nil && !c.closeSerializableReferenceSource(full, methods) {
 		return "", fmt.Errorf("final serializable reference source changed after compiler layout")
 	}
+	c.recordEnumRegeneratedMembers(full, methods)
 	return full, nil
 }
 
@@ -5501,6 +5519,7 @@ type dumpedMethods struct {
 	serializableReferences *serializableReferenceMethodGraph
 	compilerReference      *lambdaCompilerReference
 	lambdaEmission         *lambdaMethodEmission
+	enumLambdaInitializer  *enumLambdaInitializerReceipt
 	// Only the concrete declaration writer sets these offsets. Class recovery
 	// may edit an unsealed body without parsing or reinterpreting its header.
 	sourceBodyStart, sourceBodyEnd int
@@ -13650,6 +13669,9 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 			res = stub
 		}
 		accessFlagsVerbose, _ := getMethodAccessFlagsVerbose(method.AccessFlags)
+		if name == "<clinit>" && genuineEnum {
+			c.recordEnumLambdaInitializer(res)
+		}
 		if strings.TrimSpace(res.bodyCode) == "" {
 			// A synthetic access-bridge constructor whose body decompiled to empty (its `this()`
 			// delegation to a trivial no-arg ctor was stripped) must be KEPT, not dropped. javac emits
@@ -13673,7 +13695,7 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 			keepDeclaredCtor := name == "<init>" && !isSynBridgeCtor &&
 				c.getenv("JDEC_NO_KEEP_DECLARED_CTOR") == "" &&
 				!c.isOmittableDefaultCtor(descriptor, accessFlagsVerbose)
-			if isSynBridgeCtor || keepDeclaredCtor || res.initializerCode != "" {
+			if isSynBridgeCtor || keepDeclaredCtor || res.initializerCode != "" || res.enumLambdaInitializer != nil {
 				// keep res as the empty-body constructor (faithful: empty body == implicit super())
 			} else if !slices.Contains(accessFlagsVerbose, "abstract") && !slices.Contains(accessFlagsVerbose, "annotation") && !slices.Contains(accessFlagsVerbose, "interface") && !slices.Contains(accessFlagsVerbose, "enum") {
 				methodType, perr := types.ParseMethodDescriptor(descriptor)

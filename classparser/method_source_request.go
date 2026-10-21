@@ -1,6 +1,8 @@
 package javaclassparser
 
 import (
+	"slices"
+
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	coreutils "github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/internal/workbudget"
@@ -63,6 +65,7 @@ type lambdaMethodSourceReceipt struct {
 	request methodSourceRequest
 	key     string
 	body    *dumpedMethods
+	shared  []*lambdaMethodSourceReceipt
 	// Optional completed render observations for private-access lowering.
 	// A cached template containing capture placeholders is not final source.
 	renderedTemplate       string
@@ -127,7 +130,20 @@ func (c *ClassObjectDumper) recordLambdaMethodSourceBody(name, descriptor string
 	if c.lambdaMethodSourceBodies == nil {
 		c.lambdaMethodSourceBodies = map[*MemberInfo]*lambdaMethodSourceReceipt{}
 	}
-	c.lambdaMethodSourceBodies[body.member] = &lambdaMethodSourceReceipt{object: c.obj, method: body.member, request: request, key: body.sourceCacheKey, body: body}
+	r := &lambdaMethodSourceReceipt{object: c.obj, method: body.member, request: request, key: body.sourceCacheKey, body: body}
+	if prior := c.lambdaMethodSourceBodies[body.member]; prior != nil {
+		if prior.request.factory.same(request.factory) {
+			r.shared = prior.shared
+		} else if c.sharedStaticLambdaSites(prior, r) {
+			if len(prior.shared) >= methodSourceLambdaRequestLimit || c.Work != nil && c.Work.CheckAlloc(int64(len(prior.shared)+1)*256) != nil {
+				return false
+			}
+			copy := *prior
+			copy.shared = nil
+			r.shared = append(slices.Clone(prior.shared), &copy)
+		}
+	}
+	c.lambdaMethodSourceBodies[body.member] = r
 	return true
 }
 

@@ -3,6 +3,7 @@ package javaclassparser
 import (
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
@@ -22,6 +23,9 @@ func (c *ClassObjectDumper) proposeLexicalLambdaMethodOrder(source string, membe
 		return nil, false
 	}
 	if c.options.SourceCompiler != NativeJavac8 && c.options.SourceCompiler != ModernJavac {
+		return nil, false
+	}
+	if !c.lambdaDeclarationOrderMayNeedProposal(methods) {
 		return nil, false
 	}
 	// The owning member packets are not inserted into this assembly yet, so
@@ -158,6 +162,60 @@ func (c *ClassObjectDumper) proposeLexicalLambdaMethodOrder(source string, membe
 		}
 	}
 	return result, len(positions) == 0 && slices.Equal(fixedBefore, fixedAfter)
+}
+
+// This is only a necessary-condition inventory for an optional proposal. The
+// final source certificate is always required. Completed emission postorder
+// can show that ordinary declaration order already consumes 0,1,... without
+// reopening every body/capture proof twice. Unknown/projected scopes still take
+// the full proposal path; an ordinal read here never grants publication rights.
+func (c *ClassObjectDumper) lambdaDeclarationOrderMayNeedProposal(methods []*dumpedMethods) bool {
+	if c == nil || len(c.lambdaMethodSourceBodies) == 0 {
+		return false
+	}
+	if c.obj == nil || c.interfaceLambdaInitializer != nil {
+		return true
+	}
+	ordinal, nodes := 0, 0
+	seen := map[*dumpedMethods]bool{}
+	var ordered func(*dumpedMethods, int) bool
+	ordered = func(parent *dumpedMethods, depth int) bool {
+		if parent == nil || parent.member == nil || depth >= methodSourceLambdaDepthLimit || nodes >= methodSourceLambdaRequestLimit || seen[parent] || !parent.lambdaEmission.closed() || !nativeProofWork(c.Work, 1) || c.Work != nil && c.Work.CheckAlloc(int64(len(seen)+1)*128) != nil {
+			return false
+		}
+		seen[parent], nodes = true, nodes+1
+		for _, child := range parent.lambdaEmission.children {
+			if child.body == nil || !ordered(child.body, depth+1) {
+				return false
+			}
+			name, known := sourceBridgeUTF8(c.obj, child.body.member.NameIndex)
+			if !known || !nativeProofWork(c.Work, int64(len(name))+1) {
+				return false
+			}
+			_, suffix, separated := strings.Cut(name, "$")
+			if separated {
+				suffix = suffix[strings.LastIndexByte(suffix, '$')+1:]
+			}
+			number, err := strconv.Atoi(suffix)
+			if !separated || err != nil || number != ordinal || suffix != strconv.Itoa(number) {
+				return false
+			}
+			ordinal++
+		}
+		return true
+	}
+	for _, parent := range methods {
+		if parent == nil || parent.initializerCode != "" || parent.enumLambdaInitializer != nil {
+			return true
+		}
+		if parent.lambdaEmission == nil || len(parent.lambdaEmission.children) == 0 {
+			continue
+		}
+		if parent.code == "" || !ordered(parent, 0) {
+			return true
+		}
+	}
+	return ordinal != len(c.lambdaMethodSourceBodies)
 }
 
 // A complete lexical family owns its existing registration certificate. A

@@ -64,10 +64,15 @@ func assertDefaultCompilerRegistration(t *testing.T, fixture string) {
 
 func assertDefaultCompilerRegistrationOracle(t *testing.T, fixture, oraclePrefix string) {
 	t.Helper()
+	assertDefaultCompilerRegistrationOracleConfigured(t, fixture, oraclePrefix, true)
+}
+
+func assertDefaultCompilerRegistrationOracleConfigured(t *testing.T, fixture, oraclePrefix string, parameters bool) {
+	t.Helper()
 	compiler, java := t04Tools(t)
 	for _, debug := range []string{"none", "source,lines,vars"} {
 		t.Run(debug, func(t *testing.T) {
-			files := compileLambdaParameterMetadataFixture(t, compiler, ModernJavac, fixture, "DefaultCompilerCases", debug)
+			files := compileLambdaParameterMetadataFixture(t, compiler, ModernJavac, fixture, "DefaultCompilerCases", debug, parameters)
 			original := t.TempDir()
 			for name, raw := range files {
 				if err := os.WriteFile(filepath.Join(original, name), raw, 0600); err != nil {
@@ -97,11 +102,26 @@ func assertDefaultCompilerRegistrationOracle(t *testing.T, fixture, oraclePrefix
 						if err := os.WriteFile(path, []byte(result.Source), 0600); err != nil {
 							t.Fatal(err)
 						}
-						if log, err := exec.Command(compiler, "-proc:none", "--release", "8", "-parameters", "-g:"+debug, "-cp", original, "-d", out, path).CombinedOutput(); err != nil {
+						args := []string{"-proc:none", "--release", "8", "-g:" + debug, "-cp", original, "-d", out, path}
+						if parameters {
+							args = append(args, "-parameters")
+						}
+						if log, err := exec.Command(compiler, args...).CombinedOutput(); err != nil {
 							t.Fatalf("candidate compile: %v\n%s\n%s", err, log, result.Source)
 						}
-						if err := os.WriteFile(filepath.Join(out, "DefaultCompilerDriver.class"), files["DefaultCompilerDriver.class"], 0600); err != nil {
-							t.Fatal(err)
+						// Execute the unchanged binary driver and its original top-level
+						// SAM declarations, with only the consumer replaced. This harness
+						// does not accept an original owned class as a missing candidate.
+						for name, raw := range files {
+							if name == "DefaultCompilerCases.class" {
+								continue
+							}
+							if strings.HasPrefix(name, "DefaultCompilerCases$") {
+								t.Fatal("owned class needs a family round-trip harness", name)
+							}
+							if err := os.WriteFile(filepath.Join(out, name), raw, 0600); err != nil {
+								t.Fatal(err)
+							}
 						}
 						if got := t04RunJava(t, java, out, "DefaultCompilerDriver"); got != oracle {
 							t.Fatalf("unchanged binary driver binding/implementation identities:\noriginal %s\ncandidate %s\n%s", oracle, got, result.Source)
