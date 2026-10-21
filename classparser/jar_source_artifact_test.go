@@ -91,7 +91,7 @@ func sourceArtifactWriteFiles(t *testing.T, files map[string][]byte) string {
 // The original binary caller supplies the algorithm and reflection oracle.
 // Candidate javac sees no original owned class; restoration must preserve its
 // executable output and recover all original field/capture/serialization ABI.
-func TestJarSourceArtifactStorageRetainsAlgorithmsAndMetadata(t *testing.T) {
+func TestNativeJarSourceArtifactStorageRetainsAlgorithmsAndMetadata(t *testing.T) {
 	modern, java := t04Tools(t)
 	for _, compiler := range []SourceCompilerProfile{ModernJavac, NativeJavac8} {
 		for _, root := range []string{"StorageFamily", "AlternateCacheOwner"} {
@@ -186,7 +186,7 @@ func TestJarSourceArtifactStorageRetainsAlgorithmsAndMetadata(t *testing.T) {
 	}
 }
 
-func TestJarSourceArtifactDoesNotRelaxPlainSourceOrCaptureProofs(t *testing.T) {
+func TestNativeJarSourceArtifactDoesNotRelaxPlainSourceOrCaptureProofs(t *testing.T) {
 	plain := nativeCompileClasses(t, sourceArtifactStorageFixture)
 	original := sourceArtifactOriginalStorage(t, plain, "StorageFamily")
 	root, err := Parse(original["StorageFamily.class"])
@@ -260,7 +260,7 @@ func TestJarSourceArtifactDoesNotRelaxPlainSourceOrCaptureProofs(t *testing.T) {
 	}
 }
 
-func TestJarSourceArtifactFieldMetadataBindsArchiveAndReleaseNamespace(t *testing.T) {
+func TestNativeJarSourceArtifactFieldMetadataBindsArchiveAndReleaseNamespace(t *testing.T) {
 	base := nativeCompileClasses(t, sourceFieldMetadataFixture)["MetadataStorage.class"]
 	files := map[string][]byte{
 		"MetadataStorage.class": metadataStorageOriginal(t, base, "flag"),

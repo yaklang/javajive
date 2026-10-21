@@ -47,7 +47,7 @@ func metadataStorageOriginal(t *testing.T, raw []byte, encoding string) []byte {
 	return object.Bytes()
 }
 
-func TestSourceFieldMetadataRestoresOnlyOriginalMarkerBytes(t *testing.T) {
+func TestNativeSourceFieldMetadataRestoresOnlyOriginalMarkerBytes(t *testing.T) {
 	for _, root := range []string{"MetadataStorage", "UnrelatedStorage"} {
 		for _, debug := range []string{"none", "source,lines,vars"} {
 			compiled := nativeCompileSourceReleaseClasses(t, map[string]string{root + ".java": strings.ReplaceAll(sourceFieldMetadataFixture, "MetadataStorage", root)}, debug, "8")[root+".class"]
@@ -101,7 +101,7 @@ func TestSourceFieldMetadataRestoresOnlyOriginalMarkerBytes(t *testing.T) {
 	}
 }
 
-func TestSourceFieldMetadataRejectsChangedDeclarationUniverse(t *testing.T) {
+func TestNativeSourceFieldMetadataRejectsChangedDeclarationUniverse(t *testing.T) {
 	compiled := nativeCompileClasses(t, sourceFieldMetadataFixture)["MetadataStorage.class"]
 	original := metadataStorageOriginal(t, compiled, "flag")
 	for _, mutation := range []string{"class identity", "missing", "extra", "descriptor", "name", "private", "transient", "volatile", "unexpected synthetic", "duplicate original", "duplicate compiled", "malformed original", "truncated compiled"} {
@@ -148,7 +148,7 @@ func TestSourceFieldMetadataRejectsChangedDeclarationUniverse(t *testing.T) {
 	}
 }
 
-func TestSourceFieldMetadataRetainsSharedResourceAndCancellationLimits(t *testing.T) {
+func TestNativeSourceFieldMetadataRetainsSharedResourceAndCancellationLimits(t *testing.T) {
 	compiled := nativeCompileClasses(t, sourceFieldMetadataFixture)["MetadataStorage.class"]
 	original := metadataStorageOriginal(t, compiled, "flag")
 	for _, limit := range []string{"input", "read", "parse", "scan", "output", "allocation", "canceled"} {
@@ -182,7 +182,7 @@ func TestSourceFieldMetadataRetainsSharedResourceAndCancellationLimits(t *testin
 	}
 }
 
-func TestSourceFieldMetadataUsesFieldIdentityAndKeepsCompiledMethods(t *testing.T) {
+func TestNativeSourceFieldMetadataUsesFieldIdentityAndKeepsCompiledMethods(t *testing.T) {
 	base := nativeCompileClasses(t, sourceFieldMetadataFixture)["MetadataStorage.class"]
 	differentCode := strings.Replace(sourceFieldMetadataFixture, "x*31+17", "x*17+31", 1)
 	compiled := nativeCompileClasses(t, differentCode)["MetadataStorage.class"]
@@ -216,7 +216,7 @@ func TestSourceFieldMetadataUsesFieldIdentityAndKeepsCompiledMethods(t *testing.
 	}
 }
 
-func TestSourceFieldMetadataAcceptsDenseMinimalFieldTables(t *testing.T) {
+func TestNativeSourceFieldMetadataAcceptsDenseMinimalFieldTables(t *testing.T) {
 	var source strings.Builder
 	source.WriteString("class DenseMetadata {")
 	for i := 0; i < 64; i++ {
