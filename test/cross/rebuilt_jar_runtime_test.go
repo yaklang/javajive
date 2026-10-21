@@ -177,6 +177,7 @@ public class RebuiltJarDriver {public static void main(String[]args)throws Excep
 }
 
 func TestRebuiltJarRejectsUnknownMetadataAndKeepsPlainPacking(t *testing.T) {
+	t.Run("explicit artifact metadata before packing", testHistoricalArtifactMetadataRoundTrip)
 	for _, world := range []struct {
 		name    string
 		entries map[string][]byte

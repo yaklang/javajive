@@ -17,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	classparser "github.com/yaklang/javajive/classparser"
 )
 
 type historicalCompilePass struct{ Release, Sources, ExitCode int }
@@ -41,6 +43,7 @@ type historicalJarObservation struct {
 	RebuiltClasses                                                           []string
 	Seconds                                                                  float64
 	Completed                                                                bool
+	CompilerMetadata                                                         *historicalArtifactMetadata `json:",omitempty"`
 }
 
 func historicalRebuiltClassInventory(jar *zip.Reader) []string {
@@ -167,7 +170,22 @@ func TestHistoricalJarAudit(t *testing.T) {
 			}
 			cp := withEnvShims(t, strings.Join(input.Deps, string(os.PathListSeparator)))
 			srcRoot := filepath.Join(dir, "sources")
-			files, units, fail := decompileAllWithResolverAtSourceVersion(t, input.Path, srcRoot, 0, historicalDeclarationResolver(t, input.Deps), compileRelease(jarSpecs[name], input.Path))
+			target := compileRelease(jarSpecs[name], input.Path)
+			resolve := historicalDeclarationResolver(t, input.Deps)
+			var files []string
+			var units, fail int
+			var artifact *classparser.JarSourceArtifact
+			if os.Getenv("HISTORICAL_JAR_SOURCE_ARTIFACT") == "1" {
+				var err error
+				artifact, err = classparser.NewJarSourceArtifactFromLocal(input.Path, target, classparser.ModernJavac, resolve)
+				if err != nil {
+					t.Fatal("explicit source artifact", err)
+				}
+				defer artifact.Close()
+				files, units, fail = decompileAllFromSourceReader(t, input.Path, srcRoot, 0, artifact)
+			} else {
+				files, units, fail = decompileAllWithResolverAtSourceVersion(t, input.Path, srcRoot, 0, resolve, target)
+			}
 			o.SourceUnits = units
 			o.DecompileFailures = fail
 			for _, f := range files {
@@ -197,6 +215,16 @@ func TestHistoricalJarAudit(t *testing.T) {
 			}
 			if err := os.MkdirAll(clsRoot, 0755); err != nil {
 				t.Fatal(err)
+			}
+			if artifact != nil {
+				var err error
+				o.CompilerMetadata, err = historicalRestoreArtifactMetadata(artifact, clsRoot, filepath.Join(dir, "rejected-classes"))
+				if err != nil {
+					t.Fatal("compiled metadata tree", err)
+				}
+				if len(o.CompilerMetadata.Failures) != 0 {
+					o.CompileSucceeded = false
+				}
 			}
 			repackaged := filepath.Join(dir, "rebuilt.jar")
 			zipRecompiledClassesToJar(t, clsRoot, repackaged, input.Path)

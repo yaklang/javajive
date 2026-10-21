@@ -582,12 +582,21 @@ func decompileAllWithResolverAtSourceVersion(t *testing.T, jarPath, root string,
 	// t.TempDir() RemoveAll cleanup ("file is being used by another process"), which fails the test
 	// even after a successful round-trip (observed on TestSyntheticJarRoundTrip, windows-latest).
 	defer jfs.Close()
+	return decompileAllFromSourceReader(t, jarPath, root, maxFiles, jfs)
+}
+
+type recompileSourceReader interface {
+	ReadFile(string) ([]byte, error)
+}
+
+func decompileAllFromSourceReader(t *testing.T, jarPath, root string, maxFiles int, reader recompileSourceReader) (files []string, units, decompFail int) {
+	t.Helper()
 	entries := classEntries(t, jarPath)
 	if maxFiles > 0 && len(entries) > maxFiles {
 		entries = entries[:maxFiles]
 	}
 	for _, entry := range entries {
-		raw, err := jfs.ReadFile(entry)
+		raw, err := reader.ReadFile(entry)
 		if err != nil {
 			// ReadFile maps a class entry to its decompiled source; a read error is itself a failure.
 			decompFail++
