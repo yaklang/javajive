@@ -217,6 +217,14 @@ func nativeMemberJointProtectedTypeAccess(user string, peers []map[string]*nativ
 		if !nativeProofWork(work, 1) || peer == nil || peer.root == nil || peer.family == nil || peer.family.failed || peer.root.GetClassName() != owner || peer.family.owner != owner || peer.family.lexicalObjects[owner] != peer.root || peer.objects[owner] != peer.root {
 			return false
 		}
+	}
+	// Validate the complete transaction before granting a lexical permission.
+	// An early successful owner must not hide an invalid later peer according
+	// to map iteration order. The component bound applies to both passes.
+	for owner, peer := range peers[0] {
+		if !nativeProofWork(work, 1) {
+			return false
+		}
 		child := peer.family.children[user]
 		if child == nil {
 			if nativeMemberJointAnonymousAccess(peer.family, user, work) && nativeMemberJointAnonymousProtectedTypeAccess(peer, user, work, subclass) {

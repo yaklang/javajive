@@ -8,7 +8,7 @@ import (
 
 func TestNativeJointProtectedTypeAccessRequiresEveryOriginalLexicalPeer(t *testing.T) {
 	files := nativeCompileSourceReleaseClasses(t, jointProtectedTypeScopeSources(), "none", "8")
-	for _, scenario := range []string{"original", "absent peers", "absent subclass family", "failed family", "foreign root identity", "missing lexical root", "missing source root", "missing child", "missing source child", "foreign source child", "nil child object", "foreign child identity", "foreign child lexical object", "wrong planned owner", "wrong planned name", "wrong planned flags", "wrong source spelling", "missing original self row", "foreign original self row", "private target", "uncommitted foreign user", "oversized transaction", "budget", "memory", "canceled"} {
+	for _, scenario := range []string{"original", "absent peers", "absent subclass family", "failed family", "foreign root identity", "missing lexical root", "missing source root", "missing child", "missing source child", "foreign source child", "nil child object", "foreign child identity", "foreign child lexical object", "wrong planned owner", "wrong planned name", "wrong planned flags", "wrong source spelling", "missing original self row", "foreign original self row", "private target", "uncommitted foreign user", "invalid peer aliases", "nil foreign peer", "oversized transaction", "budget", "memory", "canceled"} {
 		t.Run(scenario, func(t *testing.T) {
 			z := nativeArchive(t, files)
 			defer z.Close()
@@ -83,8 +83,14 @@ func TestNativeJointProtectedTypeAccessRequiresEveryOriginalLexicalPeer(t *testi
 				target.children["access/base/ScopeBase$Item"].flags = 2
 			case "uncommitted foreign user":
 				user = "access/use/ScopeDerived$Other"
-			case "oversized transaction":
+			case "invalid peer aliases":
 				for i := 0; i < 65; i++ {
+					peers[string(rune(0x100+i))] = peer
+				}
+			case "nil foreign peer":
+				peers["access/other/Invalid"] = nil
+			case "oversized transaction":
+				for i := 0; i <= nativeMemberDependencyComponentLimit; i++ {
 					peers[string(rune(0x100+i))] = peer
 				}
 			case "budget":
@@ -111,8 +117,16 @@ func TestNativeJointProtectedTypeAccessRequiresEveryOriginalLexicalPeer(t *testi
 			if z.nativeMemberAccessRepresentable(target, index, nil) {
 				t.Fatal("independent flattened user granted lexical access")
 			}
-			if got := z.nativeMemberAccessRepresentable(target, index, work, peers); got != (scenario == "original") {
-				t.Fatalf("joint lexical protected access=%v", got)
+			repeats := 1
+			if scenario == "invalid peer aliases" || scenario == "nil foreign peer" {
+				// A valid owner can be encountered before the invalid entry. Keep
+				// querying the same immutable input to exercise map permutations.
+				repeats = 128
+			}
+			for i := 0; i < repeats; i++ {
+				if got := z.nativeMemberAccessRepresentable(target, index, work, peers); got != (scenario == "original") {
+					t.Fatalf("joint lexical protected access=%v on query %d", got, i)
+				}
 			}
 		})
 	}
