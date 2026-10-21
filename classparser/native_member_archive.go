@@ -46,6 +46,7 @@ type nativeMemberCacheEntry struct {
 	originalPlanRefusal    bool                     // planOnce: actual bounded local refusal, never a bare cached false
 	planKnown              bool                     // published by planOnce; independent of source completion
 	dependenciesOnce       sync.Once
+	dependencyHint         *nativeMemberDependencyFact // guarded by nativeMembersMu; completed top-level discovery only
 	dependenciesKnown      bool
 	dependenciesCyclic     bool
 	dependencyParticipants []string // immutable own component; no retained class objects/graph

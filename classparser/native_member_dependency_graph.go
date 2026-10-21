@@ -12,14 +12,16 @@ import (
 // families need a joint transaction; independent source commits cannot prove it.
 // Include descriptor, Signature and annotation edges, not just actual invokes.
 func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudget.Budget) (map[string]map[string]bool, bool) {
-	return z.nativeMemberDependencyGraph(root, work, nil)
+	return z.nativeMemberDependencyGraph(root, work, nil, nil)
 }
+
+type nativeMemberDependencyRootMode struct{ wholeOwner bool }
 
 // A completion graph may discharge a type-spelling edge with an independent
 // terminal declaration proof. Ownership, ancestor/accessor and reverse caller
 // edges below are never discharged by that proof. The original metadata graph
 // remains available without this projection.
-func (z *JarFS) nativeMemberDependencyGraph(root string, work *workbudget.Budget, terminalType func(*ClassObject, *ClassObject) (bool, bool)) (map[string]map[string]bool, bool) {
+func (z *JarFS) nativeMemberDependencyGraph(root string, work *workbudget.Budget, terminalType func(*ClassObject, *ClassObject) (bool, bool), mode *nativeMemberDependencyRootMode) (map[string]map[string]bool, bool) {
 	if z == nil || root == "" || !nativeProofWork(work, 1) {
 		return nil, false
 	}
@@ -148,6 +150,11 @@ func (z *JarFS) nativeMemberDependencyGraph(root string, work *workbudget.Budget
 		return nil, false
 	}
 	independentMode := independentBoundary(rootObject)
+	if mode != nil {
+		// A successful visit separately proves the original top-level header.
+		// Independently certified static roots use a different projection.
+		mode.wholeOwner = !independentMode
+	}
 	// Missing external classes are external edges; missing an owned declaration
 	// after original InnerClasses/EnclosingMethod establishes ownership is not.
 	outermost := func(o *ClassObject) (string, bool) {

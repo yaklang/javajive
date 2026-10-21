@@ -15,6 +15,10 @@ import (
 // finish; a cached false, a temporary failed finish or a resource failure cannot
 // cut an edge. No source, private nest or constructor view is published here.
 func (z *JarFS) nativeMemberCompletionDependencyGraph(root string, work *workbudget.Budget, snapshot map[string]string) (map[string]map[string]bool, bool) {
+	return z.nativeMemberCompletionDependencyGraphWithMode(root, work, snapshot, nil)
+}
+
+func (z *JarFS) nativeMemberCompletionDependencyGraphWithMode(root string, work *workbudget.Budget, snapshot map[string]string, mode *nativeMemberDependencyRootMode) (map[string]map[string]bool, bool) {
 	if z == nil || snapshot == nil || !nativeProofWork(work, 1) {
 		return nil, false
 	}
@@ -82,7 +86,7 @@ func (z *JarFS) nativeMemberCompletionDependencyGraph(root string, work *workbud
 			}
 			proofs[key] = cut
 			return cut, true
-		})
+		}, mode)
 		return nil
 	})
 	return graph, known
