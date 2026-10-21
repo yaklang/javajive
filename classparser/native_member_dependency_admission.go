@@ -25,7 +25,7 @@ func (z *JarFS) nativeMemberDependencyAdmission(owner string, work *workbudget.B
 		return nil, false, false
 	}
 	entry.dependenciesOnce.Do(func() {
-		graph, known := z.nativeMemberOriginalDependencyGraph(owner, work)
+		graph, known := z.nativeMemberCompletionDependencyGraph(owner, work, snap)
 		if !known {
 			return
 		}

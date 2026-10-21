@@ -12,6 +12,14 @@ import (
 // families need a joint transaction; independent source commits cannot prove it.
 // Include descriptor, Signature and annotation edges, not just actual invokes.
 func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudget.Budget) (map[string]map[string]bool, bool) {
+	return z.nativeMemberDependencyGraph(root, work, nil)
+}
+
+// A completion graph may discharge a type-spelling edge with an independent
+// terminal declaration proof. Ownership, ancestor/accessor and reverse caller
+// edges below are never discharged by that proof. The original metadata graph
+// remains available without this projection.
+func (z *JarFS) nativeMemberDependencyGraph(root string, work *workbudget.Budget, terminalType func(*ClassObject, *ClassObject) (bool, bool)) (map[string]map[string]bool, bool) {
 	if z == nil || root == "" || !nativeProofWork(work, 1) {
 		return nil, false
 	}
@@ -323,7 +331,8 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 				if !known {
 					return false
 				}
-				if _, _, _, member := originalMemberOwner(other); !member {
+				declaringOwner, _, memberFlags, member := originalMemberOwner(other)
+				if !member {
 					continue
 				}
 				target, known := outermost(other)
@@ -331,6 +340,18 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 					return false
 				}
 				if target != owner {
+					// The physical static declaration proof requires its immediate
+					// owner to be this top-level dependency. A deeper lexical member
+					// cannot use that proof; do not prepare unrelated families for it.
+					if terminalType != nil && memberFlags&8 != 0 && declaringOwner == target {
+						terminal, known := terminalType(object, other)
+						if !known {
+							return false
+						}
+						if terminal {
+							continue
+						}
+					}
 					dependencies[target] = true
 				}
 			}
