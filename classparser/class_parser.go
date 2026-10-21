@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/yaklang/javajive/internal/utils"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 type ClassParser struct {
@@ -11,6 +12,9 @@ type ClassParser struct {
 	classObj  *ClassObject
 	attrCtx   attrContext
 	annoDepth int
+	// Optional offsets for metadata-only edits of an already compiled class.
+	// Ordinary parsing retains no byte positions or additional member map.
+	fieldFlagOffsets map[*MemberInfo]int
 }
 
 func NewClassParser(data []byte) *ClassParser {
@@ -116,6 +120,13 @@ func (this *ClassParser) readMembers() ([]*MemberInfo, error) {
 	if !this.reader.reserve(int64(memberCount), 8) {
 		return nil, this.reader.Err()
 	}
+	if this.fieldFlagOffsets != nil && this.attrCtx == attrCtxField {
+		// Map storage is an allocation, not a larger on-disk field_info.
+		// A valid field can contain only its eight-byte fixed header.
+		if !this.reader.failWork(this.reader.work.CheckAlloc(int64(memberCount)*32)) || !this.reader.failWork(this.reader.work.Charge(workbudget.CounterParseItems, int64(memberCount))) {
+			return nil, this.reader.Err()
+		}
+	}
 	members := make([]*MemberInfo, memberCount)
 	for i := range members {
 		members[i] = this.readMember()
@@ -126,12 +137,17 @@ func (this *ClassParser) readMembers() ([]*MemberInfo, error) {
 	return members, nil
 }
 func (this *ClassParser) readMember() *MemberInfo {
-	return &MemberInfo{
+	offset := this.reader.Offset()
+	member := &MemberInfo{
 		AccessFlags:     this.reader.readUint16(),
 		NameIndex:       this.reader.readUint16(),
 		DescriptorIndex: this.reader.readUint16(),
 		Attributes:      this.readAttributes(),
 	}
+	if this.fieldFlagOffsets != nil && this.attrCtx == attrCtxField {
+		this.fieldFlagOffsets[member] = offset
+	}
+	return member
 }
 func (this *ClassParser) readAttributes() []AttributeInfo {
 	attributesCount := this.reader.readUint16()

@@ -313,6 +313,10 @@ func ParseWithBudget(classData []byte, work *workbudget.Budget) (cf *ClassObject
 }
 
 func parseWithReader(reader *ClassReader) (cf *ClassObject, err error) {
+	return parseWithFieldFlagOffsets(reader, nil)
+}
+
+func parseWithFieldFlagOffsets(reader *ClassReader, offsets map[*MemberInfo]int) (cf *ClassObject, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			var ok bool
@@ -324,7 +328,7 @@ func parseWithReader(reader *ClassReader) (cf *ClassObject, err error) {
 			err = fmt.Errorf("parse class error: %w", e)
 		}
 	}()
-	cp := &ClassParser{reader: reader, classObj: NewClassObject()}
+	cp := &ClassParser{reader: reader, classObj: NewClassObject(), fieldFlagOffsets: offsets}
 	obj, err := cp.Parse()
 	if err != nil {
 		return nil, err

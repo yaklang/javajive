@@ -28,6 +28,7 @@ type JarFS struct {
 	// Immutable compilation profile, distinct from Multi-Release lookup.
 	targetSourceVersion      int
 	sourceCompiler           SourceCompilerProfile
+	sourceFieldMetadata      *sourceFieldMetadataAuthority
 	sourceOwnership          *sourceOwnershipCache
 	releaseViewsMu           sync.Mutex
 	releaseViews             map[int]*JarFS
@@ -166,6 +167,7 @@ func (z *JarFS) decompileClassBytes(name string, data []byte) []byte {
 	d := NewClassObjectDumper(cf)
 	d.options.TargetSourceVersion = z.targetSourceVersion
 	d.options.SourceCompiler = z.sourceCompiler
+	d.options.sourceFieldMetadata = z.sourceFieldMetadata
 	if path.Clean(name) == cf.GetClassName()+".class" {
 		d.nativeMemberLookup = z.nativeMemberLookup
 	}

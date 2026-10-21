@@ -51,6 +51,9 @@ func (z *JarFS) sourceReleaseView(release int) *JarFS {
 	view.jarPhysicalRelease = release
 	view.targetSourceVersion = z.targetSourceVersion
 	view.sourceCompiler = z.sourceCompiler
+	if z.sourceFieldMetadata != nil {
+		view.sourceFieldMetadata = &sourceFieldMetadataAuthority{jar: view}
+	}
 	view.archive = z.archive.clone()
 	if view.archive != nil {
 		view.archive.targetRelease = release

@@ -237,6 +237,10 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 }
 
 func nativeMemberProofWithMetadata(obj, enclosing *ClassObject, work *workbudget.Budget, bridges map[string]*nativeConstructorAccessBridge, lexical map[string]*ClassObject, resolve func(string) (*ClassObject, bool), provider, operands callbinding.Provider, compilers ...nativeEnumParameterCompiler) *nativeMemberClass {
+	return nativeMemberProofWithSourceMetadata(obj, enclosing, work, bridges, lexical, resolve, provider, operands, nil, compilers...)
+}
+
+func nativeMemberProofWithSourceMetadata(obj, enclosing *ClassObject, work *workbudget.Budget, bridges map[string]*nativeConstructorAccessBridge, lexical map[string]*ClassObject, resolve func(string) (*ClassObject, bool), provider, operands callbinding.Provider, metadata *sourceFieldMetadataAuthority, compilers ...nativeEnumParameterCompiler) *nativeMemberClass {
 	expectedCapture := "this$0"
 	if lexical != nil {
 		var known bool
@@ -372,6 +376,7 @@ func nativeMemberProofWithMetadata(obj, enclosing *ClassObject, work *workbudget
 			return nil
 		}
 	}
+	metadataFields := metadata.fields(obj, work)
 	for _, f := range obj.Fields {
 		if f == nil || !nativeProofWork(work, 1) {
 			return nil
@@ -392,12 +397,17 @@ func nativeMemberProofWithMetadata(obj, enclosing *ClassObject, work *workbudget
 			if p.enumSynthesis != nil && p.enumSynthesis.valuesField == f {
 				continue
 			}
-			if flags&0x1000 != 0 {
+			if flags&0x1000 != 0 && !metadataFields[f] {
 				return nil
 			}
 			continue
 		}
 		if flags&0x1000 != 0 {
+			// A storage field does not become an enclosing capture. The
+			// original expected capture still needs its exact old protocol.
+			if n != expectedCapture && flags&8 == 0 && metadataFields[f] {
+				continue
+			}
 			if p.field != "" || n != expectedCapture || flags != 0x1010 || d != "L"+owner+";" || !onlySynthetic {
 				return nil
 			}

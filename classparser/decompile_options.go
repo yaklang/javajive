@@ -90,6 +90,9 @@ type DecompileOptions struct {
 	// Multi-Release namespace. Empty retains modern javac behavior. javac8
 	// requires TargetSourceVersion=8 and an actual javac8 rebuild oracle.
 	SourceCompiler SourceCompilerProfile
+	// Only a JarSourceArtifact can grant postcompile field metadata recovery.
+	// This capability is never constructed by a plain-source public request.
+	sourceFieldMetadata *sourceFieldMetadataAuthority
 
 	// EnableShadowIR builds a read-only MethodIR snapshot after SemanticCFG.
 	// The old printer remains the default source path. Default false.
