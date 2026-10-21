@@ -4,8 +4,12 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"maps"
+	"slices"
 
+	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
@@ -44,15 +48,87 @@ func (c *ClassObjectDumper) artifactStaticAnonymousConstructor(object *ClassObje
 	return child
 }
 
-// Checked SUPER/initializer effects need a separate Exceptions-attribute
-// obligation. This domain has only hidden captures and an implicit no-arg
-// parent with a complete empty checked-exception declaration.
+// A declared Exceptions attribute is a separate compiler obligation. A
+// nontrivial constructor must reopen its complete original representation and
+// every eager call's empty declaration; metadata editing never moves captures
+// or initializers across SUPER.
 func sourceAnonymousStaticConstructorDomain(child *nativeAnonymousClass, metadata callbinding.Provider, work *workbudget.Budget) bool {
-	if child == nil || child.object == nil || child.enclosingField != "" || child.unusedEnclosing || child.sharedParameterRoles || len(child.superParams) != 0 || child.superDescriptor != "()V" || len(child.initializers) != 0 || child.expressionInitializer != nil {
+	if child == nil || child.object == nil || child.enclosingField != "" || child.unusedEnclosing || child.sharedParameterRoles {
 		return false
+	}
+	if len(child.superParams) != 0 || child.superDescriptor != "()V" || len(child.initializers) != 0 || child.expressionInitializer != nil {
+		return sourceAnonymousStaticConstructorCallsClosed(child, metadata, work)
 	}
 	exceptions, known := exactInvocationExceptions(metadata, child.object.GetSupperClassName(), "<init>", "()V")
 	return known && len(exceptions) == 0 && nativeProofWork(work, 1)
+}
+
+func sourceAnonymousStaticConstructorCallsClosed(child *nativeAnonymousClass, metadata callbinding.Provider, work *workbudget.Budget) bool {
+	owner, method, owned := originalAnonymousOwner(child.object)
+	if !owned || method != child.method || child.descriptor == "" || child.object.AccessFlags != 0x0030 || !nativeAnonymousSelfAccessFlags(child.object, 8, work) {
+		return false
+	}
+	// Reconstruct rather than trust a supplied list of SUPER ports or an
+	// initializer marker. Foreign member/forest and lambda roles still need
+	// their own composition proof and remain outside this additional domain.
+	proof := nativeAnonymousConstructorRolesWithLambdas(child.object, owner, method, owner, work, nil, nil, metadata, 0x0030, false, nil)
+	if proof == nil || proof.descriptor != child.descriptor || proof.superDescriptor != child.superDescriptor || proof.superPC != child.superPC || proof.sharedParameterRoles || proof.enclosingField != "" || proof.memberSuper != nil {
+		return false
+	}
+	if !nativeProofWork(work, int64(len(child.fields)+len(child.superParams))+1) || !maps.Equal(proof.fields, child.fields) || !maps.Equal(proof.capturePCs, child.capturePCs) || !slices.Equal(proof.superParams, child.superParams) || proof.sourceSuperDescriptor != child.sourceSuperDescriptor {
+		return false
+	}
+	var code *CodeAttribute
+	for _, declaration := range child.object.Methods {
+		name, named := sourceBridgeUTF8(child.object, declaration.NameIndex)
+		if !named || !nativeProofWork(work, 1) {
+			return false
+		}
+		if name != "<init>" {
+			continue
+		}
+		for _, attribute := range declaration.Attributes {
+			if _, declared := attribute.(*ExceptionsAttribute); declared {
+				return false
+			}
+			if body, present := attribute.(*CodeAttribute); present {
+				if code != nil {
+					return false
+				}
+				code = body
+			}
+		}
+	}
+	if code == nil || !nativeProofWork(work, int64(len(code.Code))+1) {
+		return false
+	}
+	decoder := core.NewDecompiler(code.Code, func(index int) values.JavaValue { return GetValueFromCP(child.object.ConstantPool, index) })
+	decoder.Work = work
+	if decoder.ParseOpcode() != nil {
+		return false
+	}
+	for _, op := range constructorMotionOps(decoder) {
+		if !nativeProofWork(work, 1) || op == nil || op.Instr == nil {
+			return false
+		}
+		if int(op.CurrentOffset) < proof.superPC {
+			continue // Reopened capture stores and unchanged parameter loads.
+		}
+		switch op.Instr.OpCode {
+		case core.OP_INVOKESPECIAL, core.OP_INVOKESTATIC, core.OP_INVOKEVIRTUAL, core.OP_INVOKEINTERFACE:
+			member := constructorMotionMember(child.object, op, op.Instr.OpCode)
+			if member == nil {
+				return false
+			}
+			exceptions, known := exactInvocationExceptions(metadata, member.Name, member.Member, member.Description)
+			if !known || len(exceptions) != 0 {
+				return false
+			}
+		case core.OP_INVOKEDYNAMIC:
+			return false // No eager adaptation/declared-throws proof in this domain.
+		}
+	}
+	return true
 }
 
 func (c *ClassObjectDumper) artifactAnonymousClassPlan(child *nativeAnonymousClass) *sourceAnonymousClassMetadataPlan {
