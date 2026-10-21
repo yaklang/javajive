@@ -23,6 +23,7 @@ type sourceLambdaMetadataAuthority struct {
 	plans        map[string]*sourceLambdaMetadataPlan
 	active       map[string]*sourceLambdaMetadataPlan
 	constructors map[string]*sourceConstructorMetadataPlan
+	anonymous    map[string]*sourceAnonymousClassMetadataPlan
 	publications map[string]*sourceLambdaPublication
 	bytes        int64
 }
@@ -66,6 +67,11 @@ func (a *sourceLambdaMetadataAuthority) sourceReturned(owner string, source []by
 			return fmt.Errorf("constructor metadata: conflicting completed source variants require a fresh artifact")
 		}
 	}
+	for _, plan := range publication.anonymous {
+		if prior := a.anonymous[plan.owner]; prior != nil && !sourceAnonymousMetadataPlansEqual(prior, plan) {
+			return fmt.Errorf("anonymous metadata: conflicting completed source variants require a fresh artifact")
+		}
+	}
 	if a.active == nil {
 		a.active = map[string]*sourceLambdaMetadataPlan{}
 	}
@@ -77,6 +83,12 @@ func (a *sourceLambdaMetadataAuthority) sourceReturned(owner string, source []by
 	}
 	for _, plan := range publication.constructors {
 		a.constructors[plan.owner] = plan
+	}
+	if len(publication.anonymous) != 0 && a.anonymous == nil {
+		a.anonymous = map[string]*sourceAnonymousClassMetadataPlan{}
+	}
+	for _, plan := range publication.anonymous {
+		a.anonymous[plan.owner] = plan
 	}
 	return nil
 }
@@ -217,6 +229,7 @@ type sourceLambdaPublication struct {
 	originalHash, sourceHash [32]byte
 	plans                    []*sourceLambdaMetadataPlan
 	constructors             []*sourceConstructorMetadataPlan
+	anonymous                []*sourceAnonymousClassMetadataPlan
 }
 
 func (a *sourceLambdaMetadataAuthority) publication(owner, source string) *sourceLambdaPublication {
@@ -270,6 +283,15 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 		publication.constructors = append(publication.constructors, plan)
 		return true
 	}
+	anonymousSeen := map[string]bool{}
+	addAnonymous := func(plan *sourceAnonymousClassMetadataPlan) bool {
+		if plan == nil || anonymousSeen[plan.owner] || len(publication.anonymous) >= 4096 || !nativeProofWork(c.Work, 1) {
+			return false
+		}
+		anonymousSeen[plan.owner] = true
+		publication.anonymous = append(publication.anonymous, plan)
+		return true
+	}
 	bytes := int64(0)
 	for _, member := range c.sourceConstructorMembers {
 		cost := int64(len(source)) + 1
@@ -280,6 +302,9 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 		if member.plan != nil && !addConstructor(member.plan) {
 			return false
 		}
+		if member.anonymous != nil && !addAnonymous(member.anonymous) {
+			return false
+		}
 		if nested := member.publication; nested != nil {
 			for _, plan := range nested.plans {
 				if !add(plan) {
@@ -288,6 +313,11 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 			}
 			for _, plan := range nested.constructors {
 				if !addConstructor(plan) {
+					return false
+				}
+			}
+			for _, plan := range nested.anonymous {
+				if !addAnonymous(plan) {
 					return false
 				}
 			}
@@ -331,6 +361,11 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 				return false
 			}
 		}
+		for _, plan := range member.publication.anonymous {
+			if !addAnonymous(plan) {
+				return false
+			}
+		}
 	}
 	raw, bound := a.original(c.obj, c.Work)
 	if !bound {
@@ -341,12 +376,15 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 	for _, plan := range publication.constructors {
 		size += int64(128 + len(plan.owner) + len(plan.descriptor) + len(plan.flags)*2)
 	}
+	for _, plan := range publication.anonymous {
+		size += int64(128 + len(plan.owner) + len(plan.classKey))
+	}
 	if c.Work != nil && c.Work.CheckAlloc(size) != nil {
 		return false
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if prior := a.publications[publication.owner]; prior != nil && prior.originalHash == publication.originalHash && prior.sourceHash == publication.sourceHash && slices.Equal(prior.plans, publication.plans) && slices.EqualFunc(prior.constructors, publication.constructors, sourceConstructorMetadataPlansEqual) {
+	if prior := a.publications[publication.owner]; prior != nil && prior.originalHash == publication.originalHash && prior.sourceHash == publication.sourceHash && slices.Equal(prior.plans, publication.plans) && slices.EqualFunc(prior.constructors, publication.constructors, sourceConstructorMetadataPlansEqual) && slices.EqualFunc(prior.anonymous, publication.anonymous, sourceAnonymousMetadataPlansEqual) {
 		// The typed/source checks above still run on a cache hit. Reusing the
 		// same immutable publication must not spend retained-memory allowance.
 		return true

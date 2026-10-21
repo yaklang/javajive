@@ -25,6 +25,9 @@ import (
 // additionally restore original empty-Signature absence. Other generic method
 // signatures must already match. Regenerated bridges separately owe the same
 // symbolic load/cast/delegation/return program; table equality cannot prove it.
+// A completed native-javac8 static anonymous allocation can additionally owe
+// its original final class bit and static anonymous InnerClasses rows. Its
+// capture stores still come only from the compiler, with no Code motion.
 // It does not
 // certify compilation, JVM verification, other ABI metadata or algorithmic
 // equivalence; those still require independent validation.
@@ -73,7 +76,7 @@ func (a *JarSourceArtifact) Close() error { return a.jar.Close() }
 // RestoreClassMetadata binds restoration to this archive's original bytes and
 // the exact physical source namespace. Declaration-resolver classes cannot
 // authorize edits. Only field/parameter/proved-lambda/implicit-constructor
-// metadata is restored; executable Code and other compiled attribute payloads
+// and proved static-anonymous metadata is restored; executable Code and other compiled attribute payloads
 // remain unchanged. Generic method signatures must close exactly afterwards.
 func (a *JarSourceArtifact) RestoreClassMetadata(name string, compiled []byte) ([]byte, error) {
 	if a == nil || a.jar == nil {
@@ -101,6 +104,10 @@ func (a *JarSourceArtifact) RestoreClassMetadata(name string, compiled []byte) (
 	var lambda *sourceLambdaMetadataPlan
 	if authority := z.sourceLambdaMetadata; authority != nil {
 		lambda = authority.plan(object.GetClassName())
+		compiled, err = authority.restoreAnonymousClassMetadata(original, compiled, reader.Work)
+		if err != nil {
+			return nil, err
+		}
 	}
 	compiled, err = restoreMethodParameterMetadata(original, compiled, lambda, reader.Work)
 	if err != nil {

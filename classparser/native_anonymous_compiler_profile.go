@@ -65,6 +65,9 @@ func (c *ClassObjectDumper) nativeAnonymousConstructorForCompiler(obj *ClassObje
 			}
 			return packet
 		}
+		if packet := c.artifactStaticAnonymousConstructor(obj, owner, method, assertionRoot, members, forest, metadata, access); packet != nil {
+			return packet
+		}
 		// JDK18+ retains the hidden enclosing constructor parameter while
 		// omitting its unused field. Older output targets must regenerate the
 		// field and cannot preserve that original declaration shape.
@@ -77,6 +80,11 @@ func (c *ClassObjectDumper) nativeAnonymousConstructorForCompiler(obj *ClassObje
 		}
 		return nativeAnonymousConstructorRolesWithLambdas(obj, owner, method, assertionRoot, c.Work, members, forest, metadata, 0x0020, true, lambda, access)
 	}
+	return c.nativeJavac8AnonymousConstructor(obj, owner, method, assertionRoot, members, forest, metadata, access)
+}
+
+func (c *ClassObjectDumper) nativeJavac8AnonymousConstructor(obj *ClassObject, owner, method, assertionRoot string, members *nativeMemberFamily, forest *nativeAnonymousForest, metadata callbinding.Provider, access map[string]*nativeConstructorAccessBridge) *nativeAnonymousClass {
+	lambda := &nativeMemberClass{object: obj, lambdaContext: nativeLambdaImplementationContext{resolve: c.nativeAnnotationDeclarationResolver(), metadata: metadata}}
 	// Native javac8 emits the same anonymous ownership/capture profile when
 	// its input source is Java5 through Java8. The selected output remains Java8.
 	// Older inputs must also close their physical classfile-feature domain; a

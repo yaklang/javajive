@@ -26,6 +26,7 @@ type sourceConstructorMemberPublication struct {
 	group       *nativeAnonymousFamily
 	child       *nativeAnonymousClass
 	plan        *sourceConstructorMetadataPlan
+	anonymous   *sourceAnonymousClassMetadataPlan
 	publication *sourceLambdaPublication
 }
 
@@ -110,19 +111,23 @@ func (c *ClassObjectDumper) recordArtifactConstructorPublication(group *nativeAn
 		return false
 	}
 	plan := c.artifactConstructorPlan(child)
+	anonymous := c.artifactAnonymousClassPlan(child)
+	if child.artifactStaticMetadata && anonymous == nil {
+		return false
+	}
 	publication := c.options.sourceLambdaMetadata.publication(child.object.GetClassName(), source)
-	if plan == nil && publication == nil {
+	if plan == nil && anonymous == nil && publication == nil {
 		return c.Work.Check() == nil
 	}
 	for _, prior := range c.sourceConstructorMembers {
 		if prior.group == group && prior.child == child {
-			return (plan == nil && prior.plan == nil || sourceConstructorMetadataPlansEqual(prior.plan, plan)) && prior.publication == publication
+			return (plan == nil && prior.plan == nil || sourceConstructorMetadataPlansEqual(prior.plan, plan)) && sourceAnonymousMetadataPlansEqual(prior.anonymous, anonymous) && prior.publication == publication
 		}
 	}
 	if len(c.sourceConstructorMembers) >= 4096 || !nativeProofWork(c.Work, 1) || c.Work.CheckAlloc(int64(len(c.sourceConstructorMembers)+1)*256) != nil {
 		return false
 	}
-	c.sourceConstructorMembers = append(c.sourceConstructorMembers, sourceConstructorMemberPublication{group, child, plan, publication})
+	c.sourceConstructorMembers = append(c.sourceConstructorMembers, sourceConstructorMemberPublication{group: group, child: child, plan: plan, anonymous: anonymous, publication: publication})
 	return true
 }
 
@@ -137,13 +142,16 @@ func (c *ClassObjectDumper) artifactConstructorPublicationClosed(member sourceCo
 	if member.plan != nil && !sourceConstructorMetadataPlansEqual(member.plan, c.artifactConstructorPlan(child)) {
 		return false
 	}
+	if !sourceAnonymousMetadataPlansEqual(member.anonymous, c.artifactAnonymousClassPlan(child)) {
+		return false
+	}
 	if nested := member.publication; nested != nil {
 		raw, bound := c.options.sourceLambdaMetadata.original(child.object, c.Work)
 		if !bound || nested.owner != child.object.GetClassName() || sha256.Sum256(raw) != nested.originalHash {
 			return false
 		}
 	}
-	return member.plan != nil || member.publication != nil
+	return member.plan != nil || member.anonymous != nil || member.publication != nil
 }
 
 // Restore the absence of compiler-generated all-hidden metadata, with its

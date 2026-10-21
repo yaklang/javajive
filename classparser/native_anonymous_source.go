@@ -20,6 +20,9 @@ type nativeAnonymousClass struct {
 	// Nonzero only for the separately proved Java5/6 native-javac domain.
 	// Reopen that domain before consuming this plan as anonymous source.
 	legacyInputMajor uint16
+	// The explicit artifact must restore the proved native-javac8 static
+	// anonymous declaration metadata after modern compilation.
+	artifactStaticMetadata bool
 	// This view carries only original lambda implementation evidence. It
 	// supplies no named membership, constructor or foreign private scope.
 	lambdaImplementation  *nativeMemberClass

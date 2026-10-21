@@ -175,6 +175,7 @@ func (this *ClassParser) readAttributes() []AttributeInfo {
 	return attributes
 }
 func (this *ClassParser) readAttribute(seen map[string]int) AttributeInfo {
+	start, context := this.reader.Offset(), this.attrCtx
 	this.reader.SetStage("attribute", "name_index")
 	attributeNameIndex := this.reader.readUint16()
 	if err := this.reader.Err(); err != nil {
@@ -210,6 +211,12 @@ func (this *ClassParser) readAttribute(seen map[string]int) AttributeInfo {
 	attrInfo.readInfo(this)
 	this.reader = parent
 	requireKnownAttrExactEnd(sub, attrInfo, attrName)
+	if this.metadataLayout != nil && context == attrCtxClass {
+		if inner, ok := attrInfo.(*InnerClassesAttribute); ok {
+			this.metadataLayout.innerClasses = inner
+			this.metadataLayout.innerClassSpan = compiledMetadataSpan{start, parent.Offset()}
+		}
+	}
 	return attrInfo
 }
 

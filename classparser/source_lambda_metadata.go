@@ -15,9 +15,11 @@ import (
 // opaque original spans of the newly compiled class, never reserialized.
 type compiledMetadataSpan struct{ start, end int }
 type compiledMetadataLayout struct {
-	poolEnd   int
-	constants []compiledMetadataSpan
-	methods   map[*MemberInfo]compiledMetadataSpan
+	poolEnd        int
+	constants      []compiledMetadataSpan
+	methods        map[*MemberInfo]compiledMetadataSpan
+	innerClasses   *InnerClassesAttribute
+	innerClassSpan compiledMetadataSpan
 }
 
 type sourceLambdaMethodIdentity struct{ name, descriptor string }
