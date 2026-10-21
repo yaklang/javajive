@@ -4914,6 +4914,9 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 					if haveFinally && finally.Continuation != nil {
 						statementStr += "\n" + statementListToString([]statements.Statement{finally.Continuation})
 					}
+					if haveFinally && len(finally.SourceEpilogue) > 0 {
+						statementStr += "\n" + statementListToString(finally.SourceEpilogue)
+					}
 					if !haveCatch && !haveFinally {
 						body := statementListToString(ret.TryBody)
 						if canFlattenNoCatchTry(body, dumped.malformedTry, funcCtx.SourceRendering) {

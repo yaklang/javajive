@@ -14,6 +14,28 @@ import (
 // suffix. Reattempt the existing complete resource proof on a private clone;
 // neither the original handler tree nor any earlier analysis is changed.
 func RecoverCatchAllFinallyForSource(tr *statements.TryCatchStatement) (*FinallyRegion, bool) {
+	if region, known := recoverFinallyDirectSource(tr); known {
+		return region, true
+	}
+	if tr == nil {
+		return nil, false
+	}
+	clone := *tr
+	tail := factorFinallyFallthroughTail(&clone)
+	if len(tail) == 0 {
+		return nil, false
+	}
+	region, known := recoverFinallyDirectSource(&clone)
+	if !known || region.Continuation != nil {
+		return nil, false
+	}
+	region.SourceEpilogue = tail
+	return region, true
+}
+
+// Direct recovery does not attempt another continuation factor. Structural
+// factoring and late source views share it without recursive source queries.
+func recoverFinallyDirectSource(tr *statements.TryCatchStatement) (*FinallyRegion, bool) {
 	if region, known := RecoverCatchAllFinally(tr); known {
 		return region, true
 	}

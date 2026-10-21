@@ -229,8 +229,16 @@ func typedAbsorbingHandlers(body []statements.Statement, permittedThrows map[int
 				if x == nil {
 					continue
 				}
+				catchBodies := x.CatchBodies
+				if view, known := rewriter.RecoverCatchAllFinally(x); known {
+					// The copied enclosing cleanup is outside these typed
+					// handlers. Its nested synthetic rethrows cannot make a
+					// handler propagate the exception it already contained.
+					// All real invokes/throws are still checked at raw PCs.
+					catchBodies = view.CatchBodies
+				}
 				for i, handler := range x.Handlers {
-					if !handler.CatchAll && handler.EntryPC >= 0 && i < len(x.CatchBodies) && absorbs(x.CatchBodies[i]) {
+					if !handler.CatchAll && handler.EntryPC >= 0 && i < len(catchBodies) && absorbs(catchBodies[i]) {
 						result[handler.EntryPC] = true
 					}
 				}

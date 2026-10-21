@@ -156,6 +156,9 @@ func sameFinallyEffectTreeBound(rows []core.HandlerRange, a, b values.JavaValue,
 		if x.Op == values.Not {
 			return sameFinallyBooleanNotShape(x, y) && same(x.Values[0], y.Values[0])
 		}
+		if x.Op == values.LOGICAL_AND || x.Op == values.LOGICAL_OR {
+			return finallyShortCircuitBooleanShape(x) && finallyShortCircuitBooleanShape(y) && same(x.Values[0], y.Values[0]) && same(x.Values[1], y.Values[1])
+		}
 		if len(x.Values) != 2 {
 			return false
 		}
@@ -191,6 +194,10 @@ func sameFinallyEffectTreeBound(rows []core.HandlerRange, a, b values.JavaValue,
 		if !ok {
 			return false
 		}
+		if operand, target, pc, known := x.OriginalInstanceOfSource(); known {
+			other, otherTarget, otherPC, otherKnown := y.OriginalInstanceOfSource()
+			return otherKnown && target == otherTarget && outside(pc, true) && outside(otherPC, true) && finallyInstanceOfReferenceOperand(operand) && finallyInstanceOfReferenceOperand(other) && same(operand, other)
+		}
 		xarg, xtarget, _, xknown := x.SourcePrimitiveConversion()
 		yarg, ytarget, _, yknown := y.SourcePrimitiveConversion()
 		return xknown && yknown && xtarget == ytarget && totalPrimitiveConversionOperand(xarg) && totalPrimitiveConversionOperand(yarg) && same(xarg, yarg)
@@ -199,6 +206,30 @@ func sameFinallyEffectTreeBound(rows []core.HandlerRange, a, b values.JavaValue,
 		return ok && x != nil && y != nil && typeSame(x.TargetType, y.TargetType) && x.Binding == y.Binding && outside(x.OriginPC, !x.Binding) && outside(y.OriginPC, !y.Binding) && same(x.Value, y.Value)
 	}
 	return false
+}
+
+// Preserve the short-circuit tree and evaluation order. Boolean source types
+// rule out implicit unboxing, while each child's own effect proof retains its
+// original domain. Numeric truthiness and boxed Boolean are not this operation.
+func finallyShortCircuitBooleanShape(x *values.JavaExpression) bool {
+	if x == nil || x.Op != values.LOGICAL_AND && x.Op != values.LOGICAL_OR || len(x.Values) != 2 || x.Type() == nil {
+		return false
+	}
+	for _, v := range []values.JavaValue{x, x.Values[0], x.Values[1]} {
+		if v == nil || v.Type() == nil {
+			return false
+		}
+		primitive, ok := v.Type().RawType().(*types.JavaPrimer)
+		if !ok || primitive == nil || primitive.Name != types.JavaBoolean {
+			return false
+		}
+	}
+	return true
+}
+
+func finallyInstanceOfReferenceOperand(v values.JavaValue) bool {
+	v = plainTryValue(v)
+	return v != nil && (v == values.JavaNull || values.IsNullLiteral(v) || v.Type() != nil && values.ReferenceTypeDescriptor(v.Type(), nil) != "")
 }
 
 func finallyCoveredAssignment(x *statements.AssignStatement, covered func(int) bool) bool {

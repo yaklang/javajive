@@ -4065,29 +4065,23 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 	case OP_INSTANCEOF:
 		classInfo := d.constantPoolGetter(int(Convert2bytesToInt(opcode.Data))).(*values.JavaClassValue).Type()
 		value := runtimeStackSimulation.Pop().(values.JavaValue)
-		instanceOf := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-			return fmt.Sprintf("%s instanceof %s", values.AssignmentOperand(value, funcCtx), classInfo.String(funcCtx))
-		}, func() types.JavaType {
-			return types.NewJavaPrimer(types.JavaBoolean)
-		}, func(oldId *utils2.VariableId, newId *utils2.VariableId) {
-			// The instanceof operand is captured in this CustomValue's String closure. Like
-			// OP_CHECKCAST and the numeric-conversion CustomValues, it MUST forward ReplaceVar to the
-			// captured operand: otherwise a later identity rebind of the operand's variable (e.g.
-			// rewriteVar minting a fresh id for a slot's disjoint reuse and ReplaceVar-ing every use)
-			// never reaches the operand, so the rendered `varN instanceof T` keeps a stale id that
-			// collides with a DIFFERENT same-slot variable. fastjson2 JSONSchema.of:
-			// `exclusiveMaximum instanceof Integer` rendered against the unrelated int-typed `var6`
-			// ("unexpected type, required: reference, found: int"). Kill-switch:
-			// JDEC_INSTANCEOF_REPLACEVAR_OFF=1.
-			if d.getenv("JDEC_INSTANCEOF_REPLACEVAR_OFF") == "1" {
-				return
-			}
-			value.ReplaceVar(oldId, newId)
-		})
-		instanceOf.Flag = "instanceof"
-		instanceOf.CapturesKnown = true
-		instanceOf.Captures = []values.JavaValue{value}
-		instanceOf.OriginPC, instanceOf.HasOriginPC = int(opcode.CurrentOffset), true
+		instanceOf := values.NewOriginalInstanceOf(value, classInfo, int(opcode.CurrentOffset))
+		if instanceOf == nil {
+			return fmt.Errorf("invalid original instanceof at PC %d", opcode.CurrentOffset)
+		}
+		if d.getenv("JDEC_INSTANCEOF_REPLACEVAR_OFF") == "1" {
+			instanceOf = values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+				return fmt.Sprintf("%s instanceof %s", values.AssignmentOperand(value, funcCtx), classInfo.String(funcCtx))
+			}, func() types.JavaType {
+				return types.NewJavaPrimer(types.JavaBoolean)
+			})
+			// Diagnostic control: keep the legacy operand without forwarding
+			// rebinding. It has no original-type-test proof capability.
+			instanceOf.Flag = "instanceof"
+			instanceOf.CapturesKnown = true
+			instanceOf.Captures = []values.JavaValue{value}
+			instanceOf.OriginPC, instanceOf.HasOriginPC = int(opcode.CurrentOffset), true
+		}
 		runtimeStackSimulation.Push(instanceOf)
 	case OP_CHECKCAST:
 		classInfo := d.constantPoolGetter(int(Convert2bytesToInt(opcode.Data))).(*values.JavaClassValue).Type()

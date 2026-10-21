@@ -91,6 +91,9 @@ func Children(value JavaValue) ([]JavaValue, bool) {
 		}
 		return []JavaValue{v.Inner}, true
 	case *CustomValue:
+		if operand, _, _, known := v.OriginalInstanceOfSource(); known {
+			return []JavaValue{operand}, true
+		}
 		if operand, _, _, known := v.SourcePrimitiveConversion(); known {
 			return []JavaValue{operand}, true
 		}
@@ -215,6 +218,11 @@ func InspectValue(value JavaValue) (effect Effects, refs map[*JavaRef]bool) {
 				effect |= v.Extra
 			}
 		case *CustomValue:
+			if _, _, _, known := v.OriginalInstanceOfSource(); known {
+				// Resolution may fail; a type test never licenses moving its
+				// original evaluation across handlers or other effects.
+				effect |= EffectThrow
+			}
 			if _, known := v.SourceCaughtExceptionEntry(); known {
 				// Dependency completeness does not license moving an implicit
 				// handler-entry word outside its original catch binding.

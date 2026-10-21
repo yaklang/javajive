@@ -15,6 +15,7 @@ type CustomValue struct {
 	serializableReferenceSource      *serializableReferenceSource
 	sourceMethodReference            *uncapturedMethodReferenceSource
 	sourcePrimitive                  *sourcePrimitiveConversion
+	sourceInstanceOf                 *originalInstanceOfSource
 	sourceCaught                     bool
 	sourceCaughtPC                   int
 	sourceCaughtTyped                bool
@@ -64,6 +65,10 @@ type CustomValue struct {
 
 // ReplaceVar implements JavaValue.
 func (v *CustomValue) ReplaceVar(oldId *utils.VariableId, newId *utils.VariableId) {
+	if v.sourceInstanceOf != nil {
+		v.sourceInstanceOf.operand.ReplaceVar(oldId, newId)
+		return
+	}
 	if v.sourcePrimitive != nil {
 		v.sourcePrimitive.operand.ReplaceVar(oldId, newId)
 		return
@@ -77,6 +82,9 @@ func (v *CustomValue) ReplaceVar(oldId *utils.VariableId, newId *utils.VariableI
 }
 
 func (v *CustomValue) Type() types.JavaType {
+	if v.sourceInstanceOf != nil {
+		return types.NewJavaPrimer(types.JavaBoolean)
+	}
 	if v.sourcePrimitive != nil {
 		return types.NewJavaPrimer(v.sourcePrimitive.target)
 	}
@@ -115,6 +123,9 @@ func (v *CustomValue) String(funcCtx *class_context.ClassContext) string {
 	write := v.WriteFunc
 	if v.sourceMethodReference != nil {
 		write = v.sourceMethodReference.write
+	}
+	if v.sourceInstanceOf != nil {
+		write = v.sourceInstanceOf.write
 	}
 	if v.StringFunc == nil && write == nil {
 		return ""

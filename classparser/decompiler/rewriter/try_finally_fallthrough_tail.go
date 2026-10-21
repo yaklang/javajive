@@ -21,10 +21,10 @@ func factorFinallyFallthroughTail(tr *statements.TryCatchStatement) []statements
 		return nil
 	}
 	body := finallyWithoutEnd(tr.TryBody)
-	if len(body) < 3 || len(body) > 128 {
+	if len(body) == 0 || len(body) > 128 {
 		return nil
 	}
-	if _, complete := RecoverCatchAllFinallyForSource(tr); complete {
+	if _, complete := recoverFinallyDirectSource(tr); complete {
 		return nil
 	}
 	var rows [][2]int
@@ -46,8 +46,8 @@ func factorFinallyFallthroughTail(tr *statements.TryCatchStatement) []statements
 		}
 		prefix := *tr
 		prefix.TryBody = slices.Clone(body[:split])
-		view, complete := RecoverCatchAllFinallyForSource(&prefix)
-		if !complete || view == nil || len(view.Cleanup) == 0 {
+		view, complete := recoverFinallyDirectSource(&prefix)
+		if !complete || view == nil || len(view.Cleanup) == 0 || view.Continuation != nil {
 			continue
 		}
 		// The view above is a proof, not a replacement for the typed tree.
@@ -55,7 +55,7 @@ func factorFinallyFallthroughTail(tr *statements.TryCatchStatement) []statements
 		tr.TryBody = prefix.TryBody
 		return slices.Clone(body[split:])
 	}
-	return nil
+	return factorFinallyConditionalContinuation(tr, body, ranges)
 }
 
 // Factoring a tail creates new CFG nodes for the same already-proved source

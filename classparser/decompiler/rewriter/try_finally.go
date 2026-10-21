@@ -16,6 +16,10 @@ type FinallyRegion struct {
 	// initializes the private pending-Throwable state of a proved resource
 	// protocol after enclosing finally views have exposed its normal exits.
 	SourcePrologue []statements.Statement
+	// SourceEpilogue is the original normal continuation exposed only after
+	// an enclosing finally view removed its own duplicated cleanup. It is
+	// rendered after this finally, without changing the canonical typed tree.
+	SourceEpilogue []statements.Statement
 	TryBody        []statements.Statement
 	Exceptions     []*values.JavaRef
 	CatchBodies    [][]statements.Statement
@@ -481,6 +485,18 @@ func finallyCoveredValue(root values.JavaValue, covered func(int) bool) bool {
 				if !x.HasOriginPC || !covered(x.OriginPC) || x.HasEvaluationEndPC && !covered(x.EvaluationEndPC) || len(x.Initializer) > 0 && !x.HasEvaluationEndPC {
 					return false
 				}
+				if x.HasEvaluationEndPC {
+					if x.OriginPC < 0 || x.EvaluationEndPC < x.OriginPC || x.EvaluationEndPC > 65535 {
+						return false
+					}
+					// Endpoints alone cannot prove the handler ownership of
+					// folded stores across a gap between protected intervals.
+					for pc := x.OriginPC; pc <= x.EvaluationEndPC; pc++ {
+						if !covered(pc) {
+							return false
+						}
+					}
+				}
 				children = append(append([]values.JavaValue{}, x.Length...), x.Initializer...)
 				break
 			}
@@ -555,6 +571,13 @@ func finallyCoveredValue(root values.JavaValue, covered func(int) bool) bool {
 		case *values.JavaClassMember:
 			return x != nil && x.HasOriginPC && covered(x.OriginPC) && x.Name != "" && x.Member != "" && x.Description != ""
 		case *values.CustomValue:
+			if operand, _, pc, original := x.OriginalInstanceOfSource(); original {
+				if !covered(pc) || !finallyInstanceOfReferenceOperand(operand) {
+					return false
+				}
+				children = []values.JavaValue{operand}
+				break
+			}
 			if pc, captures, original := x.OriginalLambdaFactoryEvaluation(); original {
 				if !covered(pc) {
 					return false
@@ -590,7 +613,17 @@ func finallyCoveredValue(root values.JavaValue, covered func(int) bool) bool {
 // outside every protected interval. Names are field/invoke identities from the
 // IR; rendered text and library-specific patterns never establish equivalence.
 func sameFinallyCleanup(rows []core.HandlerRange, a, b statements.Statement, excluded []*values.JavaRef, depth int) bool {
-	if depth > 16 || a == nil || b == nil {
+	p := finallyCleanupComparison{remaining: 2048}
+	return p.statement(rows, a, b, excluded, depth)
+}
+
+type finallyCleanupComparison struct {
+	remaining int
+}
+
+func (p *finallyCleanupComparison) statement(rows []core.HandlerRange, a, b statements.Statement, excluded []*values.JavaRef, depth int) bool {
+	p.remaining--
+	if p.remaining < 0 || depth > 16 || a == nil || b == nil {
 		return false
 	}
 	outside := func(pc int) bool {
@@ -640,12 +673,12 @@ func sameFinallyCleanup(rows []core.HandlerRange, a, b statements.Statement, exc
 			return false
 		}
 		for i, st := range xa {
-			if !sameFinallyCleanup(rows, st, ya[i], excluded, depth+1) {
+			if !p.statement(rows, st, ya[i], excluded, depth+1) {
 				return false
 			}
 		}
 		for i, st := range xb {
-			if !sameFinallyCleanup(rows, st, yb[i], excluded, depth+1) {
+			if !p.statement(rows, st, yb[i], excluded, depth+1) {
 				return false
 			}
 		}
@@ -661,11 +694,14 @@ func sameFinallyCleanup(rows []core.HandlerRange, a, b statements.Statement, exc
 			return false
 		}
 		for i, st := range x.Body {
-			if !sameFinallyCleanup(rows, st, y.Body[i], excluded, depth+1) {
+			if !p.statement(rows, st, y.Body[i], excluded, depth+1) {
 				return false
 			}
 		}
 		return true
+	case *statements.TryCatchStatement:
+		y, ok := b.(*statements.TryCatchStatement)
+		return ok && p.nested(rows, x, y, excluded, depth+1)
 	case *statements.CustomStatement:
 		y, ok := b.(*statements.CustomStatement)
 		return ok && x != nil && y != nil && x.ThrownValue != nil && y.ThrownValue != nil && x.HasOriginPC && y.HasOriginPC && outside(x.OriginPC) && outside(y.OriginPC) && sameFinallyEffectValue(rows, x.ThrownValue, y.ThrownValue, excluded, depth)
