@@ -112,8 +112,17 @@ func (c *ClassObjectDumper) recordLambdaMethodEmission(body *dumpedMethods, temp
 		frame.invalid = true
 		return false
 	}
-	for _, prior := range frame.children {
+	for i, prior := range frame.children {
 		if prior.body == body || prior.request == body.sourceRequest {
+			// Type/cast views can inspect one context-free producer several
+			// times before its text is emitted once. Coalesce only an adjacent
+			// identical observation of the same original request. The final
+			// declaration still owes one source occurrence per child; actual
+			// duplicated arrows, reordered requests and captured binders retain
+			// their independent refusal.
+			if i == len(frame.children)-1 && prior.body == body && prior.request == body.sourceRequest && prior.packet == packet && c.lambdaStatelessRepeatedPreviewClosed(body) {
+				return true
+			}
 			frame.invalid = true
 			return false
 		}
@@ -129,6 +138,16 @@ func (c *ClassObjectDumper) recordLambdaMethodEmission(body *dumpedMethods, temp
 	frame.children = append(frame.children, lambdaMethodOccurrence{body: body, request: body.sourceRequest, packet: strings.Clone(packet)})
 	frame.bytes += int64(len(packet))
 	return true
+}
+
+func (c *ClassObjectDumper) lambdaStatelessRepeatedPreviewClosed(body *dumpedMethods) bool {
+	if c == nil || c.obj == nil || body == nil || body.member == nil || body.sourceRequest.role != methodSourceLambdaBody || body.sourceRequest.captureCount != 0 || body.member.AccessFlags != 0x100a || !c.lambdaMethodSourcePacketClosed(body.member, body, c.Work) {
+		return false
+	}
+	site, known := c.originalCompilerReferenceSite(body.sourceRequest.factory)
+	name, named := sourceBridgeUTF8(c.obj, body.member.NameIndex)
+	descriptor, typed := sourceBridgeUTF8(c.obj, body.member.DescriptorIndex)
+	return known && named && typed && site.captureCount == 0 && site.implementation.Name == c.obj.GetClassName() && site.implementation.Member == name && site.implementation.Description == descriptor
 }
 
 // The original header binds an already completed declaration. Later checked
