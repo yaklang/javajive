@@ -23,7 +23,8 @@
     "c83f1adb45cbdb55b368c3120d05315e15e8a33c",
     "24d2ef36c6836948586251c011ff0759ffa242cf",
     "9e07d3ea410dcc553763ce4d15f80e1186652849",
-    "d30f48189b47ba9afe57b6971437434fccce82b9"
+    "d30f48189b47ba9afe57b6971437434fccce82b9",
+    "82dbcc38d063b052c33d03ce2af7496eff1f682d"
   ],
   "measured_completed_parents": 2628,
   "seconds": {
@@ -171,6 +172,7 @@
     "TestAdversarialArrayStoresKeepPreciseCatchRethrow": 5.02,
     "TestAdversarialAssertionStatusOwnerCannotBeFlattened": 10.69,
     "TestAdversarialAssertionStatusOwnerLexicalFamily": 15.08,
+    "TestAdversarialAssertionStoragePreservesInheritanceStatusAndABI": 168.8,
     "TestAdversarialAuthoredMethodParameterNamesRoundTrip": 145.36,
     "TestAdversarialAutomaticLayerSelectionRoundTrip": 7.53,
     "TestAdversarialBareIfMissesOldUnique": 0.44,
@@ -2801,7 +2803,8 @@
     38879736024,
     39293806774,
     39434553509,
-    39441005032
+    39441005032,
+    39805732062
   ],
   "local_followup_base_revision": "137a6a059a09297c508360979a1b33c42191d8f1"
 }
