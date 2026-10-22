@@ -1,10 +1,20 @@
 package javaclassparser
 
 import (
+	"crypto/sha256"
 	"fmt"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 )
+
+type nativeEnumBackingSource struct {
+	object      *ClassObject
+	initializer *MemberInfo
+	code        *CodeAttribute
+	codeHash    [32]byte
+	packet      core.RegeneratedStaticArray
+}
 
 // Source regenerates a fresh array of constants in declaration order. A clone
 // factory proves only copying, not the order or identity of the array copied.
@@ -12,6 +22,7 @@ import (
 // helper and inline compiler forms have the same array-packet contract; user
 // initialization outside that packet is never moved or silently suppressed.
 func (c *ClassObjectDumper) nativeEnumBackingArrayProtocol(initializations map[string]nativeEnumConstantAllocation) error {
+	c.nativeEnumBacking = nil
 	fail := func(reason string) error {
 		if c.Work != nil && c.Work.Err() != nil {
 			return c.Work.Err()
@@ -123,6 +134,7 @@ func (c *ClassObjectDumper) nativeEnumBackingArrayProtocol(initializations map[s
 	}
 	start := storeIndex - 1
 	previous := initOps[start]
+	arrayHelper := ""
 	if nativeEnumOpcode(previous, core.OP_INVOKESTATIC) {
 		helperName, known := nativeEnumArrayHelperName(obj, c.Work)
 		if !known || !nativeEnumMemberOperand(obj, previous, core.OP_INVOKESTATIC, owner, helperName, "()"+descriptor) {
@@ -149,6 +161,7 @@ func (c *ClassObjectDumper) nativeEnumBackingArrayProtocol(initializations map[s
 		if !regenerated {
 			return fail("non-generated array helper")
 		}
+		arrayHelper = helperName
 	} else {
 		start = storeIndex - (2 + 4*len(constants))
 		if start < 0 || !nativeEnumValuesArrayPacket(obj, initOps[start:storeIndex], constants, c.Work) {
@@ -189,6 +202,46 @@ func (c *ClassObjectDumper) nativeEnumBackingArrayProtocol(initializations map[s
 	if !nativeEnumRegionExecutedOnce(ir, uint16(first), uint16(last), c.Work, preceding...) {
 		return fail("backing producer is bypassed, unreachable or repeated")
 	}
+	// Java emits its backing immediately after the constants (and any proved
+	// compiler assertion prefix). Dominance alone would also accept a later
+	// packet, after user code which can call values() before the array exists.
+	before := -1
+	if len(constants) != 0 {
+		for i, op := range initOps {
+			if int(op.CurrentOffset) == initializations[constants[len(constants)-1]].storePC {
+				before = i
+				break
+			}
+		}
+	} else if assertion := c.nativeAssertionProtocol(); assertion != nil && assertion.initializer == initializer {
+		for i, op := range initOps {
+			if int(op.CurrentOffset) < assertion.initializerEndPC {
+				before = i
+			}
+		}
+	}
+	if start != before+1 {
+		return fail("backing producer follows non-regenerated initializer effects")
+	}
+	allocation := first
+	if arrayHelper == "" {
+		allocation = int(initOps[start+1].CurrentOffset)
+	}
+	c.nativeEnumBacking = &nativeEnumBackingSource{object: obj, initializer: initializer, code: initCode, codeHash: sha256.Sum256(initCode.Code), packet: core.RegeneratedStaticArray{Owner: owner, Field: backingName, Descriptor: descriptor, Helper: arrayHelper, AllocationPC: allocation, StorePC: last, Constants: constants}}
 
+	return nil
+}
+
+func (c *ClassObjectDumper) projectNativeEnumBacking(parser *core.Decompiler, code *CodeAttribute, method *MemberInfo, root *[]statements.Statement) error {
+	plan := c.nativeEnumBacking
+	if plan == nil || method != plan.initializer {
+		return nil
+	}
+	if plan.object != c.obj || plan.code != code || sha256.Sum256(code.Code) != plan.codeHash || !c.isGenuineEnum() || !parser.ProjectRegeneratedStaticArray(root, plan.packet) {
+		if c.Work != nil && c.Work.Err() != nil {
+			return c.Work.Err()
+		}
+		return fmt.Errorf("enum regeneration: original backing source packet is not closed")
+	}
 	return nil
 }

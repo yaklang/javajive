@@ -61,6 +61,14 @@ func TestAdversarialArtifactLambdaMetadataKeepsIndependentAnonymousABI(t *testin
 
 func testArtifactLambdaMetadata(t *testing.T, sourceFixture string, namedModes []bool, want string, validateDeclarations ...func(*testing.T, []byte, []byte)) {
 	t.Helper()
+	testArtifactLambdaMetadataCompilerDomains(t, sourceFixture, namedModes, want, true, validateDeclarations...)
+}
+
+// Compiler controls qualify source generation within each compiler's original
+// method universe. Existing artifact tests retain their cross-compiler domain;
+// this selector never relaxes RestoreClassMetadata's ABI or fresh Code checks.
+func testArtifactLambdaMetadataCompilerDomains(t *testing.T, sourceFixture string, namedModes []bool, want string, crossCompiler bool, validateDeclarations ...func(*testing.T, []byte, []byte)) {
+	t.Helper()
 	modern, java := t04Tools(t)
 	native := os.Getenv("JAVA8_JAVAC")
 	if native == "" {
@@ -74,6 +82,9 @@ func testArtifactLambdaMetadata(t *testing.T, sourceFixture string, namedModes [
 		{"modern control", modern, modern, ModernJavac, ModernJavac},
 		{"native to modern artifact", native, modern, NativeJavac8, ModernJavac},
 	} {
+		if !crossCompiler && transition.originalProfile != transition.profile {
+			continue
+		}
 		for _, named := range namedModes {
 			label := transition.name + "/unnamed"
 			if named {

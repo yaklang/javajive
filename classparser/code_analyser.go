@@ -431,6 +431,9 @@ func parseBytesCodeWithLambdaCaptureOrder(dumper *ClassObjectDumper, codeAttr *C
 			}
 		}
 		parser.InlineEnumLambdaArgumentTemps(&st, constants)
+		if failure := dumper.projectNativeEnumBacking(parser, codeAttr, originalMethod, &st); failure != nil {
+			return parser.Params, st, failure
+		}
 	}
 	// One bounded original context per method; report count must not multiply
 	// copies of a long method name/descriptor. Failed parser reports still need

@@ -56,6 +56,7 @@ type ClassObjectDumper struct {
 	nativeSourceNamesReady                bool
 	nativeMemberChecks                    map[string]map[int]bool
 	nativeEnumConstantCurrent             *nativeEnumConstantBody
+	nativeEnumBacking                     *nativeEnumBackingSource
 	nativeMemberRoot                      *nativeMemberFamily
 	nativeMethodLocalCurrent              *nativeMethodLocalClass
 	nativeMethodLocalPlacements           map[statements.Statement][]string
