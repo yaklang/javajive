@@ -7760,6 +7760,20 @@ func fixMissingReturn(body string) string {
 	return strings.Join(lines, "\n")
 }
 
+// isMovableCheckedCall reports a statement that is itself a checked reflection
+// call. Nested if/catch headers can mention getMethod in a condition; those
+// lines are not calls and must stay where they are.
+func isMovableCheckedCall(line string, re *regexp.Regexp) bool {
+	trim := strings.TrimSpace(line)
+	if trim == "" || strings.HasPrefix(trim, "if ") || strings.HasPrefix(trim, "if(") ||
+		strings.HasPrefix(trim, "}") || strings.HasPrefix(trim, "catch") || strings.HasPrefix(trim, "try") ||
+		strings.HasPrefix(trim, "else") || strings.HasPrefix(trim, "for") || strings.HasPrefix(trim, "while") ||
+		strings.HasPrefix(trim, "return") || strings.HasPrefix(trim, "throw") || strings.HasPrefix(trim, "//") {
+		return false
+	}
+	return re.MatchString(trim)
+}
+
 // fixTryCatchExceptionPlacement detects the pattern where exception-throwing calls (getDeclaredConstructor,
 // newInstance, etc.) are rendered OUTSIDE a try block, while the catch clause lists those exception types.
 // It moves the calls into the inner try body so javac sees them as caught.
@@ -7803,25 +7817,54 @@ func fixTryCatchExceptionPlacement(body string) string {
 				break
 			}
 		}
-		// Collect the if-body lines (at ifIndent + 1 tab).
-		bodyIndent := ifIndent + "\t"
+		// The if header already opened a brace. Count until it closes, so a
+		// same-line `}else{` ends the then-body instead of being treated as more
+		// body (that used to delete the header of a nested if and leave its else
+		// attached to catch).
+		depth := 0
+		for _, ch := range lnClean {
+			switch ch {
+			case '{':
+				depth++
+			case '}':
+				depth--
+			}
+		}
+		if depth <= 0 {
+			continue
+		}
 		var ifBodyLines []int
 		closingBrace := -1
-		for j := i + 1; j < len(lines) && j < i+20; j++ {
+		for j := i + 1; j < len(lines) && j < i+80; j++ {
 			jl := strings.TrimRight(lines[j], "\r")
-			if strings.TrimSpace(jl) == "}" && strings.HasPrefix(jl, ifIndent) && !strings.HasPrefix(jl, bodyIndent) {
-				closingBrace = j
+			ifBodyLines = append(ifBodyLines, j)
+			for _, ch := range jl {
+				switch ch {
+				case '{':
+					depth++
+				case '}':
+					depth--
+					if depth == 0 {
+						closingBrace = j
+					}
+				}
+				if closingBrace >= 0 {
+					break
+				}
+			}
+			if closingBrace >= 0 {
+				ifBodyLines = ifBodyLines[:len(ifBodyLines)-1]
 				break
 			}
-			ifBodyLines = append(ifBodyLines, j)
 		}
 		if closingBrace < 0 || len(ifBodyLines) == 0 {
 			continue
 		}
-		// Check if any if-body line has a throwing call.
+		// Check if any if-body line has a throwing call. A nested if condition
+		// that merely mentions getMethod is not a call to move.
 		hasThrowingCall := false
 		for _, idx := range ifBodyLines {
-			if throwingCallRe.MatchString(lines[idx]) {
+			if isMovableCheckedCall(lines[idx], throwingCallRe) {
 				hasThrowingCall = true
 				break
 			}
@@ -7863,7 +7906,7 @@ func fixTryCatchExceptionPlacement(body string) string {
 		var newIfBody []string
 		for _, idx := range ifBodyLines {
 			jl := strings.TrimRight(lines[idx], "\r")
-			if throwingCallRe.MatchString(jl) {
+			if isMovableCheckedCall(jl, throwingCallRe) {
 				// Re-indent to innerTryIndent + 1 tab.
 				trimmed := strings.TrimLeft(jl, "\t")
 				throwingLines = append(throwingLines, innerTryIndent+"\t"+trimmed)
