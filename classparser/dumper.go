@@ -57,6 +57,7 @@ type ClassObjectDumper struct {
 	nativeMemberChecks                    map[string]map[int]bool
 	nativeEnumConstantCurrent             *nativeEnumConstantBody
 	nativeEnumBacking                     *nativeEnumBackingSource
+	rawAssertionStorage                   *sourceAssertionStoragePlan
 	nativeMemberRoot                      *nativeMemberFamily
 	nativeMethodLocalCurrent              *nativeMethodLocalClass
 	nativeMethodLocalPlacements           map[statements.Statement][]string
@@ -1495,6 +1496,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		}
 	}
 	c.prepareNativeStandaloneAssertion()
+	c.prepareRawAssertionStorage()
 	// Check the actual declaration at publication as well as during planning.
 	// Dependency-only views have no source ownership and retain ordinary
 	// rendering; a native certificate cannot borrow its broader alphabet.
@@ -2169,6 +2171,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	if !c.sealArtifactLambdaPublication(full, members) {
 		return "", fmt.Errorf("lambda metadata source-family publication is not closed")
 	}
+	if !c.publishRawAssertionStorage(full) {
+		return "", fmt.Errorf("field identity source publication is not closed")
+	}
 	return full, nil
 }
 
@@ -2206,6 +2211,9 @@ func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
 			return nil, err
 		}
 		renderName := class_context.SafeIdentifier(name)
+		if field.AccessFlags&8 != 0 {
+			renderName = c.FuncCtx.StaticFieldName(c.obj.GetClassName(), name)
+		}
 		// The spelling alone is legal for a user field. Only the original
 		// generated self-array has the compiler's backing-field identity.
 		originalDescriptor, _ := sourceBridgeUTF8(c.obj, field.DescriptorIndex)
@@ -4174,6 +4182,9 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			rawName := c.obj.ConstantPoolManager.GetUtf8(int(field.NameIndex)).Value
 			finalFieldMap[rawName] = struct{}{}
 			finalFieldRenderNameToRaw[class_context.SafeIdentifier(rawName)] = rawName
+			if field.AccessFlags&8 != 0 {
+				finalFieldRenderNameToRaw[c.FuncCtx.StaticFieldName(c.obj.GetClassName(), rawName)] = rawName
+			}
 		}
 	}
 	annoStrs := []string{}

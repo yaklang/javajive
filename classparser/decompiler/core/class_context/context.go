@@ -26,6 +26,8 @@ type SourceCaptureOperand struct {
 	Receiver bool
 }
 type ClassContext struct {
+	// Render-only alpha bindings. Physical JVM symbols remain unchanged in IR.
+	StaticFieldAliases map[string]string
 	// These read-only observations are installed only while a proved ordinary
 	// constructor throws scope renders its final method body. They confer no
 	// allocation, access, argument-cast, capture or initialization permission.

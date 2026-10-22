@@ -52,7 +52,7 @@ func (z *JarFS) sourceReleaseView(release int) *JarFS {
 	view.targetSourceVersion = z.targetSourceVersion
 	view.sourceCompiler = z.sourceCompiler
 	if z.sourceFieldMetadata != nil {
-		view.sourceFieldMetadata = &sourceFieldMetadataAuthority{jar: view}
+		view.sourceFieldMetadata = &sourceFieldMetadataAuthority{jar: view, aliasParent: z.sourceFieldMetadata}
 	}
 	if z.sourceLambdaMetadata != nil {
 		view.sourceLambdaMetadata = &sourceLambdaMetadataAuthority{jar: view}

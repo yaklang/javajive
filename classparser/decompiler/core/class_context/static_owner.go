@@ -26,11 +26,21 @@ func (f *ClassContext) StaticMethodReferenceTypeName(owner string) (string, bool
 // (JLS 15.11.1). Unlike static interface methods, interface fields allow this
 // primary form too. An implicit own-field name still needs a free value name.
 func (f *ClassContext) StaticFieldSelection(owner, member string) string {
-	member = SafeIdentifier(member)
+	member = f.StaticFieldName(owner, member)
 	if owner == f.ClassName && !f.QualifiedStaticFields && !f.localValueNameShadows(member) {
 		return member
 	}
 	return f.staticOwner(owner, true) + "." + member
+}
+
+func (f *ClassContext) StaticFieldName(owner, member string) string {
+	if f == nil {
+		return SafeIdentifier(member)
+	}
+	if alias := f.StaticFieldAliases[strings.ReplaceAll(owner, ".", "/")+"\x00"+member]; alias != "" {
+		return SafeIdentifier(alias)
+	}
+	return SafeIdentifier(member)
 }
 
 // StaticClassOwner retains type binding when a method select would otherwise

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"strings"
+	"sync"
 
 	"github.com/yaklang/javajive/internal/memfile"
 	"github.com/yaklang/javajive/internal/workbudget"
@@ -59,6 +60,11 @@ func (a *JarSourceArtifact) ReadFile(name string) ([]byte, error) {
 			return nil, err
 		}
 	}
+	if z != nil && z.sourceFieldMetadata != nil && strings.HasSuffix(logical, ".class") {
+		if err := z.sourceFieldMetadata.assertionSourceReturned(strings.TrimSuffix(logical, ".class"), source); err != nil {
+			return nil, err
+		}
+	}
 	return source, nil
 }
 func (a *JarSourceArtifact) Open(name string) (fs.File, error) {
@@ -78,6 +84,10 @@ func (a *JarSourceArtifact) Close() error { return a.jar.Close() }
 // authorize edits. Only field/parameter/proved-lambda/implicit-constructor
 // and proved static-anonymous metadata is restored; executable Code and other compiled attribute payloads
 // remain unchanged. Generic method signatures must close exactly afterwards.
+// A completed raw assertion-storage projection can also owe an alpha-renamed
+// field declaration and its own Fieldref identities. Only those symbolic pool
+// bindings change; Code, handlers, stack maps, debug tables and string literals
+// retain the compiler's bytes.
 func (a *JarSourceArtifact) RestoreClassMetadata(name string, compiled []byte) ([]byte, error) {
 	if a == nil || a.jar == nil {
 		return nil, fs.ErrInvalid
@@ -100,6 +110,12 @@ func (a *JarSourceArtifact) RestoreClassMetadata(name string, compiled []byte) (
 	}
 	if object.GetClassName()+".class" != logical {
 		return nil, fmt.Errorf("field metadata: archive path and class identity disagree")
+	}
+	if z.sourceFieldMetadata != nil && z.sourceFieldMetadata.hasAssertionStorage(object.GetClassName()) {
+		compiled, err = z.sourceFieldMetadata.restoreAssertionStorage(original, compiled, reader.Work)
+		if err != nil {
+			return nil, err
+		}
 	}
 	var lambda *sourceLambdaMetadataPlan
 	if authority := z.sourceLambdaMetadata; authority != nil {
@@ -143,7 +159,13 @@ func (a *JarSourceArtifact) RestoreClassMetadata(name string, compiled []byte) (
 // This capability exists only in a fresh artifact source view. The original
 // class objects remain authoritative for types, captures and bytecode proofs.
 // A declaration-only resolver never enrolls a foreign class in the artifact.
-type sourceFieldMetadataAuthority struct{ jar *JarFS }
+type sourceFieldMetadataAuthority struct {
+	jar                       *JarFS
+	aliasParent               *sourceFieldMetadataAuthority
+	assertionIndex            sourceAssertionStorageIndex
+	aliasMu                   sync.Mutex
+	aliasPending, aliasActive map[string]*sourceAssertionStoragePlan
+}
 
 func (a *sourceFieldMetadataAuthority) fields(object *ClassObject, work *workbudget.Budget) map[*MemberInfo]bool {
 	if a == nil || a.jar == nil || object == nil {
