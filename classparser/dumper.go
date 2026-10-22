@@ -157,8 +157,15 @@ type ClassObjectDumper struct {
 	// DISJOINT scopes (safe to share names). Top-level lambdas (depth 1) keep `l<i>`, so the common
 	// case is byte-for-byte unchanged. See DumpMethodWithInitialId. Kill-switch:
 	// JDEC_LAMBDA_PARAM_SCOPE_OFF=1 restores the flat `l<i>` naming.
-	lambdaDepth                    int
-	fieldDefaultValue              map[string]string
+	lambdaDepth       int
+	fieldDefaultValue map[string]string
+	// enumConstantSourceName maps a bytecode ACC_ENUM field to the distinct
+	// denotable Enum name string. Empty means the field name is the constant.
+	enumConstantSourceName map[string]string
+	// enumSyntheticBackingField is the values() array proved by the enum
+	// protocol. Source regenerates it as $VALUES, so the original spelling is
+	// not emitted.
+	enumSyntheticBackingField      string
 	interfaceInitializerHelpers    []*dumpedMethods
 	interfaceLambdaInitializer     *interfaceLambdaInitializerReceipt
 	constructorBoundaryHelpers     []*dumpedMethods
@@ -608,6 +615,15 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		}
 		if err := c.nativeEnumBackingArrayProtocol(initializations); err != nil {
 			return "", err
+		}
+		c.enumConstantSourceName = nil
+		for field, plan := range initializations {
+			if plan.sourceName != "" && plan.sourceName != field {
+				if c.enumConstantSourceName == nil {
+					c.enumConstantSourceName = map[string]string{}
+				}
+				c.enumConstantSourceName[field] = plan.sourceName
+			}
 		}
 	}
 
@@ -1604,7 +1620,14 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			}
 			var enumPackets []enumLambdaConstantPacket
 			for idx, enumSimple := range enumFields {
-				constStr := enumSimple.annotations + enumSimple.fieldName
+				spelling := enumSimple.fieldName
+				ann := enumSimple.annotations
+				if src := c.enumConstantSourceName[enumSimple.fieldName]; src != "" {
+					// The hidden name is the constant. Annotations stay on the
+					// bytecode field, which is emitted as the alias below.
+					spelling, ann = src, ""
+				}
+				constStr := ann + spelling
 				if args := c.enumConstantArgs(enumSimple.fieldName); args != "" {
 					constStr += "(" + args + ")"
 				}
@@ -1631,6 +1654,21 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			}
 			if !c.bindFlatEnumPublicationPackets(enumPackets) {
 				return ""
+			}
+			for _, enumSimple := range enumFields {
+				src := c.enumConstantSourceName[enumSimple.fieldName]
+				if src == "" {
+					continue
+				}
+				attrsB.WriteString("\t")
+				attrsB.WriteString(enumSimple.annotations)
+				attrsB.WriteString("public static final ")
+				attrsB.WriteString(className)
+				attrsB.WriteString(" ")
+				attrsB.WriteString(enumSimple.fieldName)
+				attrsB.WriteString(" = ")
+				attrsB.WriteString(src)
+				attrsB.WriteString(";\n")
 			}
 			if isEnum && len(enumFields) == 0 && (len(ordinaryFields) > 0 || len(methods) > 0) {
 				// Java requires a separator before enum body declarations when the constant list is empty:
@@ -2261,7 +2299,11 @@ func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
 		// The spelling alone is legal for a user field. Only the original
 		// generated self-array has the compiler's backing-field identity.
 		originalDescriptor, _ := sourceBridgeUTF8(c.obj, field.DescriptorIndex)
-		if genuineEnum && name == "$VALUES" && field.AccessFlags == 0x101a && originalDescriptor == "[L"+c.obj.GetClassName()+";" {
+		backingSpelling := c.enumSyntheticBackingField
+		if backingSpelling == "" {
+			backingSpelling = "$VALUES"
+		}
+		if genuineEnum && name == backingSpelling && field.AccessFlags == 0x101a && originalDescriptor == "[L"+c.obj.GetClassName()+";" {
 			continue
 		}
 		if c.recordSkipFields[name] {

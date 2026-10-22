@@ -20,6 +20,7 @@ Status at 2026-10-22T22:50:00+08:00: **not full-project acceptance**. Local bran
 | PKG-01 | Synthetic package-info returned before annotation emission | `classparser/package_info_test.go`: package annotations, cross-package type identity and javac rebuild |
 | NAME-01 | Same-package type was qualified through a type-shadowed package root, causing invalid static import fallback | `classparser/samepkg_shadow_static_test.go`: types `a.a`, `a.k`, `other.k`, caller `a.l`; original and generated source compile |
 | ENUM-01 | Exact access_flags=0x0009 check rejected historical public static final enum factory (0x0019) | `TestNativeEnumAcceptsFinalValuesFactory`, `test/coremail/enum_factory_test.go` + `test/coremail/testdata/enum/`: original vs rebuilt order/identity/ordinal/name/payload/clone/exception; synchronized method remains refused |
+| ENUM-02 | Obfuscated ACC_ENUM field name differed from the Enum constructor's name string, and the synthetic values array was not spelled `$VALUES` | `test/coremail/enum_hidden_name_test.go`: rename only those UTF-8 names, keep ordinals and payload; regenerated source uses the hidden name as the constant and the bytecode field as `public static final` alias. Keyword and duplicate strings stay refused |
 
 ENUM-01 accepts **only** `0x0009` or `0x0019`. All original opcode, constant-pool target, producer ordering, copy semantics and CFG checks remain. It does not claim byte-for-byte reconstruction or preservation of a compiler-generated factory's reflected final flag across javac versions; it proves the executable factory protocol with unchanged arguments/results/exceptions and static dispatch. Unsupported flags (including synchronization) are rejected.
 
@@ -31,7 +32,8 @@ Full-project baseline: `/mnt/data/scan-outputs/coremail-java-recheck-20261022-20
 
 * Before ENUM-01, replay of all 249 baseline failures: 45 emitted / 204 refused.
 * After ENUM-01: 149 emitted / 100 refused. All 149 emitted units passed Yaklang `FrontendRaw`; failure-comment units are reported separately, not counted as reconstructed Java.
-* Remaining mutually exclusive buckets: 43 hidden enum name/ordinal, 23 enclosing method scope, 15 static owner binding, 13 erased backing-field escapes, 3 enum enclosing identity, 2 constructor origins, 1 backing-field declaration. Each needs independent proof and regression; none has been declared unexpressible.
+* After ENUM-02, the same 43 hidden-name paths were replayed again: 40 emitted / 3 refused. The 3 refusals are constant-specific enclosing identity, not name mismatch. Emitted units contain an `enum` declaration and a static alias, and none of those 40 contains a failure comment or a stub marker. This is still not FrontendRaw acceptance of the whole project.
+* Remaining mutually exclusive buckets from the 100 post-ENUM-01 refusals, with the hidden-name bucket reduced: 23 enclosing method scope, 15 static owner binding, 13 erased backing-field escapes, 3 enum enclosing identity, 2 constructor origins, 1 backing-field declaration. None has been declared unexpressible.
 * This targeted replay does not replace coremail/ekp acceptance or prove that the remaining 1634 stubs are resolved.
 
 ## Test-toolchain requirements
@@ -59,3 +61,9 @@ Verified online at 2026-10-22T22:14:37+08:00:
 
 * JLS 9.7.1–9.7.2: `@Deprecated()` is legal; marker syntax is equivalent shorthand, not a correctness repair: https://docs.oracle.com/javase/specs/jls/se17/html/jls-9.html#jls-9.7.2 .
 * JLS 7.5: package annotations can use imports in the same compilation unit: https://docs.oracle.com/javase/specs/jls/se17/html/jls-7.html#jls-7.5 . Fully qualifying annotation types is a renderer choice when omitting imports, not a Java requirement.
+
+Verified online at 2026-10-22T23:58:00+08:00:
+
+* JLS 8.1.4: a class cannot name `Enum` as its direct superclass except as an enum class: https://docs.oracle.com/javase/specs/jls/se21/html/jls-8.html#jls-8.1.4 .
+* JLS 8.9.1–8.9.3: the enum constant identifier is the implicit field; the body may also declare ordinary static fields; those fields are not initialized before the constants, and constructors cannot read non-constant static fields: https://docs.oracle.com/javase/specs/jls/se21/html/jls-8.html#jls-8.9.2 .
+* `Enum(String name, int ordinal)`: the name is the identifier used to declare the constant, and the ordinal is its declaration position. Programmers cannot invoke that constructor: https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Enum.html .

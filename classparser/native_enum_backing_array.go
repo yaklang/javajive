@@ -61,9 +61,14 @@ func (c *ClassObjectDumper) nativeEnumBackingArrayProtocol(initializations map[s
 		return fail("factory or initializer")
 	}
 	backingName, nk := sourceBridgeUTF8(obj, backing.NameIndex)
-	if !nk || backingName != "$VALUES" {
+	// values() already selected the unique private static final synthetic
+	// self-array (flags 0x101a, no attributes). Javac spells that field
+	// $VALUES, but an obfuscator can rename it. The later packet proof, not
+	// the spelling, certifies the constant order. Source regenerates $VALUES.
+	if !nk || backingName == "" {
 		return fail("compiler backing declaration")
 	}
+	c.enumSyntheticBackingField = backingName
 	constants := []string{}
 	for _, f := range obj.Fields {
 		if f == nil || !nativeProofWork(c.Work, 1) {
