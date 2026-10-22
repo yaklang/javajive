@@ -555,6 +555,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// The omitted profile is the public modern-javac alias. Legacy Dump and
 	// archive callers must enter the same proof/emission path as options APIs.
 	c.options.SourceCompiler = c.options.SourceCompiler.effective()
+	if c != nil && c.obj != nil {
+		obj := c.obj
+		defer releaseClassDumpScratch(obj)
+	}
 	if c.options.EnvSnapshot == nil {
 		// Nested legacy Dump (Dump/Decompile inside DecompileWithOptions) must
 		// push a live-env sentinel and restore the outer snapshot. A top-level
@@ -13614,7 +13618,7 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 			// Graceful degradation: an un-decompilable method body must not fail the whole
 			// class. Emit a stub method (correct signature, throwing body) so the rest of
 			// the class still decompiles.
-			log.Warnf("decompile method %s%s failed, emitting stub: %v", name, descriptor, err)
+			log.Warnf("decompile method %s%s failed, emitting stub: %v class=%s", name, descriptor, err, c.obj.GetClassName())
 			stub := c.dumpStubMethod(method, name, descriptor, err.Error())
 			if stub == nil {
 				// even the signature could not be derived; drop the method to keep output valid

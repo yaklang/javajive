@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/yaklang/javajive/internal/filesys"
 	fi "github.com/yaklang/javajive/internal/filesys/filesys_interface"
@@ -116,9 +117,9 @@ func MaybeWrapExpandedArchiveFS(fs fi.FileSystem, recursiveParse bool) fi.FileSy
 		if info.IsDir() {
 			return nil
 		}
-		if isArchiveFile(path) {
+		if isArchiveFile(path) || strings.EqualFold(filepath.Ext(path), ".class") {
 			hasArchive = true
-			return filepath.SkipAll
+			return filesys.SkipAll
 		}
 		return nil
 	}))
