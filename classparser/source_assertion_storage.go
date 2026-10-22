@@ -139,6 +139,10 @@ func (a *sourceFieldMetadataAuthority) assertionStorageAliases(work *workbudget.
 				if !nk || !dk {
 					return
 				}
+				// A symbolic owner can inherit storage from a binary dependency
+				// outside this archive. Its member spelling is still occupied:
+				// introducing a same-named own field would capture that source use.
+				names[n] = true
 				if n != nativeAssertionField || desc != "Z" {
 					continue
 				}
