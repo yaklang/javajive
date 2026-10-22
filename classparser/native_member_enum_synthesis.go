@@ -64,8 +64,16 @@ func nativeEnumArrayHelperName(obj *ClassObject, work *workbudget.Budget) (strin
 func nativeEnumValuesFactoryBacking(obj *ClassObject, method *MemberInfo, work *workbudget.Budget) *MemberInfo {
 	return nativeEnumValuesFactoryBackingWithParameterNames(obj, method, work, false)
 }
+
+// A source factory must be public and static. ACC_FINAL is legal on a static
+// method and older javac emitted values() with it (javap 0x0019, e.g. CXF
+// MessageFormatType); requiring exactly 0x0009 rejected those valid enums.
+func nativeEnumFactoryMethodFlags(flags uint16) bool {
+	return flags == 0x0009 || flags == 0x0019
+}
+
 func nativeEnumValuesFactoryBackingWithParameterNames(obj *ClassObject, method *MemberInfo, work *workbudget.Budget, allowNames bool) *MemberInfo {
-	if obj == nil || method == nil || method.AccessFlags != 9 || !nativeEnumOriginalFrameCapacity(method, 1, 0) {
+	if obj == nil || method == nil || !nativeEnumFactoryMethodFlags(method.AccessFlags) || !nativeEnumOriginalFrameCapacity(method, 1, 0) {
 		return nil
 	}
 	name := obj.GetClassName()
@@ -102,7 +110,7 @@ func nativeEnumValueOfFactoryProof(obj *ClassObject, method *MemberInfo, work *w
 	return nativeEnumValueOfFactoryProofWithParameterNames(obj, method, work, false)
 }
 func nativeEnumValueOfFactoryProofWithParameterNames(obj *ClassObject, method *MemberInfo, work *workbudget.Budget, allowNames bool) bool {
-	if obj == nil || method == nil || method.AccessFlags != 9 || !nativeEnumOriginalFrameCapacity(method, 2, 1) {
+	if obj == nil || method == nil || !nativeEnumFactoryMethodFlags(method.AccessFlags) || !nativeEnumOriginalFrameCapacity(method, 2, 1) {
 		return false
 	}
 	name := obj.GetClassName()
@@ -463,12 +471,12 @@ func nativeEnumDeclarationSynthesis(obj *ClassObject, resolve func(string) (*Cla
 		}
 		switch {
 		case n == "values" && d == "()"+array:
-			if valuesMethod != nil || method.AccessFlags != 9 {
+			if valuesMethod != nil || !nativeEnumFactoryMethodFlags(method.AccessFlags) {
 				return nil
 			}
 			valuesMethod = method
 		case n == "valueOf" && d == "(Ljava/lang/String;)"+descriptor:
-			if valueOf != nil || method.AccessFlags != 9 {
+			if valueOf != nil || !nativeEnumFactoryMethodFlags(method.AccessFlags) {
 				return nil
 			}
 			valueOf = method
