@@ -13,10 +13,11 @@ import (
 // the artifact's declaration inventory. Source alpha conversion must preserve
 // that binding even when the original symbolic owner is the child itself.
 const assertionStorageInheritedNameFixture = `class AliasScope{}
+class $jdec$storage$2$0 {static boolean value;}
 class StorageParent {static boolean $jdec$storage$2;}
 public class InheritedStorage extends StorageParent {
  static final boolean $assertionsDisabled=!AliasScope.class.desiredAssertionStatus();
- public static boolean inheritedValue(){return InheritedStorage.$jdec$storage$2;}
+ public static boolean inheritedValue(){return InheritedStorage.$jdec$storage$2 ^ $jdec$storage$2$0.value;}
  public static int algorithm(int n){if(!$assertionsDisabled&&n<0)throw new AssertionError(n);return n*3+5;}
 }
 class InheritedDriver {
@@ -26,7 +27,9 @@ class InheritedDriver {
   int rows=0;
   for(boolean field:new boolean[]{false,true}){
    StorageParent.$jdec$storage$2=field;
-   if(InheritedStorage.inheritedValue()!=field)throw new AssertionError("inherited field binding changed");
+   for(boolean other:new boolean[]{false,true}){
+   $jdec$storage$2$0.value=other;
+   if(InheritedStorage.inheritedValue()!=(field!=other))throw new AssertionError("inherited field binding changed");
    for(int n:new int[]{Integer.MIN_VALUE,-1,0,1,Integer.MAX_VALUE}){
     Throwable error=null;int value=0;
     try{value=InheritedStorage.algorithm(n);}catch(Throwable e){error=e;}
@@ -34,6 +37,7 @@ class InheritedDriver {
     if(fail!=(error instanceof AssertionError)||error!=null&&!(error instanceof AssertionError))throw new AssertionError("assertion storage binding changed");
     if(!fail&&value!=java.math.BigInteger.valueOf(n).multiply(java.math.BigInteger.valueOf(3)).add(java.math.BigInteger.valueOf(5)).intValue())throw new AssertionError("modular arithmetic changed");
     rows++;
+   }
    }
   }
   System.out.println(rows+":external-inherited-field:assertion-binding:arithmetic");
@@ -76,7 +80,7 @@ func TestAdversarialAssertionStorageKeepsExternalInheritedFieldNames(t *testing.
 				t.Helper()
 				for _, mode := range []string{"-ea", "-da"} {
 					out, err := exec.Command(java, "-Xverify:all", mode, "-cp", dir, "InheritedDriver").CombinedOutput()
-					if err != nil || string(out) != "10:external-inherited-field:assertion-binding:arithmetic\n" {
+					if err != nil || string(out) != "20:external-inherited-field:assertion-binding:arithmetic\n" {
 						t.Fatalf("independent %s oracle: %v\n%s", mode, err, out)
 					}
 				}
@@ -85,7 +89,7 @@ func TestAdversarialAssertionStorageKeepsExternalInheritedFieldNames(t *testing.
 			entries := map[string][]byte{}
 			dependencies := map[string][]byte{}
 			for name, raw := range files {
-				if name != "StorageParent.class" {
+				if name != "StorageParent.class" && name != "$jdec$storage$2$0.class" {
 					entries[name] = raw
 				}
 				if name != "InheritedStorage.class" {

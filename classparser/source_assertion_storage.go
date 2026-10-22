@@ -119,9 +119,46 @@ func (a *sourceFieldMetadataAuthority) assertionStorageAliases(work *workbudget.
 				}
 			}
 			classes[owner] = d
+			for _, attribute := range object.Attributes {
+				if inner, ok := attribute.(*InnerClassesAttribute); ok && inner != nil {
+					for _, row := range inner.Classes {
+						if row == nil || !nativeProofWork(work, 1) {
+							return
+						}
+						if row.InnerNameIndex != 0 {
+							name, known := sourceBridgeUTF8(object, row.InnerNameIndex)
+							if !known || !nativeProofWork(work, int64(len(name))) {
+								return
+							}
+							names[name] = true
+						}
+					}
+				}
+			}
 			for _, constant := range object.ConstantPool {
 				if !nativeProofWork(work, 1) {
 					return
+				}
+				// A new value name must not obscure an original type or package
+				// qualifier, even when its declaration is outside this archive.
+				if class, ok := constant.(*ConstantClassInfo); ok {
+					if class == nil {
+						return
+					}
+					name, known := sourceBridgeUTF8(object, class.NameIndex)
+					if !known || !nativeProofWork(work, int64(len(name))+1) {
+						return
+					}
+					if strings.HasPrefix(name, "[") {
+						name = strings.TrimLeft(name, "[")
+						if strings.HasPrefix(name, "L") && strings.HasSuffix(name, ";") {
+							name = name[1 : len(name)-1]
+						}
+					}
+					for _, part := range strings.Split(name, "/") {
+						names[part] = true
+					}
+					continue
 				}
 				field, ok := constant.(*ConstantFieldrefInfo)
 				if !ok {
