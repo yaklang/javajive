@@ -224,8 +224,32 @@ func (c *ClassObjectDumper) nativeEnumConstantInitializationsWithDeclarations(re
 				return fail("constant-specific declaration")
 			}
 			enclosing, method, known := originalAnonymousOwner(body)
-			if !known || enclosing != owner || method != "" {
-				return fail("constant-specific enclosing identity")
+			if known && enclosing == owner && method == "" {
+				// Anonymous Owner$N identity. Folding uses that binary name.
+			} else {
+				marker, descriptor, proved := c.renamedEnumConstantBody(body)
+				if !proved {
+					return fail("constant-specific enclosing identity")
+				}
+				if c.enumConstantBodyMarker == "" {
+					if marker != body.GetClassName() {
+						return fail("constant-specific enclosing identity")
+					}
+					c.enumConstantBodyMarker = marker
+				} else if marker != c.enumConstantBodyMarker {
+					return fail("constant-specific enclosing identity")
+				}
+				if c.enumProvedConstantBodies == nil {
+					c.enumProvedConstantBodies = map[string]string{}
+				}
+				if existing, duplicate := c.enumProvedConstantBodies[store.Member]; duplicate && existing != body.GetClassName() {
+					return fail("constant-specific enclosing identity")
+				}
+				c.enumProvedConstantBodies[store.Member] = body.GetClassName()
+				if c.enumMarkerDescriptors == nil {
+					c.enumMarkerDescriptors = map[string]bool{}
+				}
+				c.enumMarkerDescriptors[descriptor] = true
 			}
 		}
 		plan.constant, plan.sourceName, plan.ordinal, plan.storePC = store.Member, sourceName, ordinal, int(record.PC)

@@ -165,7 +165,13 @@ type ClassObjectDumper struct {
 	// enumSyntheticBackingField is the values() array proved by the enum
 	// protocol. Source regenerates it as $VALUES, so the original spelling is
 	// not emitted.
-	enumSyntheticBackingField      string
+	enumSyntheticBackingField string
+	// enumProvedConstantBodies maps a bytecode constant field to the renamed
+	// class that holds its body. enumMarkerDescriptors are the synthetic
+	// access bridges those bodies call; source regenerates both.
+	enumProvedConstantBodies       map[string]string
+	enumConstantBodyMarker         string
+	enumMarkerDescriptors          map[string]bool
 	interfaceInitializerHelpers    []*dumpedMethods
 	interfaceLambdaInitializer     *interfaceLambdaInitializerReceipt
 	constructorBoundaryHelpers     []*dumpedMethods
