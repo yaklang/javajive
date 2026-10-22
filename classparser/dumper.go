@@ -4610,8 +4610,8 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			}
 			c.MethodType = methodType.FunctionType()
 			if !isLambda {
-				paramsNewStrList = c.applyParameterAnnotations(method, name, descriptor, paramsNewStrList)
 				paramsNewStrList = c.applyParamTypeAnnotations(method, name, descriptor, methodType.FunctionType().ParamTypes, paramsNewStrList)
+				paramsNewStrList = c.applyParameterAnnotations(method, name, descriptor, paramsNewStrList)
 				var known bool
 				paramsNewStrList, known = c.applyOriginalSourceParameterFinality(method, descriptor, paramsNewStrList)
 				if !known {
@@ -5295,8 +5295,8 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 				paramList = append(paramList, fmt.Sprintf("%s %s", typeName, parameterNameIDs[idx].String()))
 			}
 		}
-		paramList = c.applyParameterAnnotations(method, name, descriptor, paramList)
 		paramList = c.applyParamTypeAnnotations(method, name, descriptor, paramTypes, paramList)
+		paramList = c.applyParameterAnnotations(method, name, descriptor, paramList)
 		var known bool
 		paramList, known = c.applyOriginalSourceParameterFinality(method, descriptor, paramList)
 		if !known {

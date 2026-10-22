@@ -59,7 +59,7 @@ func TestAdversarialArtifactLambdaMetadataKeepsIndependentAnonymousABI(t *testin
 	testArtifactLambdaMetadata(t, artifactLambdaWithAnonymousMetadataFixture, []bool{false, true}, "7:artifact:helpermetadata:timing:overflow\n")
 }
 
-func testArtifactLambdaMetadata(t *testing.T, sourceFixture string, namedModes []bool, want string) {
+func testArtifactLambdaMetadata(t *testing.T, sourceFixture string, namedModes []bool, want string, validateDeclarations ...func(*testing.T, []byte, []byte)) {
 	t.Helper()
 	modern, java := t04Tools(t)
 	native := os.Getenv("JAVA8_JAVAC")
@@ -129,9 +129,15 @@ func testArtifactLambdaMetadata(t *testing.T, sourceFixture string, namedModes [
 						if err != nil {
 							t.Fatal(err)
 						}
+						for _, validate := range validateDeclarations {
+							validate(t, original[owner+".class"], compiled)
+						}
 						restored, err := artifact.RestoreClassMetadata(owner+".class", compiled)
 						if err != nil || nativeBinaryShape(t, original[owner+".class"]) != nativeBinaryShape(t, restored) || lambdaParameterMetadataTables(t, original[owner+".class"]) != lambdaParameterMetadataTables(t, restored) {
 							t.Fatalf("original helper declarations/parameter metadata: %v", err)
+						}
+						for _, validate := range validateDeclarations {
+							validate(t, original[owner+".class"], restored)
 						}
 						nativeLexicalExactSignatures(t, owner+".class", original[owner+".class"], restored)
 						if constructorInvocationThrowsDeclarations(t, original[owner+".class"]) != constructorInvocationThrowsDeclarations(t, restored) {
