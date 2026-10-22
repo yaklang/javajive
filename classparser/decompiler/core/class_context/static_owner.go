@@ -105,6 +105,15 @@ func (f *ClassContext) staticOwnerTypeSyntax(owner, source string) bool {
 	return pkg == "" || !strings.HasPrefix(source, pkg+".") || !f.typeNameShadowsPackageRoot(root)
 }
 
+// packageNameObscured reports that the caller's package cannot qualify a
+// same-package type: its first identifier is already a type name in scope.
+func (f *ClassContext) packageNameObscured() bool {
+	if f == nil || f.PackageName == "" {
+		return false
+	}
+	return f.typeNameShadowsPackageRoot(strings.SplitN(f.PackageName, ".", 2)[0])
+}
+
 func (f *ClassContext) typeNameShadowsPackageRoot(name string) bool {
 	if f.LexicalTypeNames[name] || f.IsTypeParam(name) {
 		return true

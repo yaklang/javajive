@@ -973,6 +973,11 @@ func (f *ClassContext) ShortTypeName(name string) string {
 		// name would bind to the wrong type. In that case emit the fully-qualified name instead. The
 		// clashing set is precomputed from the constant pool by the dumper (render-order independent).
 		if f.SamePkgFQNames != nil && f.SamePkgFQNames[className] {
+			// Package a.k is not a package qualifier when type a is in scope.
+			// Keep the same-package simple name and leave the foreign type qualified.
+			if pkg == f.PackageName && f.packageNameObscured() {
+				return dotted
+			}
 			return pkg + "." + dotted
 		}
 		// Runtime lowering can introduce a platform owner absent from the
@@ -988,6 +993,9 @@ func (f *ClassContext) ShortTypeName(name string) string {
 			}
 		}
 		return dotted
+	}
+	if f.SamePkgFQNames != nil && f.SamePkgFQNames[className] && f.packageNameObscured() {
+		return pkg + "." + dotted
 	}
 	f.Import(name)
 	if f.BuildInLibsMap == nil {
