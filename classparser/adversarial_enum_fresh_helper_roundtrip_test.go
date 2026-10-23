@@ -30,11 +30,12 @@ class PacketValuesDriver {public static void main(String[]args)throws Exception 
 }}
 `
 
-func enumFreshOracleRun(t *testing.T, java, mode, dir, driver string) ([]byte, error) {
+func enumFreshOracleRun(t *testing.T, java, mode, dir, driver string, args ...string) ([]byte, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	log, err := exec.CommandContext(ctx, java, "-Xverify:all", mode, "-cp", dir, driver).CombinedOutput()
+	argv := append([]string{"-Xverify:all", mode, "-cp", dir, driver}, args...)
+	log, err := exec.CommandContext(ctx, java, argv...).CombinedOutput()
 	if ctx.Err() != nil {
 		t.Fatalf("enum oracle exceeded its per-world deadline: %s %s\n%s", driver, mode, log)
 	}
