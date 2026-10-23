@@ -651,9 +651,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			// nested, failed the InnerClasses lookup, and wrongly stripped `public`, making the class
 			// inaccessible across packages ("$Gson$Preconditions is not public in com.google.gson.internal").
 		case c.nativeAnonymousIndependentInitializerHeader() || c.nativeMemberIndependentSourceHeader() || c.reconstructionPhysicalHeader():
-			// Proved independent initializer tails and static source roots
-			// keep their ClassFile visibility. Other flat units retain their
-			// accessibility policy for references from separate source units.
+			// Independent physical reconstruction units and proved static
+			// source roots keep ClassFile visibility. Native declarations
+			// continue to use their original lexical source protocol.
 			if c.obj.AccessFlags&1 == 0 {
 				accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "public", ""))
 			}

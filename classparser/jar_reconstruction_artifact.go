@@ -28,6 +28,10 @@ import (
 // universe. Its only consumer, array element identities, empty-stack boundary
 // and supported debug PCs are checked before any edit; all other metadata
 // contracts still apply. The original initializer's Code is never copied.
+// A separately published flat synthetic class with only static declarations
+// can also owe removal of javac's added default Object constructor. Only an
+// unused exact default constructor is removed, alongside restoration of the
+// original synthetic class flag; every surviving fresh method stays untouched.
 type JarReconstructionArtifact struct{ source *JarSourceArtifact }
 
 var _ fs.ReadFileFS = (*JarReconstructionArtifact)(nil)
