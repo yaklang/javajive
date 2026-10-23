@@ -15,8 +15,11 @@ import (
 // a flat constructor's capture assignments can require restoration before
 // SUPER. Running the intermediate compiler output is not equivalent.
 //
-// Only matched instructions in the freshly compiled class are reordered. No
-// original executable bytes are copied. All existing field, method, bridge and
+// Matched instructions in the freshly compiled class can be reordered. A
+// separately proved qualified-SUPER projection can also neutralize only the
+// compiler-added enclosing null check, preserving an original implicit nullable
+// port and all instruction offsets. Original explicit null checks are excluded.
+// No original executable bytes are copied. All existing field, method, bridge and
 // metadata checks remain required. This operation does not certify the rest of
 // a method, JVM verification or whole-program equivalence; callers still owe
 // independent validation. Plain JarFS and JarSourceArtifact are unchanged.

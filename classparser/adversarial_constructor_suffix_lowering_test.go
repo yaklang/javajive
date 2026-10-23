@@ -75,6 +75,11 @@ func constructorSuffixFamilyRoundTrip(t *testing.T, fixture, debug string, owner
 
 func constructorSuffixFamilyAtTargetRoundTrip(t *testing.T, fixture, debug string, owners []string, expected string, release, sourceTarget int) ([]byte, []byte, *JarReconstructionArtifact) {
 	t.Helper()
+	return constructorSuffixFamilyAtTargetWithCompilerRoundTrip(t, fixture, debug, owners, expected, release, sourceTarget, ModernJavac)
+}
+
+func constructorSuffixFamilyAtTargetWithCompilerRoundTrip(t *testing.T, fixture, debug string, owners []string, expected string, release, sourceTarget int, profile SourceCompilerProfile) ([]byte, []byte, *JarReconstructionArtifact) {
+	t.Helper()
 	owner := owners[0]
 	modern, java := t04Tools(t)
 	native := os.Getenv("JAVA8_JAVAC")
@@ -106,7 +111,7 @@ func constructorSuffixFamilyAtTargetRoundTrip(t *testing.T, fixture, debug strin
 	if err := os.WriteFile(jar, t23Zip(t, owned), 0600); err != nil {
 		t.Fatal(err)
 	}
-	a, err := NewJarReconstructionArtifactFromLocal(jar, sourceTarget, ModernJavac, func(n string) ([]byte, bool) { b, k := original[n+".class"]; return b, k })
+	a, err := NewJarReconstructionArtifactFromLocal(jar, sourceTarget, profile, func(n string) ([]byte, bool) { b, k := original[n+".class"]; return b, k })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,6 +166,13 @@ func constructorSuffixFamilyAtTargetRoundTrip(t *testing.T, fixture, debug strin
 		}
 	}
 	args := []string{"-proc:none", "--release", strconv.Itoa(sourceTarget), "-g:" + debug, "-cp", out, "-sourcepath", out, "-d", out}
+	if profile == NativeJavac8 {
+		if sourceTarget != 8 {
+			t.Fatal("native fresh compiler requires target 8")
+		}
+		modern = native
+		args = []string{"-proc:none", "-source", "8", "-target", "8", "-g:" + debug, "-cp", out, "-sourcepath", out, "-d", out}
+	}
 	for _, name := range owners {
 		path := filepath.Join(out, name+".java")
 		if err := os.WriteFile(path, sources[name], 0600); err != nil {

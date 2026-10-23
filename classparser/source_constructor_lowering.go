@@ -43,6 +43,7 @@ type sourceConstructorLoweringPlan struct {
 	captures                                  []constructorLoweringCapture
 	arguments                                 []constructorLoweringArgument
 	body                                      bool
+	qualified                                 *constructorLoweringQualifiedSuper
 }
 
 type sourceConstructorLoweringPublication struct {
@@ -104,6 +105,7 @@ type constructorLoweringPacket struct {
 	firstEnd, secondEnd int
 	ops                 []*core.OpCode
 	argumentOrigins     []constructorLoweringOperandOrigin
+	qualifierGuards     []constructorLoweringQualifierGuard
 }
 
 func constructorLoweringCode(method *MemberInfo) *CodeAttribute {
@@ -127,6 +129,10 @@ func constructorLoweringPacketFor(object *ClassObject, method *MemberInfo, befor
 }
 
 func constructorLoweringTypedPacketFor(object *ClassObject, method *MemberInfo, before, original bool, work *workbudget.Budget, provider callbinding.Provider, captureCount ...int) *constructorLoweringPacket {
+	return constructorLoweringTypedPacketWithQualifier(object, method, before, original, false, work, provider, captureCount...)
+}
+
+func constructorLoweringTypedPacketWithQualifier(object *ClassObject, method *MemberInfo, before, original, qualified bool, work *workbudget.Budget, provider callbinding.Provider, captureCount ...int) *constructorLoweringPacket {
 	// The pre-nestmate capture packet has the same typed operands and receiver
 	// initialization cut in Java4 through Java8. Its whole instruction domain
 	// is checked below (including rejection of JSR/RET), independently of the
@@ -176,6 +182,7 @@ func constructorLoweringTypedPacketFor(object *ClassObject, method *MemberInfo, 
 	}
 	i, peak := 0, 1
 	var argumentOrigins []constructorLoweringOperandOrigin
+	var qualifierGuards []constructorLoweringQualifierGuard
 	widening := newConstructorWideningQuery(provider)
 	load := func(op *core.OpCode, slot int, typ string) bool {
 		return core.GetRetrieveIdx(op) == slot && constructorMotionLoad(op, typ)
@@ -244,7 +251,7 @@ func constructorLoweringTypedPacketFor(object *ClassObject, method *MemberInfo, 
 	}
 	delegate := func() bool {
 		var ok bool
-		p.arguments, argumentOrigins, p.superDescriptor, ok = constructorLoweringDelegateOperands(object, ops, &i, slots, params, p.super, widening, &peak, work)
+		p.arguments, argumentOrigins, p.superDescriptor, ok = constructorLoweringDelegateOperands(object, ops, &i, slots, params, p.super, widening, &peak, work, qualified, &qualifierGuards)
 		return ok
 	}
 	first, second := captures, delegate
@@ -259,7 +266,10 @@ func constructorLoweringTypedPacketFor(object *ClassObject, method *MemberInfo, 
 		return nil
 	}
 	p.body = i+1 != len(ops) || ops[i].Instr.OpCode != core.OP_RETURN
-	return &constructorLoweringPacket{p, code, boundary, int(ops[i].CurrentOffset), ops, argumentOrigins}
+	if qualified && (original || len(qualifierGuards) != 1 || before && !qualifierGuards[0].noop) {
+		return nil
+	}
+	return &constructorLoweringPacket{p, code, boundary, int(ops[i].CurrentOffset), ops, argumentOrigins, qualifierGuards}
 }
 
 func (c *ClassObjectDumper) planArtifactConstructorLowering(boundary *constructorSourceBoundary, code *CodeAttribute, method *MemberInfo, decoder *core.Decompiler) bool {
@@ -312,6 +322,7 @@ func (c *ClassObjectDumper) planArtifactConstructorLowering(boundary *constructo
 	if len(c.constructorLowerings) >= 64 && c.constructorLowerings[p.plan.descriptor] == nil {
 		return false
 	}
+	p.plan.qualified = c.constructorLoweringQualifiedSuperView(p.plan)
 	boundary.lowering = p.plan
 	return true
 }
@@ -612,15 +623,15 @@ func (a *sourceConstructorLoweringAuthority) lower(original, compiled []byte, wo
 		}
 		seen[desc] = true
 		originalPacket := constructorLoweringTypedPacketFor(want, expected[desc], true, true, work, provider)
-		if originalPacket == nil || !reflect.DeepEqual(plan, originalPacket.plan) {
+		if originalPacket == nil || !constructorLoweringExecutablePlanEqual(plan, originalPacket.plan) || !a.constructorLoweringQualifiedSuperUnchanged(want, plan, work) {
 			return nil, constructorLoweringFailure(work, "original packet changed")
 		}
-		packet := constructorLoweringTypedPacketFor(got, method, false, false, work, provider, len(plan.captures))
-		if packet == nil || !reflect.DeepEqual(plan, packet.plan) {
+		packet := constructorLoweringTypedPacketWithQualifier(got, method, false, false, plan.qualified != nil, work, provider, len(plan.captures))
+		if packet == nil || !constructorLoweringExecutablePlanEqual(plan, packet.plan) {
 			// A separately verified already-lowered packet makes completion
 			// idempotent. An arbitrary constructor body is never a substitute.
-			packet = constructorLoweringTypedPacketFor(got, method, true, false, work, provider, len(plan.captures))
-			if packet == nil || !reflect.DeepEqual(plan, packet.plan) {
+			packet = constructorLoweringTypedPacketWithQualifier(got, method, true, false, plan.qualified != nil, work, provider, len(plan.captures))
+			if packet == nil || !constructorLoweringExecutablePlanEqual(plan, packet.plan) {
 				return nil, constructorLoweringFailure(work, "fresh constructor does not match original slots, fields and delegation")
 			}
 			if _, err := constructorLoweringMethodEdit(compiled, got, method, layout, packet, false, work); err != nil {
@@ -793,6 +804,17 @@ func constructorLoweringCodeBytes(raw []byte, object *ClassObject, packet *const
 		copy(out, fresh[packet.firstEnd:packet.secondEnd])
 		copy(out[packet.secondEnd-packet.firstEnd:], fresh[:packet.firstEnd])
 		copy(out[packet.secondEnd:], fresh[packet.secondEnd:])
+	}
+	for _, guard := range packet.qualifierGuards {
+		start, known := pcMap[guard.start]
+		if !known || guard.end-guard.start != 5 || start < 0 || start+5 > packet.secondEnd {
+			return fail("unproved qualified SUPER guard span")
+		}
+		// Only the compiler's extra qualifier check is removed. Keep its
+		// width as NOPs, so all suffix frames, handlers and PCs remain fixed.
+		for i := start; i < start+5; i++ {
+			raw[8+i] = core.OP_NOP
+		}
 	}
 	return work.Check()
 }

@@ -566,6 +566,16 @@ func (p *constructorSourceBoundary) renderDelegation(ctx *class_context.ClassCon
 	if p == nil || p.delegate == nil {
 		return "", nil
 	}
+	if p.lowering != nil && p.lowering.qualified != nil {
+		if p.throwsReceipt != nil || p.carrier != "" {
+			return "", fmt.Errorf("qualified SUPER requires independent binding completion")
+		}
+		args := p.delegate.ArgumentStrings(ctx)
+		if len(args) != len(p.lowering.arguments) || len(args) == 0 {
+			return "", fmt.Errorf("qualified SUPER operand count changed")
+		}
+		return "(" + args[0] + ").super(" + strings.Join(args[1:], ",") + ")", nil
+	}
 	if p.throwsReceipt != nil {
 		if p.throwsReceipt.plan != p {
 			return "", fmt.Errorf("foreign constructor invocation throws source receipt")

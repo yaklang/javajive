@@ -43,7 +43,7 @@ func constructorLoweringOperandAssignable(argument constructorLoweringArgument, 
 // unique uninitialized identity, duplicated once and consumed by its own <init>.
 // No stores, arbitrary DUPs, receiver uses, branches or discarded effects are
 // admitted. Hence the final SUPER consumes the entire stack above its receiver.
-func constructorLoweringDelegateOperands(object *ClassObject, ops []*core.OpCode, at *int, slots map[int]int, params []string, super string, widening *constructorWideningQuery, peak *int, work *workbudget.Budget) ([]constructorLoweringArgument, []constructorLoweringOperandOrigin, string, bool) {
+func constructorLoweringDelegateOperands(object *ClassObject, ops []*core.OpCode, at *int, slots map[int]int, params []string, super string, widening *constructorWideningQuery, peak *int, work *workbudget.Budget, qualified bool, guards *[]constructorLoweringQualifierGuard) ([]constructorLoweringArgument, []constructorLoweringOperandOrigin, string, bool) {
 	fail := func() ([]constructorLoweringArgument, []constructorLoweringOperandOrigin, string, bool) {
 		return nil, nil, "", false
 	}
@@ -81,6 +81,19 @@ func constructorLoweringDelegateOperands(object *ClassObject, ops []*core.OpCode
 		op := ops[*at]
 		pc := int(op.CurrentOffset)
 		switch op.Instr.OpCode {
+		case core.OP_DUP, core.OP_NOP:
+			if !qualified || len(*guards) != 0 || len(stack) != 1 || stack[0].pendingOwner != "" || stack[0].argument.slot <= 0 || !callbinding.Reference(stack[0].argument.descriptor) {
+				return fail()
+			}
+			guard, count, ok := constructorLoweringReadQualifierGuard(object, ops, *at)
+			if !ok {
+				return fail()
+			}
+			*guards = append(*guards, guard)
+			*at += count - 1
+			if *peak < 3 {
+				*peak = 3
+			}
 		case core.OP_NEW:
 			if op.IsWide || len(op.Data) != 2 || *at+1 >= len(ops) || ops[*at+1].Instr.OpCode != core.OP_DUP || ops[*at+1].IsWide || len(ops[*at+1].Data) != 0 {
 				return fail()
