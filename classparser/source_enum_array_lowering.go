@@ -100,9 +100,23 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 	if len(fields) != len(freshFields) {
 		return decline()
 	}
+	wantMembers, freshMembers := map[sourceFieldIdentity]*MemberInfo{}, map[sourceFieldIdentity]*MemberInfo{}
+	for _, pair := range []struct {
+		object *ClassObject
+		index  map[sourceFieldIdentity]*MemberInfo
+	}{{want, wantMembers}, {got, freshMembers}} {
+		for _, field := range pair.object.Fields {
+			name, _ := sourceBridgeUTF8(pair.object, field.NameIndex)
+			desc, _ := sourceBridgeUTF8(pair.object, field.DescriptorIndex)
+			if !nativeProofWork(work, int64(len(name)+len(desc))+1) {
+				return decline()
+			}
+			pair.index[sourceFieldIdentity{name, desc}] = field
+		}
+	}
 	for key, flags := range fields {
 		actual, found := freshFields[key]
-		if !found || actual != flags {
+		if !found || actual != flags || !enumArrayUTF8Equal(want, wantMembers[key].NameIndex, got, freshMembers[key].NameIndex) || !enumArrayUTF8Equal(want, wantMembers[key].DescriptorIndex, got, freshMembers[key].DescriptorIndex) {
 			return decline()
 		}
 	}
@@ -131,7 +145,7 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 	expected := map[sourceLambdaMethodIdentity]*MemberInfo{}
 	for _, method := range want.Methods {
 		key, known := identity(want, method)
-		if !known || expected[key] != nil || !nativeProofWork(work, 1) {
+		if !known || expected[key] != nil || !nativeProofWork(work, int64(len(key.name)+len(key.descriptor))+1) {
 			return decline()
 		}
 		expected[key] = method
@@ -141,12 +155,12 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 	seen := map[sourceLambdaMethodIdentity]bool{}
 	for _, method := range got.Methods {
 		key, known := identity(got, method)
-		if !known || seen[key] || !nativeProofWork(work, 1) {
+		if !known || seen[key] || !nativeProofWork(work, int64(len(key.name)+len(key.descriptor))+1) {
 			return decline()
 		}
 		seen[key] = true
 		if old := expected[key]; old != nil {
-			if old.AccessFlags != method.AccessFlags {
+			if old.AccessFlags != method.AccessFlags || !enumArrayUTF8Equal(want, old.NameIndex, got, method.NameIndex) || !enumArrayUTF8Equal(want, old.DescriptorIndex, got, method.DescriptorIndex) {
 				return decline()
 			}
 			if key.name == "<clinit>" && key.descriptor == "()V" {
@@ -183,11 +197,15 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 		return decline()
 	}
 	prefix := len(constants) * 6
-	if !enumArrayConstantPrefix(want, oldOps, constants, work) || !enumArrayConstantPrefix(got, initOps, constants, work) || len(initOps) != prefix+3 || len(oldOps) != prefix+4+4*len(constants) || !nativeEnumValuesArrayPacket(want, oldOps[prefix:len(oldOps)-2], constants, work) || !nativeEnumMemberOperand(got, initOps[prefix], core.OP_INVOKESTATIC, owner, helperKey.name, helperKey.descriptor) || !nativeEnumOpcode(initOps[len(initOps)-1], core.OP_RETURN) || !nativeEnumOpcode(oldOps[len(oldOps)-1], core.OP_RETURN) {
+	if !enumArrayConstantPrefix(want, oldOps, constants, wantMembers, work) || !enumArrayConstantPrefix(got, initOps, constants, freshMembers, work) || len(initOps) != prefix+3 || len(oldOps) != prefix+4+4*len(constants) || !nativeEnumValuesArrayPacket(want, oldOps[prefix:len(oldOps)-2], constants, work) || !nativeEnumMemberOperand(got, initOps[prefix], core.OP_INVOKESTATIC, owner, helperKey.name, helperKey.descriptor) || !enumArrayOwnMember(got, initOps[prefix], helper.NameIndex, helper.DescriptorIndex) || !nativeEnumOpcode(initOps[len(initOps)-1], core.OP_RETURN) || !nativeEnumOpcode(oldOps[len(oldOps)-1], core.OP_RETURN) {
 		return decline()
 	}
 	oldStore := constructorMotionMember(want, oldOps[len(oldOps)-2], core.OP_PUTSTATIC)
 	if oldStore == nil || !nativeEnumMemberOperand(want, oldOps[len(oldOps)-2], core.OP_PUTSTATIC, owner, oldStore.Member, "[L"+owner+";") || !nativeEnumMemberOperand(got, initOps[prefix+1], core.OP_PUTSTATIC, owner, oldStore.Member, "[L"+owner+";") || fields[sourceFieldIdentity{oldStore.Member, "[L" + owner + ";"}] != 0x101a {
+		return decline()
+	}
+	backingKey := sourceFieldIdentity{oldStore.Member, "[L" + owner + ";"}
+	if !enumArrayOwnMember(want, oldOps[len(oldOps)-2], wantMembers[backingKey].NameIndex, wantMembers[backingKey].DescriptorIndex) || !enumArrayOwnMember(got, initOps[prefix+1], freshMembers[backingKey].NameIndex, freshMembers[backingKey].DescriptorIndex) || !enumArrayExactElements(want, oldOps[prefix:len(oldOps)-2], constants, wantMembers) || !enumArrayExactElements(got, arrayOps[:len(arrayOps)-1], constants, freshMembers) {
 		return decline()
 	}
 	// A surviving method handle would make deletion observable even without a
@@ -268,11 +286,28 @@ func enumArrayInstructionSpans(code []byte, ops []*core.OpCode) bool {
 
 // These prefixes end at an empty stack. Each no-extra-argument allocation
 // stores its exact original name/ordinal instance before the array is built.
-func enumArrayConstantPrefix(object *ClassObject, ops []*core.OpCode, constants []string, work *workbudget.Budget) bool {
+func enumArrayConstantPrefix(object *ClassObject, ops []*core.OpCode, constants []string, fields map[sourceFieldIdentity]*MemberInfo, work *workbudget.Budget) bool {
 	if len(ops) < len(constants)*6 || !nativeProofWork(work, int64(len(constants))*6+1) {
 		return false
 	}
 	owner := object.GetClassName()
+	var constructor *MemberInfo
+	for _, method := range object.Methods {
+		name, _ := sourceBridgeUTF8(object, method.NameIndex)
+		desc, _ := sourceBridgeUTF8(object, method.DescriptorIndex)
+		if !nativeProofWork(work, int64(len(name)+len(desc))+1) {
+			return false
+		}
+		if name == "<init>" && desc == "(Ljava/lang/String;I)V" {
+			if constructor != nil {
+				return false
+			}
+			constructor = method
+		}
+	}
+	if len(constants) != 0 && constructor == nil {
+		return false
+	}
 	for i, name := range constants {
 		at := i * 6
 		index, known := nativeEnumCPIndex(ops[at+2])
@@ -287,7 +322,57 @@ func enumArrayConstantPrefix(object *ClassObject, ops []*core.OpCode, constants 
 			known = false
 		}
 		ordinal, ordinalOK := nativeEnumOriginalInt(object, ops[at+3])
-		if !nativeEnumOpcode(ops[at], core.OP_NEW) || !nativeEnumClassOperand(object, ops[at], owner) || !nativeEnumOpcode(ops[at+1], core.OP_DUP) || !known || literal != name || !ordinalOK || ordinal != i || !nativeEnumMemberOperand(object, ops[at+4], core.OP_INVOKESPECIAL, owner, "<init>", "(Ljava/lang/String;I)V") || !nativeEnumMemberOperand(object, ops[at+5], core.OP_PUTSTATIC, owner, name, "L"+owner+";") {
+		field := fields[sourceFieldIdentity{name, "L" + owner + ";"}]
+		classIndex, _ := nativeEnumCPIndex(ops[at])
+		if field == nil || !nativeEnumOpcode(ops[at], core.OP_NEW) || !nativeEnumClassOperand(object, ops[at], owner) || !enumArrayClassEqual(object, classIndex, object.ThisClass) || !nativeEnumOpcode(ops[at+1], core.OP_DUP) || !known || literal != name || !ordinalOK || ordinal != i || !nativeEnumMemberOperand(object, ops[at+4], core.OP_INVOKESPECIAL, owner, "<init>", "(Ljava/lang/String;I)V") || !nativeEnumMemberOperand(object, ops[at+5], core.OP_PUTSTATIC, owner, name, "L"+owner+";") || !enumArrayOwnMember(object, ops[at+5], field.NameIndex, field.DescriptorIndex) {
+			return false
+		}
+		stringInfo, ok := object.ConstantPool[index-1].(*ConstantStringInfo)
+		if !ok || stringInfo == nil || !enumArrayUTF8Equal(object, stringInfo.StringIndex, object, field.NameIndex) || !enumArrayOwnMember(object, ops[at+4], constructor.NameIndex, constructor.DescriptorIndex) {
+			return false
+		}
+	}
+	return true
+}
+
+// Display strings are not symbol identities: an unpaired UTF-16 unit and a
+// literal backslash-u spelling can share the legacy display representation.
+func enumArrayUTF8Equal(left *ClassObject, li uint16, right *ClassObject, ri uint16) bool {
+	a, ak := sourceParameterUTF8Key(left, li)
+	b, bk := sourceParameterUTF8Key(right, ri)
+	return ak && bk && a == b
+}
+
+func enumArrayClassEqual(object *ClassObject, left, right uint16) bool {
+	a, ak := sourceParameterClassKey(object, left)
+	b, bk := sourceParameterClassKey(object, right)
+	return ak && bk && a == b
+}
+
+func enumArrayOwnMember(object *ClassObject, op *core.OpCode, name, descriptor uint16) bool {
+	index, known := nativeEnumCPIndex(op)
+	if !known || index == 0 || int(index) > len(object.ConstantPool) {
+		return false
+	}
+	ref := nativeConstantMember(object.ConstantPool[index-1])
+	if ref == nil || !enumArrayClassEqual(object, ref.ClassIndex, object.ThisClass) || ref.NameAndTypeIndex == 0 || int(ref.NameAndTypeIndex) > len(object.ConstantPool) {
+		return false
+	}
+	nt, known := object.ConstantPool[ref.NameAndTypeIndex-1].(*ConstantNameAndTypeInfo)
+	return known && nt != nil && enumArrayUTF8Equal(object, nt.NameIndex, object, name) && enumArrayUTF8Equal(object, nt.DescriptorIndex, object, descriptor)
+}
+
+func enumArrayExactElements(object *ClassObject, ops []*core.OpCode, constants []string, fields map[sourceFieldIdentity]*MemberInfo) bool {
+	if len(ops) != 2+4*len(constants) {
+		return false
+	}
+	index, known := nativeEnumCPIndex(ops[1])
+	if !known || !enumArrayClassEqual(object, index, object.ThisClass) {
+		return false
+	}
+	for i, name := range constants {
+		field := fields[sourceFieldIdentity{name, "L" + object.GetClassName() + ";"}]
+		if field == nil || !enumArrayOwnMember(object, ops[4+4*i], field.NameIndex, field.DescriptorIndex) {
 			return false
 		}
 	}
