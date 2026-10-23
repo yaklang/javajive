@@ -216,6 +216,14 @@ func TestStaticCallImportChecksBothTypeNamespacesAndOwnerKind(t *testing.T) {
 					probe := declarations["probe/Probe"]
 					probe.Methods = []callbinding.Method{{Name: "compute", Desc: "()I", Public: true, Static: true}}
 					declarations[probe.Name] = probe
+				case "clear root with own method":
+					// The caller shadows the method name but nothing obscures the
+					// owner's package root, so the qualified TypeName is still legal.
+					f.TypeParams = nil
+					f.SourceValueNameShadow = nil
+					probe := declarations["probe/Probe"]
+					probe.Methods = []callbinding.Method{{Name: "compute", Desc: "()I", Public: true, Static: true}}
+					declarations[probe.Name] = probe
 				}
 				declarations["a/Api"] = api
 				if variant == "missing owner" {
@@ -248,6 +256,8 @@ func TestStaticCallImportChecksBothTypeNamespacesAndOwnerKind(t *testing.T) {
 					want, imports = "((Api)null).", ""
 				} else if variant == "obscured root with own method" || variant == "method conflict" {
 					want, imports = "Api.", ""
+				} else if variant == "clear root with own method" {
+					want, imports = "a.Api.", ""
 				}
 				if prefix != want || strings.Join(f.StaticMethodImports.Imports(), ",") != imports {
 					t.Fatalf("prefix=%q imports=%v want=%q/%q", prefix, f.StaticMethodImports.Imports(), want, imports)
