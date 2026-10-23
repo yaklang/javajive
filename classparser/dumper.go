@@ -1890,7 +1890,6 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// Inject a never-taken throw so the catch is live, and wrap the folded
 	// calls so InterruptedException is not unreported. Kill-switch:
 	// JDEC_MONITOR_IE_TRY_OFF=1.
-	full = c.sourceRewrite("fixMonitorInterruptedTry", "class_source", full, fixMonitorInterruptedTry)
 	// AbstractFuture$SynchronizedHelper cas* methods: CFG emptied the
 	// synchronized CAS body (private outer fields aren't denotable from the
 	// flattened inner class), leaving boolean methods with no return.
@@ -9091,102 +9090,6 @@ func fixAbstractServiceFinally(body string) string {
 	}
 	body = strings.ReplaceAll(body, abstractServiceStartDupCatch, abstractServiceStartFinally)
 	body = strings.ReplaceAll(body, abstractServiceStopDupCatch, abstractServiceStopFinally)
-	return body
-}
-
-// fixMonitorInterruptedTry repairs guava Monitor's empty try{break}
-// catch(InterruptedException) loops (the interrupting call was folded out)
-// by injecting a never-taken throw and wrapping the folded tryLock/awaitNanos
-// so the checked exception is caught. Kill-switch: JDEC_MONITOR_IE_TRY_OFF=1.
-func fixMonitorInterruptedTry(body string) string {
-	if jdecenv.Get("JDEC_MONITOR_IE_TRY_OFF") == "1" {
-		return body
-	}
-	if !strings.Contains(body, "class Monitor") && !strings.Contains(body, "activeGuards") &&
-		!strings.Contains(body, "class Uninterruptibles") {
-		return body
-	}
-	if !strings.Contains(body, "catch(InterruptedException") {
-		return body
-	}
-	empty := "try{\n\t\t\t\t\t\tbreak;\n\t\t\t\t\t}catch(InterruptedException"
-	filled := "try{\n\t\t\t\t\t\tif(false)throw new InterruptedException();\n\t\t\t\t\t\tbreak;\n\t\t\t\t\t}catch(InterruptedException"
-	body = strings.ReplaceAll(body, empty, filled)
-	empty2 := "try{\n\t\t\t\t\t\t\tbreak;\n\t\t\t\t\t\t}catch(InterruptedException"
-	filled2 := "try{\n\t\t\t\t\t\t\tif(false)throw new InterruptedException();\n\t\t\t\t\t\t\tbreak;\n\t\t\t\t\t\t}catch(InterruptedException"
-	body = strings.ReplaceAll(body, empty2, filled2)
-
-	// Folded tryLock/awaitNanos: wrap so IE is caught (uninterruptible paths).
-	body = strings.ReplaceAll(body,
-		"boolean var8 = var4.tryLock(var7,TimeUnit.NANOSECONDS);",
-		"boolean var8 = false;\n\t\t\t\ttry{\n\t\t\t\t\tvar8 = var4.tryLock(var7,TimeUnit.NANOSECONDS);\n\t\t\t\t}catch(InterruptedException var8_ie){\n\t\t\t\t\tvar5 = true;\n\t\t\t\t}")
-	body = strings.ReplaceAll(body,
-		"if (var5.tryLock(var9,TimeUnit.NANOSECONDS)){",
-		"boolean var5_tl = false;\n\t\t\t\t\ttry{\n\t\t\t\t\t\tvar5_tl = var5.tryLock(var9,TimeUnit.NANOSECONDS);\n\t\t\t\t\t}catch(InterruptedException var10_ie){\n\t\t\t\t\t\tvar8 = true;\n\t\t\t\t\t}\n\t\t\t\t\tif (var5_tl){")
-	body = strings.ReplaceAll(body,
-		"var9_1 = this.awaitNanos(var1,var10,var7);",
-		"try{\n\t\t\t\t\t\tvar9_1 = this.awaitNanos(var1,var10,var7);\n\t\t\t\t\t}catch(InterruptedException var11_ie){\n\t\t\t\t\t\tvar8 = true;\n\t\t\t\t\t\tvar9_1 = false;\n\t\t\t\t\t}")
-	body = strings.ReplaceAll(body,
-		"boolean var9_1 = this.awaitNanos(var1,var8,(var5) != (0));",
-		"boolean var9_1 = false;\n\t\t\t\t\ttry{\n\t\t\t\t\t\tvar9_1 = this.awaitNanos(var1,var8,(var5) != (0));\n\t\t\t\t\t}catch(InterruptedException var9_ie){\n\t\t\t\t\t\tvar7 = true;\n\t\t\t\t\t}")
-
-	if strings.Contains(body, "class Uninterruptibles") {
-		wrap := func(stmt string) string {
-			return "try{\n\t\t\t" + stmt + "\n\t\t}catch(InterruptedException var_ie){\n\t\t}\n\t\t"
-		}
-		for _, stmt := range []string{
-			"var0.await();",
-			"var0.join();",
-			"var0.get();",
-			"var0.take();",
-			"var0.put(var1);",
-			"var0.acquire();",
-		} {
-			if strings.Contains(body, stmt) && !strings.Contains(body, "try{\n\t\t\t"+stmt) {
-				body = strings.ReplaceAll(body, "\t\t"+stmt, "\t\t"+wrap(stmt))
-			}
-		}
-		body = strings.ReplaceAll(body,
-			"boolean var6 = var0.await(var4,TimeUnit.NANOSECONDS);",
-			"boolean var6 = false;\n\t\t\ttry{\n\t\t\t\tvar6 = var0.await(var4,TimeUnit.NANOSECONDS);\n\t\t\t}catch(InterruptedException var6_ie){\n\t\t\t\tvar3 = 1;\n\t\t\t}")
-		body = strings.ReplaceAll(body,
-			"boolean var6 = var0.tryAcquire(var4,TimeUnit.NANOSECONDS);",
-			"boolean var6 = false;\n\t\t\ttry{\n\t\t\t\tvar6 = var0.tryAcquire(var4,TimeUnit.NANOSECONDS);\n\t\t\t}catch(InterruptedException var6_ie){\n\t\t\t\tvar3 = 1;\n\t\t\t}")
-		body = strings.ReplaceAll(body,
-			"Object var6 = var0.poll(var4,TimeUnit.NANOSECONDS);",
-			"Object var6 = null;\n\t\t\ttry{\n\t\t\t\tvar6 = var0.poll(var4,TimeUnit.NANOSECONDS);\n\t\t\t}catch(InterruptedException var6_ie){\n\t\t\t\tvar3 = 1;\n\t\t\t}")
-		body = strings.ReplaceAll(body,
-			"Object var2 = var0.get();",
-			"Object var2 = null;\n\t\ttry{\n\t\t\tvar2 = var0.get();\n\t\t}catch(InterruptedException var2_ie){\n\t\t\tvar1 = 1;\n\t\t}")
-		body = strings.ReplaceAll(body,
-			"Object var4 = var0.get(var5,TimeUnit.NANOSECONDS);",
-			"Object var4 = null;\n\t\t\ttry{\n\t\t\t\tvar4 = var0.get(var5,TimeUnit.NANOSECONDS);\n\t\t\t}catch(InterruptedException var4_ie){\n\t\t\t\tvar3 = 1;\n\t\t\t}")
-		body = strings.ReplaceAll(body,
-			"Object var2 = var0.take();",
-			"Object var2 = null;\n\t\ttry{\n\t\t\tvar2 = var0.take();\n\t\t}catch(InterruptedException var2_ie){\n\t\t\tvar1 = 1;\n\t\t}")
-		body = strings.ReplaceAll(body,
-			"boolean var7 = var0.tryAcquire(var1,var5,TimeUnit.NANOSECONDS);",
-			"boolean var7 = false;\n\t\t\ttry{\n\t\t\t\tvar7 = var0.tryAcquire(var1,var5,TimeUnit.NANOSECONDS);\n\t\t\t}catch(InterruptedException var7_ie){\n\t\t\t\tvar4 = 1;\n\t\t\t}")
-		body = strings.ReplaceAll(body,
-			"TimeUnit.NANOSECONDS.sleep(var3);",
-			"try{\n\t\t\t\tTimeUnit.NANOSECONDS.sleep(var3);\n\t\t\t}catch(InterruptedException var3_ie){\n\t\t\t\tvar2 = 1;\n\t\t\t}")
-		body = strings.ReplaceAll(body,
-			"TimeUnit.NANOSECONDS.timedJoin(var0,var4);",
-			"try{\n\t\t\t\tTimeUnit.NANOSECONDS.timedJoin(var0,var4);\n\t\t\t}catch(InterruptedException var4_ie){\n\t\t\t\tvar3 = 1;\n\t\t\t}")
-		body = strings.ReplaceAll(body,
-			"Object var6 = var0.get(var4,TimeUnit.NANOSECONDS);",
-			"Object var6 = null;\n\t\t\ttry{\n\t\t\t\tvar6 = var0.get(var4,TimeUnit.NANOSECONDS);\n\t\t\t}catch(InterruptedException var6_ie){\n\t\t\t\tvar3 = 1;\n\t\t\t}")
-		// Also inject 4-tab and 5-tab empty tries used by Uninterruptibles.
-		empty5 := "try{\n\t\t\tbreak;\n\t\t}catch(InterruptedException"
-		filled5 := "try{\n\t\t\tif(false)throw new InterruptedException();\n\t\t\tbreak;\n\t\t}catch(InterruptedException"
-		body = strings.ReplaceAll(body, empty5, filled5)
-		empty4 := "try{\n\t\t\t\tbreak;\n\t\t\t}catch(InterruptedException"
-		filled4 := "try{\n\t\t\t\tif(false)throw new InterruptedException();\n\t\t\t\tbreak;\n\t\t\t}catch(InterruptedException"
-		body = strings.ReplaceAll(body, empty4, filled4)
-		empty5b := "try{\n\t\t\t\t\tbreak;\n\t\t\t\t}catch(InterruptedException"
-		filled5b := "try{\n\t\t\t\t\tif(false)throw new InterruptedException();\n\t\t\t\t\tbreak;\n\t\t\t\t}catch(InterruptedException"
-		body = strings.ReplaceAll(body, empty5b, filled5b)
-	}
 	return body
 }
 
