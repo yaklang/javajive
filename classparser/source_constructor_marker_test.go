@@ -57,14 +57,17 @@ func TestAdversarialConstructorMarkerRequiresEquivalentTypedForwarding(t *testin
 				f.MajorVersion = 54
 			case "no-op padding":
 				code.Code = append([]byte{byte(core.OP_NOP)}, code.Code...)
+				code.AttrLen++
 			case "receiver":
 				code.Code[0] = byte(core.OP_ALOAD_1)
 			case "wide argument slot":
 				code.Code[1] = byte(core.OP_LLOAD_2)
 			case "marker read":
 				code.Code = append([]byte{byte(core.OP_ALOAD), 7, byte(core.OP_POP)}, code.Code...)
+				code.AttrLen += 3
 			case "extra effect":
 				code.Code = append([]byte{byte(core.OP_ICONST_0), byte(core.OP_POP)}, code.Code...)
+				code.AttrLen += 2
 			case "different target":
 				for _, c := range f.ConstantPool {
 					if r, ok := c.(*ConstantMethodrefInfo); ok {
@@ -80,6 +83,7 @@ func TestAdversarialConstructorMarkerRequiresEquivalentTypedForwarding(t *testin
 				}
 			case "handler":
 				code.ExceptionTable = []*ExceptionTableEntry{{StartPc: 0, EndPc: 1, HandlerPc: 0}}
+				code.AttrLen += 8
 			case "stack":
 				code.MaxStack = 0
 			case "locals":
