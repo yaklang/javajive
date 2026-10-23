@@ -6,35 +6,35 @@ import (
 	"github.com/yaklang/javajive/internal/jdecenv"
 )
 
-// maxReplaceWalkDepth stops a long chain of distinct ternaries or calls from
-// growing the goroutine stack until the process stalls. Nodes already in the
-// walk are also skipped via the replacing flag.
-const maxReplaceWalkDepth = 128
+// maxReplaceVisits is the number of nodes one top-level ReplaceVar may touch.
+// A binary tree of distinct ternaries is exponential in depth; a depth cap
+// still visits 2^depth nodes. The counter is not decremented until the
+// outermost call returns, so the whole walk shares one budget.
+const maxReplaceVisits = 10000
 
 var (
 	replaceWalkMu    sync.Mutex
-	replaceWalkDepth = map[uint64]int{}
+	replaceWalkCount = map[uint64]int{}
 )
 
-func enterReplaceWalk() bool {
+func beginReplaceWalk() (proceed bool, root bool) {
 	id := jdecenv.Goid()
 	replaceWalkMu.Lock()
 	defer replaceWalkMu.Unlock()
-	if replaceWalkDepth[id] >= maxReplaceWalkDepth {
-		return false
+	n := replaceWalkCount[id]
+	if n >= maxReplaceVisits {
+		return false, false
 	}
-	replaceWalkDepth[id]++
-	return true
+	replaceWalkCount[id] = n + 1
+	return true, n == 0
 }
 
-func leaveReplaceWalk() {
-	id := jdecenv.Goid()
-	replaceWalkMu.Lock()
-	defer replaceWalkMu.Unlock()
-	n := replaceWalkDepth[id]
-	if n <= 1 {
-		delete(replaceWalkDepth, id)
+func endReplaceWalk(root bool) {
+	if !root {
 		return
 	}
-	replaceWalkDepth[id] = n - 1
+	id := jdecenv.Goid()
+	replaceWalkMu.Lock()
+	delete(replaceWalkCount, id)
+	replaceWalkMu.Unlock()
 }

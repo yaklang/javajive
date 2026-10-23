@@ -980,10 +980,14 @@ func (f *FunctionCallExpression) Clone() *FunctionCallExpression {
 // ReplaceVar implements JavaValue. Nested variable ids are rewritten; invoke
 // identity (Kind, OriginPC, Descriptor, ClassName, FunctionName) is kept.
 func (f *FunctionCallExpression) ReplaceVar(oldId *utils.VariableId, newId *utils.VariableId) {
-	if f == nil || f.replacing || !enterReplaceWalk() {
+	if f == nil || f.replacing {
 		return
 	}
-	defer leaveReplaceWalk()
+	proceed, root := beginReplaceWalk()
+	if !proceed {
+		return
+	}
+	defer endReplaceWalk(root)
 	f.replacing = true
 	defer func() { f.replacing = false }()
 	if f.Object != nil {
