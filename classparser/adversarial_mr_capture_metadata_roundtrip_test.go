@@ -3,6 +3,7 @@ package javaclassparser
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -210,6 +211,9 @@ func TestAdversarialMRCaptureMetadataKeepsTargetAndProvenanceGuards(t *testing.T
 					var err error
 					if kind == "static" {
 						p := *authority.anonymous[child]
+						// Isolate the version/nest guard from the independent stale
+						// hash guard: even an otherwise bound packet cannot cross it.
+						p.originalHash = sha256.Sum256(original)
 						if variant == "stale proof" {
 							p.originalHash[0] ^= 1
 						}
@@ -220,6 +224,7 @@ func TestAdversarialMRCaptureMetadataKeepsTargetAndProvenanceGuards(t *testing.T
 						result, err = restoreSourceAnonymousClassMetadataAtTarget(original, fresh, plans, target, work)
 					} else {
 						p := *authority.constructorPlan(child)
+						p.originalHash = sha256.Sum256(original)
 						if variant == "stale proof" {
 							p.originalHash[0] ^= 1
 						}
