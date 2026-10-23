@@ -59,8 +59,9 @@ func (a *sourceConstructorLoweringAuthority) enumArraySourceReturned(owner strin
 
 // A newer compiler can add a private array helper to a Java8 enum whose
 // original initializer constructed that same array inline. The first domain
-// is a complete straight-line initializer: declaration-ordered no-extra-arg
-// constants, the unique backing producer, RETURN. The fresh helper is inlined
+// is a complete straight-line initializer: declaration-ordered constants,
+// the unique backing producer, RETURN. User operands need typed allocation
+// origins and an empty stack at the array cut. The fresh helper is inlined
 // from its OWN bytes and removed only after proving its only consumer. All
 // remaining methods/fields keep their complete identities and other flags.
 // No original executable byte is copied, nor is an extra method ignored by the
@@ -312,6 +313,9 @@ func enumArrayConstantBoundary(object *ClassObject, initializer *MemberInfo, ops
 	}
 	_, frames, known := reader.nativeOriginalMethodSnapshot(initializer, code)
 	if !known {
+		return 0, false
+	}
+	if work.CheckAlloc(int64(len(ops)+len(frames.Instructions)+1)*192+int64(len(object.Methods)+1)*96) != nil {
 		return 0, false
 	}
 	positions := map[int]int{}
