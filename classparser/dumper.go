@@ -265,12 +265,17 @@ func (c *ClassObjectDumper) selfInnerClassAccessFlags() (uint16, bool) {
 	return innerSelfAccessFlags(c.obj)
 }
 
-// nestDemotePrivate reports whether this class is in a flattened nest (a `$`
-// nested type or an enclosing class of one). Flattened sibling units cannot
-// see each other's `private` members (`HikariPool$HouseKeeper` reading
-// `HikariPool.connectionBag`). Widening those members to package-private is
-// recompile-safe. Kill-switch: JDEC_NEST_PRIVATE_PACKAGE_OFF=1.
+// nestDemotePrivate retains the existing flattened-nest compatibility fallback
+// only when the classfile can actually grant peer private access. InnerClasses
+// and '$' names are lexical evidence, not VM access permission. Legacy peers
+// instead invoke original accessor methods; widening their private fields,
+// static methods or constructors changes the original declaration contract.
+// Kill-switch: JDEC_NEST_PRIVATE_PACKAGE_OFF=1.
 func (c *ClassObjectDumper) nestDemotePrivate() bool {
+	if c.obj == nil || c.obj.MajorVersion < 55 ||
+		(!hasOriginalNestAttribute(c.obj, "NestHost") && !hasOriginalNestAttribute(c.obj, "NestMembers")) {
+		return false
+	}
 	// A capture view is emitted within a proved original lexical declaration.
 	// It has no flattened-sibling access gap to justify widening private fields.
 	if c.nativeCaptureFields != nil || c.nativeMethodLocalCurrent != nil || c.nativeMemberCurrent != nil || c.nativeEnumConstantCurrent != nil || c.nativeMemberRoot != nil && c.nativeMemberRoot.owner == c.obj.GetClassName() {
@@ -2207,14 +2212,7 @@ func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
 		//}
 		_ = accessFlagsVerbose
 		accessFlags := accessCode
-		// InnerClasses and '$' spelling describe lexical/source names, not
-		// JVM private-access permission. Before version 55, peer accesses use
-		// ordinary methods (usually compiler accessors); widening the field
-		// changes reflection and can alter source lookup through a subclass.
-		// Even newer classfiles need an actual nest attribute for the existing
-		// flattened-nest fallback. Do not invent a nest from a name alone.
-		if c.nestDemotePrivate() && c.obj.MajorVersion >= 55 &&
-			(hasOriginalNestAttribute(c.obj, "NestHost") || hasOriginalNestAttribute(c.obj, "NestMembers")) {
+		if c.nestDemotePrivate() {
 			accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "private", ""))
 		}
 		name, err := c.obj.getUtf8(field.NameIndex)
