@@ -150,11 +150,6 @@ func pop(id uint64) {
 	atomic.AddInt32(&liveBinds, -1)
 }
 
-// gid identifies this goroutine for the ambient snapshot stack. It parses
-// runtime.Stack once per Get when a frame is bound. Hot reconstructors must
-// use ClassContext.Getenv / Decompiler.getenv (explicit policy), not Get.
-func gid() uint64 { return gidFromStack() }
-
 func gidFromStack() uint64 {
 	var buf [64]byte
 	n := runtime.Stack(buf[:], false)
