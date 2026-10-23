@@ -77,6 +77,9 @@ func TestNativeEnumConstantBodyRequiresCompleteOriginalPacket(t *testing.T) {
 						}
 					}
 				}
+				if ctor != nil && params == nil {
+					params = ensureConstantBodyParameters(t, obj, ctor, plan.descriptor)
+				}
 				if ctor == nil || code == nil || params == nil || rows == nil || self == nil || enclosing == nil || len(bridges) != 1 {
 					t.Fatalf("incomplete genuine fixture ctor=%v code=%v params=%v rows=%v self=%v enclosing=%v bridges=%d", ctor != nil, code != nil, params != nil, rows != nil, self != nil, enclosing != nil, len(bridges))
 				}
@@ -208,6 +211,35 @@ func TestNativeEnumConstantBodyRequiresCompleteOriginalPacket(t *testing.T) {
 			})
 		}
 	}
+}
+
+// The certificate admits an absent MethodParameters attribute as the legacy
+// compiler profile, so some javac releases omit it on the constant-body
+// constructor while JDK 18+ always emit it. The mutation cases need a concrete
+// attribute; supply the compiler's own shape when the fixture compiler did not
+// emit one (unnamed name/ordinal entries are ACC_SYNTHETIC, ordinary ones 0).
+func ensureConstantBodyParameters(t *testing.T, obj *ClassObject, ctor *MemberInfo, descriptor string) *UnparsedAttribute {
+	t.Helper()
+	for _, attribute := range ctor.Attributes {
+		if parameters, ok := attribute.(*UnparsedAttribute); ok && parameters != nil && parameters.Name == "MethodParameters" {
+			return parameters
+		}
+	}
+	fields := methodParamFieldDescriptors(descriptor)
+	if len(fields) < 2 {
+		t.Fatalf("constant body constructor descriptor %q", descriptor)
+	}
+	sourceBridgePoolString(t, obj, "MethodParameters")
+	info := make([]byte, 1+4*len(fields))
+	info[0] = byte(len(fields))
+	for i := range fields {
+		if i < 2 {
+			info[1+4*i+2] = 0x10
+		}
+	}
+	parameters := &UnparsedAttribute{Name: "MethodParameters", Length: uint32(len(info)), Info: info}
+	ctor.Attributes = append(ctor.Attributes, parameters)
+	return parameters
 }
 
 func TestNativeEnumConstantArchiveRejectsUnownedExecutableTypes(t *testing.T) {

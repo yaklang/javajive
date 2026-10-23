@@ -100,19 +100,12 @@ func TestNativeMemberEnumSynthesisRequiresOriginalProtocol(t *testing.T) {
 				case "nil signature":
 					methods["<init>"].Attributes = append(methods["<init>"].Attributes, (*SignatureAttribute)(nil))
 				case "named mandated parameter", "wrong parameter flags":
-					seen := false
-					for _, attribute := range methods["valueOf"].Attributes {
-						if parameters, ok := attribute.(*UnparsedAttribute); ok && parameters.Name == "MethodParameters" {
-							seen = true
-							if variant == "named mandated parameter" {
-								parameters.Info[2] = byte(methods["valueOf"].NameIndex)
-							} else {
-								parameters.Info[3] = 0
-							}
-						}
-					}
-					if !seen {
-						t.Fatal("original mandated parameter missing")
+					parameters := ensureMandatedValueOfParameters(t, obj, methods["valueOf"])
+					if variant == "named mandated parameter" {
+						name := sourceBridgePoolString(t, obj, "name")
+						parameters.Info[1], parameters.Info[2] = byte(name>>8), byte(name)
+					} else {
+						parameters.Info[3] = 0
 					}
 				case "no clone":
 					codes["values"].Code = append(append([]byte(nil), codes["values"].Code[:3]...), byte(core.OP_ARETURN))
@@ -154,6 +147,24 @@ func TestNativeMemberEnumSynthesisRequiresOriginalProtocol(t *testing.T) {
 			})
 		}
 	}
+}
+
+// The certificate admits an absent MethodParameters attribute as the legacy
+// compiler profile, so some javac releases omit it for the mandated valueOf
+// parameter while others (JDK 18+) always emit it. These mutations need a
+// concrete attribute to corrupt; supply the compiler's own shape when the
+// fixture compiler did not emit one.
+func ensureMandatedValueOfParameters(t *testing.T, obj *ClassObject, method *MemberInfo) *UnparsedAttribute {
+	t.Helper()
+	for _, attribute := range method.Attributes {
+		if parameters, ok := attribute.(*UnparsedAttribute); ok && parameters != nil && parameters.Name == "MethodParameters" {
+			return parameters
+		}
+	}
+	sourceBridgePoolString(t, obj, "MethodParameters")
+	parameters := &UnparsedAttribute{Name: "MethodParameters", Length: 5, Info: []byte{1, 0, 0, 0x80, 0}}
+	method.Attributes = append(method.Attributes, parameters)
+	return parameters
 }
 
 // A valid JVM class can implement values() with an exposed backing array.

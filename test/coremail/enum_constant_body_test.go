@@ -54,6 +54,46 @@ func TestRenamedEnumConstantBodyFoldsIntoConstant(t *testing.T) {
 	}
 }
 
+// Comparison keeps InnerClasses after the obfuscator renames Owner$N.
+// The surviving row is static, names this class, and has no outer or inner
+// name. Stripping the attribute is a different certificate; this one must
+// still fold, and a non-static or named row must still refuse.
+func TestRenamedEnumConstantBodyKeepsStaticSelfRow(t *testing.T) {
+	javac, java := tool(t, "javac"), tool(t, "java")
+	dir := t.TempDir()
+	command(t, javac, "-proc:none", "--release", "8", "-g:none", "-d", dir, "testdata/enum/ConstantBody.java", "testdata/enum/ConstantBodyDriver.java")
+	entries := renamedConstantBodiesKeepingStaticRow(t, dir)
+	original := command(t, java, "-cp", dir, "fixtures.ConstantBodyDriver")
+	if original != "ok" {
+		t.Fatalf("static-row classes changed behavior: %q", original)
+	}
+	generated := decompileArchive(t, dir, entries, "fixtures/ConstantBody.class")
+	if strings.Contains(generated, "decompile dump failed") || strings.Contains(generated, parser.DecompileStubMarker) || !strings.Contains(generated, "LE {") {
+		t.Fatalf("static self row refused:\n%s", generated)
+	}
+	rebuilt := filepath.Join(dir, "rebuilt")
+	put(t, filepath.Join(rebuilt, "fixtures/ConstantBody.java"), []byte(generated))
+	command(t, javac, "-proc:none", "--release", "8", "-d", rebuilt, filepath.Join(rebuilt, "fixtures/ConstantBody.java"))
+	if got := command(t, java, "-cp", rebuilt+string(os.PathListSeparator)+dir, "fixtures.ConstantBodyDriver"); got != original {
+		t.Fatalf("original %q regenerated %q\n%s", original, got, generated)
+	}
+	obj, err := parser.Parse(entries["fixtures/BodyLE.class"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, attribute := range obj.Attributes {
+		inner, ok := attribute.(*parser.InnerClassesAttribute)
+		if ok && inner != nil && len(inner.Classes) == 1 && inner.Classes[0] != nil {
+			inner.Classes[0].InnerClassAccessFlags = 0x0010
+		}
+	}
+	entries["fixtures/BodyLE.class"] = obj.Bytes()
+	refused := decompileArchive(t, dir, entries, "fixtures/ConstantBody.class")
+	if !strings.Contains(refused, "constant-specific enclosing identity") {
+		t.Fatalf("non-static inner row was folded:\n%s", refused)
+	}
+}
+
 func TestRenamedEnumConstantBodyRejectsNonEnumSubclass(t *testing.T) {
 	javac := tool(t, "javac")
 	dir := t.TempDir()
@@ -118,6 +158,116 @@ func rewriteUTF8(obj *parser.ClassObject, from, to string) {
 		}
 		u.SetString(strings.ReplaceAll(u.Value, from, to))
 	}
+}
+
+func renamedConstantBodiesKeepingStaticRow(t *testing.T, dir string) map[string][]byte {
+	t.Helper()
+	names := []string{"fixtures/ConstantBody.class", "fixtures/ConstantBody$1.class", "fixtures/ConstantBody$2.class"}
+	objects := map[string]*parser.ClassObject{}
+	for _, name := range names {
+		obj, err := parser.Parse(readFile(t, filepath.Join(dir, name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		objects[name] = obj
+	}
+	rewrites := [][2]string{{"fixtures/ConstantBody$1", "fixtures/BodyLE"}, {"fixtures/ConstantBody$2", "fixtures/BodyLT"}}
+	for _, obj := range objects {
+		for _, pair := range rewrites {
+			rewriteUTF8(obj, pair[0], pair[1])
+		}
+	}
+	for _, name := range []string{"fixtures/ConstantBody$1.class", "fixtures/ConstantBody$2.class"} {
+		keepStaticSelfRow(t, objects[name], name == "fixtures/ConstantBody$2.class")
+	}
+	enumObj := objects["fixtures/ConstantBody.class"]
+	renameEnumField(t, enumObj, "LE", "a")
+	renameEnumField(t, enumObj, "LT", "b")
+	renameEnumField(t, enumObj, "PLAIN", "c")
+	renameEnumField(t, enumObj, "$VALUES", "k")
+	entries := map[string][]byte{}
+	renamed := map[string]string{
+		"fixtures/ConstantBody.class":   "fixtures/ConstantBody.class",
+		"fixtures/ConstantBody$1.class": "fixtures/BodyLE.class",
+		"fixtures/ConstantBody$2.class": "fixtures/BodyLT.class",
+	}
+	for old, obj := range objects {
+		raw := obj.Bytes()
+		entries[renamed[old]] = raw
+		put(t, filepath.Join(dir, renamed[old]), raw)
+	}
+	return entries
+}
+
+func keepStaticSelfRow(t *testing.T, obj *parser.ClassObject, withSharedMarker bool) {
+	t.Helper()
+	kept := obj.Attributes[:0]
+	rows := 0
+	for _, attribute := range obj.Attributes {
+		switch attribute := attribute.(type) {
+		case *parser.InnerClassesAttribute:
+			if attribute == nil {
+				t.Fatal("nil inner classes")
+			}
+			self := attribute.Classes[:0]
+			var marker *parser.InnerClassInfo
+			for _, row := range attribute.Classes {
+				if row == nil {
+					continue
+				}
+				if row.InnerClassInfoIndex == obj.ThisClass {
+					row.OuterClassInfoIndex = 0
+					row.InnerNameIndex = 0
+					row.InnerClassAccessFlags = 0x0008
+					self = append(self, row)
+				} else if marker == nil {
+					row.OuterClassInfoIndex = 0
+					row.InnerNameIndex = 0
+					row.InnerClassAccessFlags = 0x0008
+					marker = row
+				}
+			}
+			if len(self) != 1 {
+				t.Fatalf("self rows=%d", len(self))
+			}
+			if withSharedMarker {
+				if marker == nil {
+					t.Fatal("no foreign inner row to retarget")
+				}
+				marker.InnerClassInfoIndex = sharedMarkerClass(t, obj, "fixtures/BodyLE")
+				self = append(self, marker)
+			}
+			attribute.Classes = self
+			attribute.NumberOfClasses = uint16(len(self))
+			attribute.AttrLen = 2 + 8*uint32(len(self))
+			rows++
+		case *parser.UnparsedAttribute:
+			if attribute != nil && attribute.Name == "EnclosingMethod" {
+				continue
+			}
+		}
+		kept = append(kept, attribute)
+	}
+	if rows != 1 {
+		t.Fatalf("inner attributes=%d", rows)
+	}
+	obj.Attributes = kept
+}
+
+func sharedMarkerClass(t *testing.T, obj *parser.ClassObject, internal string) uint16 {
+	t.Helper()
+	for index, entry := range obj.ConstantPool {
+		class, ok := entry.(*parser.ConstantClassInfo)
+		if !ok || class == nil || int(class.NameIndex) > len(obj.ConstantPool) {
+			continue
+		}
+		utf, ok := obj.ConstantPool[class.NameIndex-1].(*parser.ConstantUtf8Info)
+		if ok && utf != nil && utf.Value == internal {
+			return uint16(index + 1)
+		}
+	}
+	t.Fatalf("missing class %s", internal)
+	return 0
 }
 
 func stripEnumBodyIdentity(obj *parser.ClassObject) {

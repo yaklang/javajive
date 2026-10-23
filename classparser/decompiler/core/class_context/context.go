@@ -120,6 +120,11 @@ type ClassContext struct {
 	LocalNames map[*coreutils.VariableId]string
 	// Positive declaration evidence for visible source value names.
 	SourceValueNameShadow func(string) bool
+	// EnumSyntheticBackingField is the compiler's constant array of the enum
+	// being dumped (renamed by an obfuscator when it is not $VALUES). Source
+	// regenerates that field, so its proved read-only uses are expressed
+	// through the clone factory.
+	EnumSyntheticBackingField string
 	// Static imports are shared by every declaration in one source unit. A
 	// failed binding cannot publish a source unit that silently selects a decoy.
 	StaticMethodImports   *StaticMethodImports

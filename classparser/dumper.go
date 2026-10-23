@@ -839,6 +839,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			funcCtx.SamePkgFQNames[name] = true
 		}
 	}
+	// The backing-array protocol proved this enum's compiler array field. Source
+	// regenerates it, so its read-only uses render through the clone factory.
+	funcCtx.EnumSyntheticBackingField = c.enumSyntheticBackingField
 	if err := c.consultResolverForCancel(); err != nil {
 		return "", err
 	}
@@ -2097,7 +2100,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	full = c.sourceRewrite("fixEnumNoArgCtorThisAfterLocals", "class_source", full, fixEnumNoArgCtorThisAfterLocals)
 	full = c.sourceRewrite("fixCtorNPECheckBeforeThis", "class_source", full, fixCtorNPECheckBeforeThis)
 	full = c.sourceRewrite("fixCtorDelegationArgumentSpills", "class_source", full, fixCtorDelegationArgumentSpills)
-	full = c.sourceRewrite("fixEnumClinitIllegalNew", "class_source", full, fixEnumClinitIllegalNew)
+	backingField := c.enumSyntheticBackingField
+	full = c.sourceRewrite("fixEnumClinitIllegalNew", "class_source", full, func(source string) string {
+		return stripEnumBackingAssignment(fixEnumClinitIllegalNew(source), backingField)
+	})
 	full = c.sourceRewrite("fixBareNestedImports", "class_source", full, fixBareNestedImports)
 	full = c.sourceRewrite("fixHardjarShapes", "class_source", full, fixHardjarShapes)
 	// boolean local used as `*`/`+` operand. Kill-switch: JDEC_BOOL_ARITH_OPERAND_OFF=1.

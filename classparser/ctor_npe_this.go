@@ -968,6 +968,51 @@ func fixEnumClinitIllegalNew(body string) string {
 
 var enumValuesAssignRe = regexp.MustCompile(`(?m)^[ \t]*\$VALUES[ \t]*=[ \t]*[^;\r\n]+;\r?\n?`)
 
+// The backing-array protocol proves this enum's compiler array field, which
+// source regenerates. Its original assignment is therefore not source. Javac
+// spells the field $VALUES, but an obfuscator can rename it, so strip the
+// proved name too -- and only inside a static initializer, so a method's local
+// or parameter that happens to share the name is never touched.
+func stripEnumBackingAssignment(body, name string) string {
+	if name == "" || jdecenv.Get("JDEC_ENUM_CLINIT_NEW_OFF") == "1" {
+		return body
+	}
+	// Reads of the proved field render as values(). Its clinit store renders
+	// the same way (`values() = ...`), which is not a Java assignment. An
+	// obfuscated spelling can also survive when the select is not rewritten.
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?m)^[ \t]*values\(\)[ \t]*=[ \t]*[^;\r\n]+;\r?\n?`),
+	}
+	if name != "$VALUES" {
+		patterns = append(patterns, regexp.MustCompile(`(?m)^[ \t]*`+regexp.QuoteMeta(name)+`[ \t]*=[ \t]*[^;\r\n]+;\r?\n?`))
+	}
+	var matches [][]int
+	for _, pattern := range patterns {
+		matches = append(matches, pattern.FindAllStringIndex(body, -1)...)
+	}
+	if len(matches) == 0 {
+		return body
+	}
+	var removals []enumSourceRange
+	for _, match := range matches {
+		start, end, ok := enumClinitBlockBounds(body, match[0])
+		if !ok || match[0] < start || match[1] > end {
+			continue
+		}
+		removals = append(removals, enumSourceRange{match[0], match[1]})
+	}
+	sort.Slice(removals, func(i, j int) bool { return removals[i].start > removals[j].start })
+	lastStart := len(body) + 1
+	for _, removal := range removals {
+		if removal.start < 0 || removal.end > len(body) || removal.start >= removal.end || removal.end > lastStart {
+			continue
+		}
+		body = body[:removal.start] + body[removal.end:]
+		lastStart = removal.start
+	}
+	return body
+}
+
 func patchEnumConstantArgs(body, name, args string) (string, bool) {
 	if args == "" {
 		return body, false

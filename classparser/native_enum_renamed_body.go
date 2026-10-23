@@ -27,6 +27,10 @@ func (c *ClassObjectDumper) renamedEnumConstantBody(body *ClassObject) (marker, 
 			if attribute == nil {
 				return "", "", false
 			}
+		case *InnerClassesAttribute:
+			if !renamedEnumStaticRows(body, attribute) {
+				return "", "", false
+			}
 		default:
 			return "", "", false
 		}
@@ -102,7 +106,71 @@ func (c *ClassObjectDumper) renamedEnumConstantBody(body *ClassObject) (marker, 
 	if bridge == nil || bridge.target != "(Ljava/lang/String;I)V" || bridge.marker == "" {
 		return "", "", false
 	}
+	if !renamedEnumRowsMatchMarker(body, bridge.marker) {
+		return "", "", false
+	}
 	return bridge.marker, target.Description, true
+}
+
+func renamedEnumStaticRows(body *ClassObject, attribute *InnerClassesAttribute) bool {
+	if body == nil || attribute == nil || len(attribute.Classes) == 0 || len(attribute.Classes) > 2 {
+		return false
+	}
+	self := 0
+	for _, row := range attribute.Classes {
+		if !renamedEnumStaticUnnamedRow(row) {
+			return false
+		}
+		if row.InnerClassInfoIndex == body.ThisClass {
+			self++
+		}
+	}
+	return self == 1
+}
+
+func renamedEnumRowsMatchMarker(body *ClassObject, marker string) bool {
+	markerClass, known := sourceBridgeClassIndex(body, marker)
+	if !known {
+		return false
+	}
+	for _, attribute := range body.Attributes {
+		inner, ok := attribute.(*InnerClassesAttribute)
+		if !ok {
+			continue
+		}
+		for _, row := range inner.Classes {
+			if row == nil {
+				return false
+			}
+			if row.InnerClassInfoIndex != body.ThisClass && row.InnerClassInfoIndex != markerClass {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func renamedEnumStaticUnnamedRow(row *InnerClassInfo) bool {
+	// JVMS 4.7.6: no outer and no inner name. A constant-body subclass also
+	// carries ACC_ENUM (0x4000) beside ACC_STATIC. Any other flag is rejected.
+	if row == nil || row.OuterClassInfoIndex != 0 || row.InnerNameIndex != 0 {
+		return false
+	}
+	const staticOrEnum = 0x0008 | 0x4000
+	return row.InnerClassAccessFlags&staticOrEnum == row.InnerClassAccessFlags && row.InnerClassAccessFlags&0x0008 != 0
+}
+
+func sourceBridgeClassIndex(obj *ClassObject, internal string) (uint16, bool) {
+	if obj == nil || internal == "" {
+		return 0, false
+	}
+	for index := 1; index <= len(obj.ConstantPool); index++ {
+		name, known := sourceBridgeClassName(obj, uint16(index))
+		if known && name == internal {
+			return uint16(index), true
+		}
+	}
+	return 0, false
 }
 
 func renamedEnumBridgeParameters(attribute *UnparsedAttribute) bool {
