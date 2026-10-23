@@ -254,10 +254,10 @@ func TestStaticCallImportChecksBothTypeNamespacesAndOwnerKind(t *testing.T) {
 					want, imports = "Outer.Api.", ""
 				} else if variant == "value-only shadow" && !isInterface {
 					want, imports = "((Api)null).", ""
-				} else if variant == "obscured root with own method" || variant == "method conflict" {
+				} else if variant == "obscured root with own method" || variant == "method conflict" || variant == "clear root with own method" {
+					// A free simple name stays `Api.`. The qualified spelling is reserved
+					// for the case where that name cannot be imported.
 					want, imports = "Api.", ""
-				} else if variant == "clear root with own method" {
-					want, imports = "a.Api.", ""
 				}
 				if prefix != want || strings.Join(f.StaticMethodImports.Imports(), ",") != imports {
 					t.Fatalf("prefix=%q imports=%v want=%q/%q", prefix, f.StaticMethodImports.Imports(), want, imports)
@@ -275,14 +275,18 @@ func TestRetainedIncompleteStaticOwnerKeepsQualifiedTarget(t *testing.T) {
 	declarations[probe.Name] = probe
 	const owner = "java.text.MessageFormat"
 	const desc = "(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;"
-	if prefix := f.StaticClassCallPrefix(owner, "format", desc); f.StaticMethodImports.Error() == nil {
+	if prefix := f.staticImportCallPrefix(owner, "format", desc, owner, false); f.StaticMethodImports.Error() == nil {
 		t.Fatalf("strict path accepted an incomplete owner: %q", prefix)
 	}
 	f.StaticMethodImports = NewStaticMethodImports()
 	f.RetainUnprovedSource = true
-	prefix := f.StaticClassCallPrefix(owner, "format", desc)
+	prefix := f.staticImportCallPrefix(owner, "format", desc, owner, false)
 	if prefix != owner+"." || f.StaticMethodImports.Error() != nil {
 		t.Fatalf("prefix=%q err=%v", prefix, f.StaticMethodImports.Error())
+	}
+	f.StaticMethodImports = NewStaticMethodImports()
+	if got := f.staticImportCallPrefix("mt.if", "a", "()I", "mt.if", false); got != "mt.if_." || f.StaticMethodImports.Error() != nil {
+		t.Fatalf("keyword owner prefix=%q err=%v", got, f.StaticMethodImports.Error())
 	}
 }
 
