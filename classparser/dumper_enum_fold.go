@@ -56,6 +56,9 @@ func isSyntheticEnumConstantSubclass(cf *ClassObject) bool {
 // the enclosing unit's import block (assembled after this) carries them. Returns nil (no folding) on
 // the single-class path, for non-enums, or when JDEC_NO_ENUM_FOLD is set (load-bearing kill-switch).
 func (c *ClassObjectDumper) foldEnumConstantBodies(isEnum bool) (map[string]string, error) {
+	c.sourceFlatEnumBodies = nil
+	c.sourceFlatEnumPackets = nil
+	c.sourceFlatEnumPacketSeal = nil
 	if !isEnum || c.foldSiblingResolver == nil || c.getenv("JDEC_NO_ENUM_FOLD") != "" {
 		return nil, nil
 	}
@@ -181,7 +184,11 @@ func (c *ClassObjectDumper) renderFoldedConstantObjectWithProof(subObj *ClassObj
 		b.WriteString("\n")
 	}
 	b.WriteString("\t}")
-	return b.String()
+	result = b.String()
+	if proof != nil && !c.recordFlatEnumPublication(proof, child, src, result) {
+		return ""
+	}
+	return result
 }
 
 // javaExtractImports returns the import targets ("java.util.List") from top-level `import X;` lines.

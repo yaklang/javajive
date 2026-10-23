@@ -182,7 +182,13 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 		}
 		seen[key] = true
 		if old := expected[key]; old != nil {
-			if old.AccessFlags != method.AccessFlags || !enumArrayUTF8Equal(want, old.NameIndex, got, method.NameIndex) || !enumArrayUTF8Equal(want, old.DescriptorIndex, got, method.DescriptorIndex) {
+			// Source declarations cannot spell ACC_SYNTHETIC. That metadata
+			// obligation is discharged after removing the independently proved
+			// array helper; its bijection cannot run while that helper exists.
+			// Preserve the fresh flags here. No execution/access flag may differ,
+			// and no newly synthetic or constructor declaration is accepted.
+			flagsMatch := old.AccessFlags == method.AccessFlags || key.name != "<init>" && key.name != "<clinit>" && old.AccessFlags == method.AccessFlags|syntheticMethodFlag
+			if !flagsMatch || !enumArrayUTF8Equal(want, old.NameIndex, got, method.NameIndex) || !enumArrayUTF8Equal(want, old.DescriptorIndex, got, method.DescriptorIndex) {
 				return decline()
 			}
 			if key.name == "<clinit>" && key.descriptor == "()V" {

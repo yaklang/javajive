@@ -124,6 +124,12 @@ func (a *JarSourceArtifact) restoreClassMetadata(name string, compiled []byte, t
 	var lambda *sourceLambdaMetadataPlan
 	if authority := z.sourceLambdaMetadata; authority != nil {
 		lambda = authority.plan(object.GetClassName())
+		if lambda != nil && z.sourceConstructorLowering != nil {
+			compiled, lambda, err = lowerLambdaCheckedInputs(original, compiled, lambda, reader.Work)
+			if err != nil {
+				return nil, err
+			}
+		}
 		compiled, err = authority.restoreAnonymousClassMetadataAtTarget(original, compiled, target, reader.Work)
 		if err != nil {
 			return nil, err

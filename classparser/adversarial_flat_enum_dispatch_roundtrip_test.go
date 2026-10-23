@@ -25,6 +25,10 @@ func TestAdversarialFlatEnumConstructorProofSeparatesMetadataAndBodyCode(t *test
 	}
 }
 
+func TestAdversarialFlatEnumPrivateReferenceKeepsCheckedImplementationInput(t *testing.T) {
+	flatEnumDispatchRoundTrip(t, false, "private reference")
+}
+
 func flatEnumDispatchRoundTrip(t *testing.T, assertions bool, variants ...string) {
 	t.Helper()
 	javac, java := t04Tools(t)
@@ -72,6 +76,10 @@ class FlatDispatchDriver {public static void main(String[]args){
 							source = strings.Replace(source, old, strings.TrimSuffix(old, ")")+",String.class)", 1)
 						}
 						source = strings.Replace(source, "Mode(long step,double bias)", "Mode(long step,double bias,Class<?> kind)", 1)
+					}
+					if variant == "private reference" {
+						source = strings.Replace(source, "return x+step;", `return x+((java.util.function.Function<Mode,Long>)Mode::secret).apply(ADD).longValue();`, 1)
+						source = strings.Replace(source, "final long step;", `private Long secret(){return Long.valueOf(step);}final long step;`, 1)
 					}
 					if variant == "lambda bootstrap" {
 						source = strings.Replace(source, "return x+step;", "java.util.function.LongUnaryOperator f = value -> value+step;return f.applyAsLong(x);", 1)
@@ -173,6 +181,15 @@ if(FlatDispatchEffects.calls!=9)`, 1)
 								}
 								done, err := artifact.FinishClass(name, fresh)
 								if err != nil {
+									for _, raw := range [][]byte{owned[name], fresh} {
+										object := mustParseLowering(t, raw)
+										for _, method := range object.Methods {
+											n, _ := sourceBridgeUTF8(object, method.NameIndex)
+											d, _ := sourceBridgeUTF8(object, method.DescriptorIndex)
+											t.Logf("%s method %s%s flags=%04x", name, n, d, method.AccessFlags)
+										}
+									}
+									t.Log(text)
 									t.Fatal("constant family completion", name, err)
 								}
 								if err := os.WriteFile(file, done, 0600); err != nil {

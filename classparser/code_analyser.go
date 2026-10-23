@@ -299,7 +299,10 @@ func parseBytesCodeWithLambdaCaptureOrder(dumper *ClassObjectDumper, codeAttr *C
 			return source, nil
 		}
 		if hasPC && len(captured) == 0 && dumper.ordinaryArrowChangesStaticImplementationPorts(name, desc, request) {
-			return core.LambdaBodySource{}, fmt.Errorf("%w: ordinary arrow changes original static implementation input types", core.ErrLambdaSourceUnsupported)
+			request.checkedInput = dumper.proveLambdaCheckedInputAdapter(name, desc, request)
+			if request.checkedInput == nil {
+				return core.LambdaBodySource{}, fmt.Errorf("%w: ordinary arrow changes original static implementation input types", core.ErrLambdaSourceUnsupported)
+			}
 		}
 		dumped, err := dumper.dumpMethodWithSourceRequest(name, desc, id, adapter, request)
 		if err != nil {

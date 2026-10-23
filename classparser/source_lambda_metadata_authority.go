@@ -157,6 +157,13 @@ func (c *ClassObjectDumper) publishArtifactLambdaMetadata(source string, members
 			return false
 		}
 		needed = needed || name != generated || table
+		generatedDescriptor := descriptor
+		if input := body.sourceRequest.checkedInput; input != nil {
+			if !c.lambdaCheckedInputRequestClosed(name, descriptor, body.sourceRequest) {
+				return false
+			}
+			generatedDescriptor, needed = input.generatedDescriptor, true
+		}
 		if seen[body.member] {
 			// Shared factories can compile to a different helper universe.
 			// No per-event renaming can manufacture a missing implementation.
@@ -164,7 +171,7 @@ func (c *ClassObjectDumper) publishArtifactLambdaMetadata(source string, members
 			continue
 		}
 		seen[body.member] = true
-		plan.methods = append(plan.methods, sourceLambdaMetadataMethod{sourceLambdaMethodIdentity{name, descriptor}, sourceLambdaMethodIdentity{generated, descriptor}})
+		plan.methods = append(plan.methods, sourceLambdaMetadataMethod{sourceLambdaMethodIdentity{name, descriptor}, sourceLambdaMethodIdentity{generated, generatedDescriptor}})
 	}
 	if !needed {
 		return true
@@ -257,7 +264,7 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 		own = nil
 	}
 	ownEnum := c.nativeEnumBacking != nil && c.nativeEnumBacking.object == c.obj && !c.sourceDegraded && !legacySourceHasFailureMarker(source) && c.artifactLambdaMetadataAllowed()
-	if own == nil && !ownEnum && len(c.sourceLambdaMembers) == 0 && len(c.sourceConstructorMembers) == 0 {
+	if own == nil && !ownEnum && len(c.sourceLambdaMembers) == 0 && len(c.sourceConstructorMembers) == 0 && len(c.sourceFlatEnumBodies) == 0 {
 		return true
 	}
 	// Enum-only origins transport a completed lexical source packet; they
@@ -278,6 +285,21 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 	}
 	if own != nil && !add(own) {
 		return false
+	}
+	constantPublications, closed := c.flatEnumPublicationsClosed(source)
+	if !closed {
+		return false
+	}
+	for _, nested := range constantPublications {
+		// Flat constant bodies have no arbitrary nested declaration authority.
+		if len(nested.constructors) != 0 || len(nested.anonymous) != 0 || len(nested.enums) != 0 {
+			return false
+		}
+		for _, plan := range nested.plans {
+			if !add(plan) {
+				return false
+			}
+		}
 	}
 	constructorSeen := map[string]bool{}
 	addConstructor := func(plan *sourceConstructorMetadataPlan) bool {

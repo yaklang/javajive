@@ -28,12 +28,13 @@ type methodSourceRequest struct {
 	captureCount int
 	serial       uint64
 	factory      *lambdaSourceFactory
+	checkedInput *lambdaCheckedInputAdapter
 }
 
 func (r methodSourceRequest) valid() bool {
 	switch r.role {
 	case methodSourceDeclaration:
-		return r.captureCount == 0 && r.serial == 0 && r.factory == nil
+		return r.captureCount == 0 && r.serial == 0 && r.factory == nil && r.checkedInput == nil
 	case methodSourceCompilerReference:
 		// Static references have no captured receiver. The completed typed
 		// packet separately proves which of the zero/one-port roles applies.
@@ -96,6 +97,9 @@ func (c *ClassObjectDumper) lambdaMethodSourcePacketClosed(method *MemberInfo, b
 	name, named := sourceBridgeUTF8(c.obj, method.NameIndex)
 	descriptor, typed := sourceBridgeUTF8(c.obj, method.DescriptorIndex)
 	if !named || !typed {
+		return false
+	}
+	if input := body.sourceRequest.checkedInput; input != nil && !c.lambdaCheckedInputRequestClosed(name, descriptor, body.sourceRequest) {
 		return false
 	}
 	for _, original := range c.obj.Methods {

@@ -39,7 +39,7 @@ func enumArrayLoweringInputs(t *testing.T) ([]byte, []byte, *JarReconstructionAr
 
 func TestAdversarialEnumArrayLoweringKeepsCompletePacketAndConsumerProof(t *testing.T) {
 	original, compiled, artifact := enumArrayLoweringInputs(t)
-	for _, variant := range []string{"control", "renamed helper", "expanded integer", "unreturned source", "pending namespace", "stale original", "pre-enum version", "unqualified newer version", "preview version", "field universe", "extra method", "visibility", "helper flags", "array order", "array opcode", "extra instruction", "other consumer", "wrong call kind", "method handle", "handler", "frame", "unknown PC table", "max stack", "work", "output", "canceled"} {
+	for _, variant := range []string{"control", "renamed helper", "expanded integer", "lost synthetic metadata", "new synthetic metadata", "lost synthetic plus synchronized", "unreturned source", "pending namespace", "stale original", "pre-enum version", "unqualified newer version", "preview version", "field universe", "extra method", "visibility", "helper flags", "array order", "array opcode", "extra instruction", "other consumer", "wrong call kind", "method handle", "handler", "frame", "unknown PC table", "max stack", "work", "output", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			object := mustParseLowering(t, bytes.Clone(compiled))
 			var initializer, helper, fold *MemberInfo
@@ -71,6 +71,23 @@ func TestAdversarialEnumArrayLoweringKeepsCompletePacketAndConsumerProof(t *test
 			authority := artifact.source.jar.sourceConstructorLowering
 			want := bytes.Clone(original)
 			switch variant {
+			case "lost synthetic metadata", "lost synthetic plus synchronized":
+				old := mustParseLowering(t, want)
+				for _, m := range old.Methods {
+					name, _ := sourceBridgeUTF8(old, m.NameIndex)
+					if name == "fold" {
+						m.AccessFlags |= syntheticMethodFlag
+					}
+				}
+				want = old.Bytes()
+				origin := authority.enumActive["PacketValues"]
+				origin.originalHash = sha256.Sum256(want)
+				authority = &sourceConstructorLoweringAuthority{jar: authority.jar, enumActive: map[string]constructorNativeSourceOrigin{"PacketValues": origin}}
+				if variant == "lost synthetic plus synchronized" {
+					fold.AccessFlags |= 0x20
+				}
+			case "new synthetic metadata":
+				fold.AccessFlags |= syntheticMethodFlag
 			case "renamed helper":
 				index := uint16(object.ConstantPoolManager.AddUtf8Info("compiler$array$packet"))
 				helper.NameIndex = index
@@ -179,7 +196,25 @@ func TestAdversarialEnumArrayLoweringKeepsCompletePacketAndConsumerProof(t *test
 			}
 			inputBefore, wantBefore := bytes.Clone(input), bytes.Clone(want)
 			got, err := authority.lowerEnumArrayHelper("PacketValues", want, input, work)
-			if variant == "control" || variant == "renamed helper" || variant == "expanded integer" {
+			if variant == "lost synthetic metadata" {
+				if err != nil || bytes.Equal(got, input) {
+					t.Fatal("array proof must precede independent synthetic metadata", err)
+				}
+				if sourceMethodMetadataClosed(mustParseLowering(t, want), got, nil) == nil {
+					t.Fatal("array completion waived the remaining synthetic obligation")
+				}
+				finished, e := restoreReconstructionSyntheticFlags(want, got, nil)
+				if e != nil {
+					t.Fatal("synthetic metadata", e)
+				}
+				finished, e = restoreMethodParameterMetadata(want, finished, nil, nil)
+				if e != nil {
+					t.Fatal("remaining parameter metadata", e)
+				}
+				if e = sourceMethodMetadataClosed(mustParseLowering(t, want), finished, nil); e != nil {
+					t.Fatal("composed metadata did not close the original method universe", e)
+				}
+			} else if variant == "control" || variant == "renamed helper" || variant == "expanded integer" {
 				if err != nil || bytes.Equal(got, input) {
 					t.Fatal("positive fresh packet edit", err)
 				}

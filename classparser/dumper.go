@@ -73,6 +73,9 @@ type ClassObjectDumper struct {
 	nativeAnonymousRoot                   *nativeAnonymousFamily
 	sourceLambdaMembers                   []sourceLambdaMemberPublication
 	sourceConstructorMembers              []sourceConstructorMemberPublication
+	sourceFlatEnumBodies                  []sourceFlatEnumPublication
+	sourceFlatEnumPackets                 []enumLambdaConstantPacket
+	sourceFlatEnumPacketSeal              []enumLambdaConstantPacket
 	nativeCaptureFields                   map[string]string
 	nativeCapturedReads                   map[string]map[int]string
 	nativeTypeParams                      []string
@@ -1591,7 +1594,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 				attrsB.WriteString(constStr)
 				attrsB.WriteString(body)
 				attrsB.WriteString(separator)
-				if trackEnumFactories {
+				if trackEnumFactories || len(c.sourceFlatEnumBodies) != 0 {
 					cost := int64(len(constStr)+len(body)+3) + int64(len(enumFields))*64
 					if c.Work != nil && c.Work.CheckAlloc(cost) != nil {
 						return ""
@@ -1601,6 +1604,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 				}
 			}
 			if trackEnumFactories && !c.bindEnumLambdaInitializerPackets(methods, enumPackets) {
+				return ""
+			}
+			if !c.bindFlatEnumPublicationPackets(enumPackets) {
 				return ""
 			}
 			if isEnum && len(enumFields) == 0 && (len(ordinaryFields) > 0 || len(methods) > 0) {
