@@ -48,17 +48,16 @@ type sourceConstructorLoweringAuthority struct {
 
 type constructorNativeSourceOrigin struct{ originalHash, sourceHash [32]byte }
 
-// A flat anonymous declaration is already a distinct explicit reconstruction
-// unit. Its original physical class accessibility governs its binary callers;
-// legacy blanket promotion to public would change the class ABI before the
-// postcompile constructor proof can complete. Named nested declarations and
-// native family source retain their existing ownership/visibility protocols.
-func (c *ClassObjectDumper) reconstructionAnonymousPhysicalHeader() bool {
+// An independently flattened declaration is a physical reconstruction unit.
+// JVM class access uses ClassFile flags; InnerClasses flags describe lexical
+// source visibility. Promoting the physical class can grant public Lookup
+// access that its unchanged original binary callers never had. Native member,
+// local and enum-body declarations retain their lexical source protocols.
+func (c *ClassObjectDumper) reconstructionPhysicalHeader() bool {
 	if c == nil || c.obj == nil || c.options.sourceConstructorLowering == nil || c.nativeMemberCurrent != nil || c.nativeMethodLocalCurrent != nil || c.nativeEnumConstantCurrent != nil {
 		return false
 	}
-	_, _, known := originalAnonymousOwner(c.obj)
-	return known
+	return true
 }
 
 // Native member/anonymous source ownership has its own capture regeneration
