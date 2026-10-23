@@ -169,6 +169,12 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 	if !oldOK || !initOK || !arrayOK || oldCode == nil || initCode == nil || arrayCode == nil || oldCode.MaxLocals != 0 || initCode.MaxLocals != 0 || arrayCode.MaxLocals != 0 || len(arrayOps) == 0 || !nativeEnumOpcode(arrayOps[len(arrayOps)-1], core.OP_ARETURN) || !nativeEnumValuesArrayPacket(got, arrayOps[:len(arrayOps)-1], constants, work) {
 		return decline()
 	}
+	// The source-regeneration decoder can omit harmless NOPs. Executable
+	// splicing additionally needs every raw instruction boundary accounted for;
+	// a gap cannot be borrowed as a proof for its debug PCs or byte span.
+	if !enumArrayInstructionSpans(oldCode.Code, oldOps) || !enumArrayInstructionSpans(initCode.Code, initOps) || !enumArrayInstructionSpans(arrayCode.Code, arrayOps) {
+		return decline()
+	}
 	peak := uint16(1)
 	if len(constants) != 0 {
 		peak = 4
@@ -225,8 +231,18 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 			return decline()
 		}
 		for _, op := range constructorMotionOps(decoder) {
-			if nativeEnumMemberOperand(got, op, core.OP_INVOKESTATIC, owner, helperKey.name, helperKey.descriptor) {
-				if method != initializer || int(op.CurrentOffset) != int(initOps[prefix].CurrentOffset) {
+			if !nativeProofWork(work, 1) {
+				return decline()
+			}
+			if !nativeEnumOpcode(op, core.OP_INVOKESTATIC) && !nativeEnumOpcode(op, core.OP_INVOKEVIRTUAL) && !nativeEnumOpcode(op, core.OP_INVOKESPECIAL) && !nativeEnumOpcode(op, core.OP_INVOKEINTERFACE) {
+				continue
+			}
+			member := constructorMotionMember(got, op, op.Instr.OpCode)
+			if member == nil {
+				return decline()
+			}
+			if member.Name == owner && member.Member == helperKey.name && member.Description == helperKey.descriptor {
+				if !nativeEnumMemberOperand(got, op, core.OP_INVOKESTATIC, owner, helperKey.name, helperKey.descriptor) || method != initializer || int(op.CurrentOffset) != int(initOps[prefix].CurrentOffset) {
 					return decline()
 				}
 				calls++
@@ -237,6 +253,17 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 		return decline()
 	}
 	return enumArrayFreshMethodEdits(compiled, got, layout, initializer, helper, initOps, arrayOps, prefix, work)
+}
+
+func enumArrayInstructionSpans(code []byte, ops []*core.OpCode) bool {
+	pc := 0
+	for _, op := range ops {
+		if op == nil || op.Instr == nil || int(op.CurrentOffset) != pc || pc >= len(code) || code[pc] != byte(op.Instr.OpCode) || len(op.Data) > len(code)-pc-1 || !bytes.Equal(code[pc+1:pc+1+len(op.Data)], op.Data) {
+			return false
+		}
+		pc += 1 + len(op.Data)
+	}
+	return pc == len(code)
 }
 
 // These prefixes end at an empty stack. Each no-extra-argument allocation

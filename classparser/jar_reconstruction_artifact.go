@@ -23,6 +23,11 @@ import (
 // Ordinary declared methods can additionally recover a missing ACC_SYNTHETIC
 // marker under an unchanged complete method/class declaration universe. This
 // grants no constructor, initializer, bridge, visibility or method-name edits.
+// A separately proved straight-line Java8 enum initializer can inline a fresh
+// compiler's private constant-array helper, restoring the original method
+// universe. Its only consumer, array element identities, empty-stack boundary
+// and supported debug PCs are checked before any edit; all other metadata
+// contracts still apply. The original initializer's Code is never copied.
 type JarReconstructionArtifact struct{ source *JarSourceArtifact }
 
 var _ fs.ReadFileFS = (*JarReconstructionArtifact)(nil)
