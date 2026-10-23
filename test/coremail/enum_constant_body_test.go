@@ -151,6 +151,61 @@ func renamedConstantBodies(t *testing.T, dir string) map[string][]byte {
 	return entries
 }
 
+// A stripped class can also keep only its own static row while the shared
+// marker class entry is gone. The constructor descriptor is then the only
+// place naming the marker, and folding still has to be certified.
+func TestRenamedEnumConstantBodySelfRowWithoutMarkerClassEntry(t *testing.T) {
+	javac, java := tool(t, "javac"), tool(t, "java")
+	dir := t.TempDir()
+	command(t, javac, "-proc:none", "--release", "8", "-g:none", "-d", dir, "testdata/enum/ConstantBody.java", "testdata/enum/ConstantBodyDriver.java")
+	objects := map[string]*parser.ClassObject{}
+	for _, name := range []string{"fixtures/ConstantBody.class", "fixtures/ConstantBody$1.class", "fixtures/ConstantBody$2.class"} {
+		obj, err := parser.Parse(readFile(t, filepath.Join(dir, name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		objects[name] = obj
+	}
+	for _, obj := range objects {
+		rewriteUTF8(obj, "fixtures/ConstantBody$1", "fixtures/BodyLE")
+		rewriteUTF8(obj, "fixtures/ConstantBody$2", "fixtures/BodyLT")
+	}
+	for _, name := range []string{"fixtures/ConstantBody$1.class", "fixtures/ConstantBody$2.class"} {
+		keepStaticSelfRow(t, objects[name], false)
+	}
+	pointClassEntryAway(t, objects["fixtures/ConstantBody$2.class"], "fixtures/BodyLE")
+	enumObj := objects["fixtures/ConstantBody.class"]
+	renameEnumField(t, enumObj, "LE", "a")
+	renameEnumField(t, enumObj, "LT", "b")
+	renameEnumField(t, enumObj, "PLAIN", "c")
+	renameEnumField(t, enumObj, "$VALUES", "k")
+	entries := map[string][]byte{}
+	for name, obj := range objects {
+		renamed := map[string]string{
+			"fixtures/ConstantBody.class":   "fixtures/ConstantBody.class",
+			"fixtures/ConstantBody$1.class": "fixtures/BodyLE.class",
+			"fixtures/ConstantBody$2.class": "fixtures/BodyLT.class",
+		}[name]
+		raw := obj.Bytes()
+		entries[renamed] = raw
+		put(t, filepath.Join(dir, renamed), raw)
+	}
+	original := command(t, java, "-cp", dir, "fixtures.ConstantBodyDriver")
+	if original != "ok" {
+		t.Fatalf("renamed classes changed behavior: %q", original)
+	}
+	generated := decompileArchive(t, dir, entries, "fixtures/ConstantBody.class")
+	if strings.Contains(generated, "decompile dump failed") || !strings.Contains(generated, "LE {") || !strings.Contains(generated, "LT {") {
+		t.Fatalf("self-row body without a marker class entry was refused:\n%s", generated)
+	}
+	rebuilt := filepath.Join(dir, "rebuilt")
+	put(t, filepath.Join(rebuilt, "fixtures/ConstantBody.java"), []byte(generated))
+	command(t, javac, "-proc:none", "--release", "8", "-d", rebuilt, filepath.Join(rebuilt, "fixtures/ConstantBody.java"))
+	if got := command(t, java, "-cp", rebuilt+string(os.PathListSeparator)+dir, "fixtures.ConstantBodyDriver"); got != original {
+		t.Fatalf("original %q regenerated %q\n%s", original, got, generated)
+	}
+}
+
 // Real obfuscated jars (mt.dq, es, ez in coremail) rename every constant body
 // to an unrelated name, drop every InnerClasses/EnclosingMethod row and leave
 // the shared first-body marker only inside the constructor descriptor. The
