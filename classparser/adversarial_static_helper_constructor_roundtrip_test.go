@@ -33,6 +33,13 @@ func TestAdversarialStaticHelperHasNoInventedConstructorOrClassMarkerLoss(t *tes
 			if len(files[child]) == 0 {
 				t.Fatal("original compiler did not generate the switch helper")
 			}
+			originalDir := sourceArtifactWriteFiles(t, files)
+			for _, mode := range []string{"-ea", "-da"} {
+				log, err := enumFreshOracleRun(t, java, mode, originalDir, "HelperDriver")
+				if err != nil || string(log) != "15:static:helper:constructor:algorithm\n" {
+					t.Fatal("original helper/algorithm oracle", err, string(log))
+				}
+			}
 			jar := filepath.Join(t.TempDir(), "static-helper.jar")
 			if err := os.WriteFile(jar, t23Zip(t, map[string][]byte{child: files[child]}), 0600); err != nil {
 				t.Fatal(err)

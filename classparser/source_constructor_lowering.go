@@ -44,6 +44,7 @@ type sourceConstructorLoweringAuthority struct {
 	pending, active             map[string]*sourceConstructorLoweringPublication
 	nativePending, nativeActive map[string]constructorNativeSourceOrigin
 	enumPending, enumActive     map[string]constructorNativeSourceOrigin
+	staticPending, staticActive map[string]constructorNativeSourceOrigin
 }
 
 type constructorNativeSourceOrigin struct{ originalHash, sourceHash [32]byte }
@@ -306,6 +307,9 @@ func (c *ClassObjectDumper) planArtifactConstructorLowering(boundary *constructo
 }
 
 func (c *ClassObjectDumper) publishConstructorLowering(source string, methods []*dumpedMethods) bool {
+	if !c.publishStaticClassLowering(source) {
+		return false
+	}
 	if !c.publishEnumArrayLowering(source) {
 		return false
 	}
@@ -362,6 +366,11 @@ func (a *sourceConstructorLoweringAuthority) sourceReturned(owner string, source
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	hash := sha256.Sum256(source)
+	staticOrigin, staticFound := a.staticPending[owner]
+	staticFound = staticFound && staticOrigin.sourceHash == hash
+	if previous, active := a.staticActive[owner]; active && (!staticFound || previous != staticOrigin) {
+		return fmt.Errorf("static class lowering: changed returned source")
+	}
 	toActivate := map[string]constructorNativeSourceOrigin{}
 	for _, origin := range enums {
 		candidate := constructorNativeSourceOrigin{origin.originalHash, hash}
@@ -387,7 +396,7 @@ func (a *sourceConstructorLoweringAuthority) sourceReturned(owner string, source
 			return fmt.Errorf("enum lowering: conflicting completed owning sources")
 		}
 	}
-	activateEnums := func() {
+	activateOrigins := func() {
 		// Commit only at a successful return, while holding the lock. A
 		// later native/constructor conflict cannot leave partial authority.
 		if len(toActivate) != 0 {
@@ -397,6 +406,12 @@ func (a *sourceConstructorLoweringAuthority) sourceReturned(owner string, source
 			for binary, origin := range toActivate {
 				a.enumActive[binary] = origin
 			}
+		}
+		if staticFound {
+			if a.staticActive == nil {
+				a.staticActive = map[string]constructorNativeSourceOrigin{}
+			}
+			a.staticActive[owner] = staticOrigin
 		}
 	}
 	if origin, found := a.nativePending[owner]; found && origin.sourceHash == hash {
@@ -410,7 +425,7 @@ func (a *sourceConstructorLoweringAuthority) sourceReturned(owner string, source
 			a.nativeActive = map[string]constructorNativeSourceOrigin{}
 		}
 		a.nativeActive[owner] = origin
-		activateEnums()
+		activateOrigins()
 		return nil
 	}
 	p := a.pending[owner]
@@ -418,7 +433,7 @@ func (a *sourceConstructorLoweringAuthority) sourceReturned(owner string, source
 		if a.active[owner] != nil {
 			return fmt.Errorf("constructor lowering: changed source requires a fresh artifact")
 		}
-		activateEnums()
+		activateOrigins()
 		return nil
 	}
 	if prior := a.active[owner]; prior != nil && !reflect.DeepEqual(prior, p) {
@@ -428,7 +443,7 @@ func (a *sourceConstructorLoweringAuthority) sourceReturned(owner string, source
 		a.active = map[string]*sourceConstructorLoweringPublication{}
 	}
 	a.active[owner] = p
-	activateEnums()
+	activateOrigins()
 	return nil
 }
 
