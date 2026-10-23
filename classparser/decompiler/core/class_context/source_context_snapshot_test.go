@@ -21,6 +21,7 @@ func TestSourceProofContextSnapshotKeepsItsOriginalMethod(t *testing.T) {
 		},
 		SourceAllocationRender:       func(AllocationRenderView) (string, string) { return "live", "live" },
 		SourceConstructedInvocation:  func(ConstructedInvocationView) {},
+		SourceMethodReference:        func(any, string) {},
 		SourceGenericArgument:        func(any, int) (string, bool) { return "live", true },
 		SourceGenericReceiver:        func(any) (string, bool) { return "live", true },
 		SourceGenericInvocationBound: func(any) bool { return true },
@@ -39,6 +40,9 @@ func TestSourceProofContextSnapshotKeepsItsOriginalMethod(t *testing.T) {
 	}
 	if saved.SourceAllocationRender != nil || saved.SourceConstructedInvocation != nil || saved.SourceGenericArgument != nil || saved.SourceGenericReceiver != nil || saved.SourceGenericInvocationBound != nil || saved.SourceGenericInvocation != nil || live.SourceAllocationRender == nil || live.SourceConstructedInvocation == nil || live.SourceGenericArgument == nil || live.SourceGenericReceiver == nil || live.SourceGenericInvocationBound == nil || live.SourceGenericInvocation == nil {
 		t.Fatal("a publication snapshot retained or changed live render authority")
+	}
+	if saved.SourceMethodReference != nil || live.SourceMethodReference == nil {
+		t.Fatal("a proof snapshot retained or erased the live reference observer")
 	}
 	// Metadata queries deliberately stay live. Freezing the resolver's answers
 	// would conceal the stale-input change that the retained proof must reject.

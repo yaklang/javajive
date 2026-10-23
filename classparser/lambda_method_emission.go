@@ -16,14 +16,16 @@ type lambdaMethodEmission struct {
 	complete, ended, invalid bool
 	bytes                    int64
 	children                 []lambdaMethodOccurrence
+	references               []ordinaryReferenceOccurrence
 	seal                     *lambdaMethodEmissionSeal
 }
 
 type lambdaMethodEmissionSeal struct {
-	body     *dumpedMethods
-	request  methodSourceRequest
-	bytes    int64
-	children []lambdaMethodOccurrence
+	body       *dumpedMethods
+	request    methodSourceRequest
+	bytes      int64
+	children   []lambdaMethodOccurrence
+	references []ordinaryReferenceOccurrence
 }
 
 type lambdaMethodOccurrence struct {
@@ -45,16 +47,17 @@ func (c *ClassObjectDumper) endLambdaMethodEmission(frame *lambdaMethodEmission,
 	if frame == nil || frame.ended {
 		return
 	}
-	frame.complete = complete && c.lambdaMethodRendering == frame && !frame.invalid && nativeProofWork(c.Work, int64(len(frame.children))+1) && (c.Work == nil || c.Work.CheckAlloc(int64(len(frame.children))*96+128) == nil)
+	count := len(frame.children) + len(frame.references)
+	frame.complete = complete && c.lambdaMethodRendering == frame && !frame.invalid && nativeProofWork(c.Work, int64(count)+1) && (c.Work == nil || c.Work.CheckAlloc(int64(count)*128+128) == nil)
 	if frame.complete {
-		frame.seal = &lambdaMethodEmissionSeal{body: frame.body, request: frame.request, bytes: frame.bytes, children: slices.Clone(frame.children)}
+		frame.seal = &lambdaMethodEmissionSeal{body: frame.body, request: frame.request, bytes: frame.bytes, children: slices.Clone(frame.children), references: slices.Clone(frame.references)}
 	}
 	frame.ended = true
 	c.lambdaMethodRendering = frame.previous
 }
 
 func (frame *lambdaMethodEmission) closed() bool {
-	return frame != nil && frame.complete && frame.ended && !frame.invalid && frame.seal != nil && frame.body == frame.seal.body && frame.request == frame.seal.request && frame.bytes == frame.seal.bytes && slices.Equal(frame.children, frame.seal.children)
+	return frame != nil && frame.complete && frame.ended && !frame.invalid && frame.seal != nil && frame.body == frame.seal.body && frame.request == frame.seal.request && frame.bytes == frame.seal.bytes && slices.Equal(frame.children, frame.seal.children) && slices.Equal(frame.references, frame.seal.references)
 }
 
 // Preview renders can use names which later belong to another declaration.
@@ -217,6 +220,9 @@ func (c *ClassObjectDumper) lambdaEmissionPosition(parent, child *dumpedMethods,
 		hasReference = hasReference || event.body != nil && event.body.compilerReference != nil
 	}
 	arrows, known := c.lambdaOwnImplementationTokens(declaration, hasReference)
+	if known && hasReference {
+		arrows, known = c.lambdaWithoutOrdinaryReferences(declaration, parent, arrows, charge)
+	}
 	if !known || len(arrows) != len(frame.children) {
 		return 0, false
 	}

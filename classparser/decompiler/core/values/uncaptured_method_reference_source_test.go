@@ -95,3 +95,50 @@ func TestUncapturedMethodReferenceSourceOwnsCanonicalRendererAndCreationTarget(t
 		})
 	}
 }
+
+func TestUncapturedMethodReferenceObserverSeesOnlyCompletedCanonicalSource(t *testing.T) {
+	for _, scenario := range []string{"canonical", "opaque callbacks", "output limit", "retained target"} {
+		t.Run(scenario, func(t *testing.T) {
+			identity := MethodReferenceSource{Kind: 6, Owner: "Sample", Member: "format", Descriptor: "(Ljava/lang/Object;)Ljava/lang/String;", CallName: "apply", CallDescriptor: "()Ljava/util/function/Function;", ErasedSAM: "(Ljava/lang/Object;)Ljava/lang/Object;", Instantiated: "(Ljava/lang/Object;)Ljava/lang/String;"}
+			raw := types.NewJavaClass("java.util.function.Function")
+			value := NewUncapturedMethodReferenceSource(identity, raw)
+			value.OriginPC, value.HasOriginPC = 7, true
+			value.MarkOriginalLambdaFactory(7)
+			ctx := &class_context.ClassContext{}
+			if scenario == "opaque callbacks" {
+				value.StringFunc = func(*class_context.ClassContext) string { t.Fatal("opaque source ran"); return "" }
+				value.WriteFunc = func(*class_context.ClassContext, *workbudget.Writer) error { t.Fatal("opaque source ran"); return nil }
+			}
+			if scenario == "output limit" {
+				ctx.Work = workbudget.New(nil, workbudget.Limits{MaxOutputBytes: 7})
+			}
+			if scenario == "retained target" {
+				value, _ = value.RetainMethodReferenceTarget(raw, types.NewJavaClass("java.util.function.UnaryOperator"))
+			}
+			calls, seen := 0, ""
+			ctx.SourceMethodReference = func(observed any, packet string) {
+				if observed != value {
+					t.Fatal("observer lost actual typed view")
+				}
+				calls++
+				seen = packet
+			}
+			text := value.String(ctx)
+			if scenario == "output limit" {
+				if text != "" || calls != 0 || ctx.Work.Err() == nil {
+					t.Fatal("incomplete source was published")
+				}
+			} else if calls != 1 || seen != text || text == "" {
+				t.Fatal("completed canonical source not observed", calls, seen, text)
+			}
+			snapshot, known := ctx.SnapshotForSourceProof(nil)
+			if !known {
+				t.Fatal("snapshot")
+			}
+			value.String(snapshot)
+			if scenario != "output limit" && calls != 1 {
+				t.Fatal("proof re-render invoked live observer")
+			}
+		})
+	}
+}

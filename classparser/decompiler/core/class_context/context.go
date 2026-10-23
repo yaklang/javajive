@@ -33,6 +33,9 @@ type ClassContext struct {
 	// allocation, access, argument-cast, capture or initialization permission.
 	SourceAllocationRender      func(AllocationRenderView) (prefix, suffix string)
 	SourceConstructedInvocation func(ConstructedInvocationView)
+	// Observation of a completed canonical ordinary method-reference render.
+	// The consumer must reopen its original factory; this grants no binding.
+	SourceMethodReference func(value any, source string)
 	// Installed only by the final ordinary-method publisher after original
 	// factory, reaching-definition and generic-signature proofs have closed.
 	SourceGenericArgument        func(invocation any, index int) (string, bool)

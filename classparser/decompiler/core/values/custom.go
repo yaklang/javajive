@@ -157,7 +157,11 @@ func (v *CustomValue) String(funcCtx *class_context.ClassContext) string {
 		if guard && renderRejected(funcCtx) {
 			return ""
 		}
-		return out.String()
+		text := out.String()
+		if v.sourceMethodReference != nil && funcCtx != nil && funcCtx.SourceMethodReference != nil {
+			funcCtx.SourceMethodReference(v, text)
+		}
+		return text
 	}
 	s := v.StringFunc(funcCtx)
 	if renderRejected(funcCtx) {

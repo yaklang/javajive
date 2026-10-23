@@ -456,9 +456,9 @@ func (c *ClassObjectDumper) proveCompilerVarargsReference(name, descriptor strin
 	return &lambdaCompilerReference{parameter: parameter, local: local, originalReceiver: receiver, factory: f, shape: shape, receiver: receiver, context: ctx, target: target, erased: site.erased, instantiated: site.actual, template: "\x00LCAP0\x00::" + shape.member.Member, maxStack: shape.code.MaxStack, maxLocals: shape.code.MaxLocals, factoryStack: f.code.MaxStack, factoryLocals: f.code.MaxLocals}
 }
 
-// An unknown reference must not silently disappear from the class-wide
-// compiler counter. Until ordinary reference/no-adapter events are represented,
-// decline this projection in mixed or nested scopes before consuming any body.
+// Every factory must have a proved compiler role. Fixed-arity ordinary
+// references consume no implementation ordinal; final source occurrence proofs
+// still own their exclusion. Unknown and nested domains remain unsupported.
 func (c *ClassObjectDumper) compilerReferenceFlatScope() bool {
 	if c == nil || c.obj == nil || len(c.obj.Methods) > 4096 {
 		return false
@@ -500,6 +500,9 @@ func (c *ClassObjectDumper) compilerReferenceFlatScope() bool {
 				}
 				site, known := c.originalCompilerReferenceSite(f)
 				if !known || c.originalLambdaDeclaration(c.obj.GetClassName(), site.implementation.Member, site.implementation.Description) != core.LambdaDeclarationSyntheticBody {
+					if _, ordinary := c.originalOrdinaryReferenceSite(f); ordinary {
+						continue
+					}
 					return false
 				}
 				key := site.implementation.Member + site.implementation.Description

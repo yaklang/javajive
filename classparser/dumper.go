@@ -5116,6 +5116,11 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			}
 			lambdaEmission := c.beginLambdaMethodEmission(dumped)
 			defer c.endLambdaMethodEmission(lambdaEmission, false)
+			priorReferenceObserver := funcCtx.SourceMethodReference
+			funcCtx.SourceMethodReference = func(value any, packet string) {
+				c.recordOrdinaryReferenceEmission(dumped, codeAttr, funcCtx, value, packet)
+			}
+			defer func() { funcCtx.SourceMethodReference = priorReferenceObserver }()
 			if name == "<clinit>" && classStaticInitializersMustHoist {
 				renderInitializer := statementListToString
 				if needsCheckedEscape {

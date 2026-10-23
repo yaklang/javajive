@@ -135,6 +135,9 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 	}
 	text := string(own)
 	arrows, known := c.lambdaOwnImplementationTokens(text, hasReference)
+	if known && hasReference {
+		arrows, known = c.lambdaClassWithoutOrdinaryReferences(text, methods, arrows, charge)
+	}
 	if !known || len(arrows) == 0 {
 		return nil, false
 	}
