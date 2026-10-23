@@ -60,7 +60,7 @@ func TestAdversarialConstructorLoweringRefusesUnqualifiedOriginalVersions(t *tes
 
 func TestAdversarialSourceConstructorLoweringRejectsFreshPacketAndPCMutation(t *testing.T) {
 	original, compiled, a := loweringAuthorityTestInputs(t)
-	for _, kind := range []string{"control", "parameter slot", "wide category", "field identity", "field descriptor", "delegation", "extra instruction", "handler", "frame", "unknown Code annotation", "line operand PC", "local interior", "max stack", "max locals", "method flags", "missing constructor", "class identity"} {
+	for _, kind := range []string{"control", "parameter slot", "parameter replaced by literal", "wide category", "field identity", "field descriptor", "delegation", "extra instruction", "handler", "frame", "unknown Code annotation", "line operand PC", "local interior", "max stack", "max locals", "method flags", "missing constructor", "class identity"} {
 		t.Run(kind, func(t *testing.T) {
 			obj := mustParseLowering(t, compiled)
 			var ctor *MemberInfo
@@ -74,6 +74,8 @@ func TestAdversarialSourceConstructorLoweringRejectsFreshPacketAndPCMutation(t *
 			switch kind {
 			case "parameter slot":
 				code.Code[7] = 0x2b // token's aload_3 becomes input's aload_1
+			case "parameter replaced by literal":
+				code.Code[2] = 0x04 // valid int constant, different delegation operand
 			case "wide category":
 				code.Code[12] = 0x18 // lload becomes dload at the same word slot
 			case "field identity":
@@ -275,9 +277,8 @@ func TestAdversarialSourceConstructorLoweringRequiresOriginalAndReturnedSourceAu
 }
 
 func TestAdversarialSourceConstructorLoweringCannotTurnOrdinaryStorageIntoCaptures(t *testing.T) {
-	compiler, _ := t04Tools(t)
-	classes := compileLambdaParameterMetadataFixture(t, compiler, ModernJavac, constructorLoweringFixture, "LoweringChild", "none", false)
-	obj := mustParseLowering(t, constructorLoweringOriginal(t, classes)["LoweringChild.class"])
+	original, compiled, artifact := loweringAuthorityTestInputs(t)
+	obj := mustParseLowering(t, original)
 	for _, kind := range []string{"ordinary", "mutable", "static", "volatile", "foreign owner", "computed argument", "extra side effect"} {
 		t.Run(kind, func(t *testing.T) {
 			candidate := mustParseLowering(t, obj.Bytes())
@@ -318,7 +319,22 @@ func TestAdversarialSourceConstructorLoweringCannotTurnOrdinaryStorageIntoCaptur
 			if _, err := Parse(candidate.Bytes()); err != nil {
 				t.Fatal("original negative packet is malformed", err)
 			}
-			if constructorLoweringPacketFor(candidate, method, true, true, nil) != nil {
+			packet := constructorLoweringPacketFor(candidate, method, true, true, nil)
+			if kind == "computed argument" {
+				// A literal is now a supported original operand, but it cannot
+				// borrow the authority of the original parameter. Check the
+				// semantic plan and the actual published completion boundary.
+				publication := artifact.source.jar.sourceConstructorLowering.active["LoweringChild"]
+				descriptor, _ := sourceBridgeUTF8(candidate, method.DescriptorIndex)
+				if packet == nil || constructorLoweringExecutablePlanEqual(publication.plans[descriptor], packet.plan) {
+					t.Fatal("literal and original parameter were not distinguished")
+				}
+				if got, err := artifact.source.jar.sourceConstructorLowering.lower(candidate.Bytes(), compiled, nil); err == nil || got != nil {
+					t.Fatal("changed original operand borrowed published source authority", err)
+				}
+				return
+			}
+			if packet != nil {
 				t.Fatal("original identity obligation was relaxed", kind)
 			}
 		})
