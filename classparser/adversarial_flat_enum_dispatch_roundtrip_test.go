@@ -19,9 +19,19 @@ func TestAdversarialFlatEnumConstantAssertionsKeepLexicalStatusOwner(t *testing.
 	flatEnumDispatchRoundTrip(t, true)
 }
 
-func flatEnumDispatchRoundTrip(t *testing.T, assertions bool) {
+func TestAdversarialFlatEnumConstructorProofSeparatesMetadataAndBodyCode(t *testing.T) {
+	for _, variant := range []string{"named parameters", "generic debug", "lambda bootstrap", "legacy self row"} {
+		t.Run(variant, func(t *testing.T) { flatEnumDispatchRoundTrip(t, false, variant) })
+	}
+}
+
+func flatEnumDispatchRoundTrip(t *testing.T, assertions bool, variants ...string) {
 	t.Helper()
 	javac, java := t04Tools(t)
+	variant := ""
+	if len(variants) == 1 {
+		variant = variants[0]
+	}
 	for _, root := range []string{"FlatDispatchOwner", "ChangedDispatchOwner"} {
 		for _, profile := range []SourceCompilerProfile{NativeJavac8, ModernJavac} {
 			for _, debug := range []string{"none", "source,lines,vars"} {
@@ -53,6 +63,19 @@ class FlatDispatchDriver {public static void main(String[]args){
  System.out.println(rows+":flat:enum:dispatch:empty:overflow:identity");
 }}
 `, "FlatDispatchOwner", root)
+					if variant != "" {
+						probe := `int rows=0;for(` + root + `.Mode m:` + root + `.Mode.values()){if(m.getClass()==` + root + `.Mode.class)continue;for(java.lang.reflect.Constructor<?> c:m.getClass().getDeclaredConstructors()){StringBuilder row=new StringBuilder(m.name()+":"+m.getClass().getModifiers()+":"+c.getModifiers());for(java.lang.reflect.Parameter p:c.getParameters())row.append(":"+p.getName()+":"+p.isNamePresent()+":"+p.getModifiers()+":"+p.getParameterizedType().getTypeName());System.out.println(row);}}`
+						source = strings.Replace(source, "int rows=0;", probe, 1)
+					}
+					if variant == "generic debug" {
+						for _, old := range []string{"BASE(0,0.0)", "EMPTY(0,-0.0)", "ADD(1,0.25)", "NEGATE(0,0.5)"} {
+							source = strings.Replace(source, old, strings.TrimSuffix(old, ")")+",String.class)", 1)
+						}
+						source = strings.Replace(source, "Mode(long step,double bias)", "Mode(long step,double bias,Class<?> kind)", 1)
+					}
+					if variant == "lambda bootstrap" {
+						source = strings.Replace(source, "return x+step;", "java.util.function.LongUnaryOperator f = value -> value+step;return f.applyAsLong(x);", 1)
+					}
 					if assertions {
 						source = strings.Replace(source, "FlatDispatchEffects.calls++;if(x==17)", `FlatDispatchEffects.calls++;assert x!=9 : "original assertion";if(x==17)`, 1)
 						source = strings.Replace(source, "if(FlatDispatchEffects.calls!=8)", `boolean assertion=false;try{`+root+`.Mode.ADD.apply(9);}catch(AssertionError error){assertion=true;if(!"original assertion".equals(error.getMessage()))throw error;}
@@ -66,13 +89,41 @@ if(FlatDispatchEffects.calls!=9)`, 1)
 							t.Fatal("native original compiler required")
 						}
 					}
-					files := compileLambdaParameterMetadataFixture(t, compiler, profile, source, root, debug, false)
+					files := compileLambdaParameterMetadataFixture(t, compiler, profile, source, root, debug, variant == "named parameters")
+					if variant == "legacy self row" {
+						// Legal InnerClasses metadata need not repeat the ClassFile ENUM
+						// bit. Preserve the original runtime metadata independently of Code.
+						for name, raw := range files {
+							obj := mustParseLowering(t, raw)
+							if obj.GetSupperClassName() != root+"$Mode" {
+								continue
+							}
+							for _, attr := range obj.Attributes {
+								if rows, ok := attr.(*InnerClassesAttribute); ok {
+									for _, row := range rows.Classes {
+										binary, _ := sourceBridgeClassName(obj, row.InnerClassInfoIndex)
+										if binary == obj.GetClassName() {
+											row.InnerClassAccessFlags &= ^uint16(0x4000)
+										}
+									}
+								}
+							}
+							files[name] = obj.Bytes()
+						}
+					}
+					var originalObservations string
 					run := func(t *testing.T, dir string) {
 						t.Helper()
 						for _, mode := range []string{"-ea", "-da", "-ea:" + root, "-ea:" + root + "$Mode"} {
 							log, err := enumFreshOracleRun(t, java, mode, dir, "FlatDispatchDriver")
-							if err != nil || string(log) != "28:flat:enum:dispatch:empty:overflow:identity\n" {
+							if err != nil || !strings.HasSuffix(string(log), "28:flat:enum:dispatch:empty:overflow:identity\n") || variant == "" && string(log) != "28:flat:enum:dispatch:empty:overflow:identity\n" {
 								t.Fatal("original binary oracle", err, string(log))
+							}
+							if originalObservations == "" {
+								originalObservations = string(log)
+							}
+							if string(log) != originalObservations {
+								t.Fatal("original metadata and behavior differ", string(log), originalObservations)
 							}
 						}
 					}
@@ -118,7 +169,7 @@ if(FlatDispatchEffects.calls!=9)`, 1)
 								file := filepath.Join(out, name)
 								fresh, err := os.ReadFile(file)
 								if err != nil {
-									t.Fatal("missing constant class", name, err)
+									t.Fatal("missing constant class", name, err, text)
 								}
 								done, err := artifact.FinishClass(name, fresh)
 								if err != nil {

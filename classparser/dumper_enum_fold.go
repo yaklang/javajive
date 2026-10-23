@@ -94,7 +94,7 @@ func (c *ClassObjectDumper) foldEnumConstantBodies(isEnum bool) (map[string]stri
 		}
 		// The pre-nest packet proof permits constructor erasure even for an
 		// empty body. It retains the distinct class and inherited dispatch.
-		proof := nativeEnumConstantBodyProof(c.obj, plan, bodyOrdinal, bridges, resolve, c.Work)
+		proof := flatEnumConstantBodyProof(c.obj, plan, bodyOrdinal, bridges, resolve, c.Work)
 		if proof == nil {
 			return nil, fmt.Errorf("enum fold: original constructor or class initializer for %s is unproved", plan.constant)
 		}

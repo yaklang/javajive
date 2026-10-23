@@ -128,6 +128,10 @@ func (a *JarReconstructionArtifact) FinishClass(name string, compiled []byte) ([
 	if err != nil {
 		return nil, err
 	}
+	lowered, err = z.sourceConstructorLowering.restoreEnumConstantModifiers(original, lowered, reader.Work)
+	if err != nil {
+		return nil, err
+	}
 	lowered, err = z.sourceConstructorLowering.restoreEnumAssertionOwner(original, lowered, reader.Work)
 	if err != nil {
 		return nil, err
