@@ -23,12 +23,24 @@ func TestAdversarialConstructorBoundReferenceAcrossCompilerProtocols(t *testing.
 		{NativeJavac8, NativeJavac8}, {ModernJavac, ModernJavac},
 	} {
 		for _, debug := range []string{"none", "source,lines,vars"} {
-			for _, kind := range []string{"generic consumer", "ordinary interface"} {
+			for _, kind := range []string{"generic consumer", "ordinary interface", "ordinary result and throws"} {
 				t.Run(string(profiles.original)+"-to-"+string(profiles.rebuilt)+"/"+debug+"/"+kind, func(t *testing.T) {
 					fixture := constructorBoundReferenceFamilyFixture
 					if kind == "ordinary interface" {
 						fixture = strings.ReplaceAll(fixture, "Consumer<Object>", "BoundAction")
 						fixture += "\ninterface BoundAction {void accept(Object value);}\n"
+					}
+					if kind == "ordinary result and throws" {
+						fixture = strings.NewReplacer(
+							"Consumer<Object>", "BoundAction",
+							"void accept(Object value){", "Object accept(Object value)throws java.io.IOException{",
+							"BoundEffects.lastValue=value;if(BoundEffects.mode==3)throw BoundEffects.failure;}", "BoundEffects.lastValue=value;if(BoundEffects.mode==3)throw BoundEffects.failure;return value;}",
+							"void send(Object value){action.accept(value);}", "Object send(Object value)throws java.io.IOException{return action.apply(value);}",
+							"parts.send(value);return BoundEffects.lastValue;", "return parts.send(value);",
+							"Object first(BoundProducer producer,Object value){", "Object first(BoundProducer producer,Object value)throws java.io.IOException{",
+							"Object second(BoundProducer producer,Object value){", "Object second(BoundProducer producer,Object value)throws java.io.IOException{",
+						).Replace(fixture)
+						fixture += "\ninterface BoundAction {Object apply(Object value)throws java.io.IOException;}\n"
 					}
 					originalCompiler, rebuiltCompiler := modern, modern
 					if profiles.original == NativeJavac8 {
