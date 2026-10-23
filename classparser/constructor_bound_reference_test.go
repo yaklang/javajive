@@ -30,7 +30,7 @@ func TestAdversarialConstructorBoundReferenceRequiresOriginalEvaluationAndBindin
 				}
 			}
 			files := compileLambdaParameterMetadataFixture(t, compiler, profile, constructorBoundReferenceFamilyFixture, "BoundConstructorOwner", "none", false)
-			for _, variant := range []string{"original", "factory consumed before delegation", "detached constructor declaration", "unknown old renderer", "unsealed factory", "changed capture", "copied parameter", "changed source receiver type", "wrong check receiver", "missing factory PC", "wrong check PC", "wrong delegation owner", "nonconstructor", "different compiler protocol", "extra prefix", "protected prefix", "missing declarations", "wrong declaration owner", "incomplete member family", "member overload", "varargs member", "static member", "method generic member", "noninterface target", "missing SAM signature", "changed SAM signature", "changed constructor signature", "duplicate original constructor signature", "missing bootstrap", "duplicate bootstrap", "different bootstrap", "static implementation handle", "special implementation handle", "extra bootstrap operand", "different receiver descriptor", "budget", "canceled"} {
+			for _, variant := range []string{"original", "factory consumed before delegation", "detached constructor declaration", "unknown old renderer", "unsealed factory", "changed capture", "copied parameter", "changed source receiver type", "wrong check receiver", "missing factory PC", "wrong check PC", "wrong delegation owner", "nonconstructor", "different compiler protocol", "unknown compiler profile", "foreign null-check owner", "extra prefix", "protected prefix", "missing declarations", "wrong declaration owner", "incomplete member family", "member overload", "varargs member", "static member", "method generic member", "noninterface target", "missing SAM signature", "changed SAM signature", "changed constructor signature", "duplicate original constructor signature", "missing bootstrap", "duplicate bootstrap", "different bootstrap", "static implementation handle", "special implementation handle", "extra bootstrap operand", "different receiver descriptor", "budget", "canceled"} {
 				t.Run(variant, func(t *testing.T) {
 					obj, err := Parse(bytes.Clone(files["BoundConstructorOwner$Parts.class"]))
 					if err != nil {
@@ -171,6 +171,17 @@ func TestAdversarialConstructorBoundReferenceRequiresOriginalEvaluationAndBindin
 						method.NameIndex = obj.ThisClass
 					case "different compiler protocol":
 						d.options.SourceCompiler = map[SourceCompilerProfile]SourceCompilerProfile{ModernJavac: NativeJavac8, NativeJavac8: ModernJavac}[profile]
+					case "unknown compiler profile":
+						d.options.SourceCompiler = SourceCompilerProfile("unknown")
+					case "foreign null-check owner":
+						index := int(code.Code[4])<<8 | int(code.Code[5])
+						ref := nativeConstantMember(obj.ConstantPool[index-1])
+						if ref == nil {
+							t.Fatal("original null-check reference")
+						}
+						ref.ClassIndex = uint16(obj.ConstantPoolManager.AddNewClassInfo("ForeignNullCheck"))
+						d.ConstantPool = obj.ConstantPool
+						check.ClassName = "ForeignNullCheck"
 					case "extra prefix":
 						body = append([]statements.Statement{&statements.ExpressionStatement{Expression: argument}}, body...)
 					case "protected prefix":
@@ -216,7 +227,7 @@ func TestAdversarialConstructorBoundReferenceRequiresOriginalEvaluationAndBindin
 					}
 					before := append([]statements.Statement(nil), body...)
 					got := d.constructorBoundReferenceSource(code, body, params, method)
-					want := variant == "original" || variant == "unknown old renderer"
+					want := variant == "original" || variant == "unknown old renderer" || variant == "different compiler protocol"
 					if (len(got) == len(body)-1) != want {
 						t.Fatalf("source check absorbed=%v, want %v", len(got) == len(body)-1, want)
 					}

@@ -105,7 +105,7 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 	if err != nil {
 		return nil, err
 	}
-	if want.GetClassName() != owner || want.MajorVersion != 52 || want.MinorVersion != 0 || got.MinorVersion != 0 || got.MajorVersion < 52 || got.MajorVersion > 65 || want.AccessFlags&0x4030 != 0x4030 || want.GetSupperClassName() != "java/lang/Enum" || !sourceParameterClassIdentityClosed(want, got) || len(got.Methods) != len(want.Methods)+1 || len(got.Methods) > 4096 {
+	if want.GetClassName() != owner || want.MajorVersion != 52 || want.MinorVersion != 0 || got.MinorVersion != 0 || got.MajorVersion < 52 || got.MajorVersion > 65 || want.AccessFlags&0x4020 != 0x4020 || want.GetSupperClassName() != "java/lang/Enum" || !sourceParameterClassIdentityClosed(want, got) || len(got.Methods) != len(want.Methods)+1 || len(got.Methods) > 4096 {
 		return decline()
 	}
 	fields, err := sourceFieldIdentities(want, work)
@@ -215,8 +215,35 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 	if oldCode.MaxStack < peak || initCode.MaxStack < peak || arrayCode.MaxStack < peak {
 		return decline()
 	}
-	oldPrefix, oldPrefixOK := enumArrayConstantBoundary(want, originalInit, oldOps, constants, wantMembers, work)
-	prefix, prefixOK := enumArrayConstantBoundary(got, initializer, initOps, constants, freshMembers, work)
+	// Constant-specific allocations retain their exact class and constructor.
+	// Original sibling declarations establish those identities; no sibling Code
+	// is copied or edited. Each actual fresh sibling still owes FinishClass.
+	declarations := map[string]*ClassObject{}
+	declarationBytes := int64(0)
+	resolve := func(name string) (*ClassObject, bool) {
+		if object, found := declarations[name]; found {
+			return object, object != nil
+		}
+		if a.jar == nil || len(declarations) >= 256 || !nativeProofWork(work, 1) {
+			return nil, false
+		}
+		raw, found := a.jar.enumSiblingResolver()(name)
+		if !found || int64(len(raw)) > (32<<20)-declarationBytes {
+			return nil, false
+		}
+		declarationBytes += int64(len(raw))
+		if work.CheckAlloc(declarationBytes*8) != nil {
+			return nil, false
+		}
+		object, err := ParseWithBudget(raw, work)
+		if err != nil || object.GetClassName() != name {
+			return nil, false
+		}
+		declarations[name] = object
+		return object, true
+	}
+	oldPrefix, oldPrefixOK := enumArrayConstantBoundary(want, originalInit, oldOps, constants, wantMembers, resolve, work)
+	prefix, prefixOK := enumArrayConstantBoundary(got, initializer, initOps, constants, freshMembers, resolve, work)
 	if !oldPrefixOK || !prefixOK || len(initOps) != prefix+3 || len(oldOps) != oldPrefix+4+4*len(constants) || !nativeEnumValuesArrayPacket(want, oldOps[oldPrefix:len(oldOps)-2], constants, work) || !nativeEnumMemberOperand(got, initOps[prefix], core.OP_INVOKESTATIC, owner, helperKey.name, helperKey.descriptor) || !enumArrayOwnMember(got, initOps[prefix], helper.NameIndex, helper.DescriptorIndex) || !nativeEnumOpcode(initOps[len(initOps)-1], core.OP_RETURN) || !nativeEnumOpcode(oldOps[len(oldOps)-1], core.OP_RETURN) {
 		return decline()
 	}
@@ -309,7 +336,7 @@ func enumArrayInstructionSpans(code []byte, ops []*core.OpCode) bool {
 // or instructions. This only locates the empty-stack cut: every argument,
 // allocation and constructor instruction remains in its fresh original order.
 // The first domain still excludes branches, handlers and user initializer tails.
-func enumArrayConstantBoundary(object *ClassObject, initializer *MemberInfo, ops []*core.OpCode, constants []string, fields map[sourceFieldIdentity]*MemberInfo, work *workbudget.Budget) (int, bool) {
+func enumArrayConstantBoundary(object *ClassObject, initializer *MemberInfo, ops []*core.OpCode, constants []string, fields map[sourceFieldIdentity]*MemberInfo, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) (int, bool) {
 	if enumArrayConstantPrefix(object, ops, constants, fields, work) {
 		return len(constants) * 6, true
 	}
@@ -319,7 +346,7 @@ func enumArrayConstantBoundary(object *ClassObject, initializer *MemberInfo, ops
 	}
 	reader := NewClassObjectDumper(object)
 	reader.Work = work
-	allocations, err := reader.nativeEnumConstantInitializations()
+	allocations, err := reader.nativeEnumConstantInitializationsWithDeclarations(resolve)
 	if err != nil || len(allocations) != len(constants) {
 		return 0, false
 	}
@@ -357,11 +384,47 @@ func enumArrayConstantBoundary(object *ClassObject, initializer *MemberInfo, ops
 		invoke, invokeKnown := positions[plan.invokePC]
 		field := fields[sourceFieldIdentity{name, "L" + object.GetClassName() + ";"}]
 		constructor := constructors[plan.descriptor]
-		if !found || plan.ordinal != ordinal || plan.allocatedClass != object.GetClassName() || !newKnown || first != end || !storeKnown || last < first || !invokeKnown || invoke <= first || invoke >= last || field == nil || constructor == nil || !nativeProofWork(work, int64(last-first+1)) {
+		constructorOwner := object
+		if found && plan.allocatedClass != object.GetClassName() {
+			var known bool
+			if resolve == nil {
+				return 0, false
+			}
+			constructorOwner, known = resolve(plan.allocatedClass)
+			if !known || constructorOwner == nil {
+				return 0, false
+			}
+			constructor = nil
+			for _, method := range constructorOwner.Methods {
+				name, nk := sourceBridgeUTF8(constructorOwner, method.NameIndex)
+				descriptor, dk := sourceBridgeUTF8(constructorOwner, method.DescriptorIndex)
+				if !nk || !dk || !nativeProofWork(work, 1) {
+					return 0, false
+				}
+				if name == "<init>" && descriptor == plan.descriptor {
+					if constructor != nil {
+						return 0, false
+					}
+					constructor = method
+				}
+			}
+		}
+		if !found || plan.ordinal != ordinal || !newKnown || first != end || !storeKnown || last < first || !invokeKnown || invoke <= first || invoke >= last || field == nil || constructor == nil || !nativeProofWork(work, int64(last-first+1)) {
 			return 0, false
 		}
 		class, ck := nativeEnumCPIndex(ops[first])
-		if !ck || !enumArrayClassEqual(object, class, object.ThisClass) || !enumArrayOwnMember(object, ops[invoke], constructor.NameIndex, constructor.DescriptorIndex) || !enumArrayOwnMember(object, ops[last], field.NameIndex, field.DescriptorIndex) {
+		callIndex, callKnown := nativeEnumCPIndex(ops[invoke])
+		if !ck || !callKnown || callIndex == 0 || int(callIndex) > len(object.ConstantPool) {
+			return 0, false
+		}
+		ref, refKnown := object.ConstantPool[callIndex-1].(*ConstantMethodrefInfo)
+		if !refKnown || ref == nil || !enumArrayClassEqual(object, class, ref.ClassIndex) || ref.NameAndTypeIndex == 0 || int(ref.NameAndTypeIndex) > len(object.ConstantPool) {
+			return 0, false
+		}
+		nt, ntKnown := object.ConstantPool[ref.NameAndTypeIndex-1].(*ConstantNameAndTypeInfo)
+		newName, newKnown := sourceParameterClassKey(object, class)
+		ownerName, ownerKnown := sourceParameterClassKey(constructorOwner, constructorOwner.ThisClass)
+		if !ntKnown || nt == nil || !newKnown || !ownerKnown || newName != ownerName || !enumArrayUTF8Equal(object, nt.NameIndex, constructorOwner, constructor.NameIndex) || !enumArrayUTF8Equal(object, nt.DescriptorIndex, constructorOwner, constructor.DescriptorIndex) || !enumArrayOwnMember(object, ops[last], field.NameIndex, field.DescriptorIndex) {
 			return 0, false
 		}
 		call, callKnown := records[plan.invokePC]

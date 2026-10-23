@@ -4139,7 +4139,10 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 	// descriptor (byte-faithful) and its (raw) call sites still type-check. This recurs across every
 	// nested class with a private generic ctor reached from its encloser, so the fix is broad.
 	// Kill-switch: JDEC_NO_SYN_BRIDGE_CTOR_RETYPE=1.
-	if name == "<init>" && c.getenv("JDEC_NO_SYN_BRIDGE_CTOR_RETYPE") == "" &&
+	// A physical reconstruction preserves the bridge's own declaration,
+	// including the absence of Signature. A target's generic invocation view
+	// cannot be promoted into a new reflective parameter contract on its caller.
+	if name == "<init>" && !c.reconstructionPhysicalHeader() && c.getenv("JDEC_NO_SYN_BRIDGE_CTOR_RETYPE") == "" &&
 		c.isSyntheticAccessBridgeCtor(descriptor, method.AccessFlags) {
 		c.reTypeSyntheticBridgeCtorParams(descriptor, methodType.FunctionType())
 	}

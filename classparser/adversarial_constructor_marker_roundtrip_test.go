@@ -44,81 +44,122 @@ class MarkerDriver {public static void main(String[]args)throws Exception {
 `
 
 func TestAdversarialConstructorMarkerPreservesOriginalBinaryCallers(t *testing.T) {
+	for _, root := range []string{"MarkerHost", "ReboundMarkerHost"} {
+		for _, debug := range []string{"none", "source,lines,vars"} {
+			t.Run(root+"/"+debug, func(t *testing.T) {
+				fixture := strings.ReplaceAll(constructorMarkerFixture, "MarkerHost", root)
+				roundTripConstructorMarkerFixture(t, fixture, root, debug)
+			})
+		}
+	}
+}
+
+func roundTripConstructorMarkerFixture(t *testing.T, fixture, root, debug string) {
 	modern, java := t04Tools(t)
 	native := os.Getenv("JAVA8_JAVAC")
 	if native == "" {
 		t.Fatal("native original compiler required")
 	}
+	files := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, fixture, root, debug, false)
+	run := func(dir string) {
+		t.Helper()
+		for _, mode := range []string{"-ea", "-da"} {
+			out, err := enumFreshOracleRun(t, java, mode, dir, "MarkerDriver")
+			if err != nil || string(out) != "25:constructor:synthetic:binding:wide:exception:effects\n" {
+				t.Fatal("unchanged binary caller", err, string(out))
+			}
+		}
+	}
+	run(sourceArtifactWriteFiles(t, files))
+	owned := map[string][]byte{root + "$Target.class": files[root+"$Target.class"], root + "$1.class": files[root+"$1.class"]}
+	jar := filepath.Join(t.TempDir(), "input.jar")
+	if err := os.WriteFile(jar, t23Zip(t, owned), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := NewJarReconstructionArtifactFromLocal(jar, 8, ModernJavac, func(name string) ([]byte, bool) { b, k := files[name+".class"]; return b, k })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	external := map[string][]byte{}
+	for n, b := range files {
+		if _, ok := owned[n]; !ok {
+			external[n] = b
+		}
+	}
+	out := sourceArtifactWriteFiles(t, external)
+	paths := []string{}
+	for _, name := range []string{root + "$1", root + "$Target"} {
+		source, err := a.ReadFile(name + ".class")
+		if err != nil || legacySourceHasFailureMarker(string(source)) {
+			t.Fatal("complete physical source", name, err, string(source))
+		}
+		path := filepath.Join(out, name+".java")
+		if err := os.WriteFile(path, source, 0600); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, path)
+	}
+	if log, err := exec.Command(modern, append([]string{"-proc:none", "--release", "8", "-g:" + debug, "-cp", out, "-sourcepath", out, "-d", out}, paths...)...).CombinedOutput(); err != nil {
+		t.Fatal("compile without owned original classes", err, string(log))
+	}
+	for _, name := range []string{root + "$Target.class", root + "$1.class"} {
+		path := filepath.Join(out, name)
+		fresh, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		finished, err := a.FinishClass(name, fresh)
+		if err != nil {
+			t.Fatal("complete original constructor contract", name, err)
+		}
+		if name == root+"$Target.class" {
+			artifactLambdaMetadataCodeUnchanged(t, fresh, finished)
+			again, err := a.FinishClass(name, finished)
+			if err != nil || !bytes.Equal(again, finished) {
+				t.Fatal("idempotence", err)
+			}
+		}
+		if err := os.WriteFile(path, finished, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run(out)
+}
+
+func TestAdversarialConstructorMarkerKeepsErasedGenericBridgeContract(t *testing.T) {
 	for _, root := range []string{"MarkerHost", "ReboundMarkerHost"} {
 		for _, debug := range []string{"none", "source,lines,vars"} {
-			t.Run(root+"/"+debug, func(t *testing.T) {
-				fixture := strings.ReplaceAll(constructorMarkerFixture, "MarkerHost", root)
-				files := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, fixture, root, debug, false)
-				run := func(dir string) {
-					t.Helper()
-					for _, mode := range []string{"-ea", "-da"} {
-						out, err := enumFreshOracleRun(t, java, mode, dir, "MarkerDriver")
-						if err != nil || string(out) != "25:constructor:synthetic:binding:wide:exception:effects\n" {
-							t.Fatal("unchanged binary caller", err, string(out))
+			for _, kind := range []string{"parameterized", "variable", "bounded", "array"} {
+				t.Run(root+"/"+debug+"/"+kind, func(t *testing.T) {
+					fixture := strings.ReplaceAll(constructorMarkerFixture, "MarkerHost", root)
+					erased, genericCheck := "java.util.List.class", "c.getGenericParameterTypes()[2] instanceof java.lang.reflect.ParameterizedType"
+					if kind == "parameterized" {
+						fixture = strings.ReplaceAll(fixture, "Object v", "java.util.List<String> v")
+						fixture = strings.Replace(fixture, "Object alias=new Object();", "java.util.List<String> alias=new java.util.ArrayList<String>();", 1)
+					} else {
+						declaration, formal, physical, alias := "T", "T", "Object", "Object alias=new Object();"
+						if kind == "bounded" {
+							declaration, physical, alias = "T extends Number", "Number", "Number alias=java.math.BigInteger.TEN;"
+						}
+						if kind == "array" {
+							formal, physical, alias = "T[]", "Object[]", "Object[] alias=new Object[]{new Object()};"
+						}
+						fixture = strings.Replace(fixture, "class Target {", "class Target<"+declaration+"> {", 1)
+						fixture = strings.Replace(fixture, "make(long n,double d,Object v", "make(long n,double d,"+physical+" v", 1)
+						fixture = strings.Replace(fixture, "private Target(long n,double d,Object v", "private Target(long n,double d,"+formal+" v", 1)
+						fixture = strings.Replace(fixture, "Object alias=new Object();", alias, 1)
+						erased = physical + ".class"
+						genericCheck = "c.getGenericParameterTypes()[2] instanceof java.lang.reflect.TypeVariable"
+						if kind == "array" {
+							genericCheck = "c.getGenericParameterTypes()[2] instanceof java.lang.reflect.GenericArrayType"
 						}
 					}
-				}
-				run(sourceArtifactWriteFiles(t, files))
-				owned := map[string][]byte{root + "$Target.class": files[root+"$Target.class"], root + "$1.class": files[root+"$1.class"]}
-				jar := filepath.Join(t.TempDir(), "input.jar")
-				if err := os.WriteFile(jar, t23Zip(t, owned), 0600); err != nil {
-					t.Fatal(err)
-				}
-				a, err := NewJarReconstructionArtifactFromLocal(jar, 8, ModernJavac, func(name string) ([]byte, bool) { b, k := files[name+".class"]; return b, k })
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer a.Close()
-				external := map[string][]byte{}
-				for n, b := range files {
-					if _, ok := owned[n]; !ok {
-						external[n] = b
-					}
-				}
-				out := sourceArtifactWriteFiles(t, external)
-				paths := []string{}
-				for _, name := range []string{root + "$1", root + "$Target"} {
-					source, err := a.ReadFile(name + ".class")
-					if err != nil || legacySourceHasFailureMarker(string(source)) {
-						t.Fatal("complete physical source", name, err, string(source))
-					}
-					path := filepath.Join(out, name+".java")
-					if err := os.WriteFile(path, source, 0600); err != nil {
-						t.Fatal(err)
-					}
-					paths = append(paths, path)
-				}
-				if log, err := exec.Command(modern, append([]string{"-proc:none", "--release", "8", "-g:" + debug, "-cp", out, "-sourcepath", out, "-d", out}, paths...)...).CombinedOutput(); err != nil {
-					t.Fatal("compile without owned original classes", err, string(log))
-				}
-				for _, name := range []string{root + "$Target.class", root + "$1.class"} {
-					path := filepath.Join(out, name)
-					fresh, err := os.ReadFile(path)
-					if err != nil {
-						t.Fatal(err)
-					}
-					finished, err := a.FinishClass(name, fresh)
-					if err != nil {
-						t.Fatal("complete original constructor contract", name, err)
-					}
-					if name == root+"$Target.class" {
-						artifactLambdaMetadataCodeUnchanged(t, fresh, finished)
-						again, err := a.FinishClass(name, finished)
-						if err != nil || !bytes.Equal(again, finished) {
-							t.Fatal("idempotence", err)
-						}
-					}
-					if err := os.WriteFile(path, finished, 0600); err != nil {
-						t.Fatal(err)
-					}
-				}
-				run(out)
-			})
+					fixture = strings.Replace(fixture, "if(c.isSynthetic()){syntheticCount++;", "if(c.isSynthetic()){syntheticCount++;if(c.getGenericParameterTypes()[2]!="+erased+")throw new AssertionError(\"synthetic port gained inferred Signature\");", 1)
+					fixture = strings.Replace(fixture, "else {privateCount++;", "else {privateCount++;if(!("+genericCheck+"))throw new AssertionError(\"private target lost declared Signature\");", 1)
+					roundTripConstructorMarkerFixture(t, fixture, root, debug)
+				})
+			}
 		}
 	}
 }
