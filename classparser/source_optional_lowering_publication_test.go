@@ -8,7 +8,6 @@ import (
 )
 
 func TestAdversarialPartialSourceKeepsDiagnosticsWithoutExecutableAuthority(t *testing.T) {
-	compiler, _ := t04Tools(t)
 	native := os.Getenv("JAVA8_JAVAC")
 	if native == "" {
 		t.Fatal("native original compiler required")
@@ -70,12 +69,12 @@ func TestAdversarialPartialSourceKeepsDiagnosticsWithoutExecutableAuthority(t *t
 				if err := authority.sourceReturned(owner, []byte(source)); err != nil {
 					t.Fatal("diagnostic source must remain returnable", err)
 				}
-				if authority.enumArraySourceReturned(owner, original, nil) || authority.staticClassSourceReturned(owner, original, nil) {
-					// The unrelated kind has no local pending receipt, so its
-					// simulated parent permission is not part of this assertion.
-					if kind == "enum" && authority.enumArraySourceReturned(owner, original, nil) || kind == "static class" && authority.staticClassSourceReturned(owner, original, nil) {
-						t.Fatal("partial physical namespace borrowed base executable permission")
-					}
+				granted := authority.enumArraySourceReturned(owner, original, nil)
+				if kind == "static class" {
+					granted = authority.staticClassSourceReturned(owner, original, nil)
+				}
+				if granted {
+					t.Fatal("partial physical namespace borrowed base executable permission")
 				}
 				if len(authority.enumActive) != 0 || len(authority.staticActive) != 0 {
 					t.Fatal("partial source activated executable authority")
@@ -83,5 +82,4 @@ func TestAdversarialPartialSourceKeepsDiagnosticsWithoutExecutableAuthority(t *t
 			})
 		}
 	}
-	_ = compiler // Both supported toolchains are required by the shared fixture contract.
 }
