@@ -20,6 +20,9 @@ import (
 // metadata checks remain required. This operation does not certify the rest of
 // a method, JVM verification or whole-program equivalence; callers still owe
 // independent validation. Plain JarFS and JarSourceArtifact are unchanged.
+// Ordinary declared methods can additionally recover a missing ACC_SYNTHETIC
+// marker under an unchanged complete method/class declaration universe. This
+// grants no constructor, initializer, bridge, visibility or method-name edits.
 type JarReconstructionArtifact struct{ source *JarSourceArtifact }
 
 var _ fs.ReadFileFS = (*JarReconstructionArtifact)(nil)
@@ -96,6 +99,10 @@ func (a *JarReconstructionArtifact) FinishClass(name string, compiled []byte) ([
 	}
 	reader := z.nativeMemberReader(nil)
 	lowered, err := z.sourceConstructorLowering.lower(original, compiled, reader.Work)
+	if err != nil {
+		return nil, err
+	}
+	lowered, err = restoreDeclaredSyntheticMethodFlags(original, lowered, reader.Work)
 	if err != nil {
 		return nil, err
 	}
