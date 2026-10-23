@@ -23,6 +23,11 @@ import (
 // Ordinary declared methods can additionally recover a missing ACC_SYNTHETIC
 // marker under an unchanged complete method/class declaration universe. This
 // grants no constructor, initializer, bridge, visibility or method-name edits.
+// A separate pre-nest constructor proof can restore only ACC_SYNTHETIC on a
+// forwarding constructor whose original and fresh packets load identical typed
+// arguments, call the same private constructor, ignore the same trailing port,
+// and return without additional effects or handlers. Neither packet is copied
+// or edited; its descriptor, exception contract and all other flags must match.
 // A separately proved straight-line Java8 enum initializer can inline a fresh
 // compiler's private constant-array helper, restoring the original method
 // universe. Its only consumer, array element identities, empty-stack boundary
