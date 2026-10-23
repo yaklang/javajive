@@ -101,10 +101,14 @@ func TestAdversarialEnumFreshHelperBoundaryCountsKeepFreshInstructions(t *testin
 	if native == "" {
 		t.Fatal("native original compiler required")
 	}
-	for _, owner := range []string{"FreshBoundaryChoice", "边界𐐀Choice"} {
+	// Keep the test's filesystem paths ASCII. Some supported host JVMs fail
+	// their classpath URI decoding before loading an original fixture when
+	// testing.T places a supplementary character in its temporary directory.
+	// The actual class name and descriptors still exercise the full UTF-16 name.
+	for ownerIndex, owner := range []string{"FreshBoundaryChoice", "边界𐐀Choice"} {
 		for _, count := range []int{0, 1, 129} {
 			for _, debug := range []string{"none", "source,lines,vars"} {
-				t.Run(fmt.Sprintf("%s/%d/%s", owner, count, debug), func(t *testing.T) {
+				t.Run(fmt.Sprintf("owner%d/%d/%s", ownerIndex, count, debug), func(t *testing.T) {
 					constants := make([]string, count)
 					for i := range constants {
 						constants[i] = fmt.Sprintf("C%d", i)
