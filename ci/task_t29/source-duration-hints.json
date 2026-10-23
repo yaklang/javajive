@@ -33,6 +33,7 @@
     "TestAdversarialAliasPreservesEvaluationRoundTrip": 3.06,
     "TestAdversarialAllocationIdentitySurvivesMutatingCallRoundTrip": 4.13,
     "TestAdversarialAmbiguousInheritedFieldSelectionKeepsExactBytecodeOwner": 42.2,
+    "TestAdversarialAnnotatedVariableArityOracleRejectsDeclarationAndBehaviorMutants": 3.09,
     "TestAdversarialAnnotationClassBoundsRoundTrip": 28.01,
     "TestAdversarialAnnotationInitializerDollarNameCollisionRoundTrip": 4.31,
     "TestAdversarialAnnotationInitializerRoundTrip": 4.83,
@@ -51,6 +52,9 @@
     "TestAdversarialAnonymousCapturedParentReadOnlyLoop": 41.08,
     "TestAdversarialAnonymousCapturedParentReadOnlyLoopOriginalJavac8": 28.41,
     "TestAdversarialAnonymousCharacterSetterKeepsLexicalStorage": 56.74,
+    "TestAdversarialAnonymousCheckedParentEliminatesCoveredExceptionDeclaration": 51.82,
+    "TestAdversarialAnonymousCheckedParentKeepsOriginalInitializationAndException": 39.27,
+    "TestAdversarialAnonymousCheckedParentRetainsMultipleCheckedDeclarations": 12.05,
     "TestAdversarialAnonymousClassLiteralDirectStoreAndVirtualReceiver": 13.15,
     "TestAdversarialAnonymousClassLiteralInitializerKeepsLinkagePhase": 10.25,
     "TestAdversarialAnonymousClassLiteralInitializerKeepsOriginalSubject": 66.57,
@@ -562,6 +566,8 @@
     "TestAdversarialEnclosingParameterCaptureNativeCompiler": 32.68,
     "TestAdversarialEnumAnonymousRoleFamilyBank": 141.59,
     "TestAdversarialEnumAssertionMixedInitializationRoundTrip": 28.86,
+    "TestAdversarialEnumBackingEmptyAndLargeSourcePackets": 71.45,
+    "TestAdversarialEnumBackingSourcePacketRetainsAllocationAndAlgorithm": 41.22,
     "TestAdversarialEnumConstantDisabledAssertionRoundTrip": 37.45,
     "TestAdversarialEnumConstantEnabledAssertionRoundTrip": 35.05,
     "TestAdversarialEnumConstructorAccessorRegistration": 31.3,
@@ -2813,7 +2819,8 @@
     39293806774,
     39434553509,
     39441005032,
-    39805732062
+    39805732062,
+    39819312361
   ],
   "local_followup_base_revision": "11901804386ead7ffd3c5da61bcf5863095a91ee"
 }
