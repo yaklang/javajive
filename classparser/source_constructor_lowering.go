@@ -93,7 +93,10 @@ func constructorLoweringCode(method *MemberInfo) *CodeAttribute {
 }
 
 func constructorLoweringPacketFor(object *ClassObject, method *MemberInfo, before, original bool, work *workbudget.Budget) *constructorLoweringPacket {
-	if object == nil || method == nil || object.MajorVersion != 52 || object.MinorVersion != 0 || object.AccessFlags&0x6200 != 0 || method.AccessFlags&^uint16(0x0087) != 0 || !nativeProofWork(work, 1) {
+	// The original proof domain is Java8. An implicit MR rebuild can use a
+	// later supported class-file target; its instruction language is still
+	// checked in full. Never rewrite a compiler version header to make it fit.
+	if object == nil || method == nil || object.MinorVersion != 0 || original && object.MajorVersion != 52 || !original && (object.MajorVersion < 52 || object.MajorVersion > 65) || object.AccessFlags&0x6200 != 0 || method.AccessFlags&^uint16(0x0087) != 0 || !nativeProofWork(work, 1) {
 		return nil
 	}
 	name, nk := sourceBridgeUTF8(object, method.NameIndex)
@@ -390,6 +393,9 @@ func (a *sourceConstructorLoweringAuthority) lower(original, compiled []byte, wo
 	}
 	if want.GetClassName() != got.GetClassName() || want.GetSupperClassName() != got.GetSupperClassName() {
 		return nil, constructorLoweringFailure(work, "class or SUPER identity changed")
+	}
+	if a.jar != nil && a.jar.sourceCompiler.effective() == NativeJavac8 && got.MajorVersion != 52 {
+		return nil, constructorLoweringFailure(work, "fresh class target disagrees with selected native compiler")
 	}
 	a.mu.Lock()
 	publication := a.active[want.GetClassName()]

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -88,7 +89,24 @@ func TestSourceConstructorLoweringRejectsFreshPacketAndPCMutation(t *testing.T) 
 			case "class identity":
 				obj.ThisClass = uint16(obj.ConstantPoolManager.AddNewClassInfo("Unrelated"))
 			}
+			// Keep negative packets structurally valid; an added instruction,
+			// handler or nested table must fail its semantic obligation rather
+			// than merely fail a stale Code attribute_length.
+			code.AttrLen = uint32(12 + len(code.Code) + 8*len(code.ExceptionTable))
+			for _, attribute := range code.Attributes {
+				switch v := attribute.(type) {
+				case *UnparsedAttribute:
+					code.AttrLen += 6 + v.Length
+				case *LineNumberTableAttribute:
+					code.AttrLen += 6 + v.AttrLen
+				default:
+					t.Fatal("unhandled authored test attribute")
+				}
+			}
 			input := obj.Bytes()
+			if _, err := Parse(input); err != nil {
+				t.Fatal("negative control did not reach packet validation", err)
+			}
 			hash, originalHash := sha256.Sum256(input), sha256.Sum256(original)
 			got, err := a.source.jar.sourceConstructorLowering.lower(original, input, nil)
 			if kind == "control" {
@@ -100,6 +118,85 @@ func TestSourceConstructorLoweringRejectsFreshPacketAndPCMutation(t *testing.T) 
 			}
 			if sha256.Sum256(input) != hash || sha256.Sum256(original) != originalHash {
 				t.Fatal("input mutated, including on refusal")
+			}
+		})
+	}
+}
+
+func TestSourceConstructorLoweringRetainsFreshEncodingAndRelease(t *testing.T) {
+	original, compiled, a := loweringAuthorityTestInputs(t)
+	compiler, java := t04Tools(t)
+	for _, variant := range []string{"expanded load", "release9"} {
+		t.Run(variant, func(t *testing.T) {
+			dependencies := map[string][]byte{}
+			for _, name := range []string{"LoweringWitness", "LoweringParent", "LoweringDerived", "LoweringDriver"} {
+				raw, ok := a.source.jar.declarationResolver(name)
+				if !ok {
+					t.Fatal("independent original caller/dependency absent", name)
+				}
+				dependencies[name+".class"] = raw
+			}
+			out := sourceArtifactWriteFiles(t, dependencies)
+			fresh := bytes.Clone(compiled)
+			if variant == "release9" {
+				source, err := a.ReadFile("LoweringChild.class")
+				if err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(out, "LoweringChild.java")
+				if err := os.WriteFile(path, source, 0600); err != nil {
+					t.Fatal(err)
+				}
+				if log, err := exec.Command(compiler, "-proc:none", "--release", "9", "-g:none", "-cp", out, "-sourcepath", out, "-d", out, path).CombinedOutput(); err != nil {
+					t.Fatal("real MR implicit-source compiler control", err, string(log))
+				}
+				fresh, err = os.ReadFile(filepath.Join(out, "LoweringChild.class"))
+				if err != nil || mustParseLowering(t, fresh).MajorVersion != 53 {
+					t.Fatal("real release9 output absent", err)
+				}
+			} else {
+				obj := mustParseLowering(t, fresh)
+				for _, method := range obj.Methods {
+					name, _ := sourceBridgeUTF8(obj, method.NameIndex)
+					if name != "<init>" {
+						continue
+					}
+					code := constructorLoweringCode(method)
+					if code.Code[7] != 0x2d {
+						t.Fatal("authored compact aload_3 control")
+					}
+					expanded := append(bytes.Clone(code.Code[:7]), 0x19, 3)
+					code.Code = append(expanded, code.Code[8:]...)
+					code.AttrLen++
+				}
+				fresh = obj.Bytes()
+			}
+			hash := sha256.Sum256(fresh)
+			finished, err := a.FinishClass("LoweringChild.class", fresh)
+			if err != nil || sha256.Sum256(fresh) != hash {
+				t.Fatal("fresh encoding/release lowering", err)
+			}
+			got, before := mustParseLowering(t, finished), mustParseLowering(t, fresh)
+			if got.MajorVersion != before.MajorVersion || got.MinorVersion != before.MinorVersion {
+				t.Fatal("lowering replaced the fresh class version")
+			}
+			for _, method := range got.Methods {
+				name, _ := sourceBridgeUTF8(got, method.NameIndex)
+				if name == "<init>" && variant == "expanded load" {
+					body := constructorLoweringCode(method).Code
+					if len(body) != 37 || !bytes.Equal(body[1:3], []byte{0x19, 3}) {
+						t.Fatal("lowering copied original compact instructions instead of moving fresh ones")
+					}
+				}
+			}
+			if err := os.WriteFile(filepath.Join(out, "LoweringChild.class"), finished, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if log, err := exec.Command(java, "-Xverify:all", "-cp", out, "LoweringDriver").CombinedOutput(); err != nil || string(log) != "1440:captures:callback:publication:abrupt:subtype:wide:array:identity\n" {
+				t.Fatal("fresh instruction independent original caller oracle", err, string(log))
+			}
+			if _, err := a.source.jar.sourceConstructorLowering.lower(original, finished, nil); err != nil {
+				t.Fatal("fresh encoding completion not idempotent", err)
 			}
 		})
 	}
