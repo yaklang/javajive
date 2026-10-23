@@ -30,10 +30,11 @@ type constructorLoweringArgument struct {
 	nullCasts               []string
 	slot                    int
 	owner, name, descriptor string
+	invocation              *constructorLoweringInvocation
 }
 
 // The movable prefix contains distinct own final synthetic captures from typed
-// parameter slots and a direct SUPER of typed leaf operands. An isolated suffix
+// parameter slots and a direct SUPER of typed ordered operand trees. An isolated suffix
 // starts with an empty stack and stays at exactly the same bytecode offsets.
 // No original executable body is retained.
 type sourceConstructorLoweringPlan struct {
@@ -102,7 +103,7 @@ type constructorLoweringPacket struct {
 	code                *CodeAttribute
 	firstEnd, secondEnd int
 	ops                 []*core.OpCode
-	argumentPCs         []int
+	argumentOrigins     []constructorLoweringOperandOrigin
 }
 
 func constructorLoweringCode(method *MemberInfo) *CodeAttribute {
@@ -127,11 +128,11 @@ func constructorLoweringPacketFor(object *ClassObject, method *MemberInfo, befor
 
 func constructorLoweringTypedPacketFor(object *ClassObject, method *MemberInfo, before, original bool, work *workbudget.Budget, provider callbinding.Provider, captureCount ...int) *constructorLoweringPacket {
 	// The pre-nestmate capture packet has the same typed operands and receiver
-	// initialization cut in Java5 through Java8. Its whole instruction domain
+	// initialization cut in Java4 through Java8. Its whole instruction domain
 	// is checked below (including rejection of JSR/RET), independently of the
 	// original verifier's frame format. An implicit MR rebuild can use a later
 	// supported target; never change a version header to make a packet fit.
-	if object == nil || method == nil || object.MinorVersion != 0 || original && (object.MajorVersion < 49 || object.MajorVersion > 52) || !original && (object.MajorVersion < 52 || object.MajorVersion > 65) || object.AccessFlags&0x6200 != 0 || method.AccessFlags&^uint16(0x0087) != 0 || !nativeProofWork(work, 1) {
+	if object == nil || method == nil || object.MinorVersion != 0 || original && (object.MajorVersion < 48 || object.MajorVersion > 52) || !original && (object.MajorVersion < 52 || object.MajorVersion > 65) || object.AccessFlags&0x6200 != 0 || method.AccessFlags&^uint16(0x0087) != 0 || !nativeProofWork(work, 1) {
 		return nil
 	}
 	name, nk := sourceBridgeUTF8(object, method.NameIndex)
@@ -174,7 +175,7 @@ func constructorLoweringTypedPacketFor(object *ClassObject, method *MemberInfo, 
 		return nil
 	}
 	i, peak := 0, 1
-	var argumentPCs []int
+	var argumentOrigins []constructorLoweringOperandOrigin
 	widening := newConstructorWideningQuery(provider)
 	load := func(op *core.OpCode, slot int, typ string) bool {
 		return core.GetRetrieveIdx(op) == slot && constructorMotionLoad(op, typ)
@@ -210,6 +211,12 @@ func constructorLoweringTypedPacketFor(object *ClassObject, method *MemberInfo, 
 					return false
 				}
 				if n == key.name && typ == key.descriptor {
+					// Java 1.4 communicates synthetic capture ownership through
+					// its Synthetic attribute, not the Java 5 ACC_SYNTHETIC bit.
+					// Do not qualify a later class by changing only its header.
+					if original && object.MajorVersion < 49 && field.AccessFlags&syntheticFieldFlag != 0 {
+						return false
+					}
 					flags, _, ok := nativeMemberEffectiveFieldFlags(field, work)
 					if !ok {
 						return false
@@ -236,94 +243,9 @@ func constructorLoweringTypedPacketFor(object *ClassObject, method *MemberInfo, 
 		return len(p.captures) > 0
 	}
 	delegate := func() bool {
-		if i >= len(ops) || !load(ops[i], 0, "Ljava/lang/Object;") {
-			return false
-		}
-		i++
-		var types []string
-		stack := 1
-		for i < len(ops) {
-			if member := constructorMotionMember(object, ops[i], core.OP_INVOKESPECIAL); member != nil {
-				args, ret, err := callbinding.Descriptor(member.Description)
-				if member.Name != p.super || member.Member != "<init>" || err != nil || ret != "V" || len(args) != len(types) {
-					return false
-				}
-				// Reference widening does not change a JVM word or insert an
-				// instruction. Prove its hierarchy, retain both descriptors and
-				// never use this conversion to select a different constructor.
-				for index, actual := range types {
-					if !nativeProofWork(work, 1) {
-						return false
-					}
-					if p.arguments[index].null && len(p.arguments[index].nullCasts) == 0 {
-						if !callbinding.Reference(args[index]) {
-							return false
-						}
-					} else if !widening.assignable(actual, args[index]) {
-						return false
-					}
-				}
-				p.superDescriptor = member.Description
-				i++
-				if stack > peak {
-					peak = stack
-				}
-				return true
-			}
-			if len(types) >= 254 {
-				return false
-			}
-			argumentPC := int(ops[i].CurrentOffset)
-			arg := constructorLoweringArgument{}
-			if ops[i].Instr.OpCode == core.OP_ACONST_NULL && !ops[i].IsWide && len(ops[i].Data) == 0 {
-				arg.null, arg.descriptor = true, "Ljava/lang/Object;"
-				// Preserve the entire original null/cast leaf. Even a cast of
-				// null is not deleted or replaced by a source overload guess.
-				for i+1 < len(ops) && ops[i+1].Instr.OpCode == core.OP_CHECKCAST {
-					next := ops[i+1]
-					if next.IsWide || len(next.Data) != 2 || len(arg.nullCasts) >= 32 {
-						return false
-					}
-					name, known := sourceBridgeClassName(object, core.Convert2bytesToInt(next.Data))
-					if !known {
-						return false
-					}
-					descriptor := name
-					if !strings.HasPrefix(name, "[") {
-						descriptor = "L" + name + ";"
-					}
-					ps, _, err := callbinding.Descriptor("(" + descriptor + ")V")
-					if err != nil || len(ps) != 1 || !callbinding.Reference(descriptor) {
-						return false
-					}
-					arg.nullCasts = append(arg.nullCasts, descriptor)
-					arg.descriptor = descriptor
-					i++
-				}
-			} else if member := constructorMotionMember(object, ops[i], core.OP_GETSTATIC); member != nil {
-				if ops[i].IsWide || !nativeSourceBinaryName(member.Name) {
-					return false
-				}
-				arg.owner, arg.name, arg.descriptor = member.Name, member.Member, member.Description
-			} else {
-				slot := core.GetRetrieveIdx(ops[i])
-				index, known := slots[slot]
-				if !known || slot <= 0 || !load(ops[i], slot, params[index]) {
-					return false
-				}
-				arg.slot, arg.descriptor = slot, params[index]
-			}
-			width := constructorEffectType(arg.descriptor).width()
-			if width == 0 {
-				return false
-			}
-			types = append(types, arg.descriptor)
-			p.arguments = append(p.arguments, arg)
-			argumentPCs = append(argumentPCs, argumentPC)
-			stack += width
-			i++
-		}
-		return false
+		var ok bool
+		p.arguments, argumentOrigins, p.superDescriptor, ok = constructorLoweringDelegateOperands(object, ops, &i, slots, params, p.super, widening, &peak, work)
+		return ok
 	}
 	first, second := captures, delegate
 	if !before {
@@ -337,14 +259,14 @@ func constructorLoweringTypedPacketFor(object *ClassObject, method *MemberInfo, 
 		return nil
 	}
 	p.body = i+1 != len(ops) || ops[i].Instr.OpCode != core.OP_RETURN
-	return &constructorLoweringPacket{p, code, boundary, int(ops[i].CurrentOffset), ops, argumentPCs}
+	return &constructorLoweringPacket{p, code, boundary, int(ops[i].CurrentOffset), ops, argumentOrigins}
 }
 
 func (c *ClassObjectDumper) planArtifactConstructorLowering(boundary *constructorSourceBoundary, code *CodeAttribute, method *MemberInfo, decoder *core.Decompiler) bool {
 	if c == nil || c.FuncCtx == nil || c.options.sourceConstructorLowering == nil || c.options.TargetSourceVersion < 8 || c.options.TargetSourceVersion > 21 || c.nativeCaptureFields != nil || c.nativeMemberCurrent != nil || c.nativeMethodLocalCurrent != nil || c.nativeEnumConstantCurrent != nil || boundary == nil || boundary.delegate == nil {
 		return false
 	}
-	// The original input's Java5-8 capture convention and the selected
+	// The original input's Java4-8 capture convention and the selected
 	// source target are independent. All supported fresh targets retain the
 	// same initialization cut; lower() re-proves its exact fresh packet,
 	// verifier/debug offsets and typed SUPER operands before moving anything.
@@ -379,7 +301,7 @@ func (c *ClassObjectDumper) planArtifactConstructorLowering(boundary *constructo
 		return false
 	}
 	for i, argument := range p.plan.arguments {
-		if !constructorLoweringSourceArgument(argument, p.argumentPCs[i], boundary.delegate.Arguments[i], slots, boundary.params) {
+		if !constructorLoweringSourceOperand(argument, p.argumentOrigins[i], boundary.delegate.Arguments[i], slots, boundary.params, 0) {
 			return false
 		}
 	}

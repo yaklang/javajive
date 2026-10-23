@@ -306,10 +306,14 @@ func compileLambdaParameterMetadataFixtureWithSourcesAtRelease(t *testing.T, com
 	}
 	args := []string{"-proc:none", "-parameters", "--release", fmt.Sprint(release)}
 	if profile == NativeJavac8 {
-		if release < 5 || release > 8 {
-			t.Fatal("native javac8 fixture requires source 5 through 8")
+		if release < 4 || release > 8 {
+			t.Fatal("native javac8 fixture requires source 4 through 8")
 		}
-		args = []string{"-proc:none", "-parameters", "-source", fmt.Sprint(release), "-target", fmt.Sprint(release)}
+		nativeRelease := fmt.Sprint(release)
+		if release == 4 {
+			nativeRelease = "1.4"
+		}
+		args = []string{"-proc:none", "-parameters", "-source", nativeRelease, "-target", nativeRelease}
 	}
 	if len(named) == 1 && !named[0] {
 		args = append(args[:1], args[2:]...)
