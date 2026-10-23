@@ -23,6 +23,7 @@ type constructorSourceBoundary struct {
 	pc             int
 	delegate       *values.FunctionCallExpression
 	prefix         []statements.Statement
+	prefixEffects  []statements.Statement
 	params         []values.JavaValue
 	carrier        string
 	carrierFormals []string
@@ -233,8 +234,12 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 	for _, st := range p.prefix {
 		expr, ok := st.(*statements.ExpressionStatement)
 		if !ok || expr == nil {
-			return nil, fmt.Errorf("constructor prefix has escaping local or control flow")
+			expr = c.constructorDiscardedPrefixEffect(st, decoder, method, p.pc)
+			if expr == nil {
+				return nil, fmt.Errorf("constructor prefix has escaping local or control flow")
+			}
 		}
+		p.prefixEffects = append(p.prefixEffects, expr)
 		call, ok := values.UnpackSoltValue(expr.Expression).(*values.FunctionCallExpression)
 		if !ok || call == nil || !call.HasOriginPC || call.OriginPC <= last || call.OriginPC >= p.pc || !constructorBoundaryValue(expr.Expression, allowed, map[values.JavaValue]bool{}, calls, &remaining) {
 			return nil, fmt.Errorf("unproved constructor prefix effect ordering")
@@ -289,7 +294,7 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 		declarations = append(declarations, paramType.String(c.FuncCtx)+" "+param.String(c.FuncCtx))
 	}
 	var prefix strings.Builder
-	for _, st := range p.prefix {
+	for _, st := range p.sourcePrefixEffects() {
 		prefix.WriteString(st.String(c.FuncCtx))
 		prefix.WriteString(";\n")
 	}
@@ -452,7 +457,7 @@ func (c *ClassObjectDumper) planConstructorArgumentBridges(p *constructorSourceB
 			return fmt.Errorf("unproved constructor argument effect graph")
 		}
 	}
-	for _, st := range p.prefix {
+	for _, st := range p.sourcePrefixEffects() {
 		if expr, ok := st.(*statements.ExpressionStatement); ok && expr != nil {
 			if !constructorBoundaryValue(expr.Expression, allowed, map[values.JavaValue]bool{}, calls, &remaining) {
 				return fmt.Errorf("unproved constructor prefix dependency graph")
