@@ -167,7 +167,15 @@ func (j *JavaRef) NullTypeAdopted() bool {
 
 func IsNullLiteral(v JavaValue) bool {
 	lit, ok := v.(*JavaLiteral)
-	return ok && lit != nil && fmt.Sprint(lit.Data) == "null"
+	if !ok || lit == nil || lit.Data == nil {
+		return false
+	}
+	// fmt.Sprint allocates. Decompile calls this on every value, and the
+	// allocation showed up as a large share of ekp prepare CPU.
+	if s, ok := lit.Data.(string); ok {
+		return s == "null"
+	}
+	return fmt.Sprint(lit.Data) == "null"
 }
 
 func (j *JavaRef) String(funcCtx *class_context.ClassContext) string {
