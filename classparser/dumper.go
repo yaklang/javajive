@@ -2207,7 +2207,14 @@ func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
 		//}
 		_ = accessFlagsVerbose
 		accessFlags := accessCode
-		if c.nestDemotePrivate() {
+		// InnerClasses and '$' spelling describe lexical/source names, not
+		// JVM private-access permission. Before version 55, peer accesses use
+		// ordinary methods (usually compiler accessors); widening the field
+		// changes reflection and can alter source lookup through a subclass.
+		// Even newer classfiles need an actual nest attribute for the existing
+		// flattened-nest fallback. Do not invent a nest from a name alone.
+		if c.nestDemotePrivate() && c.obj.MajorVersion >= 55 &&
+			(hasOriginalNestAttribute(c.obj, "NestHost") || hasOriginalNestAttribute(c.obj, "NestMembers")) {
 			accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "private", ""))
 		}
 		name, err := c.obj.getUtf8(field.NameIndex)
