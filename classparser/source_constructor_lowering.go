@@ -47,6 +47,19 @@ type sourceConstructorLoweringAuthority struct {
 
 type constructorNativeSourceOrigin struct{ originalHash, sourceHash [32]byte }
 
+// A flat anonymous declaration is already a distinct explicit reconstruction
+// unit. Its original physical class accessibility governs its binary callers;
+// legacy blanket promotion to public would change the class ABI before the
+// postcompile constructor proof can complete. Named nested declarations and
+// native family source retain their existing ownership/visibility protocols.
+func (c *ClassObjectDumper) reconstructionAnonymousPhysicalHeader() bool {
+	if c == nil || c.obj == nil || c.options.sourceConstructorLowering == nil || c.nativeMemberCurrent != nil || c.nativeMethodLocalCurrent != nil || c.nativeEnumConstantCurrent != nil {
+		return false
+	}
+	_, _, known := originalAnonymousOwner(c.obj)
+	return known
+}
+
 // Native member/anonymous source ownership has its own capture regeneration
 // proof. Flat lowering must neither enroll its speculative readers nor replace
 // that protocol. Record the actual selected native source only at JarFS's final
