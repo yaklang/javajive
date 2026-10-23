@@ -119,12 +119,15 @@ func enumArrayRelocateCode(object *ClassObject, raw []byte, code *CodeAttribute,
 	fail := func() ([]byte, error) {
 		return nil, sourceLambdaMetadataFailure(work, "enum lowering unproved suffix PC map")
 	}
-	if len(ops) > 65535 || work.CheckAlloc(int64(len(raw)+len(replacement))*4+int64(len(ops))*128) != nil || delta < 0 || delta%4 != 0 || len(replacement) != len(code.Code)+delta || len(replacement) > 65535 || len(raw) < 12+len(code.Code) || int(binary.BigEndian.Uint32(raw[4:])) != len(code.Code) || !bytes.Equal(raw[8:8+len(code.Code)], code.Code) || !nativeProofWork(work, int64(len(raw)+len(replacement))) {
+	if len(ops) > 65535 || work.CheckAlloc(int64(len(raw)+len(replacement))*4+int64(len(ops))*128) != nil || delta < 0 || len(replacement) != len(code.Code)+delta || len(replacement) > 65535 || len(raw) < 12+len(code.Code) || int(binary.BigEndian.Uint32(raw[4:])) != len(code.Code) || !bytes.Equal(raw[8:8+len(code.Code)], code.Code) || !nativeProofWork(work, int64(len(raw)+len(replacement))) {
 		return fail()
 	}
 	positions := map[int]int{}
 	for _, op := range ops {
 		positions[int(op.CurrentOffset)] = op.Instr.OpCode
+	}
+	if !enumArraySuffixAlignmentPreserved(positions, call+3, delta) {
+		return fail()
 	}
 	mapPC := func(pc int, end bool) (int, bool) {
 		_, ok := positions[pc]
@@ -263,8 +266,20 @@ func enumArrayRelocateCode(object *ClassObject, raw []byte, code *CodeAttribute,
 	return out, nil
 }
 
+func enumArraySuffixAlignmentPreserved(positions map[int]int, suffix, delta int) bool {
+	if delta%4 == 0 {
+		return true
+	}
+	for pc, opcode := range positions {
+		if pc >= suffix && (opcode == core.OP_TABLESWITCH || opcode == core.OP_LOOKUPSWITCH) {
+			return false
+		}
+	}
+	return true
+}
+
 func enumArrayRelocateFrames(object *ClassObject, raw []byte, positions map[int]int, suffix, delta int, work *workbudget.Budget) ([]byte, bool) {
-	if len(raw) < 2 || work.CheckAlloc(int64(len(raw))*4) != nil || delta < 0 || delta%4 != 0 || !nativeProofWork(work, int64(len(raw))) {
+	if len(raw) < 2 || len(positions) > 65535 || work.CheckAlloc(int64(len(raw))*4) != nil || delta < 0 || !nativeProofWork(work, int64(len(raw)+len(positions))) || !enumArraySuffixAlignmentPreserved(positions, suffix, delta) {
 		return nil, false
 	}
 	out := bytes.Clone(raw[:2])

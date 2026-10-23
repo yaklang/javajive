@@ -590,10 +590,17 @@ func enumArrayFreshMethodEdits(compiled []byte, object *ClassObject, layout *com
 	if callPC < 0 || callPC+3 > len(initCode.Code) || arrayEnd <= 0 || arrayEnd >= len(arrayCode.Code) || len(initCode.Code)-3+arrayEnd > 65535 || work.CheckAlloc(int64(len(initCode.Code)+arrayEnd)*8) != nil {
 		return fail("fresh Code size")
 	}
-	// Keep the suffix displacement divisible by four. Switch padding and all
-	// relative branch operands then remain byte-for-byte unchanged. NOPs are
-	// placed within the proved straight-line replacement, never in user code.
-	padding := (4 - (arrayEnd-3)%4) % 4
+	// Only a suffix switch imposes a four-byte alignment constraint. Ordinary
+	// branch differences survive any affine displacement; a straight-line
+	// suffix should remain the exact fresh instruction composition without
+	// invented NOPs. When needed, padding stays inside the proved replacement.
+	padding := 0
+	for _, op := range initOps[prefix+1:] {
+		if op.Instr.OpCode == core.OP_TABLESWITCH || op.Instr.OpCode == core.OP_LOOKUPSWITCH {
+			padding = (4 - (arrayEnd-3)%4) % 4
+			break
+		}
+	}
 	newCode := append(bytes.Clone(initCode.Code[:callPC]), arrayCode.Code[:arrayEnd]...)
 	newCode = append(newCode, make([]byte, padding)...)
 	newCode = append(newCode, initCode.Code[callPC+3:]...)

@@ -47,6 +47,12 @@ func TestAdversarialEnumSuffixFramesKeepTypedAllocationOffsets(t *testing.T) {
 			}
 		})
 	}
+	// Frame offsets are byte offsets, not four-byte-aligned addresses. An
+	// ordinary branch suffix can move by three while its relative edges remain
+	// exact. Only switch operand alignment requires a multiple of four.
+	if got, ok := enumArrayRelocateFrames(object, []byte{0, 1, 63}, map[int]int{63: core.OP_GOTO}, 10, 3, nil); !ok || !bytes.Equal(got, []byte{0, 1, 251, 0, 66}) {
+		t.Fatal("ordinary suffix frame acquired a switch-only alignment restriction", got, ok)
+	}
 	for _, kind := range []string{"canceled", "budget", "unaligned", "overflow"} {
 		t.Run(kind, func(t *testing.T) {
 			var work *workbudget.Budget
@@ -62,6 +68,7 @@ func TestAdversarialEnumSuffixFramesKeepTypedAllocationOffsets(t *testing.T) {
 				work = workbudget.New(nil, workbudget.Limits{MaxRequestWork: 1})
 			case "unaligned":
 				delta = 3
+				positions[63] = core.OP_LOOKUPSWITCH
 			case "overflow":
 				raw = []byte{0, 1, 251, 255, 254}
 				positions = map[int]int{65534: core.OP_RETURN}
