@@ -4358,9 +4358,18 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			}
 			var needsCheckedEscape bool
 			var ordinaryThrowsScope *ordinaryConstructorThrowsScope
+			var functionalThrowsScope *genericFunctionalThrowsScope
 			var escapeErr error
 			if request.role == methodSourceDeclaration && !isLambda && adapter == nil {
-				needsCheckedEscape, ordinaryThrowsScope, escapeErr = c.methodNeedsCheckedEscapeWithOrdinaryConstructors(codeAttr, statementList, method, constructorPlan)
+				functionalThrowsScope = c.genericFunctionalThrowsScope(codeAttr, statementList, method)
+				if functionalThrowsScope == nil {
+					needsCheckedEscape, ordinaryThrowsScope, escapeErr = c.methodNeedsCheckedEscapeWithOrdinaryConstructors(codeAttr, statementList, method, constructorPlan)
+				} else {
+					needsCheckedEscape, escapeErr = c.methodNeedsCheckedEscapeAllProof(codeAttr, statementList, method, nil, functionalThrowsScope, constructorPlan)
+					if needsCheckedEscape || escapeErr != nil {
+						functionalThrowsScope = nil
+					}
+				}
 			} else {
 				// A physical declaration's throws boundary is not a SAM body's.
 				needsCheckedEscape, escapeErr = c.methodNeedsCheckedEscape(codeAttr, statementList, method, constructorPlan)
@@ -4672,6 +4681,11 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 				return nil, ordinaryErr
 			}
 			defer restoreOrdinaryThrows()
+			restoreFunctionalThrows, functionalErr := functionalThrowsScope.begin(funcCtx)
+			if functionalErr != nil {
+				return nil, functionalErr
+			}
+			defer restoreFunctionalThrows()
 
 			// Per-constructor/<clinit> count of field assignments. A final field is only safe to
 			// lift into a field initializer when assigned exactly once in this body; a blank final
@@ -5069,6 +5083,19 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 				}
 				return statementStr
 			}
+			if functionalThrowsScope != nil {
+				render := statementToString
+				statementToString = func(statement statements.Statement) string {
+					if functionalErr != nil {
+						return ""
+					}
+					source, err := functionalThrowsScope.renderStatement(statement, func() string { return render(statement) })
+					if err != nil {
+						functionalErr = err
+					}
+					return source
+				}
+			}
 			statementCodes := []string{}
 			for _, declaration := range methodLocalDeclarations {
 				if err := c.holdOutput(int64(len(declaration) + 1)); err != nil {
@@ -5183,6 +5210,9 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 				statementStr, ordinaryErr := ordinaryThrowsScope.renderStatement(statement, func() string {
 					return statementToString(statement)
 				})
+				if functionalErr != nil {
+					return nil, functionalErr
+				}
 				if ordinaryErr != nil {
 					return nil, ordinaryErr
 				}
@@ -5292,6 +5322,11 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 				return nil, ordinaryErr
 			}
 			dumped.ordinaryConstructorSource = ordinaryThrowsScope
+			sourceCode, functionalErr = functionalThrowsScope.finish(funcCtx, sourceCode)
+			if functionalErr != nil {
+				return nil, functionalErr
+			}
+			dumped.genericFunctionalSource = functionalThrowsScope
 			if !c.recordSerializableReferenceGraph(dumped, method, codeAttr, statementList, sourceCode) {
 				return nil, fmt.Errorf("serializable reference method graph is not closed")
 			}
@@ -5562,6 +5597,10 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 		scope.publishedCode = dumped.code
 		c.ordinaryConstructorEmissionSeen = true
 	}
+	if scope := dumped.genericFunctionalSource; scope != nil {
+		scope.publishedCode = dumped.code
+		c.ordinaryConstructorEmissionSeen = true
+	}
 	if renderedConstructorPlan != nil && renderedConstructorPlan.lowering != nil {
 		dumped.constructorLowering = renderedConstructorPlan.lowering
 		dumped.constructorLoweringCode = dumped.code
@@ -5600,6 +5639,7 @@ type dumpedMethods struct {
 	// A typed ordinary-NEW throws receipt was consumed by this method's final
 	// publisher. Class recovery must preserve the complete bound declaration.
 	ordinaryConstructorSource *ordinaryConstructorThrowsScope
+	genericFunctionalSource   *genericFunctionalThrowsScope
 	methodName                string
 	code                      string
 	bodyCode                  string

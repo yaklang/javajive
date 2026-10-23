@@ -33,7 +33,13 @@ type ClassContext struct {
 	// allocation, access, argument-cast, capture or initialization permission.
 	SourceAllocationRender      func(AllocationRenderView) (prefix, suffix string)
 	SourceConstructedInvocation func(ConstructedInvocationView)
-	SourceRendering             *SourceRenderState
+	// Installed only by the final ordinary-method publisher after original
+	// factory, reaching-definition and generic-signature proofs have closed.
+	SourceGenericArgument        func(invocation any, index int) (string, bool)
+	SourceGenericReceiver        func(invocation any) (string, bool)
+	SourceGenericInvocationBound func(invocation any) bool
+	SourceGenericInvocation      func(invocation any, source string, end bool) string
+	SourceRendering              *SourceRenderState
 	// RetainImplicitConstructorCalls keeps the original no-arg superclass
 	// invocation and its PC in proof-only decoding. Normal source rendering
 	// may omit this call because javac inserts it, but effect-boundary proofs

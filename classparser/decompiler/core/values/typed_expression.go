@@ -72,7 +72,12 @@ func (c *CastExpression) String(ctx *class_context.ClassContext) string {
 	if !c.Binding && c.TargetType != nil {
 		if _, reference := types.RawClassFQN(c.TargetType); reference || c.TargetType.IsArray() {
 			if call, ok := UnpackSoltValue(operand).(*FunctionCallExpression); ok {
-				if planned, ok := call.PlanErasedCheckedMethodInput(ctx); ok {
+				// A consumed original factory/Signature proof already owns the
+				// invocation's source input and receiver. Erasure-only clones
+				// would discard that view; keep this original result CHECKCAST.
+				if ctx != nil && ctx.SourceGenericInvocationBound != nil && ctx.SourceGenericInvocationBound(call) {
+					operand = call
+				} else if planned, ok := call.PlanErasedCheckedMethodInput(ctx); ok {
 					operand = planned
 				} else if planned, ok := call.PlanErasedClassResultUse(ctx); ok {
 					operand = planned

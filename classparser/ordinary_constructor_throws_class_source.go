@@ -38,7 +38,7 @@ func (c *ClassObjectDumper) newOrdinaryConstructorClassSource(source string, met
 		return nil, fmt.Errorf("ordinary constructor class-source inventory budget")
 	}
 	for _, method := range methods {
-		if method != nil && (method.ordinaryConstructorSource != nil || method.constructorLowering != nil) {
+		if method != nil && (method.ordinaryConstructorSource != nil || method.genericFunctionalSource != nil || method.constructorLowering != nil) {
 			s.bound = append(s.bound, method)
 		}
 	}
@@ -62,7 +62,7 @@ func (c *ClassObjectDumper) newOrdinaryConstructorClassSource(source string, met
 			return nil, fmt.Errorf("unproved actual class-source method extent")
 		}
 		methodEnd = span.start + len(m.code)
-		if m.ordinaryConstructorSource != nil || m.constructorLowering != nil || !m.hasSourceBodyRange || strings.HasPrefix(m.methodName, "<") || m.sourceRequest.role != methodSourceDeclaration {
+		if m.ordinaryConstructorSource != nil || m.genericFunctionalSource != nil || m.constructorLowering != nil || !m.hasSourceBodyRange || strings.HasPrefix(m.methodName, "<") || m.sourceRequest.role != methodSourceDeclaration {
 			continue
 		}
 		if m.sourceBodyStart < 0 || m.sourceBodyEnd < m.sourceBodyStart || m.sourceBodyEnd > len(m.code) || m.code[m.sourceBodyStart:m.sourceBodyEnd] != m.bodyCode {
@@ -98,8 +98,23 @@ func (s *ordinaryConstructorClassSourceReceipt) closed() bool {
 		// A trusted retry clones cache containers. The publication identity is
 		// the same consumed receipt and unchanged packet, not that container's
 		// address. A changed role, body, header or original-name stamp is stale.
-		if cached == nil || cached.sourceDumper != m.sourceDumper || cached.sourceObject != m.sourceObject || cached.sourceRequest != m.sourceRequest || cached.sourceCacheKey != m.sourceCacheKey || cached.parameterNameStamp != m.parameterNameStamp || cached.ordinaryConstructorSource != m.ordinaryConstructorSource || cached.code != m.code || cached.bodyCode != m.bodyCode || cached.methodName != m.methodName || cached.sourceBodyStart != m.sourceBodyStart || cached.sourceBodyEnd != m.sourceBodyEnd || cached.hasSourceBodyRange != m.hasSourceBodyRange || cached.checkedEscape != m.checkedEscape || cached.sourceReconstructionFailed() {
+		if cached == nil || cached.sourceDumper != m.sourceDumper || cached.sourceObject != m.sourceObject || cached.sourceRequest != m.sourceRequest || cached.sourceCacheKey != m.sourceCacheKey || cached.parameterNameStamp != m.parameterNameStamp || cached.ordinaryConstructorSource != m.ordinaryConstructorSource || cached.genericFunctionalSource != m.genericFunctionalSource || cached.code != m.code || cached.bodyCode != m.bodyCode || cached.methodName != m.methodName || cached.sourceBodyStart != m.sourceBodyStart || cached.sourceBodyEnd != m.sourceBodyEnd || cached.hasSourceBodyRange != m.hasSourceBodyRange || cached.checkedEscape != m.checkedEscape || cached.sourceReconstructionFailed() {
 			return false
+		}
+		if generic := m.genericFunctionalSource; generic != nil {
+			if generic.c != s.c || !generic.finished || generic.active || generic.failed || generic.sourceContext == nil || generic.publishedCode != m.code || generic.sourceBody != m.bodyCode {
+				return false
+			}
+			reader := *s.c
+			reader.FuncCtx, reader.CurrentMethod = generic.sourceContext, generic.method
+			proof := *generic
+			proof.c = &reader
+			if !proof.fresh() {
+				return false
+			}
+			if m.ordinaryConstructorSource == nil && m.constructorLowering == nil {
+				continue
+			}
 		}
 		if lowering := m.constructorLowering; lowering != nil {
 			if cached.constructorLowering != lowering || cached.constructorLoweringCode != m.constructorLoweringCode || m.constructorLoweringCode != m.code || m.methodName != "<init>" || m.descriptor != lowering.descriptor || s.c.constructorLowerings[lowering.descriptor] != lowering || lowering.owner != s.c.obj.GetClassName() {

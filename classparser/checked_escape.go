@@ -291,6 +291,10 @@ func (c *ClassObjectDumper) methodNeedsCheckedEscape(code *CodeAttribute, body [
 }
 
 func (c *ClassObjectDumper) methodNeedsCheckedEscapeProof(code *CodeAttribute, body []statements.Statement, method *MemberInfo, ordinary *ordinaryConstructorThrowsScope, plans ...*constructorSourceBoundary) (bool, error) {
+	return c.methodNeedsCheckedEscapeAllProof(code, body, method, ordinary, nil, plans...)
+}
+
+func (c *ClassObjectDumper) methodNeedsCheckedEscapeAllProof(code *CodeAttribute, body []statements.Statement, method *MemberInfo, ordinary *ordinaryConstructorThrowsScope, functional *genericFunctionalThrowsScope, plans ...*constructorSourceBoundary) (bool, error) {
 	if code == nil || c.FuncCtx == nil {
 		return false, nil
 	}
@@ -400,6 +404,12 @@ func (c *ClassObjectDumper) methodNeedsCheckedEscapeProof(code *CodeAttribute, b
 			exceptions, known = exactInvocationExceptions(provider, member.Name, member.Member, member.Description)
 			if !known {
 				continue
+			}
+			if functional != nil && int(op.CurrentOffset) == functional.call.OriginPC {
+				if !functional.fresh() {
+					return false, fmt.Errorf("stale generic functional throws proof")
+				}
+				exceptions = []string{functional.exception}
 			}
 			if member.Member == "<init>" {
 				// A source throws formal never grants its erased upper bound as

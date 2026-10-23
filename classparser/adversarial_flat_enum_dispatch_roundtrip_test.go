@@ -25,8 +25,22 @@ func TestAdversarialFlatEnumConstructorProofSeparatesMetadataAndBodyCode(t *test
 	}
 }
 
+func TestAdversarialFlatEnumNestedOptionalReferencesKeepOriginalPrivateOwner(t *testing.T) {
+	flatEnumDispatchRoundTrip(t, false, "nested optional references")
+}
+
 func TestAdversarialFlatEnumPrivateReferenceKeepsCheckedImplementationInput(t *testing.T) {
 	flatEnumDispatchRoundTrip(t, false, "private reference")
+}
+
+func TestAdversarialFlatEnumGenericThrowsKeepsFunctionalArgumentBinding(t *testing.T) {
+	for _, variant := range []string{"generic supplier throws", "generic custom factory throws"} {
+		t.Run(variant, func(t *testing.T) { flatEnumDispatchRoundTrip(t, false, variant) })
+	}
+}
+
+func TestAdversarialFlatEnumGenericReceiverKeepsFunctionalThrowsBinding(t *testing.T) {
+	flatEnumDispatchRoundTrip(t, false, "generic result receiver")
 }
 
 func flatEnumDispatchRoundTrip(t *testing.T, assertions bool, variants ...string) {
@@ -77,9 +91,26 @@ class FlatDispatchDriver {public static void main(String[]args){
 						}
 						source = strings.Replace(source, "Mode(long step,double bias)", "Mode(long step,double bias,Class<?> kind)", 1)
 					}
+					if variant == "nested optional references" {
+						source = strings.Replace(source, "return x+step;", `return x+java.util.stream.Stream.of(ADD,EMPTY,BASE).map(Mode::secret).flatMap(optional -> optional.map(java.util.stream.Stream::of).orElse(java.util.stream.Stream.empty())).findFirst().orElseThrow(() -> new IllegalStateException("unreachable")).longValue();`, 1)
+						source = strings.Replace(source, "final long step;", `private java.util.Optional<Long> secret(){return java.util.Optional.of(Long.valueOf(step));}final long step;`, 1)
+					}
 					if variant == "private reference" {
 						source = strings.Replace(source, "return x+step;", `return x+((java.util.function.Function<Mode,Long>)Mode::secret).apply(ADD).longValue();`, 1)
 						source = strings.Replace(source, "final long step;", `private Long secret(){return Long.valueOf(step);}final long step;`, 1)
+					}
+					if variant == "generic supplier throws" || variant == "generic custom factory throws" {
+						factory, invoke := "java.util.function.Supplier", "get"
+						if variant == "generic custom factory throws" {
+							factory, invoke = "FlatDispatchFaultFactory", "create"
+							source += "\ninterface FlatDispatchFaultFactory<E extends Throwable> { E create(); }\n"
+						}
+						source = strings.Replace(source, "if(x==17)throw FlatDispatchEffects.failure;return x+step;", "return x+require(x,step,()->FlatDispatchEffects.failure);", 1)
+						source = strings.Replace(source, "final long step;", `static <E extends Throwable> long require(long x,long value,`+factory+`<? extends E> failure) throws E {if(x==17)throw failure.`+invoke+`();return value;}final long step;`, 1)
+					}
+					if variant == "generic result receiver" {
+						source += "\nclass FlatDispatchResult<T> { final T value; FlatDispatchResult(T value){this.value=value;} <X extends Throwable> T retrieve(java.util.function.Supplier<? extends X> factory)throws X {if(value==null)throw factory.get();return value;} }\n"
+						source = strings.Replace(source, "if(x==17)throw FlatDispatchEffects.failure;return x+step;", "return x+new FlatDispatchResult<Long>(x==17?null:Long.valueOf(step)).retrieve(()->FlatDispatchEffects.failure).longValue();", 1)
 					}
 					if variant == "lambda bootstrap" {
 						source = strings.Replace(source, "return x+step;", "java.util.function.LongUnaryOperator f = value -> value+step;return f.applyAsLong(x);", 1)
@@ -166,6 +197,13 @@ if(FlatDispatchEffects.calls!=9)`, 1)
 								t.Fatal("complete flat enum source", err, text)
 							}
 							out := sourceArtifactWriteFiles(t, map[string][]byte{root + ".class": files[root+".class"], "FlatDispatchDriver.class": files["FlatDispatchDriver.class"], "FlatDispatchEffects.class": files["FlatDispatchEffects.class"]})
+							for _, helperName := range []string{"FlatDispatchFaultFactory.class", "FlatDispatchResult.class"} {
+								if helper, found := files[helperName]; found {
+									if err := os.WriteFile(filepath.Join(out, helperName), helper, 0600); err != nil {
+										t.Fatal(err)
+									}
+								}
+							}
 							path := filepath.Join(out, owner+".java")
 							if err := os.WriteFile(path, []byte(text), 0600); err != nil {
 								t.Fatal(err)

@@ -52,5 +52,8 @@ func (f *ClassContext) SnapshotForSourceProof(work *workbudget.Budget) (*ClassCo
 	out.LocalNames = maps.Clone(f.LocalNames)
 	out.CatchEntryNames = maps.Clone(f.CatchEntryNames)
 	out.SourceAllocationRender, out.SourceConstructedInvocation = nil, nil
+	out.SourceGenericArgument, out.SourceGenericInvocation = nil, nil
+	out.SourceGenericReceiver = nil
+	out.SourceGenericInvocationBound = nil
 	return out, true
 }

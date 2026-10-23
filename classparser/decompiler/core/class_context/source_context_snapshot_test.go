@@ -19,8 +19,12 @@ func TestSourceProofContextSnapshotKeepsItsOriginalMethod(t *testing.T) {
 		InvocationMetadata: func(name string) (callbinding.Class, bool) {
 			return callbinding.Class{Name: name, Signature: version}, true
 		},
-		SourceAllocationRender:      func(AllocationRenderView) (string, string) { return "live", "live" },
-		SourceConstructedInvocation: func(ConstructedInvocationView) {},
+		SourceAllocationRender:       func(AllocationRenderView) (string, string) { return "live", "live" },
+		SourceConstructedInvocation:  func(ConstructedInvocationView) {},
+		SourceGenericArgument:        func(any, int) (string, bool) { return "live", true },
+		SourceGenericReceiver:        func(any) (string, bool) { return "live", true },
+		SourceGenericInvocationBound: func(any) bool { return true },
+		SourceGenericInvocation:      func(_ any, source string, _ bool) string { return source },
 	}
 	work := workbudget.New(nil, workbudget.Limits{})
 	saved, known := live.SnapshotForSourceProof(work)
@@ -33,7 +37,7 @@ func TestSourceProofContextSnapshotKeepsItsOriginalMethod(t *testing.T) {
 	if saved.FunctionName != "first" || saved.CurrentMethodDesc != "(I)Ljava/lang/Object;" || saved.CurrentMethodSig == "" || saved.Arguments[0] != "input" || saved.TypeParams[0] != "E" || saved.LocalNames[id] != "input" || saved.CatchEntryNames[7] != "caught" || saved.MethodSignatures["first"] != "first-signature" {
 		t.Fatal("a sibling's live coordinates changed the earlier publisher")
 	}
-	if saved.SourceAllocationRender != nil || saved.SourceConstructedInvocation != nil || live.SourceAllocationRender == nil || live.SourceConstructedInvocation == nil {
+	if saved.SourceAllocationRender != nil || saved.SourceConstructedInvocation != nil || saved.SourceGenericArgument != nil || saved.SourceGenericReceiver != nil || saved.SourceGenericInvocationBound != nil || saved.SourceGenericInvocation != nil || live.SourceAllocationRender == nil || live.SourceConstructedInvocation == nil || live.SourceGenericArgument == nil || live.SourceGenericReceiver == nil || live.SourceGenericInvocationBound == nil || live.SourceGenericInvocation == nil {
 		t.Fatal("a publication snapshot retained or changed live render authority")
 	}
 	// Metadata queries deliberately stay live. Freezing the resolver's answers

@@ -3917,6 +3917,11 @@ func sameErasureClassName(a, b string) bool {
 // out of ArgumentStrings so the varargs-spread path can reuse it for the leading fixed arguments.
 func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.ClassContext) string {
 	arg := f.Arguments[i]
+	if funcCtx != nil && funcCtx.SourceGenericArgument != nil {
+		if source, known := funcCtx.SourceGenericArgument(f, i); known {
+			return source
+		}
+	}
 	if f.uniqueDelegationNullArgument(i, funcCtx) {
 		return arg.String(funcCtx)
 	}
@@ -4956,7 +4961,12 @@ func (f *FunctionCallExpression) ProvedPrivateFieldAccess(funcCtx *class_context
 	return "", false
 }
 
-func (f *FunctionCallExpression) String(funcCtx *class_context.ClassContext) string {
+func (f *FunctionCallExpression) String(funcCtx *class_context.ClassContext) (source string) {
+	if funcCtx != nil && funcCtx.SourceGenericInvocation != nil {
+		observe := funcCtx.SourceGenericInvocation
+		observe(f, "", false)
+		defer func() { source = observe(f, source, true) }()
+	}
 	if source, known := f.ProvedPrivateFieldAccess(funcCtx, false); known {
 		return source
 	}
@@ -5009,7 +5019,11 @@ func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext)
 	if bridge, ok := f.privateNestBridgeCall(funcCtx); ok {
 		return bridge
 	}
-	if !f.bindingPlanned {
+	genericReceiver := ""
+	if funcCtx != nil && funcCtx.SourceGenericReceiver != nil {
+		genericReceiver, _ = funcCtx.SourceGenericReceiver(f)
+	}
+	if !f.bindingPlanned && genericReceiver == "" {
 		if planned, ok := f.planErasedMethodInput(funcCtx); ok {
 			return planned.renderCall(funcCtx)
 		}
@@ -5044,6 +5058,9 @@ func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext)
 	}
 	defer func() { source += registration }()
 	functionName := class_context.SafeIdentifier(f.FunctionName)
+	if genericReceiver != "" {
+		return fmt.Sprintf("((%s)(%s)).%s(%s)", genericReceiver, receiverSource(f.Object.String(funcCtx)), functionName, strings.Join(paramStrs, ","))
+	}
 	if view := f.optionalGenericThrowsReceiver(funcCtx); view != nil {
 		return fmt.Sprintf("((%s)(%s)).%s(%s)", view.String(funcCtx), receiverSource(f.Object.String(funcCtx)), functionName, strings.Join(paramStrs, ","))
 	}
