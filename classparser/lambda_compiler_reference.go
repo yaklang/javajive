@@ -21,20 +21,23 @@ import (
 // ordinary method declaration and from an arrow. Its physical receiver/fixed/
 // packed ports come from verified original Code. Compiler names constrain only
 // regeneration after binding, factory and source-operand proofs have closed.
-// This first projection requires an unchanged initialized parameter receiver,
-// exact physical SAM ports, no checked target exceptions and a flat factory
-// scope. Unknown/local/adapted receivers retain the existing recovery path.
+// The receiver must retain either its initialized entry parameter or a closed
+// typed local definition frontier. Exact physical SAM ports, no checked target
+// exceptions and a flat factory scope are required. Unknown/adapted receivers
+// retain the existing recovery path.
 type compilerReferenceCaptureEmission struct {
-	frame     *lambdaMethodEmission
-	context   *class_context.ClassContext
-	parameter *values.JavaRef
-	text      string
+	frame       *lambdaMethodEmission
+	context     *class_context.ClassContext
+	parameter   *values.JavaRef
+	localSource *nativeLambdaLocalCaptureSource
+	text        string
 }
 
 type lambdaCompilerReference struct {
 	static                                           bool
 	qualifier                                        string
 	parameter                                        *values.JavaRef
+	local                                            *nativeEnumSelectorProducer
 	captureEmission                                  *compilerReferenceCaptureEmission
 	originalReceiver                                 *values.JavaRef
 	factory                                          *lambdaSourceFactory
@@ -409,8 +412,15 @@ func (c *ClassObjectDumper) proveCompilerVarargsReference(name, descriptor strin
 		return nil
 	}
 	receiver, ok := values.UnpackSoltValue(captured[0]).(*values.JavaRef)
-	if !ok || !c.compilerReferenceParameterPort(f, shape, receiver, site.captured, ctx) {
+	if !ok {
 		return nil
+	}
+	var local *nativeEnumSelectorProducer
+	if !c.compilerReferenceParameterPort(f, shape, receiver, site.captured, ctx) {
+		local = c.compilerReferenceLocalPort(f, shape, receiver, site.captured, ctx)
+		if local == nil {
+			return nil
+		}
 	}
 	kind := callbinding.Virtual
 	if shape.opcode == core.OP_INVOKEINTERFACE {
@@ -440,10 +450,10 @@ func (c *ClassObjectDumper) proveCompilerVarargsReference(name, descriptor strin
 		return nil
 	}
 	parameter, _, known := compilerReferenceParameterSource(receiver, f, ctx, c.Work)
-	if !known {
+	if !known && local == nil {
 		return nil
 	}
-	return &lambdaCompilerReference{parameter: parameter, originalReceiver: receiver, factory: f, shape: shape, receiver: receiver, context: ctx, target: target, erased: site.erased, instantiated: site.actual, template: "\x00LCAP0\x00::" + shape.member.Member, maxStack: shape.code.MaxStack, maxLocals: shape.code.MaxLocals, factoryStack: f.code.MaxStack, factoryLocals: f.code.MaxLocals}
+	return &lambdaCompilerReference{parameter: parameter, local: local, originalReceiver: receiver, factory: f, shape: shape, receiver: receiver, context: ctx, target: target, erased: site.erased, instantiated: site.actual, template: "\x00LCAP0\x00::" + shape.member.Member, maxStack: shape.code.MaxStack, maxLocals: shape.code.MaxLocals, factoryStack: f.code.MaxStack, factoryLocals: f.code.MaxLocals}
 }
 
 // An unknown reference must not silently disappear from the class-wide
@@ -553,7 +563,7 @@ func (c *ClassObjectDumper) compilerReferenceSourcePacketClosed(body *dumpedMeth
 	}
 	fresh := c.proveCompilerVarargsReference(body.methodName, body.descriptor, captured, body.sourceRequest, p.context)
 	scopeClosed := p.static && c.compilerReferenceCounterScopeClosed() || !p.static && c.compilerReferenceFlatScope()
-	return fresh != nil && fresh.static == p.static && fresh.qualifier == p.qualifier && fresh.parameter == p.parameter && fresh.shape.method == p.shape.method && fresh.shape.code == p.shape.code && slices.Equal(fresh.shape.codeBytes, p.shape.codeBytes) && fresh.shape.member == p.shape.member && fresh.shape.packCount == p.shape.packCount && slices.Equal(fresh.shape.parameters, p.shape.parameters) && fresh.template == p.template && fresh.erased == p.erased && fresh.instantiated == p.instantiated && reflect.DeepEqual(fresh.target.RawType(), p.target.RawType()) && scopeClosed
+	return fresh != nil && fresh.static == p.static && fresh.qualifier == p.qualifier && fresh.parameter == p.parameter && reflect.DeepEqual(fresh.local, p.local) && fresh.shape.method == p.shape.method && fresh.shape.code == p.shape.code && slices.Equal(fresh.shape.codeBytes, p.shape.codeBytes) && fresh.shape.member == p.shape.member && fresh.shape.packCount == p.shape.packCount && slices.Equal(fresh.shape.parameters, p.shape.parameters) && fresh.template == p.template && fresh.erased == p.erased && fresh.instantiated == p.instantiated && reflect.DeepEqual(fresh.target.RawType(), p.target.RawType()) && scopeClosed
 }
 
 // A compiler-owned reference consumes an implementation ordinal at its real
@@ -710,6 +720,15 @@ func (c *ClassObjectDumper) recordCompilerReferenceCapture(body *dumpedMethods, 
 	if !observation.Complete || len(observation.Captures) != 1 || observation.Captures[0].Index != 0 || frame.body == nil || frame.body.member != p.factory.method || frame.ended || frame.invalid || p.captureEmission != nil || c.FuncCtx == nil || c.CurrentMethod != p.factory.method {
 		return false
 	}
+	if p.local != nil {
+		source := c.compilerReferenceLocalCaptureSource(p)
+		context, known := c.FuncCtx.SnapshotForSourceProof(c.Work)
+		if source == nil || !known || p.receiver.String(context) != observation.Captures[0].Text {
+			return false
+		}
+		p.captureEmission = &compilerReferenceCaptureEmission{frame: frame, context: context, localSource: source, text: observation.Captures[0].Text}
+		return true
+	}
 	parameter, pending, known := compilerReferenceParameterSource(p.receiver, p.factory, c.FuncCtx, c.Work)
 	if !known || pending || parameter != p.parameter {
 		return false
@@ -734,6 +753,19 @@ func (c *ClassObjectDumper) compilerReferenceFinalCaptureClosed(body, parent *du
 	if p.static {
 		qualifier, known := emission.context.StaticMethodReferenceTypeName(strings.ReplaceAll(p.shape.member.Name, "/", "."))
 		return known && emission.parameter == nil && qualifier == p.qualifier && qualifier == emission.text
+	}
+	if p.local != nil {
+		site := &nativeLambdaLocalCaptureSite{method: p.factory.method, code: p.factory.code, pc: p.factory.pc, operands: []*nativeEnumSelectorProducer{p.local}}
+		source := emission.localSource
+		if p.parameter != nil || source == nil || source.method != p.factory.method || source.code != p.factory.code || !source.hasFactoryPC || source.factoryPC != p.factory.pc || len(source.values) != 1 || source.values[0] != p.receiver {
+			return false
+		}
+		// The enclosing source and the writer's context are separately retained.
+		// Reopen both against this same original definition and factory; a
+		// same-spelled reference in another method cannot borrow either view.
+		written := c.compilerReferenceLocalPort(p.factory, p.shape, p.receiver, p.shape.parameters[0], emission.context)
+		retained := c.compilerReferenceLocalPort(p.factory, p.shape, p.receiver, p.shape.parameters[0], &source.context)
+		return written != nil && retained != nil && reflect.DeepEqual(written, p.local) && reflect.DeepEqual(retained, p.local) && nativeLambdaLocalCaptureSourceClosed(site, source, c.Work) && p.receiver.String(emission.context) == emission.text
 	}
 	parameter, pending, known := compilerReferenceParameterSource(p.receiver, p.factory, emission.context, c.Work)
 	return known && !pending && parameter == p.parameter && c.compilerReferenceParameterPort(p.factory, p.shape, p.receiver, p.shape.parameters[0], emission.context) && parameter.String(emission.context) == emission.text
