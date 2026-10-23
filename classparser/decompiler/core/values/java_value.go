@@ -656,10 +656,16 @@ type TernaryExpression struct {
 	FalseValue      JavaValue
 	cachedType      types.JavaType
 	computingType   bool
+	replacing       bool
 }
 
 // ReplaceVar implements JavaValue.
 func (j *TernaryExpression) ReplaceVar(oldId *utils.VariableId, newId *utils.VariableId) {
+	if j == nil || j.replacing {
+		return
+	}
+	j.replacing = true
+	defer func() { j.replacing = false }()
 	if j.Condition != nil {
 		j.Condition.ReplaceVar(oldId, newId)
 	}

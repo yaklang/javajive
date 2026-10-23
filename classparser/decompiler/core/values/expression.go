@@ -942,6 +942,8 @@ type FunctionCallExpression struct {
 	// Legacy/unbound construction keeps a live lookup; nil supports direct IR
 	// literals that deliberately use the current ambient policy.
 	TypeEnv func(string) string
+	// replacing stops ReplaceVar when a call's arguments point back at the call.
+	replacing bool
 }
 
 // Witness returns the bytecode invoke identity. Owner is ClassName, name is
@@ -978,11 +980,18 @@ func (f *FunctionCallExpression) Clone() *FunctionCallExpression {
 // ReplaceVar implements JavaValue. Nested variable ids are rewritten; invoke
 // identity (Kind, OriginPC, Descriptor, ClassName, FunctionName) is kept.
 func (f *FunctionCallExpression) ReplaceVar(oldId *utils.VariableId, newId *utils.VariableId) {
+	if f == nil || f.replacing {
+		return
+	}
+	f.replacing = true
+	defer func() { f.replacing = false }()
 	if f.Object != nil {
 		f.Object.ReplaceVar(oldId, newId)
 	}
 	for _, arg := range f.Arguments {
-		arg.ReplaceVar(oldId, newId)
+		if arg != nil {
+			arg.ReplaceVar(oldId, newId)
+		}
 	}
 }
 
