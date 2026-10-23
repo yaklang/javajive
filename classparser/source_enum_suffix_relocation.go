@@ -9,6 +9,24 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
+// An independently certified assertion cache is a retained prefix region.
+// Its own branches are unchanged when the later array call is expanded. Remove
+// only that closed region from the suffix-edge query; all later branches still
+// have to remain after the array cut, including edges back into the cache.
+func enumArraySuffixAfterAssertionPrefixClosed(object *ClassObject, initializer *MemberInfo, code *CodeAttribute, ops []*core.OpCode, start int, work *workbudget.Budget) bool {
+	if len(ops) >= 8 {
+		index, literal := nativeEnumCPIndex(ops[0])
+		status, named := sourceBridgeClassName(object, index)
+		if literal && named {
+			packet, known := nativeMemberAssertionProofMode(object, status, work, true)
+			if known && packet != nil && packet.initializer == initializer && packet.initializerEndPC == int(ops[7].CurrentOffset) && start >= packet.initializerEndPC {
+				return enumArraySuffixClosed(code, ops[7:], start)
+			}
+		}
+	}
+	return enumArraySuffixClosed(code, ops, start)
+}
+
 // The empty-stack cut is already proved by the allocation/array protocols.
 // Suffix edges may not enter that prefix. Moving the suffix by a multiple of
 // four therefore preserves both branch differences and switch alignment.
@@ -120,8 +138,9 @@ func enumArrayRelocateCode(object *ClassObject, raw []byte, code *CodeAttribute,
 }
 
 // Relocate the metadata for a replaced instruction span. Its caller proves
-// that all retained branch source/target pairs are within the affine suffix;
-// this editor validates frame/debug positions and rejects opaque PC tables.
+// that retained branches stay wholly within either the unchanged prefix or
+// the affine suffix; this editor maps frame/debug positions in both domains
+// and rejects opaque PC tables. No branch may cross the replaced span.
 func enumRelocateInstructionSpanCode(object *ClassObject, raw []byte, code *CodeAttribute, ops []*core.OpCode, replacement []byte, start, endSpan, delta int, helperLines map[int]uint16, helperLineName, helperStack uint16, work *workbudget.Budget) ([]byte, error) {
 	fail := func() ([]byte, error) {
 		return nil, sourceLambdaMetadataFailure(work, "enum lowering unproved suffix PC map")
@@ -230,7 +249,7 @@ func enumRelocateInstructionSpanCode(object *ClassObject, raw []byte, code *Code
 			}
 			attrs = append(attrs, attribute{index, body})
 		case "StackMapTable":
-			updated, ok := enumArrayRelocateFrames(object, body, positions, endSpan, delta, work)
+			updated, ok := enumArrayRelocateFramesWithRetainedPrefix(object, body, positions, start, endSpan, delta, work)
 			if !ok {
 				return fail()
 			}
@@ -297,11 +316,27 @@ func enumArraySuffixAlignmentPreserved(positions map[int]int, suffix, delta int)
 }
 
 func enumArrayRelocateFrames(object *ClassObject, raw []byte, positions map[int]int, suffix, delta int, work *workbudget.Budget) ([]byte, bool) {
+	return enumArrayRelocateFramesWithRetainedPrefix(object, raw, positions, -1, suffix, delta, work)
+}
+
+// Frame deltas are differences between mapped absolute PCs. A retained prefix
+// maps identically; the later suffix moves by delta. Shifting only the first
+// encoded frame is correct solely when every frame belongs to the suffix.
+func enumArrayRelocateFramesWithRetainedPrefix(object *ClassObject, raw []byte, positions map[int]int, prefixEnd, suffix, delta int, work *workbudget.Budget) ([]byte, bool) {
 	if len(raw) < 2 || len(positions) > 65535 || work.CheckAlloc(int64(len(raw))*4) != nil || delta < 0 || !nativeProofWork(work, int64(len(raw)+len(positions))) || !enumArraySuffixAlignmentPreserved(positions, suffix, delta) {
 		return nil, false
 	}
 	out := bytes.Clone(raw[:2])
-	cursor, previous := 2, -1
+	cursor, previous, mappedPrevious := 2, -1, -1
+	mapPC := func(pc int) (int, bool) {
+		if _, found := positions[pc]; !found || pc < 0 || pc < suffix && pc > prefixEnd {
+			return 0, false
+		}
+		if pc >= suffix {
+			pc += delta
+		}
+		return pc, pc <= 65535
+	}
 	readU2 := func() (int, bool) {
 		if cursor+2 > len(raw) {
 			return 0, false
@@ -331,10 +366,13 @@ func enumArrayRelocateFrames(object *ClassObject, raw []byte, positions map[int]
 			return append(b, byte(index>>8), byte(index)), true
 		case 8:
 			pc, ok := readU2()
-			if !ok || pc < suffix || positions[pc] != core.OP_NEW || pc+delta > 65535 {
+			if !ok || positions[pc] != core.OP_NEW {
 				return nil, false
 			}
-			pc += delta
+			pc, ok = mapPC(pc)
+			if !ok {
+				return nil, false
+			}
 			return append(b, byte(pc>>8), byte(pc)), true
 		default:
 			// uninitializedThis is illegal in a static initializer and after
@@ -363,14 +401,13 @@ func enumArrayRelocateFrames(object *ClassObject, raw []byte, positions map[int]
 			return nil, false
 		}
 		pc := previous + 1 + offset
-		if _, ok := positions[pc]; !ok || pc < suffix || pc+delta > 65535 {
+		mapped, valid := mapPC(pc)
+		if !valid {
 			return nil, false
 		}
-		previous = pc
-		if i == 0 {
-			offset += delta
-		}
-		if offset > 65535 {
+		offset = mapped - mappedPrevious - 1
+		previous, mappedPrevious = pc, mapped
+		if offset < 0 || offset > 65535 {
 			return nil, false
 		}
 		var payload []byte

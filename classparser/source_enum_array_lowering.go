@@ -267,7 +267,7 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 	}
 	// User initialization is an unchanged suffix. Every branch must stay in
 	// that suffix, so no edge can re-enter an allocation or the array producer.
-	if !enumArraySuffixClosed(oldCode, oldOps, int(oldOps[oldStoreAt+1].CurrentOffset)) || !enumArraySuffixClosed(initCode, initOps, int(initOps[prefix+2].CurrentOffset)) {
+	if !enumArraySuffixAfterAssertionPrefixClosed(want, originalInit, oldCode, oldOps, int(oldOps[oldStoreAt+1].CurrentOffset), work) || !enumArraySuffixAfterAssertionPrefixClosed(got, initializer, initCode, initOps, int(initOps[prefix+2].CurrentOffset), work) {
 		return decline()
 	}
 	// A surviving method handle would make deletion observable even without a
@@ -403,6 +403,22 @@ func enumArrayConstantBoundary(object *ClassObject, initializer *MemberInfo, ops
 		}
 	}
 	end := 0
+	// A compiler assertion cache may precede the first allocation. Its exact
+	// isolated, empty-stack prefix stays in place; this query only locates the
+	// subsequent constant/array cut and grants no status-owner projection.
+	if len(ops) >= 8 {
+		index, literal := nativeEnumCPIndex(ops[0])
+		status, named := sourceBridgeClassName(object, index)
+		if literal && named {
+			if assertion, valid := nativeMemberAssertionProofMode(object, status, work, true); valid && assertion != nil && assertion.initializer == initializer {
+				at, found := positions[assertion.initializerEndPC]
+				if !found || at != 7 {
+					return 0, false
+				}
+				end = at
+			}
+		}
+	}
 	for ordinal, name := range constants {
 		plan, found := allocations[name]
 		first, newKnown := positions[plan.newPC]

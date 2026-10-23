@@ -18,7 +18,7 @@ type nativeStandaloneAssertion struct {
 }
 
 func (c *ClassObjectDumper) prepareNativeStandaloneAssertion() {
-	if c.nativeStandaloneAssertionOff || c.nativeStandaloneAssertion != nil || c.nativeAssertionProtocol() != nil || c.nativeCaptureFields != nil || c.nativeMethodLocalCurrent != nil || c.nativeMemberCurrent != nil || c.nativeEnumConstantCurrent != nil || c.obj == nil || c.obj.AccessFlags&0x6200 != 0 || c.options.TargetSourceVersion != 0 && c.options.TargetSourceVersion != 8 {
+	if c.nativeStandaloneAssertionOff || c.nativeStandaloneAssertion != nil || c.nativeAssertionProtocol() != nil || c.nativeCaptureFields != nil || c.nativeMethodLocalCurrent != nil || c.nativeMemberCurrent != nil || c.nativeEnumConstantCurrent != nil || c.obj == nil || c.obj.AccessFlags&0x2200 != 0 || c.options.TargetSourceVersion != 0 && c.options.TargetSourceVersion != 8 {
 		return
 	}
 	// Avoid a whole-method packet scan for classes without an assertion flag.
@@ -33,13 +33,20 @@ func (c *ClassObjectDumper) prepareNativeStandaloneAssertion() {
 		}
 		present = present || name == nativeAssertionField
 	}
-	if !present || !nativeMemberTopLevelEvidence(c.obj, c.Work) || !nativeDeclarationNamesCompatible(c.obj, c.Work) {
+	physicalEnum := c.obj.AccessFlags&0x4000 != 0 && c.obj.GetSupperClassName() == "java/lang/Enum" && c.options.sourceConstructorLowering != nil && c.nativeEnumBacking != nil && c.nativeEnumBacking.object == c.obj
+	if !present || c.obj.AccessFlags&0x4000 != 0 && !physicalEnum || !physicalEnum && !nativeMemberTopLevelEvidence(c.obj, c.Work) || !nativeDeclarationNamesCompatible(c.obj, c.Work) {
 		return
 	}
 	// javac installs its flag before ordinary static initialization. The
 	// bounded prefix proof excludes incoming edges/handlers and later writes;
 	// the source projection must remove only that proved first assignment.
 	packet, known := nativeMemberAssertionProofMode(c.obj, c.obj.GetClassName(), c.Work, true)
+	if physicalEnum {
+		// The original lexical owner is reopened again by FinishClass. Source
+		// assert regenerates the cache before all enum allocations; only that
+		// fresh compiler cache may later have its status literal projected.
+		packet, known = nativeEnumAssertionInitialization(c.obj, c.nativeAnnotationDeclarationResolver(), c.Work)
+	}
 	if !known || packet == nil {
 		return
 	}

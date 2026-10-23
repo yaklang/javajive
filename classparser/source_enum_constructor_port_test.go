@@ -20,7 +20,7 @@ func enumPortTestInputs(t *testing.T, debug string) (map[string][]byte, map[stri
 	return enumFlatTestInputs(t, debug, flatEnumPortFixture("PortOwner"))
 }
 
-func enumFlatTestInputs(t *testing.T, debug, sourceText string) (map[string][]byte, map[string][]byte, *JarReconstructionArtifact) {
+func enumFlatTestInputs(t *testing.T, debug, sourceText string, originalObservers ...func(*testing.T, map[string][]byte)) (map[string][]byte, map[string][]byte, *JarReconstructionArtifact) {
 	t.Helper()
 	modern, _ := t04Tools(t)
 	native := os.Getenv("JAVA8_JAVAC")
@@ -28,6 +28,9 @@ func enumFlatTestInputs(t *testing.T, debug, sourceText string) (map[string][]by
 		t.Fatal("native compiler required")
 	}
 	files := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, sourceText, "PortOwner", debug, false)
+	for _, observe := range originalObservers {
+		observe(t, files)
+	}
 	owned, external := map[string][]byte{}, map[string][]byte{}
 	for n, b := range files {
 		if strings.HasPrefix(n, "PortOwner$Mode") {

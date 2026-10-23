@@ -10,10 +10,10 @@ import (
 )
 
 // Flattening changes javac's lexical assertion-status class, but must not
-// change when or where a constant subclass caches that status. Reopen the
+// change when or where an enum root or constant subclass caches that status. Reopen the
 // original allocation/constructor/assertion proofs, then change only the
 // fresh initializer's class literal. Its field, reads, branches and cache
-// remain owned by the same constant subclass.
+// remain owned by the same physical enum class.
 func (a *sourceConstructorLoweringAuthority) restoreEnumAssertionOwner(original, compiled []byte, work *workbudget.Budget) ([]byte, error) {
 	decline := func() ([]byte, error) {
 		if err := work.Check(); err != nil {
@@ -33,6 +33,18 @@ func (a *sourceConstructorLoweringAuthority) restoreEnumAssertionOwner(original,
 	want, err := ParseWithBudget(original, work)
 	if err != nil {
 		return nil, err
+	}
+	if want.AccessFlags&0x4000 != 0 && want.GetSupperClassName() == "java/lang/Enum" {
+		if !nativeAccessorVersion(want, work) || !a.enumArraySourceReturned(want.GetClassName(), original, work) {
+			return decline()
+		}
+		d := a.jar.nativeMemberReader(want)
+		d.Work = work
+		proof, known := nativeEnumAssertionInitialization(want, d.nativeAnnotationDeclarationResolver(), work)
+		if !known || proof == nil {
+			return decline()
+		}
+		return retargetEnumAssertionStatus(original, compiled, want, proof, want.GetClassName(), true, work)
 	}
 	if want.AccessFlags != 0x4030 || want.GetSupperClassName() == "java/lang/Enum" || !nativeAccessorVersion(want, work) {
 		return decline()
@@ -95,6 +107,21 @@ func (a *sourceConstructorLoweringAuthority) restoreEnumAssertionOwner(original,
 	if proof == nil || proof.assertions == nil || !proof.assertions.pureInitializer || !bytes.Equal(proof.object.Bytes(), original) {
 		return fail("original source packet")
 	}
+	return retargetEnumAssertionStatus(original, compiled, want, proof.assertions, parent, false, work)
+}
+
+// Project only the independently regenerated cache's class literal. The JVM
+// prefix and all allocation/user instructions retain their relative order.
+func retargetEnumAssertionStatus(original, compiled []byte, want *ClassObject, proof *nativeMemberAssertion, freshOwner string, suffix bool, work *workbudget.Budget) ([]byte, error) {
+	decline := func() ([]byte, error) {
+		if err := work.Check(); err != nil {
+			return nil, err
+		}
+		return compiled, nil
+	}
+	fail := func(reason string) ([]byte, error) {
+		return nil, constructorLoweringFailure(work, "enum assertion owner: "+reason)
+	}
 	reader, err := NewClassReaderWithBudget(compiled, work)
 	if err != nil {
 		return nil, err
@@ -107,16 +134,16 @@ func (a *sourceConstructorLoweringAuthority) restoreEnumAssertionOwner(original,
 	if !sourceParameterClassIdentityClosed(want, got) {
 		return fail("fresh class identity")
 	}
-	status := proof.assertions.statusOwner
-	if already, ok := nativeMemberAssertionProof(got, status, work); ok && already != nil && already.pureInitializer {
+	status := proof.statusOwner
+	if already, ok := nativeMemberAssertionProofMode(got, status, work, suffix); ok && already != nil && (suffix || already.pureInitializer) {
 		return decline()
 	}
-	fresh, ok := nativeMemberAssertionProof(got, parent, work)
-	if !ok || fresh == nil || !fresh.pureInitializer {
+	fresh, ok := nativeMemberAssertionProofMode(got, freshOwner, work, suffix)
+	if !ok || fresh == nil || !suffix && !fresh.pureInitializer {
 		return fail("fresh cache packet")
 	}
-	oldOps, ok := nativeEnumMethodOps(want, proof.assertions.initializer, work)
-	if !ok || len(oldOps) != 8 {
+	oldOps, ok := nativeEnumMethodOps(want, proof.initializer, work)
+	if !ok || len(oldOps) < 8 || !suffix && len(oldOps) != 8 {
 		return fail("original cache instructions")
 	}
 	oldIndex, ok := nativeEnumCPIndex(oldOps[0])
@@ -129,7 +156,7 @@ func (a *sourceConstructorLoweringAuthority) restoreEnumAssertionOwner(original,
 	}
 	body := constructorLoweringCode(fresh.initializer)
 	ops, ok := nativeEnumMethodOps(got, fresh.initializer, work)
-	if !ok || len(ops) != 8 || !enumArrayInstructionSpans(body.Code, ops) {
+	if !ok || len(ops) < 8 || !suffix && len(ops) != 8 || !enumArrayInstructionSpans(body.Code, ops) {
 		return fail("fresh cache instructions")
 	}
 	width := int(ops[1].CurrentOffset)
