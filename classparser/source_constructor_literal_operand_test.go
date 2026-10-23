@@ -63,7 +63,7 @@ func TestAdversarialConstructorLiteralPacketRejectsFreshPayloadChanges(t *testin
 	}
 }
 
-func TestConstructorLiteralPacketSourceRequiresExactCategoryAndWord(t *testing.T) {
+func TestAdversarialConstructorLiteralPacketSourceRequiresExactCategoryAndWord(t *testing.T) {
 	for _, variant := range []string{"control", "different word", "float category", "wrong payload", "mixed role", "units", "null masquerade", "integer overflow"} {
 		t.Run(variant, func(t *testing.T) {
 			arg := constructorLoweringArgument{descriptor: "I", literal: &constructorLoweringLiteral{word: 42}}
@@ -91,7 +91,7 @@ func TestConstructorLiteralPacketSourceRequiresExactCategoryAndWord(t *testing.T
 	}
 }
 
-func TestConstructorLiteralPacketDecoderChecksWidthPoolAndBudget(t *testing.T) {
+func TestAdversarialConstructorLiteralPacketDecoderChecksWidthPoolAndBudget(t *testing.T) {
 	for _, variant := range []string{"control", "ldc wide index", "wrong ldc category", "missing pool", "zero index", "wide opcode", "truncated index", "class constant", "bad string index", "bad string entry", "budget", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			obj := &ClassObject{ConstantPool: []ConstantInfo{&ConstantStringInfo{StringIndex: 2}, &ConstantUtf8Info{Value: "a", Units: []uint16{'a', 0xd800}}}}
