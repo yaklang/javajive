@@ -100,6 +100,9 @@ func (this *ClassParser) Parse() (*ClassObject, error) {
 	this.classObj.Methods = methods
 	this.reader.SetStage("class_attributes", "count")
 	this.attrCtx = attrCtxClass
+	if this.metadataLayout != nil {
+		this.metadataLayout.classAttributesStart = this.reader.Offset()
+	}
 	this.classObj.Attributes = this.readAttributes()
 	if err := this.reader.Err(); err != nil {
 		return nil, err
