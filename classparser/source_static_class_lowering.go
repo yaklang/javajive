@@ -102,6 +102,9 @@ func (a *sourceConstructorLoweringAuthority) lowerStaticClassDefaultConstructor(
 	if !sourceParameterClassIdentityClosed(&withoutMarker, got) {
 		return decline()
 	}
+	if err := work.CheckAlloc(int64(len(original)+len(compiled))*5 + int64(len(want.Fields)+len(got.Fields)+len(want.Methods)+len(got.Methods)+1)*512); err != nil {
+		return nil, err
+	}
 	fields, err := sourceFieldIdentities(want, work)
 	if err != nil {
 		return nil, err
@@ -116,6 +119,32 @@ func (a *sourceConstructorLoweringAuthority) lowerStaticClassDefaultConstructor(
 	for k, v := range fields {
 		f, ok := freshFields[k]
 		if !ok || v&^syntheticFieldFlag != f&^syntheticFieldFlag || f&syntheticFieldFlag != 0 && v&syntheticFieldFlag == 0 {
+			return decline()
+		}
+	}
+	// Legacy display strings are not JVM symbol identities. Check the raw
+	// UTF-16 keys as well before granting even this narrow executable edit.
+	rawFields := func(object *ClassObject) (map[sourceFieldIdentity]uint16, bool) {
+		keys := map[sourceFieldIdentity]uint16{}
+		for _, field := range object.Fields {
+			name, nk := sourceParameterUTF8Key(object, field.NameIndex)
+			desc, dk := sourceParameterUTF8Key(object, field.DescriptorIndex)
+			key := sourceFieldIdentity{name, desc}
+			if _, duplicate := keys[key]; !nk || !dk || duplicate || !nativeProofWork(work, int64(len(name)+len(desc))+1) {
+				return nil, false
+			}
+			keys[key] = field.AccessFlags
+		}
+		return keys, true
+	}
+	wantKeys, wk := rawFields(want)
+	gotKeys, gk := rawFields(got)
+	if !wk || !gk || len(wantKeys) != len(gotKeys) {
+		return decline()
+	}
+	for key, flags := range wantKeys {
+		f, known := gotKeys[key]
+		if !known || flags&^syntheticFieldFlag != f&^syntheticFieldFlag || f&syntheticFieldFlag != 0 && flags&syntheticFieldFlag == 0 {
 			return decline()
 		}
 	}
@@ -189,7 +218,18 @@ func (a *sourceConstructorLoweringAuthority) lowerStaticClassDefaultConstructor(
 				return decline()
 			}
 			if name == owner {
-				return decline()
+				if r.NameAndTypeIndex == 0 || int(r.NameAndTypeIndex) > len(got.ConstantPool) {
+					return decline()
+				}
+				nt, known := got.ConstantPool[r.NameAndTypeIndex-1].(*ConstantNameAndTypeInfo)
+				if !known || nt == nil {
+					return decline()
+				}
+				method, mk := sourceBridgeUTF8(got, nt.NameIndex)
+				desc, dk := sourceBridgeUTF8(got, nt.DescriptorIndex)
+				if !mk || !dk || method == "<init>" && desc == "()V" {
+					return decline()
+				}
 			}
 		}
 	}

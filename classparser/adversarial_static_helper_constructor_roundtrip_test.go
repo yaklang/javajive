@@ -1,6 +1,7 @@
 package javaclassparser
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -75,6 +76,9 @@ func TestAdversarialStaticHelperHasNoInventedConstructorOrClassMarkerLoss(t *tes
 			finished, err := a.FinishClass(child, fresh)
 			if err != nil {
 				t.Fatal("source cannot declare absence of a JVM constructor", err)
+			}
+			if again, err := a.FinishClass(child, finished); err != nil || !bytes.Equal(again, finished) {
+				t.Fatal("static helper completion is not idempotent", err)
 			}
 			for _, world := range []struct{ name, constants, rows string }{{"original", "ALPHA,BETA,GAMMA", "15"}, {"reordered and added", "EXTRA,GAMMA,ALPHA,BETA", "20"}, {"removed", "GAMMA,ALPHA", "10"}} {
 				t.Run(world.name, func(t *testing.T) {
