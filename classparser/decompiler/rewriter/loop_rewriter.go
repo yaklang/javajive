@@ -652,6 +652,14 @@ func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*
 		if !hasPrivateRetryHandler(tr, finalSet) {
 			continue
 		}
+		if tr.SharedProtectedHandler {
+			if path, boundaries := splitRetryProtectedFrontiers(tr, circleNode); len(boundaries) > 1 {
+				for _, node := range path {
+					finalSet.Add(node)
+				}
+				continue
+			}
+		}
 		if path, boundary := protectedRetryBranchPrefix(tr, circleNode); boundary != nil {
 			tr.ProtectedEnd = boundary
 			for _, n := range path {
@@ -882,6 +890,11 @@ func hasPrivateRetryHandler(tr *core.Node, body *utils2.Set[*core.Node]) bool {
 				return true
 			}
 			if len(next.Source) == 1 && next.Source[0] == tr {
+				if splitRetryHandlerOwnershipClosed(tr, next) {
+					if _, boundaries := splitRetryProtectedFrontiers(tr, nil); len(boundaries) > 1 {
+						return true
+					}
+				}
 				if _, boundary := protectedRetryBranchPrefix(tr, nil); boundary != nil {
 					return true
 				}
