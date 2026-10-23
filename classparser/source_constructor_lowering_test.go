@@ -34,7 +34,7 @@ func loweringAuthorityTestInputs(t *testing.T) ([]byte, []byte, *JarReconstructi
 	return original["LoweringChild.class"], classes["LoweringChild.class"], a
 }
 
-func TestSourceConstructorLoweringRejectsFreshPacketAndPCMutation(t *testing.T) {
+func TestAdversarialSourceConstructorLoweringRejectsFreshPacketAndPCMutation(t *testing.T) {
 	original, compiled, a := loweringAuthorityTestInputs(t)
 	for _, kind := range []string{"control", "parameter slot", "wide category", "field identity", "field descriptor", "delegation", "extra instruction", "handler", "frame", "unknown Code annotation", "line operand PC", "local interior", "max stack", "max locals", "method flags", "missing constructor", "class identity"} {
 		t.Run(kind, func(t *testing.T) {
@@ -123,7 +123,7 @@ func TestSourceConstructorLoweringRejectsFreshPacketAndPCMutation(t *testing.T) 
 	}
 }
 
-func TestSourceConstructorLoweringRetainsFreshEncodingAndRelease(t *testing.T) {
+func TestAdversarialSourceConstructorLoweringRetainsFreshEncodingAndRelease(t *testing.T) {
 	original, compiled, a := loweringAuthorityTestInputs(t)
 	compiler, java := t04Tools(t)
 	for _, variant := range []string{"expanded load", "release9"} {
@@ -202,7 +202,7 @@ func TestSourceConstructorLoweringRetainsFreshEncodingAndRelease(t *testing.T) {
 	}
 }
 
-func TestSourceConstructorLoweringRequiresOriginalAndReturnedSourceAuthority(t *testing.T) {
+func TestAdversarialSourceConstructorLoweringRequiresOriginalAndReturnedSourceAuthority(t *testing.T) {
 	original, compiled, a := loweringAuthorityTestInputs(t)
 	authority := a.source.jar.sourceConstructorLowering
 	publication := authority.active["LoweringChild"]
@@ -250,7 +250,7 @@ func TestSourceConstructorLoweringRequiresOriginalAndReturnedSourceAuthority(t *
 	}
 }
 
-func TestSourceConstructorLoweringCannotTurnOrdinaryStorageIntoCaptures(t *testing.T) {
+func TestAdversarialSourceConstructorLoweringCannotTurnOrdinaryStorageIntoCaptures(t *testing.T) {
 	compiler, _ := t04Tools(t)
 	classes := compileLambdaParameterMetadataFixture(t, compiler, ModernJavac, constructorLoweringFixture, "LoweringChild", "none", false)
 	obj := mustParseLowering(t, constructorLoweringOriginal(t, classes)["LoweringChild.class"])
@@ -292,7 +292,7 @@ func TestSourceConstructorLoweringCannotTurnOrdinaryStorageIntoCaptures(t *testi
 	}
 }
 
-func TestSourceConstructorLoweringBindsPhysicalReleaseSourceIndependently(t *testing.T) {
+func TestAdversarialSourceConstructorLoweringBindsPhysicalReleaseSourceIndependently(t *testing.T) {
 	original, compiled, base := loweringAuthorityTestInputs(t)
 	// Identical executable semantics, distinct physical original identity. An
 	// unused constant changes no instruction or ABI and is not copied back.
