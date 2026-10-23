@@ -89,6 +89,10 @@ func (a *JarSourceArtifact) Close() error { return a.jar.Close() }
 // bindings change; Code, handlers, stack maps, debug tables and string literals
 // retain the compiler's bytes.
 func (a *JarSourceArtifact) RestoreClassMetadata(name string, compiled []byte) ([]byte, error) {
+	return a.restoreClassMetadata(name, compiled, sourceCaptureMetadataTarget{})
+}
+
+func (a *JarSourceArtifact) restoreClassMetadata(name string, compiled []byte, target sourceCaptureMetadataTarget) ([]byte, error) {
 	if a == nil || a.jar == nil {
 		return nil, fs.ErrInvalid
 	}
@@ -120,7 +124,7 @@ func (a *JarSourceArtifact) RestoreClassMetadata(name string, compiled []byte) (
 	var lambda *sourceLambdaMetadataPlan
 	if authority := z.sourceLambdaMetadata; authority != nil {
 		lambda = authority.plan(object.GetClassName())
-		compiled, err = authority.restoreAnonymousClassMetadata(original, compiled, reader.Work)
+		compiled, err = authority.restoreAnonymousClassMetadataAtTarget(original, compiled, target, reader.Work)
 		if err != nil {
 			return nil, err
 		}
@@ -131,7 +135,7 @@ func (a *JarSourceArtifact) RestoreClassMetadata(name string, compiled []byte) (
 	}
 	if authority := z.sourceLambdaMetadata; authority != nil {
 		if plan := authority.constructorPlan(object.GetClassName()); plan != nil {
-			compiled, err = restoreImplicitConstructorParameterMetadata(original, compiled, plan, reader.Work)
+			compiled, err = restoreImplicitConstructorParameterMetadataAtTarget(original, compiled, plan, target, reader.Work)
 			if err != nil {
 				return nil, err
 			}

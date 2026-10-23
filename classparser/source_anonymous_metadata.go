@@ -177,6 +177,10 @@ func (c *ClassObjectDumper) artifactAnonymousClassPlan(child *nativeAnonymousCla
 }
 
 func (a *sourceLambdaMetadataAuthority) restoreAnonymousClassMetadata(original, compiled []byte, work *workbudget.Budget) ([]byte, error) {
+	return a.restoreAnonymousClassMetadataAtTarget(original, compiled, sourceCaptureMetadataTarget{}, work)
+}
+
+func (a *sourceLambdaMetadataAuthority) restoreAnonymousClassMetadataAtTarget(original, compiled []byte, target sourceCaptureMetadataTarget, work *workbudget.Budget) ([]byte, error) {
 	a.mu.Lock()
 	if len(a.anonymous) == 0 {
 		a.mu.Unlock()
@@ -195,7 +199,7 @@ func (a *sourceLambdaMetadataAuthority) restoreAnonymousClassMetadata(original, 
 		plans[plan.classKey] = plan
 	}
 	a.mu.Unlock()
-	return restoreSourceAnonymousClassMetadata(original, compiled, plans, work)
+	return restoreSourceAnonymousClassMetadataAtTarget(original, compiled, plans, target, work)
 }
 
 type sourceAnonymousInnerRow struct {
@@ -286,6 +290,10 @@ func sourceAnonymousClassHeadClosed(left, right *ClassObject, work *workbudget.B
 // CP entries, all Code payloads and unrelated metadata bytes stay untouched.
 // Each physical source namespace owns a separate completed-plan ledger.
 func restoreSourceAnonymousClassMetadata(original, compiled []byte, plans map[string]*sourceAnonymousClassMetadataPlan, work *workbudget.Budget) ([]byte, error) {
+	return restoreSourceAnonymousClassMetadataAtTarget(original, compiled, plans, sourceCaptureMetadataTarget{}, work)
+}
+
+func restoreSourceAnonymousClassMetadataAtTarget(original, compiled []byte, plans map[string]*sourceAnonymousClassMetadataPlan, target sourceCaptureMetadataTarget, work *workbudget.Budget) ([]byte, error) {
 	fail := func(reason string) ([]byte, error) {
 		if err := work.Check(); err != nil {
 			return nil, err
@@ -314,7 +322,7 @@ func restoreSourceAnonymousClassMetadata(original, compiled []byte, plans map[st
 	}
 	var edits []compiledMetadataEdit
 	if plan := plans[key]; plan != nil {
-		if plan.classKey != key || plan.owner != want.GetClassName() || sha256.Sum256(original) != plan.originalHash || want.MajorVersion != 52 || got.MajorVersion != 52 || want.MinorVersion != 0 || got.MinorVersion != 0 || want.AccessFlags != 0x0030 || got.AccessFlags != 0x0020 && got.AccessFlags != 0x0030 || !nativeAnonymousSelfAccessFlags(want, 8, work) {
+		if plan.classKey != key || plan.owner != want.GetClassName() || sha256.Sum256(original) != plan.originalHash || !target.matches(want, got) || want.AccessFlags != 0x0030 || got.AccessFlags != 0x0020 && got.AccessFlags != 0x0030 || !nativeAnonymousSelfAccessFlags(want, 8, work) {
 			return fail("missing or stale static anonymous proof")
 		}
 		if got.AccessFlags != want.AccessFlags {

@@ -159,6 +159,10 @@ func (c *ClassObjectDumper) artifactConstructorPublicationClosed(member sourceCo
 // reflective contract too. No instruction, CP index or other attribute byte
 // is rewritten; a Signature can be removed only for the empty source type ()V.
 func restoreImplicitConstructorParameterMetadata(original, compiled []byte, plan *sourceConstructorMetadataPlan, work *workbudget.Budget) ([]byte, error) {
+	return restoreImplicitConstructorParameterMetadataAtTarget(original, compiled, plan, sourceCaptureMetadataTarget{}, work)
+}
+
+func restoreImplicitConstructorParameterMetadataAtTarget(original, compiled []byte, plan *sourceConstructorMetadataPlan, target sourceCaptureMetadataTarget, work *workbudget.Budget) ([]byte, error) {
 	fail := func(reason string) ([]byte, error) {
 		if err := work.Check(); err != nil {
 			return nil, err
@@ -181,7 +185,7 @@ func restoreImplicitConstructorParameterMetadata(original, compiled []byte, plan
 	if err != nil {
 		return nil, err
 	}
-	if want.GetClassName() != plan.owner || got.GetClassName() != plan.owner || want.MajorVersion != 52 || got.MajorVersion != 52 || want.MinorVersion != got.MinorVersion || want.AccessFlags != got.AccessFlags || want.GetSupperClassName() != got.GetSupperClassName() || !slices.Equal(want.GetInterfacesName(), got.GetInterfacesName()) || len(want.Methods) != len(got.Methods) || len(got.Methods) > 4096 {
+	if want.GetClassName() != plan.owner || got.GetClassName() != plan.owner || !target.matches(want, got) || want.AccessFlags != got.AccessFlags || want.GetSupperClassName() != got.GetSupperClassName() || !slices.Equal(want.GetInterfacesName(), got.GetInterfacesName()) || len(want.Methods) != len(got.Methods) || len(got.Methods) > 4096 {
 		return fail("class or constructor universe changed")
 	}
 	find := func(object *ClassObject) (*MemberInfo, bool) {
