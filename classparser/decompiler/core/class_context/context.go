@@ -120,6 +120,14 @@ type ClassContext struct {
 	LocalNames map[*coreutils.VariableId]string
 	// Positive declaration evidence for visible source value names.
 	SourceValueNameShadow func(string) bool
+	// TypeRefsBySimple is the complete set of referenced binary names (slash
+	// form) per simple type name, from the constant pool. A referenced type
+	// whose package root is a type in scope cannot be spelled fully qualified
+	// (JLS 6.5.5.1), so when several referenced types share one simple name it
+	// must take the single-type import and the others stay qualified. Being
+	// constant-pool based, the decision cannot depend on body render order.
+	TypeRefsBySimple map[string][]string
+	typeImportOwners map[string]string
 	// EnumSyntheticBackingField is the compiler's constant array of the enum
 	// being dumped (renamed by an obfuscator when it is not $VALUES). Source
 	// regenerates that field, so its proved read-only uses are expressed
@@ -848,6 +856,16 @@ func (f *ClassContext) Import(name string) {
 	if className != "*" {
 		className = SafeIdentifier(className)
 	}
+	// One simple name can only bind one type per compilation unit (JLS 7.5.1).
+	// When the reference inventory proved that another owner must take that
+	// name -- its own qualified spelling is illegal -- this owner must not
+	// bind it first and silently steal the reference.
+	if owner := f.typeImportOwner(className); owner != "" {
+		dotted := strings.ReplaceAll(name, "/", ".")
+		if dotted != owner && dotted != f.ClassName {
+			return
+		}
+	}
 	if f.KeySet.Has(className) {
 		return
 	}
@@ -999,6 +1017,17 @@ func (f *ClassContext) ShortTypeName(name string) string {
 		}
 		return dotted
 	}
+	// Several referenced types share this simple name and one of them cannot be
+	// spelled fully qualified because its package root is a type in scope (JLS
+	// 6.5.5.1). That owner must take the single-type import; every other owner
+	// stays fully qualified (legal, or it would be the forced one).
+	if owner := f.typeImportOwner(className); owner != "" && dotted == className {
+		if owner == name {
+			f.Import(name)
+			return dotted
+		}
+		return pkg + "." + dotted
+	}
 	if f.SamePkgFQNames != nil && f.SamePkgFQNames[className] && f.packageNameObscured() {
 		return pkg + "." + dotted
 	}
@@ -1089,6 +1118,7 @@ func (f *ClassContext) CloneForRetry() *ClassContext {
 	out.StandaloneEraseTypeVars = maps.Clone(f.StandaloneEraseTypeVars)
 	out.ForceParamEraseTypeVars = maps.Clone(f.ForceParamEraseTypeVars)
 	out.SamePkgFQNames = maps.Clone(f.SamePkgFQNames)
+	out.typeImportOwners = maps.Clone(f.typeImportOwners)
 	out.LexicalTypeNames = maps.Clone(f.LexicalTypeNames)
 	out.StaticMethodImports = f.StaticMethodImports.Clone()
 	out.staticImportScopeMemo = maps.Clone(f.staticImportScopeMemo)

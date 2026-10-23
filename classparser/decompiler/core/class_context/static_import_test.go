@@ -186,7 +186,7 @@ func TestStaticInterfaceImportRetryDoesNotPoisonOriginalTransaction(t *testing.T
 
 func TestStaticCallImportChecksBothTypeNamespacesAndOwnerKind(t *testing.T) {
 	for _, isInterface := range []bool{false, true} {
-		for _, variant := range []string{"method type parameters", "package type", "method conflict", "wrong owner kind", "missing owner", "value-only shadow", "owned type path"} {
+		for _, variant := range []string{"method type parameters", "package type", "method conflict", "wrong owner kind", "missing owner", "value-only shadow", "owned type path", "obscured root with own method"} {
 			t.Run(fmt.Sprint(isInterface)+"/"+variant, func(t *testing.T) {
 				f, declarations := staticImportModelContext()
 				api := declarations["a/Api"]
@@ -210,6 +210,12 @@ func TestStaticCallImportChecksBothTypeNamespacesAndOwnerKind(t *testing.T) {
 					f.SourceValueNameShadow = nil
 					f.DeclarationSourceName = func(string) (string, bool) { return "Outer.Api", true }
 					f.LexicalTypeNames = map[string]bool{"Outer": true}
+				case "obscured root with own method":
+					f.TypeParams = nil
+					f.LexicalTypeNames = map[string]bool{"a": true}
+					probe := declarations["probe/Probe"]
+					probe.Methods = []callbinding.Method{{Name: "compute", Desc: "()I", Public: true, Static: true}}
+					declarations[probe.Name] = probe
 				}
 				declarations["a/Api"] = api
 				if variant == "missing owner" {
@@ -221,9 +227,12 @@ func TestStaticCallImportChecksBothTypeNamespacesAndOwnerKind(t *testing.T) {
 				} else {
 					prefix = f.StaticClassCallPrefix("a.Api", "compute", "(I)I")
 				}
-				refused := variant == "method conflict" || variant == "wrong owner kind" || variant == "missing owner"
+				// "method conflict" also makes the package root a type parameter, so
+				// neither a static import nor a qualified name is legal. The single-type
+				// import is the remaining spelling; refusing it was the old gap.
+				refused := variant == "wrong owner kind" || variant == "missing owner"
 				if (f.StaticMethodImports.Error() != nil) != refused {
-					t.Fatalf("prefix=%q refusal=%v", prefix, f.StaticMethodImports.Error())
+					t.Fatalf("prefix=%q refusal=%v rootType=%v lexical=%v", prefix, f.StaticMethodImports.Error(), f.packageRootIsType("a.Api"), f.LexicalTypeNames)
 				}
 				if refused {
 					if f.StaticMethodImports.FailedMethod() != "probe.Probe.m(I)I" || len(f.StaticMethodImports.Imports()) != 0 {
@@ -237,6 +246,8 @@ func TestStaticCallImportChecksBothTypeNamespacesAndOwnerKind(t *testing.T) {
 					want, imports = "Outer.Api.", ""
 				} else if variant == "value-only shadow" && !isInterface {
 					want, imports = "((Api)null).", ""
+				} else if variant == "obscured root with own method" || variant == "method conflict" {
+					want, imports = "Api.", ""
 				}
 				if prefix != want || strings.Join(f.StaticMethodImports.Imports(), ",") != imports {
 					t.Fatalf("prefix=%q imports=%v want=%q/%q", prefix, f.StaticMethodImports.Imports(), want, imports)

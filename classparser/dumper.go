@@ -465,40 +465,30 @@ func extractDescriptorClassNames(s string) []string {
 	return out
 }
 
-func (c *ClassObjectDumper) computeSamePkgFQNames() map[string]bool {
-	if c.getenv("JDEC_SAMEPKG_FQ_OFF") != "" {
-		return nil
-	}
+// forEachReferencedTypeName visits every referenced type of this class. (1)
+// CONSTANT_Class entries (new/checkcast/instanceof/method+field owners),
+// stripping any array descriptor prefix. (2) EVERY Utf8 entry: method/field
+// descriptors and generic Signatures embed referenced types as
+// `L<binary-name>;` (or `L<binary-name><...>` in a signature), and a
+// same-package type used ONLY as a method return/parameter (e.g. the return
+// type of an inherited or cross-class method) appears there but NOT as a
+// CONSTANT_Class -- the fastjson2 FieldWriter clash is exactly this shape.
+// Scanning both is a superset; over-inclusion only ever FQ-qualifies a
+// same-package name that also genuinely occurs in another package, which is
+// always legal Java. (3) A zero catch type supplies Throwable even when no CP
+// class references it. Nested types keep their `$` (binary) spelling.
+func (c *ClassObjectDumper) forEachReferencedTypeName(visit func(binary string)) {
 	if c.obj == nil || c.obj.ConstantPoolManager == nil {
-		return nil
+		return
 	}
-	pkgsBySimple := map[string]map[string]struct{}{}
 	record := func(binary string) {
 		// binary is a slash-separated internal name (no leading L / trailing ;), possibly nested
 		// (Outer$Inner). It must carry a package ('/') for a cross-package clash to be possible.
 		if binary == "" || !strings.Contains(binary, "/") {
 			return
 		}
-		dotted := strings.ReplaceAll(binary, "/", ".")
-		pkg, simple := class_context.SplitPackageClassName(dotted)
-		if simple == "" {
-			return
-		}
-		simple = class_context.SafeIdentifier(simple)
-		m := pkgsBySimple[simple]
-		if m == nil {
-			m = map[string]struct{}{}
-			pkgsBySimple[simple] = m
-		}
-		m[pkg] = struct{}{}
+		visit(binary)
 	}
-	// (1) CONSTANT_Class entries (new/checkcast/instanceof/method+field owners), stripping any array
-	// descriptor prefix. (2) EVERY Utf8 entry: method/field descriptors and generic Signatures embed
-	// referenced types as `L<binary-name>;` (or `L<binary-name><...>` in a signature), and a
-	// same-package type used ONLY as a method return/parameter (e.g. the return type of an inherited
-	// or cross-class method) appears there but NOT as a CONSTANT_Class -- the fastjson2 FieldWriter
-	// clash is exactly this shape. Scanning both is a superset; over-inclusion only ever FQ-qualifies a
-	// same-package name that also genuinely occurs in another package, which is always legal Java.
 	for _, ci := range c.obj.ConstantPool {
 		switch e := ci.(type) {
 		case *ConstantClassInfo:
@@ -523,7 +513,6 @@ func (c *ClassObjectDumper) computeSamePkgFQNames() map[string]bool {
 			}
 		}
 	}
-	// A zero catch type supplies Throwable even when no CP class references it.
 	for _, method := range c.obj.Methods {
 		for _, attribute := range method.Attributes {
 			if code, ok := attribute.(*CodeAttribute); ok && code != nil {
@@ -535,6 +524,73 @@ func (c *ClassObjectDumper) computeSamePkgFQNames() map[string]bool {
 			}
 		}
 	}
+}
+
+// computeTypeRefsBySimple returns every referenced binary name per simple type
+// name, for simple names with more than one owner. class_context uses it to
+// pick which owner must take the single-type import when several referenced
+// types share one simple name and one of them cannot be spelled fully
+// qualified. Constant-pool based, so body render order cannot change it.
+// Kill-switch: JDEC_CROSSPKG_IMPORT_OWNER_OFF=1.
+func (c *ClassObjectDumper) computeTypeRefsBySimple() map[string][]string {
+	if c.getenv("JDEC_CROSSPKG_IMPORT_OWNER_OFF") != "" {
+		return nil
+	}
+	bySimple := map[string]map[string]struct{}{}
+	c.forEachReferencedTypeName(func(binary string) {
+		dotted := strings.ReplaceAll(binary, "/", ".")
+		_, simple := class_context.SplitPackageClassName(dotted)
+		if simple == "" {
+			return
+		}
+		simple = class_context.SafeIdentifier(simple)
+		set := bySimple[simple]
+		if set == nil {
+			set = map[string]struct{}{}
+			bySimple[simple] = set
+		}
+		set[binary] = struct{}{}
+	})
+	out := map[string][]string{}
+	for simple, set := range bySimple {
+		if len(set) < 2 {
+			continue
+		}
+		names := make([]string, 0, len(set))
+		for binary := range set {
+			names = append(names, binary)
+		}
+		sort.Strings(names)
+		out[simple] = names
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (c *ClassObjectDumper) computeSamePkgFQNames() map[string]bool {
+	if c.getenv("JDEC_SAMEPKG_FQ_OFF") != "" {
+		return nil
+	}
+	if c.obj == nil || c.obj.ConstantPoolManager == nil {
+		return nil
+	}
+	pkgsBySimple := map[string]map[string]struct{}{}
+	c.forEachReferencedTypeName(func(binary string) {
+		dotted := strings.ReplaceAll(binary, "/", ".")
+		pkg, simple := class_context.SplitPackageClassName(dotted)
+		if simple == "" {
+			return
+		}
+		simple = class_context.SafeIdentifier(simple)
+		m := pkgsBySimple[simple]
+		if m == nil {
+			m = map[string]struct{}{}
+			pkgsBySimple[simple] = m
+		}
+		m[pkg] = struct{}{}
+	})
 	out := map[string]bool{}
 	for simple, pkgs := range pkgsBySimple {
 		_, hasOwn := pkgs[c.PackageName]
@@ -839,6 +895,12 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			funcCtx.SamePkgFQNames[name] = true
 		}
 	}
+	// Precompute every simple type name with more than one referenced owner, so
+	// ClassContext can decide which owner must take the single-type import when
+	// one of them cannot be spelled fully qualified. Constant-pool based, so the
+	// decision cannot depend on body render order. Kill-switch:
+	// JDEC_CROSSPKG_IMPORT_OWNER_OFF=1.
+	funcCtx.TypeRefsBySimple = c.computeTypeRefsBySimple()
 	// The backing-array protocol proved this enum's compiler array field. Source
 	// regenerates it, so its read-only uses render through the clone factory.
 	funcCtx.EnumSyntheticBackingField = c.enumSyntheticBackingField
