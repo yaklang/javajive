@@ -13,6 +13,7 @@ package jdecenv
 import (
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -85,6 +86,22 @@ func Get(key string) string {
 		return snap[key]
 	}
 	return os.Getenv(key)
+}
+
+// CaptureProcess copies the process environment once. A decompile worker
+// passes it to Run so later Type() lookups read the map instead of os.Getenv.
+// Unbound Lookup() stays live; this snapshot is taken at the start of one class.
+func CaptureProcess() map[string]string {
+	env := os.Environ()
+	snap := make(map[string]string, len(env))
+	for _, kv := range env {
+		i := strings.IndexByte(kv, '=')
+		if i <= 0 {
+			continue
+		}
+		snap[kv[:i]] = kv[i+1:]
+	}
+	return snap
 }
 
 // Lookup captures the policy at a synchronous rendering/analysis boundary.
