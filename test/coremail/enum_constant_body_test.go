@@ -1,11 +1,12 @@
 package coremail_test
 
 import (
-	parser "github.com/yaklang/javajive/classparser"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	parser "github.com/yaklang/javajive/classparser"
 )
 
 // J2B-021: javac --release 8 emits each constant body as Owner$N with
@@ -150,6 +151,106 @@ func renamedConstantBodies(t *testing.T, dir string) map[string][]byte {
 	return entries
 }
 
+// Real obfuscated jars (mt.dq, es, ez in coremail) rename every constant body
+// to an unrelated name, drop every InnerClasses/EnclosingMethod row and leave
+// the shared first-body marker only inside the constructor descriptor. The
+// folding certificate must still recognise the family; a body whose nesting
+// rows name an unrelated class must still be refused.
+func TestRenamedEnumConstantBodyWithoutNestingRows(t *testing.T) {
+	javac, java := tool(t, "javac"), tool(t, "java")
+	dir := t.TempDir()
+	command(t, javac, "-proc:none", "--release", "8", "-g:none", "-d", dir, "testdata/enum/ConstantBody.java", "testdata/enum/ConstantBodyDriver.java")
+	objects := map[string]*parser.ClassObject{}
+	for _, name := range []string{"fixtures/ConstantBody.class", "fixtures/ConstantBody$1.class", "fixtures/ConstantBody$2.class"} {
+		obj, err := parser.Parse(readFile(t, filepath.Join(dir, name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		objects[name] = obj
+	}
+	for _, obj := range objects {
+		rewriteUTF8(obj, "fixtures/ConstantBody$1", "fixtures/BodyLE")
+		rewriteUTF8(obj, "fixtures/ConstantBody$2", "fixtures/BodyLT")
+		dropNestingRows(obj)
+	}
+	// BodyLT must recognise the shared marker from its constructor descriptor.
+	pointClassEntryAway(t, objects["fixtures/ConstantBody$2.class"], "fixtures/BodyLE")
+	enumObj := objects["fixtures/ConstantBody.class"]
+	renameEnumField(t, enumObj, "LE", "a")
+	renameEnumField(t, enumObj, "LT", "b")
+	renameEnumField(t, enumObj, "PLAIN", "c")
+	renameEnumField(t, enumObj, "$VALUES", "k")
+	entries := map[string][]byte{}
+	for name, obj := range objects {
+		renamed := map[string]string{
+			"fixtures/ConstantBody.class":   "fixtures/ConstantBody.class",
+			"fixtures/ConstantBody$1.class": "fixtures/BodyLE.class",
+			"fixtures/ConstantBody$2.class": "fixtures/BodyLT.class",
+		}[name]
+		raw := obj.Bytes()
+		entries[renamed] = raw
+		put(t, filepath.Join(dir, renamed), raw)
+	}
+	original := command(t, java, "-cp", dir, "fixtures.ConstantBodyDriver")
+	if original != "ok" {
+		t.Fatalf("renamed classes changed behavior: %q", original)
+	}
+	generated := decompileArchive(t, dir, entries, "fixtures/ConstantBody.class")
+	if strings.Contains(generated, "decompile dump failed") || !strings.Contains(generated, "LE {") || !strings.Contains(generated, "LT {") {
+		t.Fatalf("stripped constant bodies refused:\n%s", generated)
+	}
+	rebuilt := filepath.Join(dir, "rebuilt")
+	put(t, filepath.Join(rebuilt, "fixtures/ConstantBody.java"), []byte(generated))
+	command(t, javac, "-proc:none", "--release", "8", "-d", rebuilt, filepath.Join(rebuilt, "fixtures/ConstantBody.java"))
+	if got := command(t, java, "-cp", rebuilt+string(os.PathListSeparator)+dir, "fixtures.ConstantBodyDriver"); got != original {
+		t.Fatalf("original %q regenerated %q\n%s", original, got, generated)
+	}
+	// A nesting row that names an unrelated class is still a different claim.
+	body, err := parser.Parse(entries["fixtures/BodyLT.class"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	body.Attributes = append(body.Attributes, foreignInnerRow(t, body))
+	entries["fixtures/BodyLT.class"] = body.Bytes()
+	refused := decompileArchive(t, dir, entries, "fixtures/ConstantBody.class")
+	if !strings.Contains(refused, "constant-specific enclosing identity") {
+		t.Fatalf("foreign nesting row was folded:\n%s", refused)
+	}
+}
+
+func foreignInnerRow(t *testing.T, obj *parser.ClassObject) *parser.InnerClassesAttribute {
+	t.Helper()
+	self := obj.GetClassName()
+	index := uint16(0)
+	for i := 1; i <= len(obj.ConstantPool); i++ {
+		name, known := sourceBridgeName(obj, uint16(i))
+		if known && name != "" && name != self && !strings.Contains(name, "Body") {
+			index = uint16(i)
+			break
+		}
+	}
+	if index == 0 {
+		t.Fatal("fixture pool has no foreign class entry")
+	}
+	return &parser.InnerClassesAttribute{Type: "InnerClasses", AttrLen: 10, NumberOfClasses: 1, Classes: []*parser.InnerClassInfo{{InnerClassInfoIndex: index, OuterClassInfoIndex: 0, InnerNameIndex: 0, InnerClassAccessFlags: 0x0008}}}
+}
+
+// sourceBridgeName resolves a constant-pool class entry to its internal name.
+func sourceBridgeName(obj *parser.ClassObject, index uint16) (string, bool) {
+	if obj == nil || index == 0 || int(index) > len(obj.ConstantPool) {
+		return "", false
+	}
+	class, ok := obj.ConstantPool[index-1].(*parser.ConstantClassInfo)
+	if !ok || class == nil || class.NameIndex == 0 || int(class.NameIndex) > len(obj.ConstantPool) {
+		return "", false
+	}
+	utf, ok := obj.ConstantPool[class.NameIndex-1].(*parser.ConstantUtf8Info)
+	if !ok || utf == nil {
+		return "", false
+	}
+	return utf.Value, true
+}
+
 func rewriteUTF8(obj *parser.ClassObject, from, to string) {
 	for _, info := range obj.ConstantPool {
 		u, ok := info.(*parser.ConstantUtf8Info)
@@ -157,6 +258,47 @@ func rewriteUTF8(obj *parser.ClassObject, from, to string) {
 			continue
 		}
 		u.SetString(strings.ReplaceAll(u.Value, from, to))
+	}
+}
+
+// dropNestingRows removes every InnerClasses and EnclosingMethod attribute.
+func dropNestingRows(obj *parser.ClassObject) {
+	kept := obj.Attributes[:0]
+	for _, attribute := range obj.Attributes {
+		switch attribute := attribute.(type) {
+		case *parser.InnerClassesAttribute:
+			continue
+		case *parser.UnparsedAttribute:
+			if attribute != nil && attribute.Name == "EnclosingMethod" {
+				continue
+			}
+		}
+		kept = append(kept, attribute)
+	}
+	obj.Attributes = kept
+}
+
+// pointClassEntryAway makes the constant pool stop naming internal as a class.
+// An obfuscator that renames the bodies and drops the nesting rows leaves the
+// shared marker only inside the constructor descriptor, which is exactly the
+// shape the certificate must still accept.
+func pointClassEntryAway(t *testing.T, obj *parser.ClassObject, internal string) {
+	t.Helper()
+	moved := 0
+	for _, info := range obj.ConstantPool {
+		class, ok := info.(*parser.ConstantClassInfo)
+		if !ok || class == nil || int(class.NameIndex) > len(obj.ConstantPool) {
+			continue
+		}
+		utf, ok := obj.ConstantPool[class.NameIndex-1].(*parser.ConstantUtf8Info)
+		if !ok || utf == nil || utf.Value != internal {
+			continue
+		}
+		utf.SetString("java/lang/Object")
+		moved++
+	}
+	if moved == 0 {
+		t.Fatalf("no class entry for %s", internal)
 	}
 }
 

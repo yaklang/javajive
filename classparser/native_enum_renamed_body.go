@@ -1,6 +1,8 @@
 package javaclassparser
 
 import (
+	"strings"
+
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 )
 
@@ -129,7 +131,23 @@ func renamedEnumStaticRows(body *ClassObject, attribute *InnerClassesAttribute) 
 }
 
 func renamedEnumRowsMatchMarker(body *ClassObject, marker string) bool {
-	markerClass, known := sourceBridgeClassIndex(body, marker)
+	rows := 0
+	for _, attribute := range body.Attributes {
+		inner, ok := attribute.(*InnerClassesAttribute)
+		if !ok {
+			continue
+		}
+		if inner == nil {
+			return false
+		}
+		rows += len(inner.Classes)
+	}
+	// A body whose nesting rows were stripped carries no nesting claim at all;
+	// the constructor and bridge checks above already pin its identity.
+	if rows == 0 {
+		return true
+	}
+	markerClass, known := renamedEnumMarkerClassIndex(body, marker)
 	if !known {
 		return false
 	}
@@ -148,6 +166,27 @@ func renamedEnumRowsMatchMarker(body *ClassObject, marker string) bool {
 		}
 	}
 	return true
+}
+
+// renamedEnumMarkerClassIndex finds the shared first-body marker in the class's
+// own constant pool. An obfuscator that renames the bodies and drops their
+// InnerClasses rows leaves the marker only inside the constructor descriptor
+// (`L<marker>;`), so a CONSTANT_Class lookup alone would reject the class.
+func renamedEnumMarkerClassIndex(body *ClassObject, marker string) (uint16, bool) {
+	if body == nil || marker == "" {
+		return 0, false
+	}
+	if index, known := sourceBridgeClassIndex(body, marker); known {
+		return index, true
+	}
+	descriptor := "L" + marker + ";"
+	for index := 1; index <= len(body.ConstantPool); index++ {
+		name, known := sourceBridgeUTF8(body, uint16(index))
+		if known && strings.Contains(name, descriptor) {
+			return body.ThisClass, true
+		}
+	}
+	return 0, false
 }
 
 func renamedEnumStaticUnnamedRow(row *InnerClassInfo) bool {
