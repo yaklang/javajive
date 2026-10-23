@@ -24,7 +24,11 @@ type historicalMetadataFailure struct{ Class, Reason string }
 // Only successful restored classes reach the runtime JAR. Retain rejected
 // compiler output separately for diagnosis; never copy an original class back.
 func historicalRestoreArtifactMetadata(artifact *classparser.JarSourceArtifact, classes, rejected string) (*historicalArtifactMetadata, error) {
-	report := &historicalArtifactMetadata{Policy: "explicit-source-artifact", RestoredClasses: []string{}, Failures: []historicalMetadataFailure{}}
+	return historicalFinishArtifactClasses("explicit-source-artifact", artifact.RestoreClassMetadata, classes, rejected)
+}
+
+func historicalFinishArtifactClasses(policy string, finish func(string, []byte) ([]byte, error), classes, rejected string) (*historicalArtifactMetadata, error) {
+	report := &historicalArtifactMetadata{Policy: policy, RestoredClasses: []string{}, Failures: []historicalMetadataFailure{}}
 	err := filepath.WalkDir(classes, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -45,7 +49,7 @@ func historicalRestoreArtifactMetadata(artifact *classparser.JarSourceArtifact, 
 		if err != nil {
 			return err
 		}
-		restored, metadataError := artifact.RestoreClassMetadata(name, compiled)
+		restored, metadataError := finish(name, compiled)
 		if metadataError != nil {
 			report.Failures = append(report.Failures, historicalMetadataFailure{name, metadataError.Error()})
 			target := filepath.Join(rejected, relative)

@@ -26,21 +26,22 @@ type JarFS struct {
 	jarPhysicalRelease  int
 
 	// Immutable compilation profile, distinct from Multi-Release lookup.
-	targetSourceVersion      int
-	sourceCompiler           SourceCompilerProfile
-	sourceFieldMetadata      *sourceFieldMetadataAuthority
-	sourceLambdaMetadata     *sourceLambdaMetadataAuthority
-	sourceOwnership          *sourceOwnershipCache
-	releaseViewsMu           sync.Mutex
-	releaseViews             map[int]*JarFS
-	nativeMembersMu          sync.Mutex
-	nativeMembersIndex       nativeMemberIndex
-	nativeMembersCache       map[string]*nativeMemberCacheEntry
-	nativeMemberTransactions map[string]*nativeMemberTransaction
-	nativeMembersBytes       int64
-	nativeAnonymousMu        sync.Mutex
-	nativeAnonymousCache     map[string]*nativeAnonymousCacheEntry
-	nativeAnonymousBytes     int64
+	targetSourceVersion       int
+	sourceCompiler            SourceCompilerProfile
+	sourceFieldMetadata       *sourceFieldMetadataAuthority
+	sourceConstructorLowering *sourceConstructorLoweringAuthority
+	sourceLambdaMetadata      *sourceLambdaMetadataAuthority
+	sourceOwnership           *sourceOwnershipCache
+	releaseViewsMu            sync.Mutex
+	releaseViews              map[int]*JarFS
+	nativeMembersMu           sync.Mutex
+	nativeMembersIndex        nativeMemberIndex
+	nativeMembersCache        map[string]*nativeMemberCacheEntry
+	nativeMemberTransactions  map[string]*nativeMemberTransaction
+	nativeMembersBytes        int64
+	nativeAnonymousMu         sync.Mutex
+	nativeAnonymousCache      map[string]*nativeAnonymousCacheEntry
+	nativeAnonymousBytes      int64
 	*filesys.ZipFS
 	jarCache            *utils.SafeMapWithKey[string, *filesys.UnifiedFS]
 	recursiveParse      bool // 是否递归解析嵌套的jar文件，默认为true
@@ -169,6 +170,7 @@ func (z *JarFS) decompileClassBytes(name string, data []byte) []byte {
 	d.options.TargetSourceVersion = z.targetSourceVersion
 	d.options.SourceCompiler = z.sourceCompiler
 	d.options.sourceFieldMetadata = z.sourceFieldMetadata
+	d.options.sourceConstructorLowering = z.sourceConstructorLowering
 	d.options.sourceLambdaMetadata = z.sourceLambdaMetadata
 	if path.Clean(name) == cf.GetClassName()+".class" {
 		d.nativeMemberLookup = z.nativeMemberLookup

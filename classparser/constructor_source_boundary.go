@@ -18,6 +18,7 @@ import (
 // Prefix effects are either kept behind a proved inert Object initialization or
 // evaluated in the first delegation argument, before any effect of the callee.
 type constructorSourceBoundary struct {
+	lowering       *sourceConstructorLoweringPlan
 	throwsReceipt  *constructorInvocationThrowsReceipt
 	pc             int
 	delegate       *values.FunctionCallExpression
@@ -179,7 +180,7 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 						}
 						p.pc = int(op.CurrentOffset)
 						p.delegate = &values.FunctionCallExpression{ClassName: member.Name, FunctionName: "<init>", Descriptor: "()V", Kind: values.InvokeSpecial, IsSpecialInvoke: true, Object: &values.JavaRef{IsThis: true}, OriginPC: p.pc, HasOriginPC: true}
-						if len(p.prefix) == count && c.constructorCapturesCommute(p, code, method, decoder) {
+						if len(p.prefix) == count && (c.planArtifactConstructorLowering(p, code, method, decoder) || c.constructorCapturesCommute(p, code, method, decoder)) {
 							return p, nil
 						}
 					}
@@ -201,6 +202,12 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 		if err := c.planConstructorArgumentBridges(p, code, method); err != nil {
 			return nil, err
 		}
+		return p, nil
+	}
+	// An explicit reconstruction artifact can instead owe a verified compiler
+	// lowering. Its postcompile stage restores these fresh stores to their
+	// original position; this does not assert that they commute with SUPER.
+	if c.planArtifactConstructorLowering(p, code, method, decoder) {
 		return p, nil
 	}
 	if c.constructorCapturesCommute(p, code, method, decoder) {

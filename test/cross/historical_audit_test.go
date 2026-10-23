@@ -175,7 +175,19 @@ func TestHistoricalJarAudit(t *testing.T) {
 			var files []string
 			var units, fail int
 			var artifact *classparser.JarSourceArtifact
-			if os.Getenv("HISTORICAL_JAR_SOURCE_ARTIFACT") == "1" {
+			var reconstruction *classparser.JarReconstructionArtifact
+			if os.Getenv("HISTORICAL_JAR_RECONSTRUCTION_ARTIFACT") == "1" {
+				if os.Getenv("HISTORICAL_JAR_SOURCE_ARTIFACT") == "1" {
+					t.Fatal("select exactly one artifact contract")
+				}
+				var err error
+				reconstruction, err = classparser.NewJarReconstructionArtifactFromLocal(input.Path, target, classparser.ModernJavac, resolve)
+				if err != nil {
+					t.Fatal("explicit reconstruction artifact", err)
+				}
+				defer reconstruction.Close()
+				files, units, fail = decompileAllFromSourceReader(t, input.Path, srcRoot, 0, reconstruction)
+			} else if os.Getenv("HISTORICAL_JAR_SOURCE_ARTIFACT") == "1" {
 				var err error
 				artifact, err = classparser.NewJarSourceArtifactFromLocal(input.Path, target, classparser.ModernJavac, resolve)
 				if err != nil {
@@ -216,9 +228,13 @@ func TestHistoricalJarAudit(t *testing.T) {
 			if err := os.MkdirAll(clsRoot, 0755); err != nil {
 				t.Fatal(err)
 			}
-			if artifact != nil {
+			if artifact != nil || reconstruction != nil {
 				var err error
-				o.CompilerMetadata, err = historicalRestoreArtifactMetadata(artifact, clsRoot, filepath.Join(dir, "rejected-classes"))
+				if reconstruction != nil {
+					o.CompilerMetadata, err = historicalFinishArtifactClasses("explicit-reconstruction-artifact-v1", reconstruction.FinishClass, clsRoot, filepath.Join(dir, "rejected-classes"))
+				} else {
+					o.CompilerMetadata, err = historicalRestoreArtifactMetadata(artifact, clsRoot, filepath.Join(dir, "rejected-classes"))
+				}
 				if err != nil {
 					t.Fatal("compiled metadata tree", err)
 				}

@@ -58,6 +58,7 @@ type ClassObjectDumper struct {
 	nativeEnumConstantCurrent             *nativeEnumConstantBody
 	nativeEnumBacking                     *nativeEnumBackingSource
 	rawAssertionStorage                   *sourceAssertionStoragePlan
+	constructorLowerings                  map[string]*sourceConstructorLoweringPlan
 	nativeMemberRoot                      *nativeMemberFamily
 	nativeMethodLocalCurrent              *nativeMethodLocalClass
 	nativeMethodLocalPlacements           map[statements.Statement][]string
@@ -2173,6 +2174,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	}
 	if !c.publishRawAssertionStorage(full) {
 		return "", fmt.Errorf("field identity source publication is not closed")
+	}
+	if !c.publishConstructorLowering(full, methods) {
+		return "", fmt.Errorf("constructor lowering source publication is not closed")
 	}
 	return full, nil
 }
@@ -5524,6 +5528,10 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 	}
 	dumped.methodName = name
 	dumped.bodyCode = code
+	if renderedConstructorPlan != nil && renderedConstructorPlan.lowering != nil {
+		dumped.constructorLowering = renderedConstructorPlan.lowering
+		dumped.constructorLoweringCode = dumped.code
+	}
 	if graph := dumped.serializableReferences; graph != nil {
 		if graph.renderedBody != dumped.bodyCode {
 			return nil, fmt.Errorf("serializable reference body changed after its graph was sealed")
@@ -5544,10 +5552,12 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 }
 
 type dumpedMethods struct {
-	serializableReferences *serializableReferenceMethodGraph
-	compilerReference      *lambdaCompilerReference
-	lambdaEmission         *lambdaMethodEmission
-	enumLambdaInitializer  *enumLambdaInitializerReceipt
+	constructorLowering     *sourceConstructorLoweringPlan
+	constructorLoweringCode string
+	serializableReferences  *serializableReferenceMethodGraph
+	compilerReference       *lambdaCompilerReference
+	lambdaEmission          *lambdaMethodEmission
+	enumLambdaInitializer   *enumLambdaInitializerReceipt
 	// Only the concrete declaration writer sets these offsets. Class recovery
 	// may edit an unsealed body without parsing or reinterpreting its header.
 	sourceBodyStart, sourceBodyEnd int
