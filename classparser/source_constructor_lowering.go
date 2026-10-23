@@ -55,10 +55,10 @@ type constructorNativeSourceOrigin struct{ originalHash, sourceHash [32]byte }
 // access that its unchanged original binary callers never had. Native member,
 // local and enum-body declarations retain their lexical source protocols.
 func (c *ClassObjectDumper) reconstructionPhysicalHeader() bool {
-	if c == nil || c.obj == nil || c.options.sourceConstructorLowering == nil || c.nativeMemberCurrent != nil || c.nativeMethodLocalCurrent != nil || c.nativeEnumConstantCurrent != nil {
+	if c == nil || c.obj == nil || c.nativeMemberCurrent != nil || c.nativeMethodLocalCurrent != nil || c.nativeEnumConstantCurrent != nil {
 		return false
 	}
-	return true
+	return c.options.sourceConstructorLowering != nil || c.options.reconstructionPhysicalRoot != "" && c.options.reconstructionPhysicalRoot == c.obj.GetClassName()
 }
 
 // Native member/anonymous source ownership has its own capture regeneration

@@ -63,6 +63,9 @@ func (z *JarFS) nativeMemberReader(obj *ClassObject) *ClassObjectDumper {
 	d.options.SourceCompiler = z.sourceCompiler
 	d.options.sourceFieldMetadata = z.sourceFieldMetadata
 	d.options.sourceLambdaMetadata = z.sourceLambdaMetadata
+	if z.sourceConstructorLowering != nil {
+		d.options.reconstructionPhysicalRoot = obj.GetClassName()
+	}
 	d.foldSiblingResolver = z.enumSiblingResolver()
 	d.declarationResolver = z.declarationResolver
 	if z.archive != nil && z.archive.budget != nil {
