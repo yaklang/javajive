@@ -14,6 +14,10 @@ var (
 // gid identifies this goroutine. A bound jdecenv frame used to call
 // runtime.Stack on every Get; that traceback was most of ekp decompile CPU.
 // The goid field offset is measured once, then each lookup is a pointer read.
+// Goid is the current goroutine id. Callers use it to keep per-goroutine
+// walk depth without formatting a stack trace.
+func Goid() uint64 { return gid() }
+
 func gid() uint64 {
 	goidOnce.Do(calibrateGoidOffset)
 	if goidFastOK {

@@ -661,9 +661,10 @@ type TernaryExpression struct {
 
 // ReplaceVar implements JavaValue.
 func (j *TernaryExpression) ReplaceVar(oldId *utils.VariableId, newId *utils.VariableId) {
-	if j == nil || j.replacing {
+	if j == nil || j.replacing || !enterReplaceWalk() {
 		return
 	}
+	defer leaveReplaceWalk()
 	j.replacing = true
 	defer func() { j.replacing = false }()
 	if j.Condition != nil {
