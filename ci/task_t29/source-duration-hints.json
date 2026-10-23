@@ -4,9 +4,9 @@
   "latest_measured_ci_head": "d30f48189b47ba9afe57b6971437434fccce82b9",
   "latest_measured_ci_run": 39441005032,
   "latest_measured_completed_parents": 2663,
-  "local_followup_go_manifest_sha256": "405ecce341f3dbf3f6edb8ca210959a340ff3cf7c59be3e7599a89662f7507c7",
-  "local_followup_revision": "dfd37342b6961a1f2cfb08d87975887ad9353e85",
-  "local_followup_roots": 1,
+  "local_followup_go_manifest_sha256": "1d23f2ccca90affc982dbf5093dda38bc7ceaa71ba0cd9c3927fbdeaffb38660",
+  "local_followup_revision": "16980cadf56f22a10184cba3e5129625ec6405fd",
+  "local_followup_roots": 5,
   "measured_checkout_heads": [
     "8f3a843a53c2716671919ddecb0dfff51121aec7",
     "9c94287899bfb2f7cff6eeb713212ab570e46649",
@@ -2811,7 +2811,12 @@
     "TestWrapUncaughtGetConstructorSkipsReturn": 0.05,
     "TestWrapUncaughtGetConstructorSkipsThisCall": 0.05,
     "TestZxingEnumArraySpillFoldRejectsReorderedOrEffectfulShapes": 0,
-    "TestZxingEnumMultipleSpilledArrayArgumentsRoundTrip": 2.59
+    "TestZxingEnumMultipleSpilledArrayArgumentsRoundTrip": 2.59,
+    "TestAdversarialEnumFreshHelperPreservesOriginalMethodUniverse": 8.70977,
+    "TestAdversarialEnumFreshHelperBoundaryCountsKeepFreshInstructions": 25.409493,
+    "TestAdversarialEnumFreshHelperNativeOwnerMustReturnWholeSource": 7.054194,
+    "TestAdversarialEnumArrayLoweringKeepsCompletePacketAndConsumerProof": 1.277673,
+    "TestAdversarialEnumFreshHelperPhysicalSourceNamespacesStayIndependent": 7.414101
   },
   "source_runs": [
     37850493191,
