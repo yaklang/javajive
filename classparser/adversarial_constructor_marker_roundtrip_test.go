@@ -96,7 +96,7 @@ func TestAdversarialConstructorMarkerPreservesOriginalBinaryCallers(t *testing.T
 				if log, err := exec.Command(modern, append([]string{"-proc:none", "--release", "8", "-g:" + debug, "-cp", out, "-sourcepath", out, "-d", out}, paths...)...).CombinedOutput(); err != nil {
 					t.Fatal("compile without owned original classes", err, string(log))
 				}
-				for _, name := range []string{root + "$1.class", root + "$Target.class"} {
+				for _, name := range []string{root + "$Target.class", root + "$1.class"} {
 					path := filepath.Join(out, name)
 					fresh, err := os.ReadFile(path)
 					if err != nil {

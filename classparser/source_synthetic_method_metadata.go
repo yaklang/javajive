@@ -67,6 +67,8 @@ func restoreSyntheticDeclarationFlags(original, compiled []byte, constructorPack
 	}
 	seen := map[sourceLambdaMethodIdentity]bool{}
 	var edits []compiledMetadataEdit
+	var constructorProof func(*MemberInfo) bool
+	constructorProofReady := false
 	for _, method := range got.Methods {
 		key, known := identity(got, method)
 		if !known || !nativeProofWork(work, int64(len(key.name)+len(key.descriptor))+1) {
@@ -82,7 +84,22 @@ func restoreSyntheticDeclarationFlags(original, compiled []byte, constructorPack
 		}
 		// A constructor is eligible only under its own original/fresh typed
 		// forwarding proof. The ordinary metadata client keeps its old domain.
-		if key.name == "<init>" && (!constructorPackets || !syntheticConstructorMarkerEquivalent(want, got, method, work)) || key.name == "<clinit>" || expected&0x0040 != 0 {
+		if key.name == "<init>" {
+			if !constructorPackets {
+				return compiled, nil
+			}
+			if !constructorProofReady {
+				constructorProof = syntheticConstructorMarkerProof(want, got, work)
+				constructorProofReady = true
+			}
+			if constructorProof == nil || !constructorProof(method) {
+				if err := work.Check(); err != nil {
+					return nil, err
+				}
+				return compiled, nil
+			}
+		}
+		if key.name == "<clinit>" || expected&0x0040 != 0 {
 			return compiled, nil
 		}
 		span, recorded := layout.methods[method]
@@ -103,22 +120,16 @@ func restoreSyntheticDeclarationFlags(original, compiled []byte, constructorPack
 // Both actual packets must load the same typed arguments, invoke the same
 // private constructor on uninitialized-this, and return without other effects.
 // Whole class/method identities and flags are checked by the caller first.
-func syntheticConstructorMarkerEquivalent(original, fresh *ClassObject, method *MemberInfo, work *workbudget.Budget) bool {
+func syntheticConstructorMarkerProof(original, fresh *ClassObject, work *workbudget.Budget) func(*MemberInfo) bool {
 	for _, object := range []*ClassObject{original, fresh} {
 		if object == nil || object.MajorVersion < 49 || object.MajorVersion > 54 || object.MinorVersion != 0 || hasOriginalNestAttribute(object, "NestHost") || hasOriginalNestAttribute(object, "NestMembers") {
-			return false
+			return nil
 		}
 	}
 	a, b := NewClassObjectDumper(original), NewClassObjectDumper(fresh)
 	a.Work, b.Work = work, work
-	descriptor, known := sourceBridgeUTF8(fresh, method.DescriptorIndex)
-	if !known {
-		return false
-	}
-	left, right := a.originalNativeConstructorAccessBridges()[descriptor], b.constructorAccessBridgePackets(0)[descriptor]
-	if left == nil || right == nil || right.method != method || left.descriptor != right.descriptor || left.target != right.target || left.marker != right.marker {
-		return false
-	}
+	// Index each method once, rather than rescanning the class per overload.
+	oldPackets, freshPackets := a.originalNativeConstructorAccessBridges(), b.constructorAccessBridgePackets(0)
 	exceptions := func(object *ClassObject, member *MemberInfo) ([]string, bool) {
 		var result []string
 		seen := false
@@ -142,7 +153,17 @@ func syntheticConstructorMarkerEquivalent(original, fresh *ClassObject, method *
 		}
 		return result, true
 	}
-	leftThrows, leftKnown := exceptions(original, left.method)
-	rightThrows, rightKnown := exceptions(fresh, right.method)
-	return leftKnown && rightKnown && slices.Equal(leftThrows, rightThrows)
+	return func(method *MemberInfo) bool {
+		descriptor, known := sourceBridgeUTF8(fresh, method.DescriptorIndex)
+		if !known {
+			return false
+		}
+		left, right := oldPackets[descriptor], freshPackets[descriptor]
+		if left == nil || right == nil || right.method != method || left.descriptor != right.descriptor || left.target != right.target || left.marker != right.marker {
+			return false
+		}
+		leftThrows, leftKnown := exceptions(original, left.method)
+		rightThrows, rightKnown := exceptions(fresh, right.method)
+		return leftKnown && rightKnown && slices.Equal(leftThrows, rightThrows)
+	}
 }

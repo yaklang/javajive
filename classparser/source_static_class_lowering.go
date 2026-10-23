@@ -14,7 +14,10 @@ import (
 // constructor even when every original declaration is static. Publication is
 // a separate flat-unit capability, never inferred from a generated-looking name.
 func staticClassOriginalDomain(object *ClassObject, work *workbudget.Budget) bool {
-	if object == nil || object.MajorVersion != 52 || object.MinorVersion != 0 || object.AccessFlags != 0x1020 || object.GetSupperClassName() != "java/lang/Object" || len(object.Interfaces) != 0 || len(object.Methods) == 0 || len(object.Methods) > 4096 {
+	// An empty declaration universe satisfies the same no-instance-member
+	// proof. In particular an access-marker class may have no methods at all.
+	// The fresh default constructor still needs the full unused-packet check.
+	if object == nil || object.MajorVersion != 52 || object.MinorVersion != 0 || object.AccessFlags != 0x1020 || object.GetSupperClassName() != "java/lang/Object" || len(object.Interfaces) != 0 || len(object.Methods) > 4096 {
 		return false
 	}
 	for _, method := range object.Methods {
