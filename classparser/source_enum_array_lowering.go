@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
-	"sort"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/ssabuild"
@@ -70,14 +69,15 @@ func (a *sourceConstructorLoweringAuthority) enumArraySourceReturned(owner strin
 }
 
 // A newer compiler can add a private array helper to a Java8 enum whose
-// original initializer constructed that same array inline. The first domain
-// is a complete straight-line initializer: declaration-ordered constants,
-// the unique backing producer, RETURN. User operands need typed allocation
+// original initializer constructed that same array inline. Declaration-ordered
+// constants and the unique backing producer precede an isolated user suffix.
+// User operands need typed allocation
 // origins and an empty stack at the array cut. The fresh helper is inlined
 // from its OWN bytes and removed only after proving its only consumer. All
 // remaining methods/fields keep their complete identities and other flags.
 // No original executable byte is copied, nor is an extra method ignored by the
-// metadata gate. Branches, handlers, user initializer effects and opaque PC
+// metadata gate. Suffix branches retain their bytes under an aligned affine PC
+// map; verifier/debug locations are relocated together. Handlers and opaque PC
 // attributes remain outside this executable lowering domain.
 func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, original, compiled []byte, work *workbudget.Budget) ([]byte, error) {
 	decline := func() ([]byte, error) {
@@ -199,7 +199,7 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 	initOps, initOK := nativeEnumMethodOps(got, initializer, work)
 	arrayOps, arrayOK := nativeEnumMethodOps(got, helper, work)
 	oldCode, initCode, arrayCode := constructorLoweringCode(originalInit), constructorLoweringCode(initializer), constructorLoweringCode(helper)
-	if !oldOK || !initOK || !arrayOK || oldCode == nil || initCode == nil || arrayCode == nil || oldCode.MaxLocals != 0 || initCode.MaxLocals != 0 || arrayCode.MaxLocals != 0 || len(arrayOps) == 0 || !nativeEnumOpcode(arrayOps[len(arrayOps)-1], core.OP_ARETURN) || !nativeEnumValuesArrayPacket(got, arrayOps[:len(arrayOps)-1], constants, work) {
+	if !oldOK || !initOK || !arrayOK || oldCode == nil || initCode == nil || arrayCode == nil || arrayCode.MaxLocals != 0 || len(arrayOps) == 0 || !nativeEnumOpcode(arrayOps[len(arrayOps)-1], core.OP_ARETURN) || !nativeEnumValuesArrayPacket(got, arrayOps[:len(arrayOps)-1], constants, work) {
 		return decline()
 	}
 	// The source-regeneration decoder can omit harmless NOPs. Executable
@@ -244,15 +244,21 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 	}
 	oldPrefix, oldPrefixOK := enumArrayConstantBoundary(want, originalInit, oldOps, constants, wantMembers, resolve, work)
 	prefix, prefixOK := enumArrayConstantBoundary(got, initializer, initOps, constants, freshMembers, resolve, work)
-	if !oldPrefixOK || !prefixOK || len(initOps) != prefix+3 || len(oldOps) != oldPrefix+4+4*len(constants) || !nativeEnumValuesArrayPacket(want, oldOps[oldPrefix:len(oldOps)-2], constants, work) || !nativeEnumMemberOperand(got, initOps[prefix], core.OP_INVOKESTATIC, owner, helperKey.name, helperKey.descriptor) || !enumArrayOwnMember(got, initOps[prefix], helper.NameIndex, helper.DescriptorIndex) || !nativeEnumOpcode(initOps[len(initOps)-1], core.OP_RETURN) || !nativeEnumOpcode(oldOps[len(oldOps)-1], core.OP_RETURN) {
+	oldStoreAt := oldPrefix + 2 + 4*len(constants)
+	if !oldPrefixOK || !prefixOK || len(initOps) < prefix+3 || len(oldOps) < oldStoreAt+2 || !nativeEnumValuesArrayPacket(want, oldOps[oldPrefix:oldStoreAt], constants, work) || !nativeEnumMemberOperand(got, initOps[prefix], core.OP_INVOKESTATIC, owner, helperKey.name, helperKey.descriptor) || !enumArrayOwnMember(got, initOps[prefix], helper.NameIndex, helper.DescriptorIndex) || !nativeEnumOpcode(initOps[len(initOps)-1], core.OP_RETURN) || !nativeEnumOpcode(oldOps[len(oldOps)-1], core.OP_RETURN) {
 		return decline()
 	}
-	oldStore := constructorMotionMember(want, oldOps[len(oldOps)-2], core.OP_PUTSTATIC)
-	if oldStore == nil || !nativeEnumMemberOperand(want, oldOps[len(oldOps)-2], core.OP_PUTSTATIC, owner, oldStore.Member, "[L"+owner+";") || !nativeEnumMemberOperand(got, initOps[prefix+1], core.OP_PUTSTATIC, owner, oldStore.Member, "[L"+owner+";") || fields[sourceFieldIdentity{oldStore.Member, "[L" + owner + ";"}] != 0x101a {
+	oldStore := constructorMotionMember(want, oldOps[oldStoreAt], core.OP_PUTSTATIC)
+	if oldStore == nil || !nativeEnumMemberOperand(want, oldOps[oldStoreAt], core.OP_PUTSTATIC, owner, oldStore.Member, "[L"+owner+";") || !nativeEnumMemberOperand(got, initOps[prefix+1], core.OP_PUTSTATIC, owner, oldStore.Member, "[L"+owner+";") || fields[sourceFieldIdentity{oldStore.Member, "[L" + owner + ";"}] != 0x101a {
 		return decline()
 	}
 	backingKey := sourceFieldIdentity{oldStore.Member, "[L" + owner + ";"}
-	if !enumArrayOwnMember(want, oldOps[len(oldOps)-2], wantMembers[backingKey].NameIndex, wantMembers[backingKey].DescriptorIndex) || !enumArrayOwnMember(got, initOps[prefix+1], freshMembers[backingKey].NameIndex, freshMembers[backingKey].DescriptorIndex) || !enumArrayExactElements(want, oldOps[oldPrefix:len(oldOps)-2], constants, wantMembers) || !enumArrayExactElements(got, arrayOps[:len(arrayOps)-1], constants, freshMembers) {
+	if !enumArrayOwnMember(want, oldOps[oldStoreAt], wantMembers[backingKey].NameIndex, wantMembers[backingKey].DescriptorIndex) || !enumArrayOwnMember(got, initOps[prefix+1], freshMembers[backingKey].NameIndex, freshMembers[backingKey].DescriptorIndex) || !enumArrayExactElements(want, oldOps[oldPrefix:oldStoreAt], constants, wantMembers) || !enumArrayExactElements(got, arrayOps[:len(arrayOps)-1], constants, freshMembers) {
+		return decline()
+	}
+	// User initialization is an unchanged suffix. Every branch must stay in
+	// that suffix, so no edge can re-enter an allocation or the array producer.
+	if !enumArraySuffixClosed(oldCode, oldOps, int(oldOps[oldStoreAt+1].CurrentOffset)) || !enumArraySuffixClosed(initCode, initOps, int(initOps[prefix+2].CurrentOffset)) {
 		return decline()
 	}
 	// A surviving method handle would make deletion observable even without a
@@ -323,10 +329,21 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 func enumArrayInstructionSpans(code []byte, ops []*core.OpCode) bool {
 	pc := 0
 	for _, op := range ops {
-		if op == nil || op.Instr == nil || int(op.CurrentOffset) != pc || pc >= len(code) || code[pc] != byte(op.Instr.OpCode) || len(op.Data) > len(code)-pc-1 || !bytes.Equal(code[pc+1:pc+1+len(op.Data)], op.Data) {
+		if op == nil || op.Instr == nil || int(op.CurrentOffset) != pc || pc >= len(code) || code[pc] != byte(op.Instr.OpCode) {
 			return false
 		}
-		pc += 1 + len(op.Data)
+		if op.Instr.OpCode == core.OP_TABLESWITCH || op.Instr.OpCode == core.OP_LOOKUPSWITCH {
+			end, _, ok := enumArraySwitchSpan(code, op)
+			if !ok {
+				return false
+			}
+			pc = end
+		} else {
+			if len(op.Data) > len(code)-pc-1 || !bytes.Equal(code[pc+1:pc+1+len(op.Data)], op.Data) {
+				return false
+			}
+			pc += 1 + len(op.Data)
+		}
 	}
 	return pc == len(code)
 }
@@ -573,8 +590,16 @@ func enumArrayFreshMethodEdits(compiled []byte, object *ClassObject, layout *com
 	if callPC < 0 || callPC+3 > len(initCode.Code) || arrayEnd <= 0 || arrayEnd >= len(arrayCode.Code) || len(initCode.Code)-3+arrayEnd > 65535 || work.CheckAlloc(int64(len(initCode.Code)+arrayEnd)*8) != nil {
 		return fail("fresh Code size")
 	}
+	// Keep the suffix displacement divisible by four. Switch padding and all
+	// relative branch operands then remain byte-for-byte unchanged. NOPs are
+	// placed within the proved straight-line replacement, never in user code.
+	padding := (4 - (arrayEnd-3)%4) % 4
 	newCode := append(bytes.Clone(initCode.Code[:callPC]), arrayCode.Code[:arrayEnd]...)
+	newCode = append(newCode, make([]byte, padding)...)
 	newCode = append(newCode, initCode.Code[callPC+3:]...)
+	if len(newCode) > 65535 {
+		return fail("aligned fresh Code size")
+	}
 	initRaw, err := enumArrayCodePayload(compiled, object, initSpan, work)
 	if err != nil {
 		return nil, err
@@ -583,61 +608,18 @@ func enumArrayFreshMethodEdits(compiled []byte, object *ClassObject, layout *com
 	if err != nil {
 		return nil, err
 	}
-	initLines, initLineName, err := enumArrayCodeLines(initRaw.data, object, initCode, initOps, work)
-	if err != nil {
-		return nil, err
-	}
 	helperLines, helperLineName, err := enumArrayCodeLines(helperRaw.data, object, arrayCode, arrayOps, work)
 	if err != nil {
 		return nil, err
 	}
-	lines := map[int]uint16{}
-	for pc, line := range initLines {
-		if pc > callPC {
-			pc += arrayEnd - 3
-		}
-		lines[pc] = line
-	}
-	for pc, line := range helperLines {
+	for pc := range helperLines {
 		if pc >= arrayEnd {
 			return fail("line on removed helper return")
 		}
-		lines[callPC+pc] = line
 	}
-	lineName := initLineName
-	if lineName == 0 {
-		lineName = helperLineName
-	}
-	newInfo := make([]byte, 8)
-	stack := initCode.MaxStack
-	if stack < arrayCode.MaxStack {
-		stack = arrayCode.MaxStack
-	}
-	binary.BigEndian.PutUint16(newInfo, stack)
-	binary.BigEndian.PutUint16(newInfo[2:], initCode.MaxLocals)
-	binary.BigEndian.PutUint32(newInfo[4:], uint32(len(newCode)))
-	newInfo = append(newInfo, newCode...)
-	newInfo = append(newInfo, 0, 0, 0, 0) // no handlers; no PC-bearing tables yet
-	if lineName != 0 {
-		if len(lines) > 65535 {
-			return fail("line table size")
-		}
-		newInfo[len(newInfo)-1] = 1
-		body := make([]byte, 2+4*len(lines))
-		binary.BigEndian.PutUint16(body, uint16(len(lines)))
-		pcs := make([]int, 0, len(lines))
-		for pc := range lines {
-			pcs = append(pcs, pc)
-		}
-		sort.Ints(pcs)
-		for i, pc := range pcs {
-			binary.BigEndian.PutUint16(body[2+4*i:], uint16(pc))
-			binary.BigEndian.PutUint16(body[4+4*i:], lines[pc])
-		}
-		header := make([]byte, 6)
-		binary.BigEndian.PutUint16(header, lineName)
-		binary.BigEndian.PutUint32(header[2:], uint32(len(body)))
-		newInfo = append(append(newInfo, header...), body...)
+	newInfo, err := enumArrayRelocateCode(object, initRaw.data, initCode, initOps, newCode, callPC, arrayEnd-3+padding, helperLines, helperLineName, arrayCode.MaxStack, work)
+	if err != nil {
+		return nil, err
 	}
 	attribute := make([]byte, 6)
 	binary.BigEndian.PutUint16(attribute, initRaw.name)

@@ -45,6 +45,7 @@ type sourceConstructorLoweringAuthority struct {
 	nativePending, nativeActive map[string]constructorNativeSourceOrigin
 	enumPending, enumActive     map[string]constructorNativeSourceOrigin
 	staticPending, staticActive map[string]constructorNativeSourceOrigin
+	bridgePending, bridgeActive map[string]constructorNativeSourceOrigin
 }
 
 type constructorNativeSourceOrigin struct{ originalHash, sourceHash [32]byte }
@@ -307,6 +308,9 @@ func (c *ClassObjectDumper) planArtifactConstructorLowering(boundary *constructo
 }
 
 func (c *ClassObjectDumper) publishConstructorLowering(source string, methods []*dumpedMethods) bool {
+	if !c.publishInheritedBridgeLowering(source, methods) {
+		return false
+	}
 	if !c.publishStaticClassLowering(source) {
 		return false
 	}
@@ -371,6 +375,11 @@ func (a *sourceConstructorLoweringAuthority) sourceReturned(owner string, source
 	if previous, active := a.staticActive[owner]; active && (!staticFound || previous != staticOrigin) {
 		return fmt.Errorf("static class lowering: changed returned source")
 	}
+	bridgeOrigin, bridgeFound := a.bridgePending[owner]
+	bridgeFound = bridgeFound && bridgeOrigin.sourceHash == hash
+	if previous, active := a.bridgeActive[owner]; active && (!bridgeFound || previous != bridgeOrigin) {
+		return fmt.Errorf("inherited bridge lowering: changed returned source")
+	}
 	toActivate := map[string]constructorNativeSourceOrigin{}
 	for _, origin := range enums {
 		candidate := constructorNativeSourceOrigin{origin.originalHash, hash}
@@ -397,6 +406,12 @@ func (a *sourceConstructorLoweringAuthority) sourceReturned(owner string, source
 		}
 	}
 	activateOrigins := func() {
+		if bridgeFound {
+			if a.bridgeActive == nil {
+				a.bridgeActive = map[string]constructorNativeSourceOrigin{}
+			}
+			a.bridgeActive[owner] = bridgeOrigin
+		}
 		// Commit only at a successful return, while holding the lock. A
 		// later native/constructor conflict cannot leave partial authority.
 		if len(toActivate) != 0 {

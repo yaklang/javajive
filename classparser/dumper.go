@@ -5564,6 +5564,8 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 }
 
 type dumpedMethods struct {
+	inheritedBridge         *inheritedBridgePacket
+	inheritedBridgeCode     string
 	constructorLowering     *sourceConstructorLoweringPlan
 	constructorLoweringCode string
 	serializableReferences  *serializableReferenceMethodGraph
@@ -13303,55 +13305,16 @@ func (c *ClassObjectDumper) isGenuineEnum() bool {
 	return sup == "java.lang.Enum"
 }
 
-// isSyntheticEnumMethod handles the legacy constructor marker only. Generated
-// factories are checked against their original executable protocol separately;
-// their spelling cannot authorize deleting an arbitrary original body.
-func (c *ClassObjectDumper) isSyntheticEnumMethod(name, descriptor string) bool {
-	// Synthetic "marker" constructor javac emits for enums that have constant-specific bodies:
-	// `<init>(String name, int ordinal, <Enum>$N marker)`. Its sole purpose is to give the constant-body
-	// subclasses an accessible super-ctor; its body just forwards to the real `<init>(String,int)`.
-	// Emitting it is ALWAYS wrong (it references a synthetic `$N` type that no longer exists once bodies
-	// are folded, and renders an illegal `this(...)` after local declarations); javac re-synthesizes it
-	// from the folded constant bodies on recompile. Identified by a trailing parameter typed as this
-	// enum's OWN anonymous subclass `L<self>$<digits>;` -- a shape impossible to write in source, so the
-	// match is exact. Kill-switch JDEC_NO_ENUM_MARKER_CTOR restores the raw (broken) emission.
-	if name == "<init>" && c.getenv("JDEC_NO_ENUM_MARKER_CTOR") == "" && c.isEnumMarkerCtorDescriptor(descriptor) {
-		return true
+// Enum constructor erasure needs the original typed forwarding packet: exactly
+// one unused trailing reference parameter, ordered argument loads, and a call
+// to the unique private constructor with the same throws contract. A numeric
+// class name cannot prove any of these properties. Regeneration of the complete
+// lexical family and its binary identities is checked separately on publication.
+func (c *ClassObjectDumper) syntheticEnumConstructorBridges() map[string]*nativeConstructorAccessBridge {
+	if !c.isGenuineEnum() || c.getenv("JDEC_NO_ENUM_MARKER_CTOR") != "" {
+		return nil
 	}
-	return false
-}
-
-// isEnumMarkerCtorDescriptor reports whether descriptor's LAST parameter is an anonymous synthetic
-// class `L<binary>$<digits>;` (e.g. "Lcodec/AccEnum$1;" OR "Lcom/google/common/base/Predicates$1;"),
-// the signature of the javac-generated enum marker constructor. The marker's owner is whichever class
-// javac happened to allocate the anonymous slot in: for a TOP-LEVEL enum it is the enum's own
-// `<self>$N`, but for an enum NESTED in another class (e.g. Predicates.ObjectPredicate) javac names it
-// after the ENCLOSING class (`Predicates$1`). So we only require the trailing param to be SOME
-// anonymous class (simple name = all digits) -- a shape impossible to write in source, so the match is
-// unambiguous. This check is reached only for genuine enums (see DumpMethods), so it never affects
-// ordinary classes.
-func (c *ClassObjectDumper) isEnumMarkerCtorDescriptor(descriptor string) bool {
-	params := methodParamFieldDescriptors(descriptor)
-	if len(params) == 0 {
-		return false
-	}
-	last := params[len(params)-1]
-	// Must be a plain (non-array) object type Lxxx; .
-	if !strings.HasPrefix(last, "L") || !strings.HasSuffix(last, ";") {
-		return false
-	}
-	bin := last[1 : len(last)-1]
-	dollar := strings.LastIndexByte(bin, '$')
-	if dollar < 0 || dollar == len(bin)-1 {
-		return false
-	}
-	digits := bin[dollar+1:]
-	for i := 0; i < len(digits); i++ {
-		if digits[i] < '0' || digits[i] > '9' {
-			return false
-		}
-	}
-	return true
+	return c.originalNativeConstructorAccessBridges()
 }
 
 // methodParamFieldDescriptors splits a method descriptor's parameter list into raw JVM field
@@ -13550,6 +13513,7 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 	c.Tab()
 	defer c.UnTab()
 	genuineEnum := c.isGenuineEnum()
+	enumConstructors := c.syntheticEnumConstructorBridges()
 	var result []*dumpedMethods
 	for _, method := range c.obj.Methods {
 		if err := c.checkWork(); err != nil {
@@ -13602,7 +13566,7 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 			if err != nil {
 				return nil, err
 			}
-			if regenerated || c.isSyntheticEnumMethod(name, descriptor) {
+			if regenerated || name == "<init>" && enumConstructors[descriptor] != nil {
 				if regenerated {
 					c.noteEnumRegeneratedParameterMetadata(method, name, descriptor)
 				}
@@ -13631,6 +13595,21 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		// plus a synthetic `Object build()`). Suppress them so the output mirrors the original
 		// source. CFR and Vineflower suppress bridge methods as well.
 		if isBridgeMethod(method.AccessFlags) {
+			if inherited := c.inheritedBridgeSource(method); inherited != nil {
+				// Several wide descriptors can share the same narrow super
+				// target. They need one source override; javac regenerates the
+				// complete bridge group from its inherited declarations.
+				duplicate := false
+				for _, emitted := range result {
+					if emitted.inheritedBridge != nil && emitted.methodName == inherited.methodName && emitted.descriptor == inherited.descriptor && emitted.code == inherited.code {
+						duplicate = true
+						break
+					}
+				}
+				if !duplicate {
+					result = append(result, inherited)
+				}
+			}
 			continue
 		}
 		// if name != "isSymlink" {

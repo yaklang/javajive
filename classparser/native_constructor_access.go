@@ -9,8 +9,7 @@ import (
 	"strings"
 )
 
-// This is an original-code proof, not the older synthetic/numeric-name
-// heuristic used by ordinary flat source rendering. The trailing parameter is
+// This is an original-code proof, independent of marker spelling. The trailing parameter is
 // absent from the original target call; no source or runtime operation uses it.
 // A complete lexical family must separately prove its compiler-generated role.
 type nativeConstructorAccessBridge struct {
