@@ -98,7 +98,7 @@ type DecompileOptions struct {
 	// Header policy for one physical source root. Native ownership readers
 	// may retain this exact root's ClassFile access without borrowing any
 	// executable lowering authority. Copied lexical child options do not match.
-	reconstructionPhysicalRoot string
+	reconstructionPhysicalRoot *ClassObject
 
 	// EnableShadowIR builds a read-only MethodIR snapshot after SemanticCFG.
 	// The old printer remains the default source path. Default false.

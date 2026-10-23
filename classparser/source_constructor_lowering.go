@@ -58,7 +58,7 @@ func (c *ClassObjectDumper) reconstructionPhysicalHeader() bool {
 	if c == nil || c.obj == nil || c.nativeMemberCurrent != nil || c.nativeMethodLocalCurrent != nil || c.nativeEnumConstantCurrent != nil {
 		return false
 	}
-	return c.options.sourceConstructorLowering != nil || c.options.reconstructionPhysicalRoot != "" && c.options.reconstructionPhysicalRoot == c.obj.GetClassName()
+	return c.options.sourceConstructorLowering != nil || c.options.reconstructionPhysicalRoot == c.obj
 }
 
 // Native member/anonymous source ownership has its own capture regeneration
