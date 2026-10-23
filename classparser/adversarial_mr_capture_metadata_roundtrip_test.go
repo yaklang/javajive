@@ -44,6 +44,9 @@ func TestAdversarialMRLegacyCapturesKeepPhysicalTargetAndOriginalObservers(t *te
 						owned[n] = b
 					}
 				}
+				// The physical owning unit exists; javac can still implicitly
+				// recompile its byte-identical base-only anonymous children.
+				owned["META-INF/versions/9/ArtifactLambdaOwner.class"] = files["ArtifactLambdaOwner.class"]
 				jar := filepath.Join(t.TempDir(), "mr.jar")
 				if err := os.WriteFile(jar, t23Zip(t, owned), 0600); err != nil {
 					t.Fatal(err)
@@ -68,7 +71,7 @@ func TestAdversarialMRLegacyCapturesKeepPhysicalTargetAndOriginalObservers(t *te
 				}
 				keys := []string{}
 				for n := range owned {
-					if strings.HasSuffix(n, ".class") {
+					if strings.HasSuffix(n, ".class") && !strings.HasPrefix(n, "META-INF/") {
 						keys = append(keys, n)
 					}
 				}
