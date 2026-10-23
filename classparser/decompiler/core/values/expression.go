@@ -3917,6 +3917,9 @@ func sameErasureClassName(a, b string) bool {
 // out of ArgumentStrings so the varargs-spread path can reuse it for the leading fixed arguments.
 func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.ClassContext) string {
 	arg := f.Arguments[i]
+	if f.uniqueDelegationNullArgument(i, funcCtx) {
+		return arg.String(funcCtx)
+	}
 	// This view owns the complete original formal constraints. Rendering only
 	// its descriptor head would lose the source applicability proof.
 	if cast, ok := arg.(*CastExpression); ok && cast.Binding && len(cast.bindingIntersection) > 1 {

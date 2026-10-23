@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -65,15 +66,20 @@ func constructorSuffixRoundTrip(t *testing.T, fixture, debug, owner, expected st
 // metadata must not silently re-enroll flattened siblings as native members.
 func constructorSuffixFamilyRoundTrip(t *testing.T, fixture, debug string, owners []string, expected string, target ...int) ([]byte, []byte, *JarReconstructionArtifact) {
 	t.Helper()
+	release := 8
+	if len(target) == 1 {
+		release = target[0]
+	}
+	return constructorSuffixFamilyAtTargetRoundTrip(t, fixture, debug, owners, expected, release, 8)
+}
+
+func constructorSuffixFamilyAtTargetRoundTrip(t *testing.T, fixture, debug string, owners []string, expected string, release, sourceTarget int) ([]byte, []byte, *JarReconstructionArtifact) {
+	t.Helper()
 	owner := owners[0]
 	modern, java := t04Tools(t)
 	native := os.Getenv("JAVA8_JAVAC")
 	if native == "" {
 		t.Fatal("original native compiler required")
-	}
-	release := 8
-	if len(target) == 1 {
-		release = target[0]
 	}
 	original := compileLambdaParameterMetadataFixtureWithSourcesAtRelease(t, native, NativeJavac8, fixture, "SuffixOwner", debug, nil, release, false)
 	if int(mustParseLowering(t, original[owner+".class"]).MajorVersion) != 44+release {
@@ -100,7 +106,7 @@ func constructorSuffixFamilyRoundTrip(t *testing.T, fixture, debug string, owner
 	if err := os.WriteFile(jar, t23Zip(t, owned), 0600); err != nil {
 		t.Fatal(err)
 	}
-	a, err := NewJarReconstructionArtifactFromLocal(jar, 8, ModernJavac, func(n string) ([]byte, bool) { b, k := original[n+".class"]; return b, k })
+	a, err := NewJarReconstructionArtifactFromLocal(jar, sourceTarget, ModernJavac, func(n string) ([]byte, bool) { b, k := original[n+".class"]; return b, k })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +160,7 @@ func constructorSuffixFamilyRoundTrip(t *testing.T, fixture, debug string, owner
 			}
 		}
 	}
-	args := []string{"-proc:none", "--release", "8", "-g:" + debug, "-cp", out, "-sourcepath", out, "-d", out}
+	args := []string{"-proc:none", "--release", strconv.Itoa(sourceTarget), "-g:" + debug, "-cp", out, "-sourcepath", out, "-d", out}
 	for _, name := range owners {
 		path := filepath.Join(out, name+".java")
 		if err := os.WriteFile(path, sources[name], 0600); err != nil {

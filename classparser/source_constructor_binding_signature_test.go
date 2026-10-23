@@ -8,7 +8,7 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
-func TestConstructorBindingSignatureCompletionPreservesFreshCodeAndRejectsDrift(t *testing.T) {
+func TestAdversarialConstructorBindingSignatureCompletionPreservesFreshCodeAndRejectsDrift(t *testing.T) {
 	original, fresh, artifact := constructorSuffixFamilyRoundTrip(t, constructorEnclosingGenericFixture("Runnable"), "source,lines,vars", []string{"SuffixOwner$Base", "SuffixOwner$Member"}, "6:generic:enclosing:capture:identity:failure\n")
 	authority := artifact.source.jar.sourceConstructorLowering
 	owner := "SuffixOwner$Base"

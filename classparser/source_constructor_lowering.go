@@ -21,10 +21,13 @@ type constructorLoweringCapture struct {
 	slot  int
 }
 
-// A leaf is either an exact typed parameter slot or one symbolic GETSTATIC.
+// A leaf is an exact typed parameter slot, one symbolic GETSTATIC, or an
+// original ACONST_NULL. Null has a bottom reference type, not an Object upcast.
 // Keep producer PCs outside the plan: equivalent freshly compiled packets can
 // use different instruction widths and constant-pool indices.
 type constructorLoweringArgument struct {
+	null                    bool
+	nullCasts               []string
 	slot                    int
 	owner, name, descriptor string
 }
@@ -249,7 +252,14 @@ func constructorLoweringTypedPacketFor(object *ClassObject, method *MemberInfo, 
 				// instruction. Prove its hierarchy, retain both descriptors and
 				// never use this conversion to select a different constructor.
 				for index, actual := range types {
-					if !nativeProofWork(work, 1) || !widening.assignable(actual, args[index]) {
+					if !nativeProofWork(work, 1) {
+						return false
+					}
+					if p.arguments[index].null && len(p.arguments[index].nullCasts) == 0 {
+						if !callbinding.Reference(args[index]) {
+							return false
+						}
+					} else if !widening.assignable(actual, args[index]) {
 						return false
 					}
 				}
@@ -263,8 +273,34 @@ func constructorLoweringTypedPacketFor(object *ClassObject, method *MemberInfo, 
 			if len(types) >= 254 {
 				return false
 			}
+			argumentPC := int(ops[i].CurrentOffset)
 			arg := constructorLoweringArgument{}
-			if member := constructorMotionMember(object, ops[i], core.OP_GETSTATIC); member != nil {
+			if ops[i].Instr.OpCode == core.OP_ACONST_NULL && !ops[i].IsWide && len(ops[i].Data) == 0 {
+				arg.null, arg.descriptor = true, "Ljava/lang/Object;"
+				// Preserve the entire original null/cast leaf. Even a cast of
+				// null is not deleted or replaced by a source overload guess.
+				for i+1 < len(ops) && ops[i+1].Instr.OpCode == core.OP_CHECKCAST {
+					next := ops[i+1]
+					if next.IsWide || len(next.Data) != 2 || len(arg.nullCasts) >= 32 {
+						return false
+					}
+					name, known := sourceBridgeClassName(object, core.Convert2bytesToInt(next.Data))
+					if !known {
+						return false
+					}
+					descriptor := name
+					if !strings.HasPrefix(name, "[") {
+						descriptor = "L" + name + ";"
+					}
+					ps, _, err := callbinding.Descriptor("(" + descriptor + ")V")
+					if err != nil || len(ps) != 1 || !callbinding.Reference(descriptor) {
+						return false
+					}
+					arg.nullCasts = append(arg.nullCasts, descriptor)
+					arg.descriptor = descriptor
+					i++
+				}
+			} else if member := constructorMotionMember(object, ops[i], core.OP_GETSTATIC); member != nil {
 				if ops[i].IsWide || !nativeSourceBinaryName(member.Name) {
 					return false
 				}
@@ -283,7 +319,7 @@ func constructorLoweringTypedPacketFor(object *ClassObject, method *MemberInfo, 
 			}
 			types = append(types, arg.descriptor)
 			p.arguments = append(p.arguments, arg)
-			argumentPCs = append(argumentPCs, int(ops[i].CurrentOffset))
+			argumentPCs = append(argumentPCs, argumentPC)
 			stack += width
 			i++
 		}
@@ -305,9 +341,13 @@ func constructorLoweringTypedPacketFor(object *ClassObject, method *MemberInfo, 
 }
 
 func (c *ClassObjectDumper) planArtifactConstructorLowering(boundary *constructorSourceBoundary, code *CodeAttribute, method *MemberInfo, decoder *core.Decompiler) bool {
-	if c == nil || c.FuncCtx == nil || c.options.sourceConstructorLowering == nil || c.options.TargetSourceVersion != 8 || c.nativeCaptureFields != nil || c.nativeMemberCurrent != nil || c.nativeMethodLocalCurrent != nil || c.nativeEnumConstantCurrent != nil || boundary == nil || boundary.delegate == nil {
+	if c == nil || c.FuncCtx == nil || c.options.sourceConstructorLowering == nil || c.options.TargetSourceVersion < 8 || c.options.TargetSourceVersion > 21 || c.nativeCaptureFields != nil || c.nativeMemberCurrent != nil || c.nativeMethodLocalCurrent != nil || c.nativeEnumConstantCurrent != nil || boundary == nil || boundary.delegate == nil {
 		return false
 	}
+	// The original input's Java5-8 capture convention and the selected
+	// source target are independent. All supported fresh targets retain the
+	// same initialization cut; lower() re-proves its exact fresh packet,
+	// verifier/debug offsets and typed SUPER operands before moving anything.
 	p := constructorLoweringTypedPacketFor(c.obj, method, true, true, c.Work, c.FuncCtx.InvocationMetadata)
 	if p == nil || p.code != code || len(p.plan.captures) != len(boundary.prefix) || boundary.delegate.OriginPC != boundary.pc || boundary.delegate.Kind != values.InvokeSpecial || boundary.delegate.Descriptor != p.plan.superDescriptor || strings.ReplaceAll(boundary.delegate.ClassName, ".", "/") != p.plan.super || p.secondEnd != boundary.pc+3 {
 		return false

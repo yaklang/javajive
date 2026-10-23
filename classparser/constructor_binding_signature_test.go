@@ -9,7 +9,7 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
-func TestConstructorBindingSignatureRequiresOriginalEnclosingPort(t *testing.T) {
+func TestAdversarialConstructorBindingSignatureRequiresOriginalEnclosingPort(t *testing.T) {
 	files := nativeCompileClasses(t, `class BindingOwner {class Member<T extends Runnable>{Member(T input){}}}`)
 	for _, variant := range []string{"control", "renamed capture", "own method formal", "different arity rival", "same arity plain rival", "detached declaration", "duplicate declaration", "static member", "no owner row", "duplicate owner row", "wrong owner slot", "wrong payload erasure", "free formal", "duplicate signature", "malformed signature", "not constructor", "nonfinal capture", "nonsynthetic capture", "wrong capture slot", "canceled", "budget"} {
 		t.Run(variant, func(t *testing.T) {
@@ -117,7 +117,7 @@ func TestConstructorBindingSignatureRequiresOriginalEnclosingPort(t *testing.T) 
 	}
 }
 
-func TestSiblingConstructorArityIncludesNonGenericRivals(t *testing.T) {
+func TestAdversarialSiblingConstructorArityIncludesNonGenericRivals(t *testing.T) {
 	files := nativeCompileClasses(t, `class ConstructorArityOwner {ConstructorArityOwner(java.util.List<String> x){}ConstructorArityOwner(String x){}}`)
 	for _, reverse := range []bool{false, true} {
 		obj := mustParseLowering(t, bytes.Clone(files["ConstructorArityOwner.class"]))
