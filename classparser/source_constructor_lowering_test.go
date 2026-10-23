@@ -194,3 +194,48 @@ func TestSourceConstructorLoweringCannotTurnOrdinaryStorageIntoCaptures(t *testi
 		})
 	}
 }
+
+func TestSourceConstructorLoweringBindsPhysicalReleaseSourceIndependently(t *testing.T) {
+	original, compiled, base := loweringAuthorityTestInputs(t)
+	// Identical executable semantics, distinct physical original identity. An
+	// unused constant changes no instruction or ABI and is not copied back.
+	versioned := mustParseLowering(t, bytes.Clone(original))
+	versioned.ConstantPoolManager.AddUtf8Info("independent physical namespace")
+	jar := filepath.Join(t.TempDir(), "namespaces.jar")
+	entries := map[string][]byte{
+		"META-INF/MANIFEST.MF":                    []byte("Manifest-Version: 1.0\r\nMulti-Release: true\r\n\r\n"),
+		"LoweringChild.class":                     original,
+		"META-INF/versions/9/LoweringChild.class": versioned.Bytes(),
+	}
+	if err := os.WriteFile(jar, t23Zip(t, entries), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := NewJarReconstructionArtifactFromLocal(jar, 8, ModernJavac, base.source.jar.declarationResolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if _, err := a.ReadFile("LoweringChild.class"); err != nil {
+		t.Fatal(err)
+	}
+	const path = "META-INF/versions/9/LoweringChild.class"
+	if got, err := a.FinishClass(path, compiled); err == nil || got != nil {
+		t.Fatal("base source publication escaped into a physical namespace", err)
+	}
+	source, err := a.ReadFile(path)
+	if err != nil || legacySourceHasFailureMarker(string(source)) {
+		t.Fatalf("own physical source publication: %v\n%s", err, source)
+	}
+	got, err := a.FinishClass(path, compiled)
+	if err != nil {
+		t.Fatal("own namespace must close independently", err)
+	}
+	control, err := a.FinishClass("LoweringChild.class", compiled)
+	if err != nil || !bytes.Equal(got, control) {
+		t.Fatal("unused original pool constant affected fresh executable output", err)
+	}
+	view := a.source.jar.sourceReleaseView(9)
+	if view.sourceConstructorLowering.active["LoweringChild"] == nil || view.sourceConstructorLowering.active["LoweringChild"] == a.source.jar.sourceConstructorLowering.active["LoweringChild"] {
+		t.Fatal("physical source obligation was inherited instead of proved")
+	}
+}
