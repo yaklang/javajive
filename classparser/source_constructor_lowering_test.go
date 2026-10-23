@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +33,29 @@ func loweringAuthorityTestInputs(t *testing.T) ([]byte, []byte, *JarReconstructi
 		t.Fatalf("complete real source publication: %v\n%s", err, source)
 	}
 	return original["LoweringChild.class"], classes["LoweringChild.class"], a
+}
+
+func TestAdversarialConstructorLoweringRefusesUnqualifiedOriginalVersions(t *testing.T) {
+	original, _, _ := loweringAuthorityTestInputs(t)
+	for _, version := range [][2]uint16{{48, 0}, {53, 0}, {66, 0}, {52, 65535}, {49, 1}} {
+		t.Run(fmt.Sprintf("%d.%d", version[0], version[1]), func(t *testing.T) {
+			object := mustParseLowering(t, original)
+			object.MajorVersion, object.MinorVersion = version[0], version[1]
+			found := false
+			for _, method := range object.Methods {
+				name, _ := sourceBridgeUTF8(object, method.NameIndex)
+				if name == "<init>" {
+					found = true
+					if constructorLoweringPacketFor(object, method, true, true, nil) != nil {
+						t.Fatal("unqualified original version gained executable lowering")
+					}
+				}
+			}
+			if !found {
+				t.Fatal("missing original constructor control")
+			}
+		})
+	}
 }
 
 func TestAdversarialSourceConstructorLoweringRejectsFreshPacketAndPCMutation(t *testing.T) {
@@ -283,7 +307,16 @@ func TestAdversarialSourceConstructorLoweringCannotTurnOrdinaryStorageIntoCaptur
 			case "computed argument":
 				code.Code[31] = 0x04 // mode parameter becomes iconst_1
 			case "extra side effect":
-				code.Code = append(bytes.Clone(code.Code[:35]), 0x00, 0xb1)
+				// An unproved effect inside the movable prefix must never become
+				// part of either the capture or delegation packet. A NOP after
+				// initialization is instead a legitimate closed user-body suffix.
+				ref := candidate.ConstantPoolManager.AddNewMethodInfo("java/lang/Thread", "yield", "()V")
+				prefix := append(bytes.Clone(code.Code[:29]), 0xb8, byte(ref>>8), byte(ref))
+				code.Code = append(prefix, code.Code[29:]...)
+				code.AttrLen += 3
+			}
+			if _, err := Parse(candidate.Bytes()); err != nil {
+				t.Fatal("original negative packet is malformed", err)
 			}
 			if constructorLoweringPacketFor(candidate, method, true, true, nil) != nil {
 				t.Fatal("original identity obligation was relaxed", kind)

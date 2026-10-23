@@ -28,7 +28,7 @@ import (
 // arguments, call the same private constructor, ignore the same trailing port,
 // and return without additional effects or handlers. Neither packet is copied
 // or edited; its descriptor, exception contract and all other flags must match.
-// A separately proved straight-line Java8 enum initializer can inline a fresh
+// A separately proved Java5-8 enum initializer can inline a fresh
 // compiler's private constant-array helper, restoring the original method
 // universe. Its only consumer, array element identities, empty-stack boundary
 // and supported debug PCs are checked before any edit; all other metadata

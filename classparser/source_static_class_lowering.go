@@ -17,7 +17,11 @@ func staticClassOriginalDomain(object *ClassObject, work *workbudget.Budget) boo
 	// An empty declaration universe satisfies the same no-instance-member
 	// proof. In particular an access-marker class may have no methods at all.
 	// The fresh default constructor still needs the full unused-packet check.
-	if object == nil || object.MajorVersion != 52 || object.MinorVersion != 0 || object.AccessFlags != 0x1020 || object.GetSupperClassName() != "java/lang/Object" || len(object.Interfaces) != 0 || len(object.Methods) > 4096 {
+	// This is a declaration proof, independent of a compiler's capture or
+	// enum protocol. ACC_SYNTHETIC has its class-file meaning since version
+	// 49; every supported non-preview version has the same constructor
+	// absence contract. The fresh executable deletion is still proved below.
+	if object == nil || object.MajorVersion < 49 || object.MajorVersion > 65 || object.MinorVersion != 0 || object.AccessFlags != 0x1020 || object.GetSupperClassName() != "java/lang/Object" || len(object.Interfaces) != 0 || len(object.Methods) > 4096 {
 		return false
 	}
 	for _, method := range object.Methods {

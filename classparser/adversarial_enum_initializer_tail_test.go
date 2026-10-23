@@ -2,6 +2,7 @@ package javaclassparser
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,123 +37,137 @@ class TailDriver {public static void main(String[]args)throws Exception {
 `
 
 func TestAdversarialEnumInitializerTailKeepsControlFlowAndEffects(t *testing.T) {
+	for _, debug := range []string{"none", "source,lines,vars"} {
+		for _, kind := range []string{"lookup", "table", "uninitialized", "generic locals"} {
+			t.Run(debug+"/"+kind, func(t *testing.T) { enumInitializerTailRoundTrip(t, kind, debug, 8) })
+		}
+	}
+}
+
+func TestAdversarialEnumInitializerOriginalVersionsKeepControlFlowAndFailure(t *testing.T) {
+	for _, sample := range []struct {
+		release int
+		kind    string
+	}{{5, "lookup"}, {6, "generic locals"}, {7, "table"}, {8, "uninitialized"}} {
+		for _, debug := range []string{"none", "source,lines,vars"} {
+			t.Run(fmt.Sprintf("release%d/%s/%s", sample.release, sample.kind, debug), func(t *testing.T) { enumInitializerTailRoundTrip(t, sample.kind, debug, sample.release) })
+		}
+	}
+}
+
+func enumInitializerTailRoundTrip(t *testing.T, kind, debug string, release int) {
+	t.Helper()
 	compiler, java := t04Tools(t)
 	native := os.Getenv("JAVA8_JAVAC")
 	if native == "" {
 		t.Fatal("native original compiler required")
 	}
-	for _, debug := range []string{"none", "source,lines,vars"} {
-		for _, kind := range []string{"lookup", "table", "uninitialized", "generic locals"} {
-			t.Run(debug+"/"+kind, func(t *testing.T) {
-				fixture := enumInitializerTailFixture
-				if kind == "table" {
-					fixture = strings.Replace(fixture, "switch(v.code){case 3:", "switch(v.ordinal()){case 0:", 1)
-					fixture = strings.Replace(fixture, "case 7:", "case 1:", 1)
-				}
+	fixture := enumInitializerTailFixture
+	if kind == "table" {
+		fixture = strings.Replace(fixture, "switch(v.code){case 3:", "switch(v.ordinal()){case 0:", 1)
+		fixture = strings.Replace(fixture, "case 7:", "case 1:", 1)
+	}
+	if kind == "uninitialized" {
+		fixture = strings.Replace(fixture, "}digest=wide;}", "}digest=new TailBox(Boolean.getBoolean(\"tail.branch\") ? wide+17 : wide).value;}", 1)
+		fixture = strings.Replace(fixture, "if(failure!=0)", "if(Boolean.getBoolean(\"tail.branch\"))digest+=17;if(failure!=0)", 1)
+		fixture += "class TailBox {final long value;TailBox(long value){this.value=value;}}"
+	}
+	if kind == "generic locals" {
+		fixture = strings.Replace(fixture, "for(TailEnum v:values())", "java.util.List<TailEnum> all=java.util.Arrays.asList(values());for(TailEnum v:all)", 1)
+	}
+	files := compileLambdaParameterMetadataFixtureWithSourcesAtRelease(t, native, NativeJavac8, fixture, "TailEnum", debug, nil, release, false)
+	run := func(dir string) {
+		t.Helper()
+		for _, mode := range []string{"-ea", "-da"} {
+			for _, failure := range []string{"0", "3", "7", "11"} {
+				branches := []string{"false"}
 				if kind == "uninitialized" {
-					fixture = strings.Replace(fixture, "}digest=wide;}", "}digest=new TailBox(Boolean.getBoolean(\"tail.branch\") ? wide+17 : wide).value;}", 1)
-					fixture = strings.Replace(fixture, "if(failure!=0)", "if(Boolean.getBoolean(\"tail.branch\"))digest+=17;if(failure!=0)", 1)
-					fixture += "class TailBox {final long value;TailBox(long value){this.value=value;}}"
+					branches = append(branches, "true")
 				}
-				if kind == "generic locals" {
-					fixture = strings.Replace(fixture, "for(TailEnum v:values())", "java.util.List<TailEnum> all=java.util.Arrays.asList(values());for(TailEnum v:all)", 1)
-				}
-				files := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, fixture, "TailEnum", debug, false)
-				run := func(dir string) {
-					t.Helper()
-					for _, mode := range []string{"-ea", "-da"} {
-						for _, failure := range []string{"0", "3", "7", "11"} {
-							branches := []string{"false"}
-							if kind == "uninitialized" {
-								branches = append(branches, "true")
-							}
-							for _, branch := range branches {
-								out, err := enumFreshOracleRun(t, java, mode, dir, "TailDriver", failure, branch)
-								if err != nil || string(out) != "tail:dispatch:effects:overflow:failure:identity\n" {
-									t.Fatal("unchanged original driver", err, string(out))
-								}
-							}
-						}
+				for _, branch := range branches {
+					out, err := enumFreshOracleRun(t, java, mode, dir, "TailDriver", failure, branch)
+					if err != nil || string(out) != "tail:dispatch:effects:overflow:failure:identity\n" {
+						t.Fatal("unchanged original driver", err, string(out))
 					}
 				}
-				run(sourceArtifactWriteFiles(t, files))
-				owned := map[string][]byte{"TailEnum.class": files["TailEnum.class"]}
-				jar := filepath.Join(t.TempDir(), "input.jar")
-				if err := os.WriteFile(jar, t23Zip(t, owned), 0600); err != nil {
-					t.Fatal(err)
-				}
-				a, err := NewJarReconstructionArtifactFromLocal(jar, 8, ModernJavac, func(n string) ([]byte, bool) { b, k := files[n+".class"]; return b, k })
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer a.Close()
-				source, err := a.ReadFile("TailEnum.class")
-				if err != nil || legacySourceHasFailureMarker(string(source)) {
-					t.Fatal("complete source", err, string(source))
-				}
-				external := map[string][]byte{}
-				for n, b := range files {
-					if n != "TailEnum.class" {
-						external[n] = b
-					}
-				}
-				out := sourceArtifactWriteFiles(t, external)
-				path := filepath.Join(out, "TailEnum.java")
-				if err := os.WriteFile(path, source, 0600); err != nil {
-					t.Fatal(err)
-				}
-				if log, err := exec.Command(compiler, "-proc:none", "--release", "8", "-g:"+debug, "-cp", out, "-sourcepath", out, "-d", out, path).CombinedOutput(); err != nil {
-					t.Fatal("fresh source compile", err, string(log), string(source))
-				}
-				path = filepath.Join(out, "TailEnum.class")
-				fresh, err := os.ReadFile(path)
-				if err != nil {
-					t.Fatal(err)
-				}
-				saved := bytes.Clone(fresh)
-				finished, err := a.FinishClass("TailEnum.class", fresh)
-				if err != nil {
-					for label, raw := range map[string][]byte{"original": files["TailEnum.class"], "fresh": fresh} {
-						obj := mustParseLowering(t, raw)
-						fields := map[sourceFieldIdentity]*MemberInfo{}
-						for _, f := range obj.Fields {
-							n, _ := sourceBridgeUTF8(obj, f.NameIndex)
-							d, _ := sourceBridgeUTF8(obj, f.DescriptorIndex)
-							fields[sourceFieldIdentity{n, d}] = f
-						}
-						for _, m := range obj.Methods {
-							n, _ := sourceBridgeUTF8(obj, m.NameIndex)
-							d, _ := sourceBridgeUTF8(obj, m.DescriptorIndex)
-							t.Log(label, n, d, m.AccessFlags)
-							if n != "<clinit>" {
-								continue
-							}
-							ops, ok := nativeEnumMethodOps(obj, m, nil)
-							code := constructorLoweringCode(m)
-							boundary, bk := enumArrayConstantBoundary(obj, m, ops, []string{"A", "B", "C"}, fields, nil, nil)
-							t.Log(label, "ops", ok, len(ops), "spans", enumArrayInstructionSpans(code.Code, ops), "boundary", boundary, bk, "locals", code.MaxLocals)
-							if bk {
-								tail := boundary + 2
-								if label == "original" {
-									tail = boundary + 15
-								}
-								t.Log(label, "suffix", tail, enumArraySuffixClosed(code, ops, int(ops[tail].CurrentOffset)))
-							}
-						}
-					}
-					t.Fatal("initializer and method universe", err)
-				}
-				if !bytes.Equal(saved, fresh) {
-					t.Fatal("input mutation")
-				}
-				if again, err := a.FinishClass("TailEnum.class", finished); err != nil || !bytes.Equal(again, finished) {
-					t.Fatal("idempotence", err)
-				}
-				if err := os.WriteFile(path, finished, 0600); err != nil {
-					t.Fatal(err)
-				}
-				run(out)
-			})
+			}
 		}
 	}
+	run(sourceArtifactWriteFiles(t, files))
+	owned := map[string][]byte{"TailEnum.class": files["TailEnum.class"]}
+	jar := filepath.Join(t.TempDir(), "input.jar")
+	if err := os.WriteFile(jar, t23Zip(t, owned), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := NewJarReconstructionArtifactFromLocal(jar, 8, ModernJavac, func(n string) ([]byte, bool) { b, k := files[n+".class"]; return b, k })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	source, err := a.ReadFile("TailEnum.class")
+	if err != nil || legacySourceHasFailureMarker(string(source)) {
+		t.Fatal("complete source", err, string(source))
+	}
+	external := map[string][]byte{}
+	for n, b := range files {
+		if n != "TailEnum.class" {
+			external[n] = b
+		}
+	}
+	out := sourceArtifactWriteFiles(t, external)
+	path := filepath.Join(out, "TailEnum.java")
+	if err := os.WriteFile(path, source, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if log, err := exec.Command(compiler, "-proc:none", "--release", "8", "-g:"+debug, "-cp", out, "-sourcepath", out, "-d", out, path).CombinedOutput(); err != nil {
+		t.Fatal("fresh source compile", err, string(log), string(source))
+	}
+	path = filepath.Join(out, "TailEnum.class")
+	fresh, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := bytes.Clone(fresh)
+	finished, err := a.FinishClass("TailEnum.class", fresh)
+	if err != nil {
+		for label, raw := range map[string][]byte{"original": files["TailEnum.class"], "fresh": fresh} {
+			obj := mustParseLowering(t, raw)
+			fields := map[sourceFieldIdentity]*MemberInfo{}
+			for _, f := range obj.Fields {
+				n, _ := sourceBridgeUTF8(obj, f.NameIndex)
+				d, _ := sourceBridgeUTF8(obj, f.DescriptorIndex)
+				fields[sourceFieldIdentity{n, d}] = f
+			}
+			for _, m := range obj.Methods {
+				n, _ := sourceBridgeUTF8(obj, m.NameIndex)
+				d, _ := sourceBridgeUTF8(obj, m.DescriptorIndex)
+				t.Log(label, n, d, m.AccessFlags)
+				if n != "<clinit>" {
+					continue
+				}
+				ops, ok := nativeEnumMethodOps(obj, m, nil)
+				code := constructorLoweringCode(m)
+				boundary, bk := enumArrayConstantBoundary(obj, m, ops, []string{"A", "B", "C"}, fields, nil, nil)
+				t.Log(label, "ops", ok, len(ops), "spans", enumArrayInstructionSpans(code.Code, ops), "boundary", boundary, bk, "locals", code.MaxLocals)
+				if bk {
+					tail := boundary + 2
+					if label == "original" {
+						tail = boundary + 15
+					}
+					t.Log(label, "suffix", tail, enumArraySuffixClosed(code, ops, int(ops[tail].CurrentOffset)))
+				}
+			}
+		}
+		t.Fatal("initializer and method universe", err)
+	}
+	if !bytes.Equal(saved, fresh) {
+		t.Fatal("input mutation")
+	}
+	if again, err := a.FinishClass("TailEnum.class", finished); err != nil || !bytes.Equal(again, finished) {
+		t.Fatal("idempotence", err)
+	}
+	if err := os.WriteFile(path, finished, 0600); err != nil {
+		t.Fatal(err)
+	}
+	run(out)
 }

@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"reflect"
-	"slices"
 	"strings"
 	"sync"
 
@@ -22,14 +21,24 @@ type constructorLoweringCapture struct {
 	slot  int
 }
 
-// The first domain is deliberately a complete straight-line constructor:
-// distinct own final synthetic captures from typed parameter slots, a direct
-// SUPER of typed parameters, RETURN. No original executable body is retained.
+// A leaf is either an exact typed parameter slot or one symbolic GETSTATIC.
+// Keep producer PCs outside the plan: equivalent freshly compiled packets can
+// use different instruction widths and constant-pool indices.
+type constructorLoweringArgument struct {
+	slot                    int
+	owner, name, descriptor string
+}
+
+// The movable prefix contains distinct own final synthetic captures from typed
+// parameter slots and a direct SUPER of typed leaf operands. An isolated suffix
+// starts with an empty stack and stays at exactly the same bytecode offsets.
+// No original executable body is retained.
 type sourceConstructorLoweringPlan struct {
 	owner, descriptor, super, superDescriptor string
 	flags                                     uint16
 	captures                                  []constructorLoweringCapture
-	arguments                                 []int
+	arguments                                 []constructorLoweringArgument
+	body                                      bool
 }
 
 type sourceConstructorLoweringPublication struct {
@@ -89,6 +98,7 @@ type constructorLoweringPacket struct {
 	code                *CodeAttribute
 	firstEnd, secondEnd int
 	ops                 []*core.OpCode
+	argumentPCs         []int
 }
 
 func constructorLoweringCode(method *MemberInfo) *CodeAttribute {
@@ -107,18 +117,24 @@ func constructorLoweringCode(method *MemberInfo) *CodeAttribute {
 	return found
 }
 
-func constructorLoweringPacketFor(object *ClassObject, method *MemberInfo, before, original bool, work *workbudget.Budget) *constructorLoweringPacket {
-	// The original proof domain is Java8. An implicit MR rebuild can use a
-	// later supported class-file target; its instruction language is still
-	// checked in full. Never rewrite a compiler version header to make it fit.
-	if object == nil || method == nil || object.MinorVersion != 0 || original && object.MajorVersion != 52 || !original && (object.MajorVersion < 52 || object.MajorVersion > 65) || object.AccessFlags&0x6200 != 0 || method.AccessFlags&^uint16(0x0087) != 0 || !nativeProofWork(work, 1) {
+func constructorLoweringPacketFor(object *ClassObject, method *MemberInfo, before, original bool, work *workbudget.Budget, captureCount ...int) *constructorLoweringPacket {
+	return constructorLoweringTypedPacketFor(object, method, before, original, work, nil, captureCount...)
+}
+
+func constructorLoweringTypedPacketFor(object *ClassObject, method *MemberInfo, before, original bool, work *workbudget.Budget, provider callbinding.Provider, captureCount ...int) *constructorLoweringPacket {
+	// The pre-nestmate capture packet has the same typed operands and receiver
+	// initialization cut in Java5 through Java8. Its whole instruction domain
+	// is checked below (including rejection of JSR/RET), independently of the
+	// original verifier's frame format. An implicit MR rebuild can use a later
+	// supported target; never change a version header to make a packet fit.
+	if object == nil || method == nil || object.MinorVersion != 0 || original && (object.MajorVersion < 49 || object.MajorVersion > 52) || !original && (object.MajorVersion < 52 || object.MajorVersion > 65) || object.AccessFlags&0x6200 != 0 || method.AccessFlags&^uint16(0x0087) != 0 || !nativeProofWork(work, 1) {
 		return nil
 	}
 	name, nk := sourceBridgeUTF8(object, method.NameIndex)
 	desc, dk := sourceBridgeUTF8(object, method.DescriptorIndex)
 	params, result, err := callbinding.Descriptor(desc)
 	code := constructorLoweringCode(method)
-	if !nk || name != "<init>" || !dk || err != nil || result != "V" || code == nil || len(code.Code) > 4096 || len(code.ExceptionTable) != 0 || len(code.Code) == 0 || !nativeProofWork(work, int64(len(code.Code))+int64(len(object.Fields))*64) {
+	if !nk || name != "<init>" || !dk || err != nil || result != "V" || code == nil || len(code.Code) > 4096 || len(code.Code) == 0 || !nativeProofWork(work, int64(len(code.Code))+int64(len(object.Fields))*64) {
 		return nil
 	}
 	if work.CheckAlloc(int64(len(code.Code))*128+int64(len(object.Fields))*128) != nil {
@@ -154,12 +170,17 @@ func constructorLoweringPacketFor(object *ClassObject, method *MemberInfo, befor
 		return nil
 	}
 	i, peak := 0, 1
+	var argumentPCs []int
+	widening := newConstructorWideningQuery(provider)
 	load := func(op *core.OpCode, slot int, typ string) bool {
 		return core.GetRetrieveIdx(op) == slot && constructorMotionLoad(op, typ)
 	}
 	captures := func() bool {
 		seen := map[sourceFieldIdentity]bool{}
 		for i+2 < len(ops) {
+			if len(captureCount) == 1 && len(p.captures) == captureCount[0] {
+				break
+			}
 			member := constructorMotionMember(object, ops[i+2], core.OP_PUTFIELD)
 			if member == nil {
 				break
@@ -186,8 +207,11 @@ func constructorLoweringPacketFor(object *ClassObject, method *MemberInfo, befor
 				}
 				if n == key.name && typ == key.descriptor {
 					flags, _, ok := nativeMemberEffectiveFieldFlags(field, work)
-					if !ok || flags&(0x0008|0x0040) != 0 || flags&0x0010 == 0 || original && flags&syntheticFieldFlag == 0 {
+					if !ok {
 						return false
+					}
+					if flags&(0x0008|0x0040) != 0 || flags&0x0010 == 0 || original && flags&syntheticFieldFlag == 0 {
+						return len(p.captures) > 0
 					}
 					count++
 				}
@@ -217,8 +241,16 @@ func constructorLoweringPacketFor(object *ClassObject, method *MemberInfo, befor
 		for i < len(ops) {
 			if member := constructorMotionMember(object, ops[i], core.OP_INVOKESPECIAL); member != nil {
 				args, ret, err := callbinding.Descriptor(member.Description)
-				if member.Name != p.super || member.Member != "<init>" || err != nil || ret != "V" || !slices.Equal(args, types) {
+				if member.Name != p.super || member.Member != "<init>" || err != nil || ret != "V" || len(args) != len(types) {
 					return false
+				}
+				// Reference widening does not change a JVM word or insert an
+				// instruction. Prove its hierarchy, retain both descriptors and
+				// never use this conversion to select a different constructor.
+				for index, actual := range types {
+					if !nativeProofWork(work, 1) || !widening.assignable(actual, args[index]) {
+						return false
+					}
 				}
 				p.superDescriptor = member.Description
 				i++
@@ -227,17 +259,31 @@ func constructorLoweringPacketFor(object *ClassObject, method *MemberInfo, befor
 				}
 				return true
 			}
-			slot := core.GetRetrieveIdx(ops[i])
-			index, known := slots[slot]
-			if !known || !load(ops[i], slot, params[index]) || len(types) >= 254 {
+			if len(types) >= 254 {
 				return false
 			}
-			types = append(types, params[index])
-			p.arguments = append(p.arguments, slot)
-			stack++
-			if params[index] == "J" || params[index] == "D" {
-				stack++
+			arg := constructorLoweringArgument{}
+			if member := constructorMotionMember(object, ops[i], core.OP_GETSTATIC); member != nil {
+				if ops[i].IsWide || !nativeSourceBinaryName(member.Name) {
+					return false
+				}
+				arg.owner, arg.name, arg.descriptor = member.Name, member.Member, member.Description
+			} else {
+				slot := core.GetRetrieveIdx(ops[i])
+				index, known := slots[slot]
+				if !known || slot <= 0 || !load(ops[i], slot, params[index]) {
+					return false
+				}
+				arg.slot, arg.descriptor = slot, params[index]
 			}
+			width := constructorEffectType(arg.descriptor).width()
+			if width == 0 {
+				return false
+			}
+			types = append(types, arg.descriptor)
+			p.arguments = append(p.arguments, arg)
+			argumentPCs = append(argumentPCs, int(ops[i].CurrentOffset))
+			stack += width
 			i++
 		}
 		return false
@@ -250,17 +296,18 @@ func constructorLoweringPacketFor(object *ClassObject, method *MemberInfo, befor
 		return nil
 	}
 	boundary := int(ops[i].CurrentOffset)
-	if !second() || i+1 != len(ops) || ops[i].Instr.OpCode != core.OP_RETURN || int(ops[i].CurrentOffset)+1 != len(code.Code) || int(code.MaxStack) < peak {
+	if !second() || i >= len(ops) || int(code.MaxStack) < peak || !enumArrayInstructionSpans(code.Code, ops) || !constructorLoweringSuffixClosed(object, code, ops, int(ops[i].CurrentOffset), work) {
 		return nil
 	}
-	return &constructorLoweringPacket{p, code, boundary, int(ops[i].CurrentOffset), ops}
+	p.body = i+1 != len(ops) || ops[i].Instr.OpCode != core.OP_RETURN
+	return &constructorLoweringPacket{p, code, boundary, int(ops[i].CurrentOffset), ops, argumentPCs}
 }
 
 func (c *ClassObjectDumper) planArtifactConstructorLowering(boundary *constructorSourceBoundary, code *CodeAttribute, method *MemberInfo, decoder *core.Decompiler) bool {
-	if c == nil || c.options.sourceConstructorLowering == nil || c.options.TargetSourceVersion != 8 || c.nativeCaptureFields != nil || c.nativeMemberCurrent != nil || c.nativeMethodLocalCurrent != nil || c.nativeEnumConstantCurrent != nil || boundary == nil || boundary.delegate == nil {
+	if c == nil || c.FuncCtx == nil || c.options.sourceConstructorLowering == nil || c.options.TargetSourceVersion != 8 || c.nativeCaptureFields != nil || c.nativeMemberCurrent != nil || c.nativeMethodLocalCurrent != nil || c.nativeEnumConstantCurrent != nil || boundary == nil || boundary.delegate == nil {
 		return false
 	}
-	p := constructorLoweringPacketFor(c.obj, method, true, true, c.Work)
+	p := constructorLoweringTypedPacketFor(c.obj, method, true, true, c.Work, c.FuncCtx.InvocationMetadata)
 	if p == nil || p.code != code || len(p.plan.captures) != len(boundary.prefix) || boundary.delegate.OriginPC != boundary.pc || boundary.delegate.Kind != values.InvokeSpecial || boundary.delegate.Descriptor != p.plan.superDescriptor || strings.ReplaceAll(boundary.delegate.ClassName, ".", "/") != p.plan.super || p.secondEnd != boundary.pc+3 {
 		return false
 	}
@@ -290,9 +337,8 @@ func (c *ClassObjectDumper) planArtifactConstructorLowering(boundary *constructo
 	if len(boundary.delegate.Arguments) != len(p.plan.arguments) {
 		return false
 	}
-	for i, slot := range p.plan.arguments {
-		index := slots[slot]
-		if index >= len(boundary.params) || values.UnpackSoltValue(boundary.delegate.Arguments[i]) != boundary.params[index] {
+	for i, argument := range p.plan.arguments {
+		if !constructorLoweringSourceArgument(argument, p.argumentPCs[i], boundary.delegate.Arguments[i], slots, boundary.params) {
 			return false
 		}
 	}
@@ -469,8 +515,9 @@ func constructorLoweringFailure(work *workbudget.Budget, reason string) error {
 	return fmt.Errorf("constructor lowering: %s", reason)
 }
 
-// The complete instruction languages contain no branch, handler, monitor,
-// allocation, cast or argument computation. Both packets end at an empty stack.
+// Both movable prefix packets end at an empty stack and have no branch or
+// protected instruction. A closed suffix may contain control flow and handlers;
+// it stays after both packets, with every byte and absolute PC unchanged.
 // putfield of this class's own fields on uninitializedThis is legal (JVMS
 // 4.10.1.9). Reversing the freshly compiled packets therefore restores the
 // original receiver observations, including callbacks, publication and abrupt
@@ -494,6 +541,12 @@ func (a *sourceConstructorLoweringAuthority) lower(original, compiled []byte, wo
 	}
 	if want.GetClassName() != got.GetClassName() || want.GetSupperClassName() != got.GetSupperClassName() {
 		return nil, constructorLoweringFailure(work, "class or SUPER identity changed")
+	}
+	var provider callbinding.Provider
+	if a.jar != nil {
+		reader := a.jar.nativeMemberReader(want)
+		reader.Work = work
+		provider = reader.buildInvocationMetadata()
 	}
 	if a.jar != nil && a.jar.sourceCompiler.effective() == NativeJavac8 && got.MajorVersion != 52 {
 		return nil, constructorLoweringFailure(work, "fresh class target disagrees with selected native compiler")
@@ -529,7 +582,7 @@ func (a *sourceConstructorLoweringAuthority) lower(original, compiled []byte, wo
 		if nativeClosed && native.originalHash == sha256.Sum256(original) {
 			break
 		}
-		packet := constructorLoweringPacketFor(want, method, true, true, work)
+		packet := constructorLoweringTypedPacketFor(want, method, true, true, work, provider)
 		if packet == nil || packet.plan.super == "java/lang/Object" || publication != nil && publication.plans[packet.plan.descriptor] != nil {
 			continue
 		}
@@ -540,7 +593,7 @@ func (a *sourceConstructorLoweringAuthority) lower(original, compiled []byte, wo
 			d, _ := sourceBridgeUTF8(got, candidate.DescriptorIndex)
 			if n == "<init>" && d == packet.plan.descriptor {
 				matches++
-				fresh = constructorLoweringPacketFor(got, candidate, true, false, work)
+				fresh = constructorLoweringTypedPacketFor(got, candidate, true, false, work, provider, len(packet.plan.captures))
 			}
 		}
 		if matches != 1 || fresh == nil || !reflect.DeepEqual(packet.plan, fresh.plan) {
@@ -581,15 +634,15 @@ func (a *sourceConstructorLoweringAuthority) lower(original, compiled []byte, wo
 			return nil, constructorLoweringFailure(work, "duplicate compiled constructor")
 		}
 		seen[desc] = true
-		originalPacket := constructorLoweringPacketFor(want, expected[desc], true, true, work)
+		originalPacket := constructorLoweringTypedPacketFor(want, expected[desc], true, true, work, provider)
 		if originalPacket == nil || !reflect.DeepEqual(plan, originalPacket.plan) {
 			return nil, constructorLoweringFailure(work, "original packet changed")
 		}
-		packet := constructorLoweringPacketFor(got, method, false, false, work)
+		packet := constructorLoweringTypedPacketFor(got, method, false, false, work, provider, len(plan.captures))
 		if packet == nil || !reflect.DeepEqual(plan, packet.plan) {
 			// A separately verified already-lowered packet makes completion
 			// idempotent. An arbitrary constructor body is never a substitute.
-			packet = constructorLoweringPacketFor(got, method, true, false, work)
+			packet = constructorLoweringTypedPacketFor(got, method, true, false, work, provider, len(plan.captures))
 			if packet == nil || !reflect.DeepEqual(plan, packet.plan) {
 				return nil, constructorLoweringFailure(work, "fresh constructor does not match original slots, fields and delegation")
 			}
@@ -652,9 +705,9 @@ func constructorLoweringMethodEdit(compiled []byte, object *ClassObject, method 
 
 // Debug PCs are part of the transformation proof. Complete parameter scopes
 // retain their ranges; line entries follow their original fresh instructions.
-// Any handler, nonempty frame table, interior local scope or unknown Code
-// attribute is rejected. Equal packet length alone would not discharge these
-// obligations, especially uninitializedThis frames or type-annotation offsets.
+// Frames, handlers and interior local scopes must belong wholly to the fixed
+// suffix. Unknown Code attributes remain unsupported. Equal packet length alone
+// cannot discharge uninitializedThis frames or type-annotation offsets.
 func constructorLoweringCodeBytes(raw []byte, object *ClassObject, packet *constructorLoweringPacket, permute bool, work *workbudget.Budget) error {
 	fail := func(reason string) error { return constructorLoweringFailure(work, reason) }
 	if packet == nil || len(raw) < 12 {
@@ -665,12 +718,14 @@ func constructorLoweringCodeBytes(raw []byte, object *ClassObject, packet *const
 		return fail("fresh Code byte span changed")
 	}
 	codeEnd := 8 + int(n)
-	if binary.BigEndian.Uint16(raw[codeEnd:]) != 0 {
-		return fail("protected constructor packet")
+	handlers := int(binary.BigEndian.Uint16(raw[codeEnd:]))
+	if handlers != len(packet.code.ExceptionTable) || codeEnd+4+8*handlers > len(raw) {
+		return fail("constructor handler table changed")
 	}
-	count := int(binary.BigEndian.Uint16(raw[codeEnd+2:]))
-	pos := codeEnd + 4
+	count := int(binary.BigEndian.Uint16(raw[codeEnd+2+8*handlers:]))
+	pos := codeEnd + 4 + 8*handlers
 	pcMap := map[int]int{int(n): int(n)}
+	opcodes := map[int]int{}
 	for _, op := range packet.ops {
 		pc := int(op.CurrentOffset)
 		next := pc
@@ -680,6 +735,7 @@ func constructorLoweringCodeBytes(raw []byte, object *ClassObject, packet *const
 			next -= packet.firstEnd
 		}
 		pcMap[pc] = next
+		opcodes[pc] = op.Instr.OpCode
 	}
 	params, _, _ := callbinding.Descriptor(packet.plan.descriptor)
 	slots := constructorParameterSlots(params)
@@ -704,7 +760,10 @@ func constructorLoweringCodeBytes(raw []byte, object *ClassObject, packet *const
 		rows := int(binary.BigEndian.Uint16(body))
 		switch name {
 		case "StackMapTable":
-			if len(body) != 2 || rows != 0 {
+			// All suffix PCs, NEW identities and exception regions are fixed.
+			// Reuse the frame decoder with the identity map, discarding its
+			// normalized serialization so the fresh frame bytes stay untouched.
+			if _, ok := enumArrayRelocateFrames(object, body, opcodes, packet.secondEnd, 0, work); !ok {
 				return fail("unproved constructor frame positions")
 			}
 		case "LineNumberTable":
@@ -731,6 +790,11 @@ func constructorLoweringCodeBytes(raw []byte, object *ClassObject, packet *const
 				descriptor, known := sourceBridgeUTF8(object, binary.BigEndian.Uint16(body[at+6:]))
 				_, named := sourceBridgeUTF8(object, binary.BigEndian.Uint16(body[at+4:]))
 				param, isParam := slots[slot]
+				_, startOK := pcMap[start]
+				_, endOK := pcMap[start+length]
+				if start >= packet.secondEnd && start < int(n) && start+length <= int(n) && startOK && endOK && named && known && slot < int(packet.code.MaxLocals) {
+					continue // unchanged local interval entirely in the suffix
+				}
 				if start != 0 || length != int(n) || !named || !known || slot != 0 && !isParam {
 					return fail("interior or nonparameter local scope")
 				}

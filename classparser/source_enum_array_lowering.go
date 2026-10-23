@@ -68,7 +68,7 @@ func (a *sourceConstructorLoweringAuthority) enumArraySourceReturned(owner strin
 	return active && origin.sourceHash != ([32]byte{}) && origin.originalHash == sha256.Sum256(original)
 }
 
-// A newer compiler can add a private array helper to a Java8 enum whose
+// A newer compiler can add a private array helper to a Java5-8 enum whose
 // original initializer constructed that same array inline. Declaration-ordered
 // constants and the unique backing producer precede an isolated user suffix.
 // User operands need typed allocation
@@ -105,7 +105,10 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 	if err != nil {
 		return nil, err
 	}
-	if want.GetClassName() != owner || want.MajorVersion != 52 || want.MinorVersion != 0 || got.MinorVersion != 0 || got.MajorVersion < 52 || got.MajorVersion > 65 || want.AccessFlags&0x4020 != 0x4020 || want.GetSupperClassName() != "java/lang/Enum" || !sourceParameterClassIdentityClosed(want, got) || len(got.Methods) != len(want.Methods)+1 || len(got.Methods) > 4096 {
+	// Enum declarations and this exact inline array protocol predate Java8.
+	// Version selects the supported language, not a substitute for proving the
+	// original producer, fresh helper, complete consumers and suffix PCs below.
+	if want.GetClassName() != owner || want.MajorVersion < 49 || want.MajorVersion > 52 || want.MinorVersion != 0 || got.MinorVersion != 0 || got.MajorVersion < 52 || got.MajorVersion > 65 || want.AccessFlags&0x4020 != 0x4020 || want.GetSupperClassName() != "java/lang/Enum" || !sourceParameterClassIdentityClosed(want, got) || len(got.Methods) != len(want.Methods)+1 || len(got.Methods) > 4096 {
 		return decline()
 	}
 	fields, err := sourceFieldIdentities(want, work)

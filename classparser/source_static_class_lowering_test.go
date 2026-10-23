@@ -41,7 +41,7 @@ func TestAdversarialStaticClassLoweringRequiresClosedDeclarationsAndUnusedDefaul
 	if _, err := artifact.ReadFile(owner + ".class"); err != nil {
 		t.Fatal(err)
 	}
-	for _, variant := range []string{"control", "unreturned", "pending namespace", "stale original", "source conflict", "ordinary original class", "original constructor", "extra method", "changed method flags", "changed class flags", "changed field", "constructor visibility", "constructor body", "constructor handler", "constructor frame", "constructor annotation", "constructor handle", "constructor consumer", "work", "output", "canceled"} {
+	for _, variant := range []string{"control", "unreturned", "pending namespace", "stale original", "source conflict", "ordinary original class", "original constructor", "pre-synthetic version", "future version", "preview version", "extra method", "changed method flags", "changed class flags", "changed field", "constructor visibility", "constructor body", "constructor handler", "constructor frame", "constructor annotation", "constructor handle", "constructor consumer", "work", "output", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			want := bytes.Clone(original)
 			object := mustParseLowering(t, bytes.Clone(fresh))
@@ -87,6 +87,17 @@ func TestAdversarialStaticClassLoweringRequiresClosedDeclarationsAndUnusedDefaul
 				copy.AccessFlags = 0
 				old.Methods = append(old.Methods, &copy)
 				want = old.Bytes()
+			case "pre-synthetic version", "future version", "preview version":
+				old := mustParseLowering(t, want)
+				switch variant {
+				case "pre-synthetic version":
+					old.MajorVersion = 48
+				case "future version":
+					old.MajorVersion = 66
+				case "preview version":
+					old.MinorVersion = 65535
+				}
+				want = old.Bytes()
 			case "extra method":
 				copy := *initializer
 				copy.NameIndex = uint16(object.ConstantPoolManager.AddUtf8Info("another"))
@@ -131,7 +142,7 @@ func TestAdversarialStaticClassLoweringRequiresClosedDeclarationsAndUnusedDefaul
 			}
 			// Rebind deliberately mutated originals so their packet proof is
 			// reached instead of merely testing the stale-origin rejection.
-			if variant == "ordinary original class" || variant == "original constructor" {
+			if variant == "ordinary original class" || variant == "original constructor" || variant == "pre-synthetic version" || variant == "future version" || variant == "preview version" {
 				authority = &sourceConstructorLoweringAuthority{staticActive: map[string]constructorNativeSourceOrigin{owner: {sha256.Sum256(want), sha256.Sum256(source)}}}
 			}
 			code.AttrLen = uint32(12 + len(code.Code) + 8*len(code.ExceptionTable))

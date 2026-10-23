@@ -3,6 +3,7 @@ package javaclassparser
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"os"
 	"path/filepath"
 	"testing"
@@ -38,7 +39,7 @@ func enumArrayLoweringInputs(t *testing.T) ([]byte, []byte, *JarReconstructionAr
 
 func TestAdversarialEnumArrayLoweringKeepsCompletePacketAndConsumerProof(t *testing.T) {
 	original, compiled, artifact := enumArrayLoweringInputs(t)
-	for _, variant := range []string{"control", "renamed helper", "expanded integer", "unreturned source", "pending namespace", "stale original", "field universe", "extra method", "visibility", "helper flags", "array order", "array opcode", "extra instruction", "other consumer", "wrong call kind", "method handle", "handler", "frame", "unknown PC table", "max stack", "work", "output", "canceled"} {
+	for _, variant := range []string{"control", "renamed helper", "expanded integer", "unreturned source", "pending namespace", "stale original", "pre-enum version", "unqualified newer version", "preview version", "field universe", "extra method", "visibility", "helper flags", "array order", "array opcode", "extra instruction", "other consumer", "wrong call kind", "method handle", "handler", "frame", "unknown PC table", "max stack", "work", "output", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			object := mustParseLowering(t, bytes.Clone(compiled))
 			var initializer, helper, fold *MemberInfo
@@ -94,6 +95,21 @@ func TestAdversarialEnumArrayLoweringKeepsCompletePacketAndConsumerProof(t *test
 				old := mustParseLowering(t, want)
 				old.ConstantPoolManager.AddUtf8Info("unused but independently owned physical namespace")
 				want = old.Bytes()
+			case "pre-enum version", "unqualified newer version", "preview version":
+				old := mustParseLowering(t, want)
+				switch variant {
+				case "pre-enum version":
+					old.MajorVersion = 48
+				case "unqualified newer version":
+					old.MajorVersion = 53
+				case "preview version":
+					old.MinorVersion = 65535
+				}
+				want = old.Bytes()
+				// Reach the version proof, not merely stale publication refusal.
+				origin := authority.enumActive["PacketValues"]
+				origin.originalHash = sha256.Sum256(want)
+				authority = &sourceConstructorLoweringAuthority{jar: authority.jar, enumActive: map[string]constructorNativeSourceOrigin{"PacketValues": origin}}
 			case "field universe":
 				copy := *object.Fields[0]
 				copy.NameIndex = uint16(object.ConstantPoolManager.AddUtf8Info("additional"))

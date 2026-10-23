@@ -319,7 +319,9 @@ func enumArrayRelocateFrames(object *ClassObject, raw []byte, positions map[int]
 			pc += delta
 			return append(b, byte(pc>>8), byte(pc)), true
 		default:
-			return nil, false // uninitializedThis is illegal in a static initializer
+			// uninitializedThis is illegal in a static initializer and after
+			// the constructor SUPER cut used by capture-prefix lowering.
+			return nil, false
 		}
 	}
 	for i := 0; i < int(binary.BigEndian.Uint16(raw)); i++ {
