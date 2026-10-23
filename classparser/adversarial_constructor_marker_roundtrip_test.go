@@ -130,14 +130,36 @@ func roundTripConstructorMarkerFixture(t *testing.T, fixture, root, debug string
 func TestAdversarialConstructorMarkerKeepsErasedGenericBridgeContract(t *testing.T) {
 	for _, root := range []string{"MarkerHost", "ReboundMarkerHost"} {
 		for _, debug := range []string{"none", "source,lines,vars"} {
-			t.Run(root+"/"+debug, func(t *testing.T) {
-				fixture := strings.ReplaceAll(constructorMarkerFixture, "MarkerHost", root)
-				fixture = strings.ReplaceAll(fixture, "Object v", "java.util.List<String> v")
-				fixture = strings.Replace(fixture, "Object alias=new Object();", "java.util.List<String> alias=new java.util.ArrayList<String>();", 1)
-				fixture = strings.Replace(fixture, "if(c.isSynthetic()){syntheticCount++;", "if(c.isSynthetic()){syntheticCount++;if(c.getGenericParameterTypes()[2]!=java.util.List.class)throw new AssertionError(\"synthetic port gained inferred Signature\");", 1)
-				fixture = strings.Replace(fixture, "else {privateCount++;", "else {privateCount++;if(!(c.getGenericParameterTypes()[2] instanceof java.lang.reflect.ParameterizedType))throw new AssertionError(\"private target lost declared Signature\");", 1)
-				roundTripConstructorMarkerFixture(t, fixture, root, debug)
-			})
+			for _, kind := range []string{"parameterized", "variable", "bounded", "array"} {
+				t.Run(root+"/"+debug+"/"+kind, func(t *testing.T) {
+					fixture := strings.ReplaceAll(constructorMarkerFixture, "MarkerHost", root)
+					erased, genericCheck := "java.util.List.class", "c.getGenericParameterTypes()[2] instanceof java.lang.reflect.ParameterizedType"
+					if kind == "parameterized" {
+						fixture = strings.ReplaceAll(fixture, "Object v", "java.util.List<String> v")
+						fixture = strings.Replace(fixture, "Object alias=new Object();", "java.util.List<String> alias=new java.util.ArrayList<String>();", 1)
+					} else {
+						declaration, formal, physical, alias := "T", "T", "Object", "Object alias=new Object();"
+						if kind == "bounded" {
+							declaration, physical, alias = "T extends Number", "Number", "Number alias=java.math.BigInteger.TEN;"
+						}
+						if kind == "array" {
+							formal, physical, alias = "T[]", "Object[]", "Object[] alias=new Object[]{new Object()};"
+						}
+						fixture = strings.Replace(fixture, "class Target {", "class Target<"+declaration+"> {", 1)
+						fixture = strings.Replace(fixture, "make(long n,double d,Object v", "make(long n,double d,"+physical+" v", 1)
+						fixture = strings.Replace(fixture, "private Target(long n,double d,Object v", "private Target(long n,double d,"+formal+" v", 1)
+						fixture = strings.Replace(fixture, "Object alias=new Object();", alias, 1)
+						erased = physical + ".class"
+						genericCheck = "c.getGenericParameterTypes()[2] instanceof java.lang.reflect.TypeVariable"
+						if kind == "array" {
+							genericCheck = "c.getGenericParameterTypes()[2] instanceof java.lang.reflect.GenericArrayType"
+						}
+					}
+					fixture = strings.Replace(fixture, "if(c.isSynthetic()){syntheticCount++;", "if(c.isSynthetic()){syntheticCount++;if(c.getGenericParameterTypes()[2]!="+erased+")throw new AssertionError(\"synthetic port gained inferred Signature\");", 1)
+					fixture = strings.Replace(fixture, "else {privateCount++;", "else {privateCount++;if(!("+genericCheck+"))throw new AssertionError(\"private target lost declared Signature\");", 1)
+					roundTripConstructorMarkerFixture(t, fixture, root, debug)
+				})
+			}
 		}
 	}
 }
