@@ -166,6 +166,10 @@ type ClassObjectDumper struct {
 	// protocol. Source regenerates it as $VALUES, so the original spelling is
 	// not emitted.
 	enumSyntheticBackingField string
+	// descriptorSourceProjection renders a flattened class with missing lexical
+	// generic metadata from its original physical descriptors, retaining bridges
+	// which a raw supertype cannot regenerate from generic source.
+	descriptorSourceProjection bool
 	// enumProvedConstantBodies maps a bytecode constant field to the renamed
 	// class that holds its body. enumMarkerDescriptors are the synthetic
 	// access bridges those bodies call; source regenerates both.
@@ -620,7 +624,18 @@ func (c *ClassObjectDumper) computeSamePkgFQNames() map[string]bool {
 	return out
 }
 
-func (c *ClassObjectDumper) DumpClass() (string, error) {
+func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
+	if projected := c.descriptorProjectionWithoutEnclosingMethod(); projected != nil {
+		original := c.obj
+		originalProjection := c.descriptorSourceProjection
+		c.obj, c.descriptorSourceProjection = projected, true
+		defer func() {
+			c.obj, c.descriptorSourceProjection = original, originalProjection
+			if dumpError == nil {
+				rendered = "// Generic Signature projection omitted: EnclosingMethod is absent; original executable descriptors and Code are retained.\n" + rendered
+			}
+		}()
+	}
 	// The omitted profile is the public modern-javac alias. Legacy Dump and
 	// archive callers must enter the same proof/emission path as options APIs.
 	c.options.SourceCompiler = c.options.SourceCompiler.effective()
@@ -13689,22 +13704,27 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		// plus a synthetic `Object build()`). Suppress them so the output mirrors the original
 		// source. CFR and Vineflower suppress bridge methods as well.
 		if isBridgeMethod(method.AccessFlags) {
-			if inherited := c.inheritedBridgeSource(method); inherited != nil {
-				// Several wide descriptors can share the same narrow super
-				// target. They need one source override; javac regenerates the
-				// complete bridge group from its inherited declarations.
-				duplicate := false
-				for _, emitted := range result {
-					if emitted.inheritedBridge != nil && emitted.methodName == inherited.methodName && emitted.descriptor == inherited.descriptor && emitted.code == inherited.code {
-						duplicate = true
-						break
+			if c.keepDescriptorProjectionBridge(method) {
+				// The physical bridge is required by the descriptor projection;
+				// fall through and dump it below.
+			} else {
+				if inherited := c.inheritedBridgeSource(method); inherited != nil {
+					// Several wide descriptors can share the same narrow super
+					// target. They need one source override; javac regenerates the
+					// complete bridge group from its inherited declarations.
+					duplicate := false
+					for _, emitted := range result {
+						if emitted.inheritedBridge != nil && emitted.methodName == inherited.methodName && emitted.descriptor == inherited.descriptor && emitted.code == inherited.code {
+							duplicate = true
+							break
+						}
+					}
+					if !duplicate {
+						result = append(result, inherited)
 					}
 				}
-				if !duplicate {
-					result = append(result, inherited)
-				}
+				continue
 			}
-			continue
 		}
 		// if name != "isSymlink" {
 		// 	continue
