@@ -149,7 +149,11 @@ func (j *JavaRef) ResetVarType(t types.JavaType) {
 // it was declared as `T x = null` with no committed concrete type yet.
 func (j *JavaRef) IsNullInitialized() bool {
 	lit, ok := j.Val.(*JavaLiteral)
-	return ok && lit != nil && fmt.Sprint(lit.Data) == "null"
+	if !ok || lit == nil {
+		return false
+	}
+	s, ok := lit.Data.(string)
+	return ok && s == "null"
 }
 
 // MarkNullTypeAdopted records that this null-initialized ref has committed to a concrete reference
@@ -167,15 +171,13 @@ func (j *JavaRef) NullTypeAdopted() bool {
 
 func IsNullLiteral(v JavaValue) bool {
 	lit, ok := v.(*JavaLiteral)
-	if !ok || lit == nil || lit.Data == nil {
+	if !ok || lit == nil {
 		return false
 	}
-	// fmt.Sprint allocates. Decompile calls this on every value, and the
-	// allocation showed up as a large share of ekp prepare CPU.
-	if s, ok := lit.Data.(string); ok {
-		return s == "null"
-	}
-	return fmt.Sprint(lit.Data) == "null"
+	// Null literals are the string "null". Numbers and other values are not.
+	// fmt.Sprint here allocated on every literal and dominated ekp decompile CPU.
+	s, ok := lit.Data.(string)
+	return ok && s == "null"
 }
 
 func (j *JavaRef) String(funcCtx *class_context.ClassContext) string {
