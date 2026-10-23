@@ -133,6 +133,9 @@ type ClassContext struct {
 	// regenerates that field, so its proved read-only uses are expressed
 	// through the clone factory.
 	EnumSyntheticBackingField string
+	// RetainUnprovedSource keeps a unique static target's original qualified
+	// owner when no javac-legal spelling exists. It never selects another owner.
+	RetainUnprovedSource bool
 	// Static imports are shared by every declaration in one source unit. A
 	// failed binding cannot publish a source unit that silently selects a decoy.
 	StaticMethodImports   *StaticMethodImports

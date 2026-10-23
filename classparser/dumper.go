@@ -170,6 +170,10 @@ type ClassObjectDumper struct {
 	// generic metadata from its original physical descriptors, retaining bridges
 	// which a raw supertype cannot regenerate from generic source.
 	descriptorSourceProjection bool
+	// renderEnumAsClass keeps an ACC_ENUM type's fields and methods when its
+	// constant headers are not the javac new/invokespecial protocol. The enum
+	// keyword is dropped so the original bodies can be parsed as a class.
+	renderEnumAsClass bool
 	// enumProvedConstantBodies maps a bytecode constant field to the renamed
 	// class that holds its body. enumMarkerDescriptors are the synthetic
 	// access bridges those bodies call; source regenerates both.
@@ -688,18 +692,27 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 	if isEnum {
 		initializations, err := c.nativeEnumConstantInitializations()
 		if err != nil {
+			// Groovy and other non-javac enums assign constants through a runtime
+			// call, not new+invokespecial. Refusing drops the whole class. When the
+			// caller asked to keep unproved source, render the original members as
+			// a class that extends Enum instead of substituting javac's protocol.
+			if !c.options.RetainUnprovedSource || isRequestWorkError(err) {
+				return "", err
+			}
+			c.renderEnumAsClass = true
+			isEnum = false
+			nonClassKeyword = false
+		} else if err := c.nativeEnumBackingArrayProtocol(initializations); err != nil {
 			return "", err
-		}
-		if err := c.nativeEnumBackingArrayProtocol(initializations); err != nil {
-			return "", err
-		}
-		c.enumConstantSourceName = nil
-		for field, plan := range initializations {
-			if plan.sourceName != "" && plan.sourceName != field {
-				if c.enumConstantSourceName == nil {
-					c.enumConstantSourceName = map[string]string{}
+		} else {
+			c.enumConstantSourceName = nil
+			for field, plan := range initializations {
+				if plan.sourceName != "" && plan.sourceName != field {
+					if c.enumConstantSourceName == nil {
+						c.enumConstantSourceName = map[string]string{}
+					}
+					c.enumConstantSourceName[field] = plan.sourceName
 				}
-				c.enumConstantSourceName[field] = plan.sourceName
 			}
 		}
 	}
@@ -708,8 +721,8 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 	//	return "", utils.Error("accessFlagsVerbose is empty")
 	//}
 	accessFlags := accessFlagsToCode
-	if syntheticEnumSubclass {
-		// Drop the `enum` keyword so the synthetic subclass renders as a normal class.
+	if syntheticEnumSubclass || c.renderEnumAsClass {
+		// Drop the `enum` keyword so the type renders as a normal class.
 		accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "enum", ""))
 	}
 	name := c.obj.GetClassName()
@@ -848,12 +861,13 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 		c.ClassName = packageName + "." + identityName
 	}
 	funcCtx := &class_context.ClassContext{
-		Env:                 c.getenv,
-		Work:                c.Work,
-		ClassName:           c.ClassName,
-		SupperClassName:     supperClassName,
-		PackageName:         c.PackageName,
-		StaticMethodImports: class_context.NewStaticMethodImports(),
+		Env:                  c.getenv,
+		Work:                 c.Work,
+		ClassName:            c.ClassName,
+		SupperClassName:      supperClassName,
+		PackageName:          c.PackageName,
+		StaticMethodImports:  class_context.NewStaticMethodImports(),
+		RetainUnprovedSource: c.options.RetainUnprovedSource,
 	}
 	if outer := c.nativeOuterContext; outer != nil {
 		funcCtx.StaticMethodImports = outer.StaticMethodImports
@@ -13402,6 +13416,9 @@ func (c *ClassObjectDumper) dumpStubMethod(method *MemberInfo, name, descriptor,
 // isGenuineEnum reports whether this class is a real `enum` declaration (ACC_ENUM and a
 // direct java.lang.Enum supertype), as opposed to a synthetic enum-constant subclass.
 func (c *ClassObjectDumper) isGenuineEnum() bool {
+	if c.renderEnumAsClass {
+		return false
+	}
 	if !slices.Contains(c.obj.AccessFlagsVerbose, "enum") {
 		return false
 	}
@@ -13672,6 +13689,11 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		}
 		if genuineEnum {
 			regenerated, err := nativeEnumRegeneratedMethod(c.obj, method, name, descriptor, c.Work)
+			if err != nil && c.options.RetainUnprovedSource && !isRequestWorkError(err) && name == "valueOf" && strings.Contains(err.Error(), "does not implement the source compiler protocol") {
+				// Keep the handwritten lookup. Deleting it would leave javac's implicit
+				// factory, which is a different method. The explicit body is real source.
+				regenerated, err = false, nil
+			}
 			if err != nil {
 				return nil, err
 			}

@@ -14,6 +14,8 @@ import (
 // the unbound generic metadata and render the original executable descriptors.
 // Code bytes, exception tables, access flags, names and descriptors are unchanged.
 // A present (even malformed) EnclosingMethod must still pass the existing proof.
+// method_index 0 names no enclosing method. RetainUnprovedSource may then omit the
+// unbound Signature the same way a missing attribute does. It does not declare <T>.
 func (c *ClassObjectDumper) descriptorProjectionWithoutEnclosingMethod() *ClassObject {
 	if c == nil || c.obj == nil || c.foldSiblingResolver == nil || c.nativeCaptureFields != nil || c.nativeMemberCurrent != nil || c.nativeAnonymousRoot != nil {
 		return nil
@@ -25,7 +27,10 @@ func (c *ClassObjectDumper) descriptorProjectionWithoutEnclosingMethod() *ClassO
 	rows := 0
 	for _, a := range obj.Attributes {
 		if raw, ok := a.(*UnparsedAttribute); ok && raw != nil && raw.Name == "EnclosingMethod" {
-			return nil
+			if !c.options.RetainUnprovedSource || len(raw.Info) != 4 || raw.Info[2] != 0 || raw.Info[3] != 0 {
+				return nil
+			}
+			continue
 		}
 		if table, ok := a.(*InnerClassesAttribute); ok {
 			if table == nil {

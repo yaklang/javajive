@@ -130,6 +130,19 @@ func MaybeWrapExpandedArchiveFS(fs fi.FileSystem, recursiveParse bool) fi.FileSy
 	return NewExpandedZipFSWithOptions(fs, extractZipFSFromFS(fs), recursiveParse)
 }
 
+// SetRetainUnprovedSource keeps original members when a javac source certificate
+// fails. Jar filesystems opened afterwards inherit it. The default refuses.
+func (e *ExpandedZipFS) SetRetainUnprovedSource(enabled bool) {
+	if e != nil {
+		e.retainUnprovedSource = enabled
+	}
+}
+
+// RetainsUnprovedSource reports the analysis-source policy for this tree.
+func (e *ExpandedZipFS) RetainsUnprovedSource() bool {
+	return e != nil && e.retainUnprovedSource
+}
+
 func extractZipFSFromFS(fs fi.FileSystem) *filesys.ZipFS {
 	for fs != nil {
 		switch v := fs.(type) {

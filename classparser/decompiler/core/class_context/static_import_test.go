@@ -186,7 +186,7 @@ func TestStaticInterfaceImportRetryDoesNotPoisonOriginalTransaction(t *testing.T
 
 func TestStaticCallImportChecksBothTypeNamespacesAndOwnerKind(t *testing.T) {
 	for _, isInterface := range []bool{false, true} {
-		for _, variant := range []string{"method type parameters", "package type", "method conflict", "wrong owner kind", "missing owner", "value-only shadow", "owned type path", "obscured root with own method"} {
+		for _, variant := range []string{"method type parameters", "package type", "method conflict", "wrong owner kind", "missing owner", "value-only shadow", "owned type path", "obscured root with own method", "clear root with own method"} {
 			t.Run(fmt.Sprint(isInterface)+"/"+variant, func(t *testing.T) {
 				f, declarations := staticImportModelContext()
 				api := declarations["a/Api"]
@@ -264,6 +264,25 @@ func TestStaticCallImportChecksBothTypeNamespacesAndOwnerKind(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestRetainedIncompleteStaticOwnerKeepsQualifiedTarget(t *testing.T) {
+	f, declarations := staticImportModelContext()
+	f.FunctionName, f.CurrentMethodDesc = "m", "()V"
+	probe := declarations["probe/Probe"]
+	probe.Methods = []callbinding.Method{{Name: "format", Desc: "(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;", Public: true, Static: true}}
+	declarations[probe.Name] = probe
+	const owner = "java.text.MessageFormat"
+	const desc = "(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;"
+	if prefix := f.StaticClassCallPrefix(owner, "format", desc); f.StaticMethodImports.Error() == nil {
+		t.Fatalf("strict path accepted an incomplete owner: %q", prefix)
+	}
+	f.StaticMethodImports = NewStaticMethodImports()
+	f.RetainUnprovedSource = true
+	prefix := f.StaticClassCallPrefix(owner, "format", desc)
+	if prefix != owner+"." || f.StaticMethodImports.Error() != nil {
+		t.Fatalf("prefix=%q err=%v", prefix, f.StaticMethodImports.Error())
 	}
 }
 

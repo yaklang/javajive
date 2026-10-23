@@ -68,10 +68,16 @@ func (s *StaticMethodImports) Imports() []string {
 // and have no same-spelled method (even one of a different arity). Values and
 // local/formal type names do not participate in import declarations.
 func (f *ClassContext) StaticInterfaceCallPrefix(owner, member, descriptor string) string {
-	if f.packageRootIsType(owner) && !f.staticImportScopeClear(member) {
-		if spelling := f.importedTypeCallPrefix(owner, member, descriptor, true); spelling != "" {
-			return spelling
+	if !f.staticImportScopeClear(member) {
+		// A colliding method name forbids a static import. A clear package root
+		// still has the qualified TypeName; do not shorten it to a simple name
+		// before that spelling is proved.
+		if f.packageRootIsType(owner) {
+			if spelling := f.importedTypeCallPrefix(owner, member, descriptor, true); spelling != "" {
+				return spelling
+			}
 		}
+		return f.staticImportCallPrefix(owner, member, descriptor, owner, true)
 	}
 	bound, known := f.staticTypeOwner(owner)
 	if known {
@@ -84,10 +90,13 @@ func (f *ClassContext) StaticInterfaceCallPrefix(owner, member, descriptor strin
 // type still denotes the original class. If type syntax is also obscured,
 // use the same proved method-namespace import as an interface invocation.
 func (f *ClassContext) StaticClassCallPrefix(owner, member, descriptor string) string {
-	if f.packageRootIsType(owner) && !f.staticImportScopeClear(member) {
-		if spelling := f.importedTypeCallPrefix(owner, member, descriptor, false); spelling != "" {
-			return spelling
+	if !f.staticImportScopeClear(member) {
+		if f.packageRootIsType(owner) {
+			if spelling := f.importedTypeCallPrefix(owner, member, descriptor, false); spelling != "" {
+				return spelling
+			}
 		}
+		return f.staticImportCallPrefix(owner, member, descriptor, owner, false)
 	}
 	bound, known := f.staticTypeOwner(owner)
 	if known {
@@ -133,6 +142,12 @@ func (f *ClassContext) staticImportCallPrefix(owner, member, descriptor, bound s
 	internal := strings.ReplaceAll(owner, ".", "/")
 	declaration, exists := f.InvocationMetadata(internal)
 	if !exists || declaration.Name != internal || declaration.IsInterface != interfaceOwner || !declaration.Public || !declaration.MembersComplete || !declaration.ParentsComplete {
+		// The invoke already names this owner. A missing JDK table is not a
+		// different target. Analysis output keeps the qualified call; the default
+		// path still refuses an unproved owner.
+		if f.RetainUnprovedSource && owner != "" && SafeIdentifier(member) == member {
+			return owner + "."
+		}
 		return fail("incomplete, mismatched or inaccessible original owner")
 	}
 	matches := 0
@@ -149,6 +164,13 @@ func (f *ClassContext) staticImportCallPrefix(owner, member, descriptor, bound s
 		// `Owner.member(...)`, which does not reclassify the method name.
 		if spelling := f.importedTypeCallPrefix(owner, member, descriptor, interfaceOwner); spelling != "" {
 			return spelling
+		}
+		// The target is that one public static method. A clear package root can
+		// spell it as a qualified TypeName. An obscured root has no javac-legal
+		// spelling; analysis output still keeps the original owner, and the
+		// default path refuses rather than choosing another method.
+		if matches == 1 && (!f.packageRootIsType(owner) || f.RetainUnprovedSource) {
+			return owner + "."
 		}
 		return fail("method namespace or original static target unproved")
 	}
