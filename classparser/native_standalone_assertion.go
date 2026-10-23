@@ -90,7 +90,7 @@ func (c *ClassObjectDumper) retryWithoutStandaloneAssertion() (string, error) {
 	// wireNativeMemberSource also installs a read-only dependency lookup view.
 	// Its empty owner is not a source publication transaction: rejecting that
 	// view would turn a normal flat fallback into a missing top-level class.
-	if c.nativeMemberRoot != nil && c.nativeMemberRoot.owner != "" || c.nativeAnonymousRoot != nil {
+	if c.nativeMemberRoot != nil && c.nativeMemberRoot.owner != "" || c.nativeAnonymousRoot != nil || c.flatEnumConstantCurrent != nil {
 		return "", fmt.Errorf("top-level assertion source closure unproved")
 	}
 	if c.report != nil && c.nativeStandaloneAssertion.report != nil {

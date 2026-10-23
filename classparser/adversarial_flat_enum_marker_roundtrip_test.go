@@ -2,6 +2,7 @@ package javaclassparser
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,14 +34,34 @@ func TestAdversarialFlatPlainEnumRetainsLexicalMembership(t *testing.T) {
 	}
 }
 
-func flatEnumMemberRoundTrip(t *testing.T, fixture, root, debug string, parentFirst bool) {
+func TestAdversarialFlatEnumOriginalVersionsKeepUnusedConstructorPorts(t *testing.T) {
+	for _, target := range []int{5, 6, 7} {
+		for _, debug := range []string{"none", "source,lines,vars"} {
+			t.Run(fmt.Sprintf("release%d/%s", target, debug), func(t *testing.T) {
+				flatEnumMemberRoundTrip(t, flatEnumPortFixture("VersionPortOwner"), "VersionPortOwner", debug, false, target)
+			})
+		}
+	}
+}
+
+func flatEnumMemberRoundTrip(t *testing.T, fixture, root, debug string, parentFirst bool, target ...int) {
 	t.Helper()
 	compiler, java := t04Tools(t)
 	native := os.Getenv("JAVA8_JAVAC")
 	if native == "" {
 		t.Fatal("native original compiler required")
 	}
-	files := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, fixture, root, debug, false)
+	release := 8
+	if len(target) > 1 {
+		t.Fatal("ambiguous authored compiler target")
+	}
+	if len(target) == 1 {
+		release = target[0]
+	}
+	files := compileLambdaParameterMetadataFixtureWithSourcesAtRelease(t, native, NativeJavac8, fixture, root, debug, nil, release, false)
+	if mustParseLowering(t, files[root+"$Mode.class"]).MajorVersion != uint16(44+release) {
+		t.Fatal("original compiler target mismatch")
+	}
 	run := func(dir string) {
 		t.Helper()
 		for _, mode := range []string{"-ea", "-da"} {

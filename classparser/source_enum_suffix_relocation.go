@@ -116,6 +116,13 @@ func enumArraySwitchSpan(code []byte, op *core.OpCode) (int, []byte, bool) {
 // frame inference. JVMS 4.7.4 frame deltas and uninitialized NEW offsets must
 // follow that map, as do debug interval endpoints. Unknown PC tables decline.
 func enumArrayRelocateCode(object *ClassObject, raw []byte, code *CodeAttribute, ops []*core.OpCode, replacement []byte, call, delta int, helperLines map[int]uint16, helperLineName, helperStack uint16, work *workbudget.Budget) ([]byte, error) {
+	return enumRelocateInstructionSpanCode(object, raw, code, ops, replacement, call, call+3, delta, helperLines, helperLineName, helperStack, work)
+}
+
+// Relocate the metadata for a replaced instruction span. Its caller proves
+// that all retained branch source/target pairs are within the affine suffix;
+// this editor validates frame/debug positions and rejects opaque PC tables.
+func enumRelocateInstructionSpanCode(object *ClassObject, raw []byte, code *CodeAttribute, ops []*core.OpCode, replacement []byte, start, endSpan, delta int, helperLines map[int]uint16, helperLineName, helperStack uint16, work *workbudget.Budget) ([]byte, error) {
 	fail := func() ([]byte, error) {
 		return nil, sourceLambdaMetadataFailure(work, "enum lowering unproved suffix PC map")
 	}
@@ -126,7 +133,18 @@ func enumArrayRelocateCode(object *ClassObject, raw []byte, code *CodeAttribute,
 	for _, op := range ops {
 		positions[int(op.CurrentOffset)] = op.Instr.OpCode
 	}
-	if !enumArraySuffixAlignmentPreserved(positions, call+3, delta) {
+	if _, known := positions[start]; !known || start < 0 || endSpan <= start || endSpan > len(code.Code) {
+		return fail()
+	}
+	if _, known := positions[endSpan]; !known && endSpan != len(code.Code) {
+		return fail()
+	}
+	for pc := range positions {
+		if pc > start && pc < endSpan {
+			return fail()
+		}
+	}
+	if !enumArraySuffixAlignmentPreserved(positions, endSpan, delta) {
 		return fail()
 	}
 	mapPC := func(pc int, end bool) (int, bool) {
@@ -134,10 +152,10 @@ func enumArrayRelocateCode(object *ClassObject, raw []byte, code *CodeAttribute,
 		if end && pc == len(code.Code) {
 			ok = true
 		}
-		if !ok || pc > call && pc < call+3 {
+		if !ok || pc > start && pc < endSpan {
 			return 0, false
 		}
-		if pc >= call+3 {
+		if pc >= endSpan {
 			pc += delta
 		}
 		return pc, pc <= 65535
@@ -212,7 +230,7 @@ func enumArrayRelocateCode(object *ClassObject, raw []byte, code *CodeAttribute,
 			}
 			attrs = append(attrs, attribute{index, body})
 		case "StackMapTable":
-			updated, ok := enumArrayRelocateFrames(object, body, positions, call+3, delta, work)
+			updated, ok := enumArrayRelocateFrames(object, body, positions, endSpan, delta, work)
 			if !ok {
 				return fail()
 			}
@@ -226,10 +244,10 @@ func enumArrayRelocateCode(object *ClassObject, raw []byte, code *CodeAttribute,
 		return fail()
 	}
 	for pc, line := range helperLines {
-		if pc < 0 || pc >= delta+3 {
+		if pc < 0 || pc >= delta+endSpan-start {
 			return fail()
 		}
-		lines[call+pc] = line
+		lines[start+pc] = line
 	}
 	if lineName != 0 {
 		if len(lines) > 65535 {

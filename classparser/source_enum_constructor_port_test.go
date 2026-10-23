@@ -17,12 +17,17 @@ import (
 
 func enumPortTestInputs(t *testing.T, debug string) (map[string][]byte, map[string][]byte, *JarReconstructionArtifact) {
 	t.Helper()
+	return enumFlatTestInputs(t, debug, flatEnumPortFixture("PortOwner"))
+}
+
+func enumFlatTestInputs(t *testing.T, debug, sourceText string) (map[string][]byte, map[string][]byte, *JarReconstructionArtifact) {
+	t.Helper()
 	modern, _ := t04Tools(t)
 	native := os.Getenv("JAVA8_JAVAC")
 	if native == "" {
 		t.Fatal("native compiler required")
 	}
-	files := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, flatEnumPortFixture("PortOwner"), "PortOwner", debug, false)
+	files := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, sourceText, "PortOwner", debug, false)
 	owned, external := map[string][]byte{}, map[string][]byte{}
 	for n, b := range files {
 		if strings.HasPrefix(n, "PortOwner$Mode") {

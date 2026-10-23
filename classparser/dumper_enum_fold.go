@@ -1,10 +1,9 @@
 package javaclassparser
 
 import (
+	"fmt"
+	"sort"
 	"strings"
-
-	"github.com/yaklang/javajive/internal/log"
-	"github.com/yaklang/javajive/internal/utils"
 )
 
 // Enum constant-body CROSS-CLASS folding.
@@ -56,101 +55,77 @@ func isSyntheticEnumConstantSubclass(cf *ClassObject) bool {
 // to splice after the constant. Imports required by the folded members are merged into c.FuncCtx so
 // the enclosing unit's import block (assembled after this) carries them. Returns nil (no folding) on
 // the single-class path, for non-enums, or when JDEC_NO_ENUM_FOLD is set (load-bearing kill-switch).
-func (c *ClassObjectDumper) foldEnumConstantBodies(isEnum bool) map[string]string {
+func (c *ClassObjectDumper) foldEnumConstantBodies(isEnum bool) (map[string]string, error) {
 	if !isEnum || c.foldSiblingResolver == nil || c.getenv("JDEC_NO_ENUM_FOLD") != "" {
-		return nil
+		return nil, nil
 	}
 	if native, known := c.foldNativeEnumConstantBodies(); known {
-		return native
+		return native, nil
 	}
-	debug := c.getenv("JDEC_FOLD_DEBUG") != ""
-	enumSimple := c.GetConstructorMethodName()
-	if enumSimple == "" {
-		return nil
-	}
-	pkgPath := strings.ReplaceAll(c.PackageName, ".", "/")
-	out := map[string]string{}
-	for name, raw := range c.fieldDefaultValue {
-		sub := enumSubclassSimpleFromNew(strings.TrimSpace(raw), enumSimple)
-		if sub == "" {
-			continue
-		}
-		internal := sub
-		if pkgPath != "" {
-			internal = pkgPath + "/" + sub
-		}
-		data, ok := c.foldSiblingResolver(internal)
-		if !ok || len(data) == 0 {
-			if debug {
-				log.Infof("enum fold: constant %s -> %s not resolved", name, internal)
-			}
-			continue
-		}
-		body := c.renderFoldedConstantBody(data, sub)
-		if body == "" {
-			if debug {
-				log.Infof("enum fold: constant %s -> %s produced empty body", name, internal)
-			}
-			continue
-		}
-		if debug {
-			log.Infof("enum fold: constant %s folded from %s", name, internal)
-		}
-		out[name] = body
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-// enumSubclassSimpleFromNew extracts the synthetic subclass simple name from a constant's <clinit>
-// initializer `new Outer$N(...)`. It returns "" for a body-less constant (`new Outer(...)`, whose
-// type is the enum itself) or any non-constructor RHS. The match requires the rendered type's simple
-// name to start with `<enumSimple>$`, which is exactly the shape javac emits for a constant body.
-func enumSubclassSimpleFromNew(raw, enumSimple string) string {
-	if !strings.HasPrefix(raw, "new ") {
-		return ""
-	}
-	rest := strings.TrimSpace(raw[len("new "):])
-	open := strings.IndexByte(rest, '(')
-	if open < 0 {
-		return ""
-	}
-	typ := strings.TrimSpace(rest[:open])
-	if lt := strings.IndexByte(typ, '<'); lt >= 0 {
-		typ = strings.TrimSpace(typ[:lt])
-	}
-	if dot := strings.LastIndexByte(typ, '.'); dot >= 0 {
-		typ = typ[dot+1:]
-	}
-	if !strings.HasPrefix(typ, enumSimple+"$") {
-		return ""
-	}
-	return typ
-}
-
-// renderFoldedConstantBody decompiles the synthetic subclass bytes, strips its (synthetic)
-// constructor, re-indents the remaining members one level deeper, merges its imports into the
-// enclosing unit, and returns the " {\n ...members... \n\t}" block. Returns "" if the subclass has
-// no foldable members or could not be decompiled. The sub-dumper has no resolver, so folding never
-// recurses.
-func (c *ClassObjectDumper) renderFoldedConstantBody(data []byte, subSimple string) (result string) {
-	defer func() {
-		if e := recover(); e != nil {
-			log.Warnf("enum fold: render of %s panicked: %v", subSimple, utils.ErrorStack(e))
-			result = ""
-		}
-	}()
-	subObj, err := c.parseResolved(data)
+	// Source spelling is a projection: a nested declaration can be printed
+	// with its lexical name, a flattened binary name, or an assignment cast.
+	// None identifies the allocated class. Reuse the original SSA proof that
+	// ties each constant's PUTSTATIC to its unique NEW/invokespecial pair.
+	plans, err := c.nativeEnumConstantInitializations()
 	if err != nil {
-		return ""
+		return nil, err
 	}
-	return c.renderFoldedConstantObject(subObj, subSimple)
+	ordered := make([]nativeEnumConstantAllocation, 0, len(plans))
+	for _, plan := range plans {
+		ordered = append(ordered, plan)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ordinal < ordered[j].ordinal })
+	resolve := c.nativeAnnotationDeclarationResolver()
+	bridges := c.originalNativeConstructorAccessBridges()
+	bodyOrdinal := 0
+	out := map[string]string{}
+	for _, plan := range ordered {
+		if plan.allocatedClass == c.obj.GetClassName() {
+			continue
+		}
+		bodyOrdinal++
+		data, ok := c.foldSiblingResolver(plan.allocatedClass)
+		if !ok || len(data) == 0 {
+			return nil, fmt.Errorf("enum fold: unresolved original allocation for %s", plan.constant)
+		}
+		object, err := c.parseResolved(data)
+		if err != nil || object.GetClassName() != plan.allocatedClass || object.GetSupperClassName() != c.obj.GetClassName() {
+			return nil, fmt.Errorf("enum fold: changed original allocation for %s", plan.constant)
+		}
+		// The pre-nest packet proof permits constructor erasure even for an
+		// empty body. It retains the distinct class and inherited dispatch.
+		proof := nativeEnumConstantBodyProof(c.obj, plan, bodyOrdinal, bridges, resolve, c.Work)
+		if proof == nil {
+			return nil, fmt.Errorf("enum fold: original constructor or class initializer for %s is unproved", plan.constant)
+		}
+		body := c.renderFoldedConstantObjectWithProof(proof.object, proof.object.GetClassName(), proof)
+		if body == "" {
+			return nil, fmt.Errorf("enum fold: original constant body %s could not be retained", plan.constant)
+		}
+		out[plan.constant] = body
+	}
+	return out, nil
 }
 
 func (c *ClassObjectDumper) renderFoldedConstantObject(subObj *ClassObject, subSimple string) (result string) {
+	return c.renderFoldedConstantObjectWithProof(subObj, subSimple, nil)
+}
+
+func (c *ClassObjectDumper) renderFoldedConstantObjectWithProof(subObj *ClassObject, subSimple string, proof *nativeEnumConstantBody) (result string) {
 	child := NewClassObjectDumper(subObj)
+	if proof != nil && proof.object == subObj {
+		child.flatEnumConstantCurrent = proof
+		if proof.assertions != nil {
+			// The anonymous body's cache must be regenerated by javac. An
+			// explicit reconstruction artifact separately restores its original
+			// lexical status owner after compiling the flattened enum.
+			if c.options.sourceConstructorLowering == nil {
+				return ""
+			}
+			child.nativeSourceAssertions = proof.assertions
+			child.nativeStandaloneAssertion = &nativeStandaloneAssertion{packet: proof.assertions, consumed: map[string]bool{}}
+		}
+	}
 	child.options = c.options
 	child.Work = c.Work
 	child.report = c.report
@@ -167,7 +142,7 @@ func (c *ClassObjectDumper) renderFoldedConstantObject(subObj *ClassObject, subS
 		child.nativeOuterContext = c.FuncCtx
 	}
 	src, err := child.DumpClass()
-	if err != nil || src == "" || child.nativeEnumConstantCurrent != nil && (child.sourceDegraded || len(child.constructorBoundaryHelpers) > 0 || len(child.interfaceInitializerHelpers) > 0 || child.privateNestOwnPlan != nil && len(child.privateNestOwnPlan.bridges) > 0) {
+	if err != nil || src == "" || (child.nativeEnumConstantCurrent != nil || child.flatEnumConstantCurrent != nil) && (child.sourceDegraded || len(child.constructorBoundaryHelpers) > 0 || len(child.interfaceInitializerHelpers) > 0 || child.privateNestOwnPlan != nil && len(child.privateNestOwnPlan.bridges) > 0) {
 		return ""
 	}
 	if c.FuncCtx != nil {
@@ -179,9 +154,9 @@ func (c *ClassObjectDumper) renderFoldedConstantObject(subObj *ClassObject, subS
 	if !known {
 		return ""
 	}
-	native := child.nativeEnumConstantCurrent != nil
+	native := child.nativeEnumConstantCurrent != nil || child.flatEnumConstantCurrent != nil
 	if !native {
-		body = javaRemoveConstructors(body, subSimple)
+		return "" // No constructor may disappear through source-text removal.
 	}
 	body = strings.Trim(body, "\n")
 	if strings.TrimSpace(body) == "" {

@@ -56,6 +56,7 @@ type ClassObjectDumper struct {
 	nativeSourceNamesReady                bool
 	nativeMemberChecks                    map[string]map[int]bool
 	nativeEnumConstantCurrent             *nativeEnumConstantBody
+	flatEnumConstantCurrent               *nativeEnumConstantBody
 	nativeEnumBacking                     *nativeEnumBackingSource
 	rawAssertionStorage                   *sourceAssertionStoragePlan
 	constructorLowerings                  map[string]*sourceConstructorLoweringPlan
@@ -1533,7 +1534,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// once (before assemble, which may run twice on the degradation path) so required imports are
 	// merged into funcCtx ahead of the import-assembly step below. Empty (nil) on the single-class
 	// path, leaving the constant render hook untouched.
-	enumConstantBodies := c.foldEnumConstantBodies(isEnum)
+	enumConstantBodies, enumFoldErr := c.foldEnumConstantBodies(isEnum)
+	if enumFoldErr != nil {
+		return "", enumFoldErr
+	}
 	// Compute member scopes and merge their imports once before assembly.
 	members, memberErr := c.renderNativeMembers()
 	if memberErr != nil && c.nativeMemberRoot != nil {
@@ -13536,6 +13540,11 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 			}
 		}
 		if name == "<init>" && c.nativeEnumConstantCurrent != nil && nativeEnumConstantConstructorOwned(c.nativeMemberRoot, c.obj, descriptor) {
+			continue
+		}
+		if body := c.flatEnumConstantCurrent; name == "<init>" && body != nil && body.object == c.obj && body.descriptor == descriptor {
+			// The immutable original forwarding packet was checked before this
+			// reader was constructed; enum syntax regenerates that constructor.
 			continue
 		}
 		if c.nativeAssertionProtocol() != nil && c.nativeAssertionProtocol().initializer == method && c.nativeAssertionProtocol().pureInitializer {
