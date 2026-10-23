@@ -4756,7 +4756,7 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 				var res []string
 				for i, statement := range statementList {
 					if tail, ok := statement.(*statements.ReturnStatement); ok && i > 0 {
-						if region, ok := statementList[i-1].(*statements.TryCatchStatement); ok && rewriter.FinallyConsumesSharedVoidReturn(region, tail) {
+						if region, ok := statementList[i-1].(*statements.TryCatchStatement); ok && rewriter.FinallyConsumesSharedReturn(region, tail) {
 							continue
 						}
 					}
