@@ -63,7 +63,7 @@ class PhysicalRootDriver {public static void main(String[]args)throws Throwable 
 						t.Fatal("complete source root", err, string(rendered))
 					}
 					folded, err := a.ReadFile(owner + "$1.class")
-					if err != nil || !strings.Contains(string(folded), "folded") {
+					if err != nil || !strings.HasPrefix(strings.TrimSpace(string(folded)), "// ") || !strings.Contains(string(folded), "owned by "+owner+";") {
 						t.Fatal("actual owned anonymous child required", err, string(folded))
 					}
 					external := map[string][]byte{}
