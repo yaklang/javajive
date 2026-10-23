@@ -2892,16 +2892,17 @@ func TestInsertLockFactoryCopyCtorThis(t *testing.T) {
 	}
 }
 
-func TestWrapCatchBodyGetDeclaredMethod(t *testing.T) {
-	in := "class C {\n\tObject run() {\n\t\ttry{\n\t\t\treturn x;\n\t\t}catch(Exception var1){\n\t\t\treturn new Foo(ClassLoader.class.getDeclaredMethod(\"getClassLoadingLock\",new Class[]{String.class}));\n\t\t}\n\t}\n}\n"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	out := wrapCatchBodyGetDeclaredMethod(in)
-	if !strings.Contains(out, "catch(Exception varE)") {
-		t.Fatalf("missing nested try around getDeclaredMethod:\n%s", out)
-	}
-	ioe := "class C {\n\tObject run() {\n\t\ttry{\n\t\t\treturn x;\n\t\t}catch(IOException var1){\n\t\t\treturn new Foo(ClassLoader.class.getDeclaredMethod(\"getClassLoadingLock\",new Class[]{String.class}));\n\t\t}\n\t}\n}\n"
-	if strings.Contains(wrapCatchBodyGetDeclaredMethod(ioe), "catch(Exception varE)") {
-		t.Fatal("must not wrap catch(IOException) getDeclaredMethod")
+// The old text-repair test required a newly invented catch. The executable
+// nested-handler regression checks the opposite contract with the original
+// exception object; this source boundary must not add any unproved wrapper.
+func TestAdversarialCatchSourceCannotInventWrappingHandler(t *testing.T) {
+	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "")
+	for _, catchType := range []string{"Exception", "IOException", "ReflectiveOperationException"} {
+		in := "class C { Object run() throws Exception { try{return target.run();}catch(" + catchType + " failure){return new Foo(target.getDeclaredMethod(name,types));} } }"
+		out := fixHardjarShapes(in)
+		if strings.Contains(out, "varE") || strings.Contains(out, "new RuntimeException") {
+			t.Fatalf("source spelling invented exception flow:\n%s", out)
+		}
 	}
 }
 

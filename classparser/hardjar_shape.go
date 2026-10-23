@@ -131,7 +131,8 @@ func fixHardjarCodeShapes(body string) string {
 	body = insertLockFactoryCopyCtorThis(body)
 	body = dropUnusedSyntheticThisLocal(body)
 	body = retypeObjectArrayFromResolveClass(body)
-	body = wrapCatchBodyGetDeclaredMethod(body)
+	// Invocation declarations and original protected regions own exception flow.
+	// A reflective-looking return in a catch body does not authorize a wrapper.
 	body = swapRethrowThrowableBeforeSpecificCatch(body)
 	// Returns come from the bytecode CFG. A builder seen earlier in a method
 	// does not authorize inventing a return after another, nested loop.
@@ -8664,48 +8665,6 @@ func insertLockFactoryCopyCtorThis(body string) string {
 		return body
 	}
 	return insertDelegatingThisFromSibling(body)
-}
-
-func wrapCatchBodyGetDeclaredMethod(body string) string {
-	if !strings.Contains(body, ".getDeclaredMethod(") && !strings.Contains(body, ".getMethod(") {
-		return body
-	}
-	needle := "}catch(Exception "
-	from := 0
-	for {
-		rel := strings.Index(body[from:], needle)
-		if rel < 0 {
-			return body
-		}
-		i := from + rel
-		openRel := strings.Index(body[i:], "{")
-		if openRel < 0 || openRel > 80 {
-			from = i + 1
-			continue
-		}
-		open := i + openRel
-		close := matchingCloseBrace(body, open)
-		if close < 0 {
-			from = i + 1
-			continue
-		}
-		inner := strings.TrimSpace(body[open+1 : close])
-		if !strings.HasPrefix(inner, "return ") {
-			from = close
-			continue
-		}
-		if strings.Contains(inner, "try{") || strings.Contains(inner, "catch(Exception varE)") {
-			from = close
-			continue
-		}
-		if !strings.Contains(inner, ".getDeclaredMethod(") && !strings.Contains(inner, ".getMethod(") {
-			from = close
-			continue
-		}
-		fill := "try{\n\t\t\t" + inner + "\n\t\t}catch(Exception varE){\n\t\t\tthrow new RuntimeException(varE);\n\t\t}"
-		body = body[:open+1] + "\n\t\t" + fill + body[close:]
-		from = open + 1 + len(fill)
-	}
 }
 
 func swapRethrowThrowableBeforeSpecificCatch(body string) string {

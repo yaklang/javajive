@@ -919,8 +919,8 @@ func branchArrayInertElement(item values.JavaValue) bool {
 // expression. A live allocation in the final statement tree is never
 // duplicated. The bytecode checks also keep the allocation in its original arm,
 // after all earlier call operands and under the same exception handlers.
-func (d *Decompiler) InlineDroppedBranchArrayCalls(body []statements.Statement) int {
-	if d == nil || d.getenv("JDEC_BRANCH_ARRAY_INLINE_OFF") != "" {
+func (d *Decompiler) InlineDroppedBranchArrayCalls(body *[]statements.Statement) int {
+	if d == nil || body == nil || d.getenv("JDEC_BRANCH_ARRAY_INLINE_OFF") != "" {
 		return 0
 	}
 	changed := 0
@@ -1009,17 +1009,22 @@ func (d *Decompiler) InlineDroppedBranchArrayCalls(body []statements.Statement) 
 		// the CFG builder placed it there when flattening the short-circuit arm.
 		// Remove exactly that dead definition as the call takes ownership of its
 		// allocation. An earlier, live definition blocks this rewrite.
-		location, ok := findBranchArrayReturn(&body, call, d.FunctionContext)
+		location, ok := findBranchArrayReturn(body, call, d.FunctionContext)
 		if !ok {
 			continue
 		}
 		var stranded *statements.AssignStatement
 		items := *location.list
-		if location.index+1 < len(items) {
-			assign, isAssign := items[location.index+1].(*statements.AssignStatement)
+		if last := len(items) - 1; last > location.index {
+			assign, isAssign := items[last].(*statements.AssignStatement)
 			if isAssign && assign.ArrayMember == nil && assign.JavaValue == array {
+				// CHECKCAST can materialize the conditional result into a local,
+				// followed by its return. The orphan still belongs after that
+				// unconditional terminal, not immediately after the consumer.
+				// A live, nonterminal definition may never be deleted here.
+				_, returned := items[last-1].(*statements.ReturnStatement)
 				left, isRef := values.UnpackSoltValue(assign.LeftValue).(*values.JavaRef)
-				if !isRef || !values.SameLocal(left, ref) || location.index+2 != len(items) {
+				if !returned || !isRef || !values.SameLocal(left, ref) {
 					continue
 				}
 				stranded = assign
@@ -1029,7 +1034,7 @@ func (d *Decompiler) InlineDroppedBranchArrayCalls(body []statements.Statement) 
 		}
 		original := call.Arguments[candidate.argIndex]
 		call.Arguments[candidate.argIndex] = array
-		if statementTreeReferencesLocal(body, ref, stranded) {
+		if statementTreeReferencesLocal(*body, ref, stranded) {
 			call.Arguments[candidate.argIndex] = original
 			continue
 		}

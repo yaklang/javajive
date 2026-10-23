@@ -256,18 +256,43 @@ func statementReferencesLocal(statement statements.Statement, ref *values.JavaRe
 		return false
 	}
 	read := func(value values.JavaValue) bool {
-		effects, refs := values.InspectValue(value)
-		if effects&values.EffectOpaque != 0 {
-			// Unknown source closures may hide a read of this local. Do not delete
-			// its defining assignment when the use tree cannot be enumerated.
-			return true
-		}
-		for candidate := range refs {
-			if values.SameLocal(candidate, ref) {
+		// Complete dependencies do not imply movable effects. In particular,
+		// a sealed caught-exception value has no Java operands but remains a
+		// handler-entry motion barrier. Unknown renderers still fail closed.
+		state := map[values.JavaValue]uint8{}
+		remaining := 512
+		var visit func(values.JavaValue) bool
+		visit = func(value values.JavaValue) bool {
+			if value == nil {
+				return false
+			}
+			remaining--
+			if remaining < 0 {
 				return true
 			}
+			children, known := values.Children(value)
+			if !known {
+				return true
+			}
+			if candidate, ok := value.(*values.JavaRef); ok && candidate != nil && values.SameLocal(candidate, ref) {
+				return true
+			}
+			if state[value] == 1 {
+				return true
+			}
+			if state[value] == 2 {
+				return false
+			}
+			state[value] = 1
+			for _, child := range children {
+				if visit(child) {
+					return true
+				}
+			}
+			state[value] = 2
+			return false
 		}
-		return false
+		return visit(value)
 	}
 	listReads := func(list []statements.Statement) bool { return statementTreeReferencesLocal(list, ref, skip...) }
 	switch s := statement.(type) {

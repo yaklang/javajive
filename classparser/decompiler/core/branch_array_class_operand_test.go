@@ -1,6 +1,7 @@
 package core
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
@@ -12,7 +13,7 @@ import (
 
 func TestDroppedBranchArrayKeepsEarlierClassResolutionAndHandlerOrder(t *testing.T) {
 	for _, receiver := range []bool{false, true} {
-		for _, change := range []string{"same domain", "unprotected", "handler boundary", "alternate entry", "branch", "later producer", "different literal", "duplicate producer", "another array use", "live definition"} {
+		for _, change := range []string{"same domain", "unprotected", "handler boundary", "alternate entry", "branch", "later producer", "different literal", "duplicate producer", "another array use", "live definition", "dead return suffix", "dead cast return suffix", "live following definition", "duplicate dead definitions"} {
 			t.Run(map[bool]string{false: "argument", true: "receiver"}[receiver]+"/"+change, func(t *testing.T) {
 				class := values.NewJavaClassValue(types.NewJavaClass("sample.Uninitialized"))
 				class.OriginPC, class.HasOriginPC = 1, true
@@ -60,10 +61,29 @@ func TestDroppedBranchArrayKeepsEarlierClassResolutionAndHandlerOrder(t *testing
 					body = append(body, &statements.ReturnStatement{JavaValue: ref})
 				case "live definition":
 					body = append([]statements.Statement{statements.NewAssignStatement(ref, array, true)}, body...)
+				case "dead return suffix":
+					body = append(body, statements.NewAssignStatement(ref, array, true))
+				case "dead cast return suffix", "live following definition", "duplicate dead definitions":
+					result := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("java.lang.Object"))
+					cast := values.NewOriginalCheckCast(call, result.Type(), 8)
+					body = []statements.Statement{statements.NewAssignStatement(result, cast, true), statements.NewReturnStatement(result), statements.NewAssignStatement(ref, array, true)}
+					if change == "live following definition" {
+						body = append(body[:1], body[2:]...)
+					}
+					if change == "duplicate dead definitions" {
+						body = append(body, statements.NewAssignStatement(ref, array, true))
+					}
 				}
-				want := change == "same domain" || change == "unprotected"
-				if changed := d.InlineDroppedBranchArrayCalls(body); (changed == 1) != want {
+				want := change == "same domain" || change == "unprotected" || change == "dead return suffix" || change == "dead cast return suffix"
+				if changed := d.InlineDroppedBranchArrayCalls(&body); (changed == 1) != want {
 					t.Fatalf("array ownership transferred=%d, want %v", changed, want)
+				}
+				if want && strings.HasPrefix(change, "dead ") {
+					for _, st := range body {
+						if assign, ok := st.(*statements.AssignStatement); ok && assign.JavaValue == array {
+							t.Fatal("stranded definition survives in caller body")
+						}
+					}
 				}
 				if (call.Arguments[arg] == array) != want {
 					t.Fatal("a refused transfer changed its invocation operand")

@@ -196,3 +196,55 @@ func TestBranchArrayInlinePreservesExistingStaticArgumentView(t *testing.T) {
 		})
 	}
 }
+
+// Knowing a value's dependency graph is distinct from permission to move its
+// evaluation. A sealed handler-entry value remains an effect barrier but does
+// not secretly read an unrelated array local.
+func TestArrayLocalUseProofSeparatesDependenciesFromMotionEffects(t *testing.T) {
+	for _, variant := range []string{"caught entry", "wrapped caught entry", "array read", "same local", "opaque exception flag", "changed caught PC", "unknown child", "cycle", "too deep", "shared value"} {
+		t.Run(variant, func(t *testing.T) {
+			ref := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaArrayType(types.NewJavaClass("java.lang.Class")))
+			caught := values.NewCaughtExceptionValue(17, types.NewJavaClass("java.lang.Exception"))
+			var value values.JavaValue = caught
+			want := false
+			switch variant {
+			case "wrapped caught entry":
+				value = &values.CastExpression{Value: caught, TargetType: types.NewJavaClass("java.lang.Throwable")}
+			case "array read":
+				value = ref
+				want = true
+			case "same local":
+				copy := *ref
+				value = &copy
+				want = true
+			case "opaque exception flag":
+				value = &values.CustomValue{Flag: "exception", OriginPC: 17, HasOriginPC: true}
+				want = true
+			case "changed caught PC":
+				caught.OriginPC++
+				want = true
+			case "unknown child":
+				value = &values.CastExpression{Value: &values.CustomValue{}, TargetType: caught.Type()}
+				want = true
+			case "cycle":
+				v := &values.CastExpression{TargetType: caught.Type()}
+				v.Value = v
+				value = v
+				want = true
+			case "too deep":
+				for i := 0; i < 600; i++ {
+					value = &values.CastExpression{Value: value, TargetType: caught.Type()}
+				}
+				want = true
+			case "shared value":
+				value = &values.JavaExpression{Values: []values.JavaValue{caught, caught}}
+			}
+			if got := statementReferencesLocal(statements.NewReturnStatement(value), ref); got != want {
+				t.Fatalf("possible local use=%v want=%v", got, want)
+			}
+			if effect, _ := values.InspectValue(caught); effect&values.EffectOpaque == 0 {
+				t.Fatal("dependency proof removed handler motion barrier")
+			}
+		})
+	}
+}
