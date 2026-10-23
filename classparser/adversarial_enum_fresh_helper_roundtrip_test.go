@@ -339,3 +339,81 @@ class NativeEnumDriver{public static void main(String[]args){int rows=0;
 		}
 	}
 }
+
+func TestAdversarialEnumFreshHelperPhysicalSourceNamespacesStayIndependent(t *testing.T) {
+	compiler, java := t04Tools(t)
+	native := os.Getenv("JAVA8_JAVAC")
+	if native == "" {
+		t.Fatal("native original compiler required")
+	}
+	files := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, enumFreshHelperFixture, "PacketValues", "none", false)
+	for _, changed := range []bool{false, true} {
+		t.Run(fmt.Sprint("changed-", changed), func(t *testing.T) {
+			physical := bytes.Clone(files["PacketValues.class"])
+			if changed {
+				object := mustParseLowering(t, physical)
+				object.ConstantPoolManager.AddUtf8Info("different physical original, same printed source")
+				physical = object.Bytes()
+			}
+			jar := filepath.Join(t.TempDir(), "physical.jar")
+			entries := map[string][]byte{"PacketValues.class": files["PacketValues.class"], "META-INF/versions/9/PacketValues.class": physical, "META-INF/MANIFEST.MF": []byte("Manifest-Version: 1.0\nMulti-Release: true\n\n")}
+			if err := os.WriteFile(jar, t23Zip(t, entries), 0600); err != nil {
+				t.Fatal(err)
+			}
+			a, err := NewJarReconstructionArtifactFromLocal(jar, 8, ModernJavac, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.Close()
+			source, err := a.source.ReadFile("PacketValues.class")
+			if err != nil || legacySourceHasFailureMarker(string(source)) {
+				t.Fatal("pending base source", err)
+			}
+			out := sourceArtifactWriteFiles(t, map[string][]byte{"PacketValuesDriver.class": files["PacketValuesDriver.class"]})
+			path := filepath.Join(out, "PacketValues.java")
+			if err := os.WriteFile(path, source, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if log, err := exec.Command(compiler, "-proc:none", "--release", "9", "-g:none", "-cp", out, "-sourcepath", out, "-d", out, path).CombinedOutput(); err != nil {
+				t.Fatal("real implicit MR source compilation", err, string(log))
+			}
+			fresh, err := os.ReadFile(filepath.Join(out, "PacketValues.class"))
+			if err != nil || mustParseLowering(t, fresh).MajorVersion != 53 {
+				t.Fatal("real release9 fresh class absent", err)
+			}
+			if got, err := a.FinishClass("PacketValues.class", fresh); err == nil || got != nil {
+				t.Fatal("metadata-only base source return granted executable edits")
+			}
+			if returned, err := a.ReadFile("PacketValues.class"); err != nil || !bytes.Equal(returned, source) {
+				t.Fatal("actual base publication", err)
+			}
+			base, err := a.FinishClass("PacketValues.class", fresh)
+			if err != nil {
+				t.Fatal("base output", err)
+			}
+			name := "META-INF/versions/9/PacketValues.class"
+			got, err := a.FinishClass(name, fresh)
+			if changed {
+				if err == nil || got != nil {
+					t.Fatal("changed original borrowed a different physical source permission")
+				}
+				if returned, err := a.ReadFile(name); err != nil || !bytes.Equal(returned, source) {
+					t.Fatal("independent physical source publication", err)
+				}
+				got, err = a.FinishClass(name, fresh)
+			}
+			if err != nil || got == nil || mustParseLowering(t, got).MajorVersion != 53 || !bytes.Equal(got, base) {
+				t.Fatal("physical compiler identity or independent enum output", err)
+			}
+			if err := os.WriteFile(filepath.Join(out, "PacketValues.class"), got, 0600); err != nil {
+				t.Fatal(err)
+			}
+			for _, mode := range []string{"-ea", "-da"} {
+				log, err := enumFreshOracleRun(t, java, mode, out, "PacketValuesDriver")
+				if err != nil || string(log) != "5:enum:values:clone:binding:overflow:method-universe\n" {
+					t.Fatal("unchanged original caller on real MR output", err, string(log))
+				}
+			}
+		})
+	}
+}
