@@ -702,6 +702,9 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 		if k == node.MergeNode && (node.SwitchEmptyCaseMerge || node.SwitchEmptyDefaultMerge) {
 			return true
 		}
+		if switchTransferEntriesNeedOwnBody(k, v, valueToBodyOffset) {
+			return true
+		}
 		for i, val := range v {
 			if i == len(v)-1 {
 				break
@@ -844,6 +847,37 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 	}
 
 	return nil
+}
+
+// Removing GOTOs and lowering loop edges can map distinct physical switch
+// entries to the same sealed break/continue leaf. They are not grouped labels:
+// physical sorting can put another case between them. Dropping the earlier
+// transfer would then introduce a new fall-through edge. Keep that operand-free
+// transfer at each distinct (or unknown) entry; only a proved common bytecode
+// offset licenses ordinary label grouping. Do not duplicate arbitrary bodies,
+// rendered text, operand evaluations or source-emission receipts.
+func switchTransferEntriesNeedOwnBody(target *core.Node, labels []switchLabel, offsets map[switchLabel]int) bool {
+	if target == nil || len(labels) < 2 {
+		return false
+	}
+	leaf, ok := target.Statement.(*statements.CustomStatement)
+	if !ok || leaf == nil {
+		return false
+	}
+	kind, _, sealed := leaf.SourceTransferProtocol()
+	if !sealed || kind != "continue" && kind != "break" {
+		return false
+	}
+	first, known := offsets[labels[0]]
+	if !known {
+		return true
+	}
+	for _, label := range labels[1:] {
+		if offset, known := offsets[label]; !known || offset != first {
+			return true
+		}
+	}
+	return false
 }
 
 // switchLabel's discriminator is outside the int32 value domain. No legal case
