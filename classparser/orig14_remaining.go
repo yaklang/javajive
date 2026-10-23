@@ -15,7 +15,8 @@ func fixOrig14RemainderReconstructs(body string) string {
 	// Exception alternatives belong to the original handler table. A Class[]
 	// argument or a reflection-like method name cannot establish a throws clause.
 	body = fixObjectGetKeyAssignedToInt(body)
-	body = fixUncheckedAwaitNanos(body)
+	// Checked calls and retries retain the original structured handler domain.
+	// A method name or a nearby source-text window cannot authorize a catch.
 	body = fixEmptySyncInTrailingElse(body)
 	return body
 }

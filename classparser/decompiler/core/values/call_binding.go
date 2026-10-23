@@ -182,6 +182,13 @@ func (f *FunctionCallExpression) rawReceiverHasUniqueErasedBinding(ctx *class_co
 		return false
 	}
 	receiverOwner := strings.ReplaceAll(receiver.Name, ".", "/")
+	// A unique overload family does not prove an interchangeable declaration.
+	// A concrete override may omit the symbolic owner's checked exceptions or
+	// narrow its return type. Retain the original owner through the ordinary
+	// widening-view planner instead of inferring equivalence from arity alone.
+	if receiverOwner != owner {
+		return false
+	}
 	metadata, ok := ctx.InvocationMetadata(receiverOwner)
 	if !ok || !metadata.Public || !callbinding.Assignable("L"+receiverOwner+";", "L"+owner+";", ctx.InvocationMetadata) {
 		return false

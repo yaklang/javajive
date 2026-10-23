@@ -636,65 +636,6 @@ func beforeIdentLooksNumeric(before string) bool {
 	return false
 }
 
-// fixUncheckedAwaitNanos wraps `ident = this.awaitNanos(...)` in try/catch
-// InterruptedException when the enclosing method does not declare that throws.
-func fixUncheckedAwaitNanos(body string) string {
-	if shapeReconstructOff() {
-		return body
-	}
-	const call = " = this.awaitNanos("
-	from := 0
-	for {
-		rel := strings.Index(body[from:], call)
-		if rel < 0 {
-			return body
-		}
-		eq := from + rel
-		// ident ends at eq; walk back
-		identStart := eq
-		for identStart > 0 {
-			c := body[identStart-1]
-			if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
-				identStart--
-				continue
-			}
-			break
-		}
-		ident := body[identStart:eq]
-		if !isDecompilerLocal(ident) {
-			from = eq + 1
-			continue
-		}
-		head := body[prevMemberStart(body, eq):eq]
-		if strings.Contains(head, "throws InterruptedException") {
-			from = eq + 1
-			continue
-		}
-		// already in a try that catches IE?
-		window := body[max(0, eq-200):eq]
-		if strings.Contains(window, "try{") && !strings.Contains(window, "catch(") {
-			from = eq + 1
-			continue
-		}
-		closeCall := strings.Index(body[eq+len(call):], ");")
-		if closeCall < 0 {
-			from = eq + 1
-			continue
-		}
-		stmtEnd := eq + len(call) + closeCall + 2
-		stmt := body[identStart:stmtEnd]
-		// indent of the statement
-		lineStart := strings.LastIndex(body[:identStart], "\n")
-		ind := ""
-		if lineStart >= 0 {
-			ind = body[lineStart+1 : identStart]
-		}
-		wrapped := "try{\n" + ind + "\t" + stmt + "\n" + ind + "}catch(InterruptedException var_ie){\n" + ind + "\t" + ident + " = false;\n" + ind + "}"
-		body = body[:identStart] + wrapped + body[stmtEnd:]
-		from = identStart + len(wrapped)
-	}
-}
-
 // fixEmptySyncInTrailingElse inserts a default return after an empty
 // `synchronized(...) { }` that is the last statement of a method's trailing
 // else (Http2Stream.closeInternal, OpenSslClientSessionCache.setSession).
