@@ -119,7 +119,7 @@ func (a *JarReconstructionArtifact) FinishClass(name string, compiled []byte) ([
 	if err != nil {
 		return nil, err
 	}
-	lowered, err = restoreDeclaredSyntheticMethodFlags(original, lowered, reader.Work)
+	lowered, err = restoreReconstructionSyntheticFlags(original, lowered, reader.Work)
 	if err != nil {
 		return nil, err
 	}

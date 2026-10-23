@@ -30,6 +30,13 @@ func (c *ClassObjectDumper) nativeConstructorAccessBridges() map[string]*nativeC
 // Original descriptor evidence is independent of the compiler used to emit
 // source. Callers must separately prove that compiler's regeneration behavior.
 func (c *ClassObjectDumper) originalNativeConstructorAccessBridges() map[string]*nativeConstructorAccessBridge {
+	return c.constructorAccessBridgePackets(0x1000)
+}
+
+// The same forwarding grammar can validate a fresh source declaration whose
+// only unspellable property is ACC_SYNTHETIC. Callers choose the exact flags;
+// the original ownership client always retains its synthetic-only contract.
+func (c *ClassObjectDumper) constructorAccessBridgePackets(requiredFlags uint16) map[string]*nativeConstructorAccessBridge {
 	result := map[string]*nativeConstructorAccessBridge{}
 	obj := c.obj
 	if !nativeAccessorVersion(obj, c.Work) {
@@ -58,7 +65,7 @@ func (c *ClassObjectDumper) originalNativeConstructorAccessBridges() map[string]
 		}
 		name, _ := obj.getUtf8(method.NameIndex)
 		desc, _ := obj.getUtf8(method.DescriptorIndex)
-		if name != "<init>" || method.AccessFlags != 0x1000 || len(constructors[desc]) != 1 {
+		if name != "<init>" || method.AccessFlags != requiredFlags || len(constructors[desc]) != 1 {
 			continue
 		}
 		params, ret, err := callbinding.Descriptor(desc)
