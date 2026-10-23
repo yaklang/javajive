@@ -180,6 +180,7 @@ func TestAdversarialConstructorBoundReferenceRequiresOriginalEvaluationAndBindin
 							t.Fatal("original null-check reference")
 						}
 						ref.ClassIndex = uint16(obj.ConstantPoolManager.AddNewClassInfo("ForeignNullCheck"))
+						d.ConstantPool = obj.ConstantPool
 						check.ClassName = "ForeignNullCheck"
 					case "extra prefix":
 						body = append([]statements.Statement{&statements.ExpressionStatement{Expression: argument}}, body...)

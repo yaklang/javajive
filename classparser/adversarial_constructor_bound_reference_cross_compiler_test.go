@@ -48,8 +48,13 @@ func TestAdversarialConstructorBoundReferenceAcrossCompilerProtocols(t *testing.
 						}
 					}
 					run(sourceArtifactWriteFiles(t, files))
-					const owner = "BoundConstructorOwner$Parts"
-					owned := map[string][]byte{owner + ".class": files[owner+".class"]}
+					const owner = "BoundConstructorOwner"
+					owned := map[string][]byte{}
+					for name, data := range files {
+						if name == owner+".class" || strings.HasPrefix(name, owner+"$") {
+							owned[name] = data
+						}
+					}
 					jar := filepath.Join(t.TempDir(), "input.jar")
 					if err := os.WriteFile(jar, t23Zip(t, owned), 0600); err != nil {
 						t.Fatal(err)
@@ -83,21 +88,23 @@ func TestAdversarialConstructorBoundReferenceAcrossCompilerProtocols(t *testing.
 					if log, err := exec.Command(rebuiltCompiler, args...).CombinedOutput(); err != nil {
 						t.Fatal("source-only compilation", err, string(log), string(source))
 					}
-					path = filepath.Join(out, owner+".class")
-					fresh, err := os.ReadFile(path)
-					if err != nil {
-						t.Fatal(err)
-					}
-					finished, err := a.FinishClass(owner+".class", fresh)
-					if err != nil {
-						t.Fatal("original declaration universe without prefix helpers", err, string(source))
-					}
-					artifactLambdaMetadataCodeUnchanged(t, fresh, finished)
-					if again, err := a.FinishClass(owner+".class", finished); err != nil || !bytes.Equal(again, finished) {
-						t.Fatal("idempotent metadata", err)
-					}
-					if err := os.WriteFile(path, finished, 0600); err != nil {
-						t.Fatal(err)
+					for name := range owned {
+						path = filepath.Join(out, name)
+						fresh, err := os.ReadFile(path)
+						if err != nil {
+							t.Fatal("source must retain every owned class", name, err)
+						}
+						finished, err := a.FinishClass(name, fresh)
+						if err != nil {
+							t.Fatal("original declaration universe without prefix helpers", name, err, string(source))
+						}
+						artifactLambdaMetadataCodeUnchanged(t, fresh, finished)
+						if again, err := a.FinishClass(name, finished); err != nil || !bytes.Equal(again, finished) {
+							t.Fatal("idempotent metadata", name, err)
+						}
+						if err := os.WriteFile(path, finished, 0600); err != nil {
+							t.Fatal(err)
+						}
 					}
 					run(out)
 				})
