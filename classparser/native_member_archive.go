@@ -62,7 +62,6 @@ func (z *JarFS) nativeMemberReader(obj *ClassObject) *ClassObjectDumper {
 	d.options.TargetSourceVersion = z.targetSourceVersion
 	d.options.SourceCompiler = z.sourceCompiler
 	d.options.sourceFieldMetadata = z.sourceFieldMetadata
-	d.options.sourceConstructorLowering = z.sourceConstructorLowering
 	d.options.sourceLambdaMetadata = z.sourceLambdaMetadata
 	d.foldSiblingResolver = z.enumSiblingResolver()
 	d.declarationResolver = z.declarationResolver

@@ -203,9 +203,10 @@ func TestSourceConstructorLoweringBindsPhysicalReleaseSourceIndependently(t *tes
 	versioned.ConstantPoolManager.AddUtf8Info("independent physical namespace")
 	jar := filepath.Join(t.TempDir(), "namespaces.jar")
 	entries := map[string][]byte{
-		"META-INF/MANIFEST.MF":                    []byte("Manifest-Version: 1.0\r\nMulti-Release: true\r\n\r\n"),
-		"LoweringChild.class":                     original,
-		"META-INF/versions/9/LoweringChild.class": versioned.Bytes(),
+		"META-INF/MANIFEST.MF":                     []byte("Manifest-Version: 1.0\r\nMulti-Release: true\r\n\r\n"),
+		"LoweringChild.class":                      original,
+		"META-INF/versions/9/LoweringChild.class":  versioned.Bytes(),
+		"META-INF/versions/11/LoweringChild.class": original,
 	}
 	if err := os.WriteFile(jar, t23Zip(t, entries), 0600); err != nil {
 		t.Fatal(err)
@@ -237,5 +238,32 @@ func TestSourceConstructorLoweringBindsPhysicalReleaseSourceIndependently(t *tes
 	view := a.source.jar.sourceReleaseView(9)
 	if view.sourceConstructorLowering.active["LoweringChild"] == nil || view.sourceConstructorLowering.active["LoweringChild"] == a.source.jar.sourceConstructorLowering.active["LoweringChild"] {
 		t.Fatal("physical source obligation was inherited instead of proved")
+	}
+	// The distinct implicit-source case can borrow the already returned base
+	// receipt when original bytes and compiler/source tuple are all identical.
+	// It must not enroll a fictitious publication in that physical namespace.
+	const implicit = "META-INF/versions/11/LoweringChild.class"
+	unchanged, err := a.FinishClass(implicit, compiled)
+	if err != nil || !bytes.Equal(unchanged, control) {
+		t.Fatal("identical published base source could not close its implicit output", err)
+	}
+	implicitView := a.source.jar.sourceReleaseView(11)
+	if implicitView.sourceConstructorLowering.active["LoweringChild"] != nil {
+		t.Fatal("implicit compilation fabricated an own-source publication")
+	}
+	for _, variant := range []string{"compiler", "source level"} {
+		t.Run(variant, func(t *testing.T) {
+			priorCompiler, priorSource := implicitView.sourceCompiler, implicitView.targetSourceVersion
+			if variant == "compiler" {
+				implicitView.sourceCompiler = NativeJavac8
+			} else {
+				implicitView.targetSourceVersion = 11
+			}
+			got, err := a.FinishClass(implicit, compiled)
+			implicitView.sourceCompiler, implicitView.targetSourceVersion = priorCompiler, priorSource
+			if err == nil || got != nil {
+				t.Fatal("compiler/source tuple mismatch borrowed a base lowering", err)
+			}
+		})
 	}
 }

@@ -5528,10 +5528,6 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 	}
 	dumped.methodName = name
 	dumped.bodyCode = code
-	if renderedConstructorPlan != nil && renderedConstructorPlan.lowering != nil {
-		dumped.constructorLowering = renderedConstructorPlan.lowering
-		dumped.constructorLoweringCode = dumped.code
-	}
 	if graph := dumped.serializableReferences; graph != nil {
 		if graph.renderedBody != dumped.bodyCode {
 			return nil, fmt.Errorf("serializable reference body changed after its graph was sealed")
@@ -5547,6 +5543,14 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 	if scope := dumped.ordinaryConstructorSource; scope != nil {
 		scope.publishedCode = dumped.code
 		c.ordinaryConstructorEmissionSeen = true
+	}
+	if renderedConstructorPlan != nil && renderedConstructorPlan.lowering != nil {
+		dumped.constructorLowering = renderedConstructorPlan.lowering
+		dumped.constructorLoweringCode = dumped.code
+		if c.constructorLowerings == nil {
+			c.constructorLowerings = map[string]*sourceConstructorLoweringPlan{}
+		}
+		c.constructorLowerings[renderedConstructorPlan.lowering.descriptor] = renderedConstructorPlan.lowering
 	}
 	return dumped, nil
 }

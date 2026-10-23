@@ -38,9 +38,35 @@ type sourceConstructorLoweringPublication struct {
 }
 
 type sourceConstructorLoweringAuthority struct {
-	jar             *JarFS
-	mu              sync.Mutex
-	pending, active map[string]*sourceConstructorLoweringPublication
+	jar                         *JarFS
+	parent                      *sourceConstructorLoweringAuthority
+	mu                          sync.Mutex
+	pending, active             map[string]*sourceConstructorLoweringPublication
+	nativePending, nativeActive map[string]constructorNativeSourceOrigin
+}
+
+type constructorNativeSourceOrigin struct{ originalHash, sourceHash [32]byte }
+
+// Native member/anonymous source ownership has its own capture regeneration
+// proof. Flat lowering must neither enroll its speculative readers nor replace
+// that protocol. Record the actual selected native source only at JarFS's final
+// ownership dispatch, then activate it on the exact public ReadFile return.
+func (z *JarFS) noteNativeConstructorSource(object *ClassObject, source []byte) {
+	a := z.sourceConstructorLowering
+	if a == nil || object == nil || legacySourceHasFailureMarker(string(source)) {
+		return
+	}
+	reader := z.nativeMemberReader(nil)
+	raw, err := z.readJarEntry(object.GetClassName() + ".class")
+	if err != nil || !nativeProofWork(reader.Work, int64(len(raw)+len(source))+1) || !bytes.Equal(raw, object.Bytes()) {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.nativePending == nil {
+		a.nativePending = map[string]constructorNativeSourceOrigin{}
+	}
+	a.nativePending[object.GetClassName()] = constructorNativeSourceOrigin{sha256.Sum256(raw), sha256.Sum256(source)}
 }
 
 type constructorLoweringPacket struct {
@@ -256,13 +282,9 @@ func (c *ClassObjectDumper) planArtifactConstructorLowering(boundary *constructo
 	if err != nil || !nativeProofWork(c.Work, int64(len(raw))*2) || !bytes.Equal(raw, c.obj.Bytes()) {
 		return false
 	}
-	if c.constructorLowerings == nil {
-		c.constructorLowerings = map[string]*sourceConstructorLoweringPlan{}
-	}
 	if len(c.constructorLowerings) >= 64 && c.constructorLowerings[p.plan.descriptor] == nil {
 		return false
 	}
-	c.constructorLowerings[p.plan.descriptor] = p.plan
 	boundary.lowering = p.plan
 	return true
 }
@@ -305,9 +327,23 @@ func (c *ClassObjectDumper) publishConstructorLowering(source string, methods []
 func (a *sourceConstructorLoweringAuthority) sourceReturned(owner string, source []byte) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	hash := sha256.Sum256(source)
+	if origin, found := a.nativePending[owner]; found && origin.sourceHash == hash {
+		if a.active[owner] != nil {
+			return fmt.Errorf("constructor lowering: conflicting native and flat source publication")
+		}
+		if prior, ok := a.nativeActive[owner]; ok && prior != origin {
+			return fmt.Errorf("constructor lowering: changed native source publication")
+		}
+		if a.nativeActive == nil {
+			a.nativeActive = map[string]constructorNativeSourceOrigin{}
+		}
+		a.nativeActive[owner] = origin
+		return nil
+	}
 	p := a.pending[owner]
-	if p == nil || p.sourceHash != sha256.Sum256(source) {
-		if a.active[owner] != nil || p != nil {
+	if p == nil || p.sourceHash != hash {
+		if a.active[owner] != nil {
 			return fmt.Errorf("constructor lowering: changed source requires a fresh artifact")
 		}
 		return nil
@@ -357,14 +393,35 @@ func (a *sourceConstructorLoweringAuthority) lower(original, compiled []byte, wo
 	}
 	a.mu.Lock()
 	publication := a.active[want.GetClassName()]
+	native, nativeClosed := a.nativeActive[want.GetClassName()]
 	pending := a.pending[want.GetClassName()]
 	a.mu.Unlock()
+	// javac can implicitly compile an unchanged base source in an MR output
+	// tree. Reuse its actual returned-source obligation only for byte-identical
+	// originals and the identical immutable compiler/source tuple. This does not
+	// fabricate a publication in the new namespace. The complete fresh packet,
+	// local field bindings and SUPER signature are still independently checked
+	// below; no parent effect or global use-closure assumption is transported.
+	if parent := a.parent; publication == nil && pending == nil && parent != nil && a.jar != nil && parent.jar != nil && a.jar.sourceCompiler.effective() == parent.jar.sourceCompiler.effective() && a.jar.targetSourceVersion == parent.jar.targetSourceVersion && nativeProofWork(work, 1) {
+		hash := sha256.Sum256(original)
+		parent.mu.Lock()
+		if p := parent.active[want.GetClassName()]; p != nil && p.originalHash == hash && p.sourceHash != ([32]byte{}) {
+			publication = p
+		}
+		if origin, known := parent.nativeActive[want.GetClassName()]; known && origin.originalHash == hash && origin.sourceHash != ([32]byte{}) {
+			native, nativeClosed = origin, true
+		}
+		parent.mu.Unlock()
+	}
 	// A missing source receipt must not silently publish an intermediate
 	// constructor with late captures (including source-cache reuse in another
 	// physical release namespace). Native lexical reconstruction can already
 	// reproduce the early packet; validate that instead of editing it. Object's
 	// exact inert initialization remains the ordinary source path's own proof.
 	for _, method := range want.Methods {
+		if nativeClosed && native.originalHash == sha256.Sum256(original) {
+			break
+		}
 		packet := constructorLoweringPacketFor(want, method, true, true, work)
 		if packet == nil || packet.plan.super == "java/lang/Object" || publication != nil && publication.plans[packet.plan.descriptor] != nil {
 			continue
@@ -384,10 +441,10 @@ func (a *sourceConstructorLoweringAuthority) lower(original, compiled []byte, wo
 		}
 	}
 	if publication == nil {
-		if pending != nil {
-			return nil, constructorLoweringFailure(work, "source has not been returned")
-		}
 		// No source-lowering plan means no permission to edit executable Code.
+		if err := work.Check(); err != nil {
+			return nil, err
+		}
 		return bytes.Clone(compiled), nil
 	}
 	if publication.originalHash != sha256.Sum256(original) || publication.sourceHash == ([32]byte{}) || len(publication.plans) == 0 || len(publication.plans) > 64 {

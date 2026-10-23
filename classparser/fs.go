@@ -157,9 +157,11 @@ func (z *JarFS) decompileClassBytes(name string, data []byte) []byte {
 	}
 	if path.Clean(name) == cf.GetClassName()+".class" {
 		if source, owned := z.nativeMemberSource(cf); owned {
+			z.noteNativeConstructorSource(cf, source)
 			return source
 		}
 		if source, owned := z.nativeAnonymousSource(cf); owned {
+			z.noteNativeConstructorSource(cf, source)
 			return source
 		}
 	}
