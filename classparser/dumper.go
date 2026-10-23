@@ -5679,8 +5679,10 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			writeBlock,
 		}
 	case "<clinit>":
+		// JVM access flags on <clinit> are not Java modifiers. Emitting them
+		// produced `private static {`, which is not a static initializer.
 		writerSeq = []func(io.Writer){
-			writeAccessFlags,
+			func(buffer io.Writer) { methodSourceBuffer.WriteString("static ") },
 			writeBlock,
 		}
 	default:
