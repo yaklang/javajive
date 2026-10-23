@@ -36,7 +36,16 @@ func (c *ClassObjectDumper) publishStaticClassLowering(source string) bool {
 	if a == nil || !c.reconstructionPhysicalHeader() || !staticClassOriginalDomain(c.obj, c.Work) {
 		return true
 	}
-	if c.sourceDegraded || legacySourceHasFailureMarker(source) || !nativeProofWork(c.Work, int64(len(source))+1) {
+	if c.sourceDegraded || legacySourceHasFailureMarker(source) {
+		a.mu.Lock()
+		if a.staticPending == nil {
+			a.staticPending = map[string]constructorNativeSourceOrigin{}
+		}
+		a.staticPending[c.obj.GetClassName()] = constructorNativeSourceOrigin{}
+		a.mu.Unlock()
+		return true
+	}
+	if !nativeProofWork(c.Work, int64(len(source))+1) {
 		return false
 	}
 	raw, err := a.jar.readJarEntry(c.obj.GetClassName() + ".class")

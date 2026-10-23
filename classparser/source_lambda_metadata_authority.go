@@ -256,7 +256,7 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 	if own != nil && own.sourceHash != hash {
 		own = nil
 	}
-	ownEnum := c.nativeEnumBacking != nil && c.nativeEnumBacking.object == c.obj && !c.sourceDegraded && c.artifactLambdaMetadataAllowed()
+	ownEnum := c.nativeEnumBacking != nil && c.nativeEnumBacking.object == c.obj && !c.sourceDegraded && !legacySourceHasFailureMarker(source) && c.artifactLambdaMetadataAllowed()
 	if own == nil && !ownEnum && len(c.sourceLambdaMembers) == 0 && len(c.sourceConstructorMembers) == 0 {
 		return true
 	}
@@ -402,7 +402,7 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 	if ownEnum && !addEnum(sourceEnumArrayOrigin{c.obj.GetClassName(), publication.originalHash}) {
 		return false
 	}
-	if c.sourceDegraded {
+	if c.sourceDegraded || legacySourceHasFailureMarker(source) {
 		// A partial owning unit is not executable reconstruction authority.
 		// Existing metadata plans keep their independent narrower contracts.
 		publication.enums = nil

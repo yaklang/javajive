@@ -25,7 +25,19 @@ func (c *ClassObjectDumper) publishEnumArrayLowering(source string) bool {
 	if a == nil || c.nativeEnumBacking == nil {
 		return true
 	}
-	if c.sourceDegraded || legacySourceHasFailureMarker(source) || c.nativeEnumBacking.object != c.obj || !nativeProofWork(c.Work, int64(len(source))+1) {
+	if c.sourceDegraded || legacySourceHasFailureMarker(source) || c.nativeEnumBacking.object != c.obj {
+		// Optional executable authority must not erase an otherwise useful
+		// diagnostic source unit. An explicitly uncompleted local receipt also
+		// prevents this physical namespace from borrowing a parent's permission.
+		a.mu.Lock()
+		if a.enumPending == nil {
+			a.enumPending = map[string]constructorNativeSourceOrigin{}
+		}
+		a.enumPending[c.obj.GetClassName()] = constructorNativeSourceOrigin{}
+		a.mu.Unlock()
+		return true
+	}
+	if !nativeProofWork(c.Work, int64(len(source))+1) {
 		return false
 	}
 	raw, err := a.jar.readJarEntry(c.obj.GetClassName() + ".class")
