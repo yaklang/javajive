@@ -173,6 +173,8 @@ func constructorLoweringDelegateOperands(object *ClassObject, ops []*core.OpCode
 					arg.descriptor = descriptor
 					*at++
 				}
+			} else if literal, descriptor, known := constructorLoweringReadLiteral(object, op, work); known {
+				arg.literal, arg.descriptor = literal, descriptor
 			} else if member := constructorMotionMember(object, op, core.OP_GETSTATIC); member != nil {
 				if op.IsWide || !nativeSourceBinaryName(member.Name) {
 					return fail()
@@ -218,7 +220,7 @@ func constructorLoweringSourceOperand(argument constructorLoweringArgument, orig
 		return constructorLoweringSourceArgument(argument, origin.pc, value, slots, params)
 	}
 	invocation := argument.invocation
-	if argument.null || len(argument.nullCasts) != 0 || argument.slot != 0 || argument.owner != "" || argument.name != "" {
+	if argument.literal != nil || argument.null || len(argument.nullCasts) != 0 || argument.slot != 0 || argument.owner != "" || argument.name != "" {
 		return false
 	}
 	value = values.UnpackSoltValue(value)

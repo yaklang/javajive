@@ -13,6 +13,9 @@ import (
 // original order of these effects, including abrupt exits before SUPER starts.
 func constructorLoweringSourceArgument(argument constructorLoweringArgument, pc int, value values.JavaValue, slots map[int]int, params []values.JavaValue) bool {
 	value = values.UnpackSoltValue(value)
+	if argument.literal != nil {
+		return constructorLoweringSourceLiteral(argument, value)
+	}
 	if argument.null {
 		if argument.slot != 0 || argument.owner != "" || argument.name != "" || len(argument.nullCasts) > 32 {
 			return false

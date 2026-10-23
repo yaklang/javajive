@@ -22,7 +22,7 @@ type constructorLoweringCapture struct {
 }
 
 // A leaf is an exact typed parameter slot, one symbolic GETSTATIC, or an
-// original ACONST_NULL. Null has a bottom reference type, not an Object upcast.
+// original literal. Null has a bottom reference type, not an Object upcast.
 // Keep producer PCs outside the plan: equivalent freshly compiled packets can
 // use different instruction widths and constant-pool indices.
 type constructorLoweringArgument struct {
@@ -31,6 +31,7 @@ type constructorLoweringArgument struct {
 	slot                    int
 	owner, name, descriptor string
 	invocation              *constructorLoweringInvocation
+	literal                 *constructorLoweringLiteral
 }
 
 // The movable prefix contains distinct own final synthetic captures from typed
