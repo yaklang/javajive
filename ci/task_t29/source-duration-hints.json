@@ -3036,7 +3036,15 @@
     "TestAdversarialHandlerConditionalArrayPreservesSelectedAllocation": 46.0862,
     "TestAdversarialHandlerConditionalLiteralArrayKeepsOriginalDefinition": 36.8726,
     "TestAdversarialHandlerConditionalArrayKeepsFailingJoinCast": 5.8665,
-    "TestAdversarialCatchSourceCannotInventWrappingHandler": 0.0
+    "TestAdversarialCatchSourceCannotInventWrappingHandler": 0.0,
+    "TestAdversarialCheckedReceiverKeepsOriginalDeclaration": 23.08,
+    "TestAdversarialCheckedRetryKeepsOriginalHandlerAndFinally": 10.53,
+    "TestAdversarialConstructorLiteralPacketPreservesTypedWordsAndCapture": 18.55,
+    "TestAdversarialConstructorLiteralPacketPreservesLegacyCaptureAndFloat": 3.68,
+    "TestAdversarialNestedFinallyKeepsNormalReturnFrontier": 16.65,
+    "TestAdversarialConstructorLiteralPacketRejectsFreshPayloadChanges": 0.98,
+    "TestAdversarialConstructorLiteralPacketSourceRequiresExactCategoryAndWord": 0.01,
+    "TestAdversarialConstructorLiteralPacketDecoderChecksWidthPoolAndBudget": 0.01
   },
   "source_runs": [
     37850493191,
