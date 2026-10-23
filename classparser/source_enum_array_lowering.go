@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/ssabuild"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
@@ -201,8 +202,9 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 	if oldCode.MaxStack < peak || initCode.MaxStack < peak || arrayCode.MaxStack < peak {
 		return decline()
 	}
-	prefix := len(constants) * 6
-	if !enumArrayConstantPrefix(want, oldOps, constants, wantMembers, work) || !enumArrayConstantPrefix(got, initOps, constants, freshMembers, work) || len(initOps) != prefix+3 || len(oldOps) != prefix+4+4*len(constants) || !nativeEnumValuesArrayPacket(want, oldOps[prefix:len(oldOps)-2], constants, work) || !nativeEnumMemberOperand(got, initOps[prefix], core.OP_INVOKESTATIC, owner, helperKey.name, helperKey.descriptor) || !enumArrayOwnMember(got, initOps[prefix], helper.NameIndex, helper.DescriptorIndex) || !nativeEnumOpcode(initOps[len(initOps)-1], core.OP_RETURN) || !nativeEnumOpcode(oldOps[len(oldOps)-1], core.OP_RETURN) {
+	oldPrefix, oldPrefixOK := enumArrayConstantBoundary(want, originalInit, oldOps, constants, wantMembers, work)
+	prefix, prefixOK := enumArrayConstantBoundary(got, initializer, initOps, constants, freshMembers, work)
+	if !oldPrefixOK || !prefixOK || len(initOps) != prefix+3 || len(oldOps) != oldPrefix+4+4*len(constants) || !nativeEnumValuesArrayPacket(want, oldOps[oldPrefix:len(oldOps)-2], constants, work) || !nativeEnumMemberOperand(got, initOps[prefix], core.OP_INVOKESTATIC, owner, helperKey.name, helperKey.descriptor) || !enumArrayOwnMember(got, initOps[prefix], helper.NameIndex, helper.DescriptorIndex) || !nativeEnumOpcode(initOps[len(initOps)-1], core.OP_RETURN) || !nativeEnumOpcode(oldOps[len(oldOps)-1], core.OP_RETURN) {
 		return decline()
 	}
 	oldStore := constructorMotionMember(want, oldOps[len(oldOps)-2], core.OP_PUTSTATIC)
@@ -210,7 +212,7 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 		return decline()
 	}
 	backingKey := sourceFieldIdentity{oldStore.Member, "[L" + owner + ";"}
-	if !enumArrayOwnMember(want, oldOps[len(oldOps)-2], wantMembers[backingKey].NameIndex, wantMembers[backingKey].DescriptorIndex) || !enumArrayOwnMember(got, initOps[prefix+1], freshMembers[backingKey].NameIndex, freshMembers[backingKey].DescriptorIndex) || !enumArrayExactElements(want, oldOps[prefix:len(oldOps)-2], constants, wantMembers) || !enumArrayExactElements(got, arrayOps[:len(arrayOps)-1], constants, freshMembers) {
+	if !enumArrayOwnMember(want, oldOps[len(oldOps)-2], wantMembers[backingKey].NameIndex, wantMembers[backingKey].DescriptorIndex) || !enumArrayOwnMember(got, initOps[prefix+1], freshMembers[backingKey].NameIndex, freshMembers[backingKey].DescriptorIndex) || !enumArrayExactElements(want, oldOps[oldPrefix:len(oldOps)-2], constants, wantMembers) || !enumArrayExactElements(got, arrayOps[:len(arrayOps)-1], constants, freshMembers) {
 		return decline()
 	}
 	// A surviving method handle would make deletion observable even without a
@@ -287,6 +289,93 @@ func enumArrayInstructionSpans(code []byte, ops []*core.OpCode) bool {
 		pc += 1 + len(op.Data)
 	}
 	return pc == len(code)
+}
+
+// User constructor arguments have variable spans and JVM category widths. Reuse
+// the immutable NEW/invoke/store origin proof, rather than counting expressions
+// or instructions. This only locates the empty-stack cut: every argument,
+// allocation and constructor instruction remains in its fresh original order.
+// The first domain still excludes branches, handlers and user initializer tails.
+func enumArrayConstantBoundary(object *ClassObject, initializer *MemberInfo, ops []*core.OpCode, constants []string, fields map[sourceFieldIdentity]*MemberInfo, work *workbudget.Budget) (int, bool) {
+	if enumArrayConstantPrefix(object, ops, constants, fields, work) {
+		return len(constants) * 6, true
+	}
+	code := constructorLoweringCode(initializer)
+	if code == nil || len(constants) == 0 || len(code.ExceptionTable) != 0 {
+		return 0, false
+	}
+	reader := NewClassObjectDumper(object)
+	reader.Work = work
+	allocations, err := reader.nativeEnumConstantInitializations()
+	if err != nil || len(allocations) != len(constants) {
+		return 0, false
+	}
+	_, frames, known := reader.nativeOriginalMethodSnapshot(initializer, code)
+	if !known {
+		return 0, false
+	}
+	positions := map[int]int{}
+	for i, op := range ops {
+		positions[int(op.CurrentOffset)] = i
+	}
+	records := map[int]ssabuild.InstructionValues{}
+	for _, record := range frames.Instructions {
+		records[int(record.PC)] = record
+	}
+	constructors := map[string]*MemberInfo{}
+	for _, method := range object.Methods {
+		name, nk := sourceBridgeUTF8(object, method.NameIndex)
+		desc, dk := sourceBridgeUTF8(object, method.DescriptorIndex)
+		if !nk || !dk || !nativeProofWork(work, 1) {
+			return 0, false
+		}
+		if name == "<init>" {
+			constructors[desc] = method
+		}
+	}
+	end := 0
+	for ordinal, name := range constants {
+		plan, found := allocations[name]
+		first, newKnown := positions[plan.newPC]
+		last, storeKnown := positions[plan.storePC]
+		invoke, invokeKnown := positions[plan.invokePC]
+		field := fields[sourceFieldIdentity{name, "L" + object.GetClassName() + ";"}]
+		constructor := constructors[plan.descriptor]
+		if !found || plan.ordinal != ordinal || plan.allocatedClass != object.GetClassName() || !newKnown || first != end || !storeKnown || last < first || !invokeKnown || invoke <= first || invoke >= last || field == nil || constructor == nil || !nativeProofWork(work, int64(last-first+1)) {
+			return 0, false
+		}
+		class, ck := nativeEnumCPIndex(ops[first])
+		if !ck || !enumArrayClassEqual(object, class, object.ThisClass) || !enumArrayOwnMember(object, ops[invoke], constructor.NameIndex, constructor.DescriptorIndex) || !enumArrayOwnMember(object, ops[last], field.NameIndex, field.DescriptorIndex) {
+			return 0, false
+		}
+		call, callKnown := records[plan.invokePC]
+		if !callKnown || len(call.Uses) < 3 || call.Uses[1].Kind != ssabuild.OriginInstr {
+			return 0, false
+		}
+		literalAt, literalKnown := positions[int(call.Uses[1].PC)]
+		if !literalKnown {
+			return 0, false
+		}
+		index, indexKnown := nativeEnumCPIndex(ops[literalAt])
+		if !indexKnown || index == 0 || int(index) > len(object.ConstantPool) {
+			return 0, false
+		}
+		literal, literalKnown := object.ConstantPool[index-1].(*ConstantStringInfo)
+		if !literalKnown || literal == nil || !enumArrayUTF8Equal(object, literal.StringIndex, object, field.NameIndex) {
+			return 0, false
+		}
+		for _, op := range ops[first : last+1] {
+			if constructorMotionPacketBranch(op.Instr.OpCode) || op.Instr.OpCode == core.OP_TABLESWITCH || op.Instr.OpCode == core.OP_LOOKUPSWITCH {
+				return 0, false
+			}
+		}
+		end = last + 1
+	}
+	if end >= len(ops) {
+		return 0, false
+	}
+	boundary, known := records[int(ops[end].CurrentOffset)]
+	return end, known && len(boundary.Before.Stack) == 0
 }
 
 // These prefixes end at an empty stack. Each no-extra-argument allocation
