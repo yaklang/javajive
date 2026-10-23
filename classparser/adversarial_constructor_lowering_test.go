@@ -116,7 +116,12 @@ func constructorLoweringOriginal(t *testing.T, classes map[string][]byte) map[st
 
 func testConstructorLoweringRoundTrip(t *testing.T, compiler, java string, profile SourceCompilerProfile, debug string) {
 	t.Helper()
-	classes := compileLambdaParameterMetadataFixture(t, compiler, profile, constructorLoweringFixture, "LoweringChild", debug, false)
+	testConstructorLoweringSourceRoundTrip(t, compiler, java, profile, debug, constructorLoweringFixture)
+}
+
+func testConstructorLoweringSourceRoundTrip(t *testing.T, compiler, java string, profile SourceCompilerProfile, debug, fixture string) {
+	t.Helper()
+	classes := compileLambdaParameterMetadataFixture(t, compiler, profile, fixture, "LoweringChild", debug, false)
 	original := constructorLoweringOriginal(t, classes)
 	const want = "1440:captures:callback:publication:abrupt:subtype:wide:array:identity\n"
 	run := func(directory string, succeeds bool) {

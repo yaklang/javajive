@@ -1621,7 +1621,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			attrsB.WriteString("\n")
 			for _, method := range methods {
 				attrsB.WriteString("\t")
-				if c.ordinaryConstructorEmissionSeen {
+				if c.ordinaryConstructorEmissionSeen || len(c.constructorLowerings) != 0 {
 					ordinaryMethodSpans = append(ordinaryMethodSpans, ordinaryConstructorMethodSourceSpan{method: method, start: attrsB.Len()})
 				}
 				attrsB.WriteString(method.code)
@@ -2903,6 +2903,8 @@ func (c *ClassObjectDumper) buildGenericDeclarationSignatures(platform bool) fun
 					_, ps, _ := types.ParseMethodSignatureFull(sigStr, c.FuncCtx)
 					if len(ps) == len(methodParamFieldDescriptors(descriptor)) {
 						methodSigs[descKey] = sigStr
+					} else if lifted, proved := constructorEnclosingBindingSignature(sObj, m, c.Work); proved {
+						methodSigs[descKey] = lifted
 					}
 					continue
 				}
@@ -2927,9 +2929,8 @@ func (c *ClassObjectDumper) buildGenericDeclarationSignatures(platform bool) fun
 // Signature keyed by DESCRIPTOR argument count. It complements the exact-descriptor constructor entries in buildSiblingClassSig: a `super(...)` call needs the superclass ctor's parameter types WITH type variables
 // (e.g. `(BaseGraph<TN;>;TN;)V`) to know which arguments feed a bare type-variable parameter, so the
 // erased `(N)` cast can be re-emitted. Only ctors whose Signature parameter count EQUALS the descriptor
-// parameter count are recorded (a non-static inner class's ctor Signature omits the synthetic leading
-// this$0, so a count mismatch would mis-index; skip it). Overloads colliding on argument count are
-// dropped. Returns nil when no cross-class resolver is available (single-class decompile).
+// parameter count are recorded, or the original enclosing-port proof supplies a
+// separate aligned binding view. Every same-arity overload collision is dropped. Returns nil when no cross-class resolver is available (single-class decompile).
 func (c *ClassObjectDumper) buildSiblingCtorSig() func(internalName string, argc int) (string, bool) {
 	if c.foldSiblingResolver == nil {
 		return nil
@@ -2960,6 +2961,12 @@ func (c *ClassObjectDumper) buildSiblingCtorSig() func(internalName string, argc
 							continue
 						}
 						descArgc := len(methodParamFieldDescriptors(descriptor))
+						// Count every constructor, including non-generic rivals.
+						if seen[descArgc] {
+							delete(ctorSigs, descArgc)
+							continue
+						}
+						seen[descArgc] = true
 						for _, attr := range m.Attributes {
 							sigAttr, ok := attr.(*SignatureAttribute)
 							if !ok {
@@ -2979,21 +2986,14 @@ func (c *ClassObjectDumper) buildSiblingCtorSig() func(internalName string, argc
 							if !strings.HasPrefix(sigStr, "(") && !strings.HasPrefix(sigStr, "<") {
 								continue
 							}
-							// Offset safety: a non-static inner class's ctor Signature omits the synthetic
-							// leading this$0/outer-capture params, so its param count is smaller than the
-							// descriptor's. Only record when they match, so the index used by the caller
-							// (which indexes descriptor arguments) lines up with the Signature params. Use
-							// ParseMethodSignatureFull (not ParseMethodSignature) so a `<T:...>` prefix is
-							// stripped before counting params.
 							_, sigParams, _ := types.ParseMethodSignatureFull(sigStr, nil)
 							if len(sigParams) != descArgc {
-								continue
+								var proved bool
+								sigStr, proved = constructorEnclosingBindingSignature(sObj, m, c.Work)
+								if !proved {
+									continue
+								}
 							}
-							if seen[descArgc] {
-								delete(ctorSigs, descArgc)
-								continue
-							}
-							seen[descArgc] = true
 							ctorSigs[descArgc] = sigStr
 						}
 					}

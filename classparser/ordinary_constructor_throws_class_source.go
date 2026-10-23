@@ -28,7 +28,9 @@ type ordinaryConstructorClassSourceDraft struct {
 
 // Class-level recovery gets body-only ports for unsealed ordinary methods.
 // Imports, type/field declarations, method headers, constructors, initializers,
-// and the entire sealed method stay in immutable segments. In particular, an
+// and the entire sealed method stay in immutable segments. A constructor
+// awaiting executable lowering is also sealed: its typed SUPER operands and
+// capture schedule cannot be reinterpreted by a later source-text rule. An
 // added field/type cannot capture a name in a previously proved NEW expression.
 func (c *ClassObjectDumper) newOrdinaryConstructorClassSource(source string, methods []*dumpedMethods, spans []ordinaryConstructorMethodSourceSpan) (*ordinaryConstructorClassSourceReceipt, error) {
 	s := &ordinaryConstructorClassSourceReceipt{c: c, current: source}
@@ -36,7 +38,7 @@ func (c *ClassObjectDumper) newOrdinaryConstructorClassSource(source string, met
 		return nil, fmt.Errorf("ordinary constructor class-source inventory budget")
 	}
 	for _, method := range methods {
-		if method != nil && method.ordinaryConstructorSource != nil {
+		if method != nil && (method.ordinaryConstructorSource != nil || method.constructorLowering != nil) {
 			s.bound = append(s.bound, method)
 		}
 	}
@@ -60,7 +62,7 @@ func (c *ClassObjectDumper) newOrdinaryConstructorClassSource(source string, met
 			return nil, fmt.Errorf("unproved actual class-source method extent")
 		}
 		methodEnd = span.start + len(m.code)
-		if m.ordinaryConstructorSource != nil || !m.hasSourceBodyRange || strings.HasPrefix(m.methodName, "<") || m.sourceRequest.role != methodSourceDeclaration {
+		if m.ordinaryConstructorSource != nil || m.constructorLowering != nil || !m.hasSourceBodyRange || strings.HasPrefix(m.methodName, "<") || m.sourceRequest.role != methodSourceDeclaration {
 			continue
 		}
 		if m.sourceBodyStart < 0 || m.sourceBodyEnd < m.sourceBodyStart || m.sourceBodyEnd > len(m.code) || m.code[m.sourceBodyStart:m.sourceBodyEnd] != m.bodyCode {
@@ -98,6 +100,17 @@ func (s *ordinaryConstructorClassSourceReceipt) closed() bool {
 		// address. A changed role, body, header or original-name stamp is stale.
 		if cached == nil || cached.sourceDumper != m.sourceDumper || cached.sourceObject != m.sourceObject || cached.sourceRequest != m.sourceRequest || cached.sourceCacheKey != m.sourceCacheKey || cached.parameterNameStamp != m.parameterNameStamp || cached.ordinaryConstructorSource != m.ordinaryConstructorSource || cached.code != m.code || cached.bodyCode != m.bodyCode || cached.methodName != m.methodName || cached.sourceBodyStart != m.sourceBodyStart || cached.sourceBodyEnd != m.sourceBodyEnd || cached.hasSourceBodyRange != m.hasSourceBodyRange || cached.checkedEscape != m.checkedEscape || cached.sourceReconstructionFailed() {
 			return false
+		}
+		if lowering := m.constructorLowering; lowering != nil {
+			if cached.constructorLowering != lowering || cached.constructorLoweringCode != m.constructorLoweringCode || m.constructorLoweringCode != m.code || m.methodName != "<init>" || m.descriptor != lowering.descriptor || s.c.constructorLowerings[lowering.descriptor] != lowering || lowering.owner != s.c.obj.GetClassName() {
+				return false
+			}
+			// The executable packet was proved by the typed declaration writer.
+			// Preserve that exact publication; FinishClass separately reopens
+			// the original bytes and verifies the fresh constructor packet.
+			if m.ordinaryConstructorSource == nil {
+				continue
+			}
 		}
 		p := m.ordinaryConstructorSource
 		if p == nil || p.c != s.c || !p.finished || p.active || p.failed || p.sourceContext == nil || p.publishedCode != m.code || p.sourceBody != m.bodyCode || len(p.receipts) != 1 {

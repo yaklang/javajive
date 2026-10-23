@@ -57,6 +57,15 @@ func TestAdversarialConstructorLoweringRetainsClosedControlFlowSuffix(t *testing
 
 func constructorSuffixRoundTrip(t *testing.T, fixture, debug, owner, expected string, target ...int) ([]byte, []byte, *JarReconstructionArtifact) {
 	t.Helper()
+	return constructorSuffixFamilyRoundTrip(t, fixture, debug, []string{owner}, expected, target...)
+}
+
+// Reconstruct every owned physical class together, while retaining the original
+// factory and driver as independent runtime observers. Compiler-only lexical
+// metadata must not silently re-enroll flattened siblings as native members.
+func constructorSuffixFamilyRoundTrip(t *testing.T, fixture, debug string, owners []string, expected string, target ...int) ([]byte, []byte, *JarReconstructionArtifact) {
+	t.Helper()
+	owner := owners[0]
 	modern, java := t04Tools(t)
 	native := os.Getenv("JAVA8_JAVAC")
 	if native == "" {
@@ -81,7 +90,14 @@ func constructorSuffixRoundTrip(t *testing.T, fixture, debug, owner, expected st
 	}
 	run(sourceArtifactWriteFiles(t, original))
 	jar := filepath.Join(t.TempDir(), "original.jar")
-	if err := os.WriteFile(jar, t23Zip(t, map[string][]byte{owner + ".class": original[owner+".class"]}), 0600); err != nil {
+	owned := map[string][]byte{}
+	for _, name := range owners {
+		if len(original[name+".class"]) == 0 {
+			t.Fatal("missing owned original", name)
+		}
+		owned[name+".class"] = original[name+".class"]
+	}
+	if err := os.WriteFile(jar, t23Zip(t, owned), 0600); err != nil {
 		t.Fatal(err)
 	}
 	a, err := NewJarReconstructionArtifactFromLocal(jar, 8, ModernJavac, func(n string) ([]byte, bool) { b, k := original[n+".class"]; return b, k })
@@ -89,18 +105,22 @@ func constructorSuffixRoundTrip(t *testing.T, fixture, debug, owner, expected st
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { a.Close() })
-	source, err := a.ReadFile(owner + ".class")
-	if err != nil || legacySourceHasFailureMarker(string(source)) {
-		t.Fatal("complete independent constructor source", err, string(source))
+	sources := map[string][]byte{}
+	for _, name := range owners {
+		source, err := a.ReadFile(name + ".class")
+		if err != nil || legacySourceHasFailureMarker(string(source)) {
+			t.Fatal("complete independent constructor source", name, err, string(source))
+		}
+		sources[name] = source
 	}
 	deps := map[string][]byte{}
 	for n, b := range original {
-		if n != owner+".class" {
+		if _, own := owned[n]; !own {
 			deps[n] = b
 		}
 	}
 	out := sourceArtifactWriteFiles(t, deps)
-	// The test reconstructs one independent physical unit. Do not let a
+	// The test reconstructs independent physical units. Do not let a
 	// dependency's redundant lexical row enroll that unit as a nonstatic
 	// member again and make javac add a second hidden enclosing parameter.
 	// This is compiler-only dependency metadata: all original dependency bytes,
@@ -113,7 +133,7 @@ func constructorSuffixRoundTrip(t *testing.T, fixture, debug, owner, expected st
 				kept := table.Classes[:0]
 				for _, row := range table.Classes {
 					binary, _ := sourceBridgeClassName(obj, row.InnerClassInfoIndex)
-					if binary == owner {
+					if _, own := owned[binary+".class"]; own {
 						changed = true
 					} else {
 						kept = append(kept, row)
@@ -134,41 +154,44 @@ func constructorSuffixRoundTrip(t *testing.T, fixture, debug, owner, expected st
 			}
 		}
 	}
-	path := filepath.Join(out, owner+".java")
-	if err := os.WriteFile(path, source, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if log, err := exec.Command(modern, "-proc:none", "--release", "8", "-g:"+debug, "-cp", out, "-sourcepath", out, "-d", out, path).CombinedOutput(); err != nil {
-		t.Fatal("fresh constructor suffix compilation", err, string(log), string(source))
-	}
-	path = filepath.Join(out, owner+".class")
-	fresh, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	saved := bytes.Clone(fresh)
-	finished, err := a.FinishClass(owner+".class", fresh)
-	if err != nil {
-		for label, raw := range map[string][]byte{"original": original[owner+".class"], "fresh": fresh} {
-			obj := mustParseLowering(t, raw)
-			for _, method := range obj.Methods {
-				name, _ := sourceBridgeUTF8(obj, method.NameIndex)
-				if name == "<init>" {
-					desc, _ := sourceBridgeUTF8(obj, method.DescriptorIndex)
-					t.Logf("%s constructor descriptor %s", label, desc)
-				}
-			}
+	args := []string{"-proc:none", "--release", "8", "-g:" + debug, "-cp", out, "-sourcepath", out, "-d", out}
+	for _, name := range owners {
+		path := filepath.Join(out, name+".java")
+		if err := os.WriteFile(path, sources[name], 0600); err != nil {
+			t.Fatal(err)
 		}
-		t.Fatal("constructor suffix completion", err, string(source))
+		args = append(args, path)
 	}
-	if !bytes.Equal(fresh, saved) {
-		t.Fatal("input mutated")
+	if log, err := exec.Command(modern, args...).CombinedOutput(); err != nil {
+		for _, name := range owners {
+			t.Log(name, string(sources[name]))
+		}
+		t.Fatal("fresh constructor suffix compilation", err, string(log))
 	}
-	if again, err := a.FinishClass(owner+".class", finished); err != nil || !bytes.Equal(again, finished) {
-		t.Fatal("completion not idempotent", err)
-	}
-	if err := os.WriteFile(path, finished, 0600); err != nil {
-		t.Fatal(err)
+	var primaryFresh []byte
+	for _, name := range owners {
+		path := filepath.Join(out, name+".class")
+		fresh, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name == owner {
+			primaryFresh = bytes.Clone(fresh)
+		}
+		saved := bytes.Clone(fresh)
+		finished, err := a.FinishClass(name+".class", fresh)
+		if err != nil {
+			t.Fatal("constructor suffix completion", name, err, string(sources[name]))
+		}
+		if !bytes.Equal(fresh, saved) {
+			t.Fatal("input mutated", name)
+		}
+		if again, err := a.FinishClass(name+".class", finished); err != nil || !bytes.Equal(again, finished) {
+			t.Fatal("completion not idempotent", name, err)
+		}
+		if err := os.WriteFile(path, finished, 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for name, raw := range deps {
 		if err := os.WriteFile(filepath.Join(out, name), raw, 0600); err != nil {
@@ -176,7 +199,7 @@ func constructorSuffixRoundTrip(t *testing.T, fixture, debug, owner, expected st
 		}
 	}
 	run(out)
-	return original[owner+".class"], fresh, a
+	return original[owner+".class"], primaryFresh, a
 }
 
 func TestAdversarialConstructorLoweringOriginalVersionsRetainCaptureOrder(t *testing.T) {

@@ -144,5 +144,9 @@ func (a *JarReconstructionArtifact) FinishClass(name string, compiled []byte) ([
 	if err != nil {
 		return nil, err
 	}
+	lowered, err = z.sourceConstructorLowering.restoreConstructorBindingSignatures(original, lowered, reader.Work)
+	if err != nil {
+		return nil, err
+	}
 	return a.source.restoreClassMetadata(name, lowered, reconstructionCaptureMetadataTarget(z))
 }

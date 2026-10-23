@@ -47,14 +47,15 @@ type sourceConstructorLoweringPublication struct {
 }
 
 type sourceConstructorLoweringAuthority struct {
-	jar                         *JarFS
-	parent                      *sourceConstructorLoweringAuthority
-	mu                          sync.Mutex
-	pending, active             map[string]*sourceConstructorLoweringPublication
-	nativePending, nativeActive map[string]constructorNativeSourceOrigin
-	enumPending, enumActive     map[string]constructorNativeSourceOrigin
-	staticPending, staticActive map[string]constructorNativeSourceOrigin
-	bridgePending, bridgeActive map[string]constructorNativeSourceOrigin
+	jar                           *JarFS
+	parent                        *sourceConstructorLoweringAuthority
+	mu                            sync.Mutex
+	pending, active               map[string]*sourceConstructorLoweringPublication
+	nativePending, nativeActive   map[string]constructorNativeSourceOrigin
+	enumPending, enumActive       map[string]constructorNativeSourceOrigin
+	staticPending, staticActive   map[string]constructorNativeSourceOrigin
+	bridgePending, bridgeActive   map[string]constructorNativeSourceOrigin
+	bindingPending, bindingActive map[string]constructorNativeSourceOrigin
 }
 
 type constructorNativeSourceOrigin struct{ originalHash, sourceHash [32]byte }
@@ -363,6 +364,9 @@ func (c *ClassObjectDumper) publishConstructorLowering(source string, methods []
 	if !c.publishEnumArrayLowering(source) {
 		return false
 	}
+	if !c.publishConstructorBindingSignatures(source, methods) {
+		return false
+	}
 	if len(c.constructorLowerings) == 0 {
 		return true
 	}
@@ -416,6 +420,11 @@ func (a *sourceConstructorLoweringAuthority) sourceReturned(owner string, source
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	hash := sha256.Sum256(source)
+	bindingOrigin, bindingFound := a.bindingPending[owner]
+	bindingFound = bindingFound && bindingOrigin.sourceHash == hash
+	if previous, active := a.bindingActive[owner]; active && (!bindingFound || previous != bindingOrigin) {
+		return fmt.Errorf("constructor binding: changed returned source")
+	}
 	staticOrigin, staticFound := a.staticPending[owner]
 	staticFound = staticFound && staticOrigin.sourceHash == hash
 	if previous, active := a.staticActive[owner]; active && (!staticFound || previous != staticOrigin) {
@@ -452,6 +461,12 @@ func (a *sourceConstructorLoweringAuthority) sourceReturned(owner string, source
 		}
 	}
 	activateOrigins := func() {
+		if bindingFound {
+			if a.bindingActive == nil {
+				a.bindingActive = map[string]constructorNativeSourceOrigin{}
+			}
+			a.bindingActive[owner] = bindingOrigin
+		}
 		if bridgeFound {
 			if a.bridgeActive == nil {
 				a.bridgeActive = map[string]constructorNativeSourceOrigin{}
