@@ -4,9 +4,9 @@
   "latest_measured_ci_head": "d30f48189b47ba9afe57b6971437434fccce82b9",
   "latest_measured_ci_run": 39441005032,
   "latest_measured_completed_parents": 2663,
-  "local_followup_go_manifest_sha256": "1d23f2ccca90affc982dbf5093dda38bc7ceaa71ba0cd9c3927fbdeaffb38660",
-  "local_followup_revision": "16980cadf56f22a10184cba3e5129625ec6405fd",
-  "local_followup_roots": 5,
+  "local_followup_go_manifest_sha256": "1746ff79540ab99be2ee298b41bd3a96477bfb3596c46ae5f394bb1e0b72feb8",
+  "local_followup_revision": "b1af1d41a26508262f2cec440fcbf5d70da64c22",
+  "local_followup_roots": 7,
   "measured_checkout_heads": [
     "8f3a843a53c2716671919ddecb0dfff51121aec7",
     "9c94287899bfb2f7cff6eeb713212ab570e46649",
@@ -2816,7 +2816,14 @@
     "TestAdversarialEnumFreshHelperBoundaryCountsKeepFreshInstructions": 25.409493,
     "TestAdversarialEnumFreshHelperNativeOwnerMustReturnWholeSource": 7.054194,
     "TestAdversarialEnumArrayLoweringKeepsCompletePacketAndConsumerProof": 1.277673,
-    "TestAdversarialEnumFreshHelperPhysicalSourceNamespacesStayIndependent": 7.414101
+    "TestAdversarialEnumFreshHelperPhysicalSourceNamespacesStayIndependent": 7.414101,
+    "TestAdversarialEnumArgumentHelperRetainsTypedAllocationAndEffects": 38.852051,
+    "TestAdversarialFlatClassKeepsPhysicalAccessWithoutLexicalOwnerSource": 10.725253,
+    "TestAdversarialStaticHelperHasNoInventedConstructorOrClassMarkerLoss": 9.87947,
+    "TestAdversarialStaticOnlyClassLoweringDoesNotDependOnSwitchNames": 7.072189,
+    "TestAdversarialEnumArgumentCutRejectsChangedOriginsAndResidualOperands": 1.619585,
+    "TestAdversarialPartialSourceKeepsDiagnosticsWithoutExecutableAuthority": 1.061728,
+    "TestAdversarialStaticClassLoweringRequiresClosedDeclarationsAndUnusedDefault": 1.295668
   },
   "source_runs": [
     37850493191,
