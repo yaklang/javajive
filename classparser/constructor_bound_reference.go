@@ -98,14 +98,21 @@ func (c *ClassObjectDumper) constructorBoundReferenceSource(code *CodeAttribute,
 	if len(ops) < 7 || core.GetRetrieveIdx(ops[0]) != 0 || !constructorMotionLoad(ops[0], "Ljava/lang/Object;") || core.GetRetrieveIdx(ops[1]) != slot || !constructorMotionLoad(ops[1], physical[parameterIndex]) || ops[2].Instr.OpCode != core.OP_DUP || !nativeMemberNullCheck(c.obj, ops[3]) || ops[4].Instr.OpCode != core.OP_POP || ops[5].Instr.OpCode != core.OP_INVOKEDYNAMIC || int(ops[3].CurrentOffset) != check.OriginPC || int(ops[5].CurrentOffset) != pc || pc >= delegate.OriginPC {
 		return body
 	}
-	// Retain the selected compiler's null-check protocol, including its owner
-	// initialization and binding. A differently lowered original stays explicit.
-	if c.options.SourceCompiler == NativeJavac8 {
-		if ops[3].Instr.OpCode != core.OP_INVOKEVIRTUAL || check.Kind != values.InvokeVirtual || len(check.Arguments) != 0 || values.UnpackSoltValue(check.Object) != receiver {
+	// JLS 15.13.3 requires this eager receiver NPE for a bound reference,
+	// independently of the compiler selected for the new source. The supported
+	// JDK compilers spell it as either final Object.getClass or the one-argument
+	// platform Objects.requireNonNull intrinsic. Neither calls user code; the
+	// discarded result cannot escape the exact DUP/check/POP/factory packet.
+	// Match the ORIGINAL opcode and receiver, never the destination profile.
+	if c.options.SourceCompiler != NativeJavac8 && c.options.SourceCompiler != ModernJavac {
+		return body
+	}
+	if ops[3].Instr.OpCode == core.OP_INVOKEVIRTUAL {
+		if check.Kind != values.InvokeVirtual || len(check.Arguments) != 0 || values.UnpackSoltValue(check.Object) != receiver {
 			return body
 		}
-	} else if c.options.SourceCompiler == ModernJavac {
-		if ops[3].Instr.OpCode != core.OP_INVOKESTATIC || check.Kind != values.InvokeStatic || len(check.Arguments) != 1 || values.UnpackSoltValue(check.Arguments[0]) != receiver {
+	} else if ops[3].Instr.OpCode == core.OP_INVOKESTATIC {
+		if check.Kind != values.InvokeStatic || len(check.Arguments) != 1 || values.UnpackSoltValue(check.Arguments[0]) != receiver {
 			return body
 		}
 	} else {
@@ -263,7 +270,7 @@ func (c *ClassObjectDumper) constructorBoundReferenceTarget(code *CodeAttribute,
 	if !ok || fi.Name != fiName || !fi.IsInterface || !fi.MembersComplete || !fi.ParentsComplete || len(fi.Methods) > 256 {
 		return fail()
 	}
-	samSignature := ""
+	samSignature, samFound := "", false
 	for _, method := range fi.Methods {
 		if !nativeProofWork(c.Work, 1) {
 			return fail()
@@ -272,11 +279,14 @@ func (c *ClassObjectDumper) constructorBoundReferenceTarget(code *CodeAttribute,
 		// class formals. The descriptor/Signature projection below binds those
 		// variables; an unrelated method formal remains unsupported there.
 		if method.Name == samName && method.Desc == erased && !method.Static && !method.Varargs && !method.Bridge {
-			if samSignature != "" {
+			if samFound {
 				return fail()
 			}
-			samSignature = method.Signature
+			samSignature, samFound = method.Signature, true
 		}
+	}
+	if !samFound {
+		return fail()
 	}
 	resolve := c.nativeAnnotationDeclarationResolver()
 	if !nativeLambdaFunctionalTarget(functional, samName, erased, resolve, c.Work) {
@@ -308,12 +318,19 @@ func (c *ClassObjectDumper) constructorBoundReferenceTarget(code *CodeAttribute,
 		if method.Name != "<init>" || method.Desc != delegateDescriptor {
 			continue
 		}
-		physical, _, exact := types.EraseConcreteMethodSignatureWithThrows(method.Signature)
+		// Absence of Signature on a monomorphic declaration is an identity
+		// projection of its descriptor, not missing type evidence. Validate the
+		// actual original absence before using that descriptor as a source view.
+		sourceSignature := method.Signature
+		if sourceSignature == "" {
+			sourceSignature = method.Desc
+		}
+		physical, _, exact := types.EraseConcreteMethodSignatureWithThrows(sourceSignature)
 		original, originalKnown := resolve(delegateOwner)
 		if !exact || physical != delegateDescriptor || !originalKnown || !constructorBoundOriginalSignature(original, "<init>", delegateDescriptor, method.Signature, c.Work) {
 			return fail()
 		}
-		formals, parameters, result := types.ParseMethodSignatureFull(method.Signature, c.FuncCtx)
+		formals, parameters, result := types.ParseMethodSignatureFull(sourceSignature, c.FuncCtx)
 		if matched || formals != "" || result == nil || len(parameters) == 0 || parameters[0] == nil || !reflect.DeepEqual(parameters[0].RawType(), target.RawType()) {
 			return fail()
 		}
