@@ -321,6 +321,9 @@ func nativeEnumClassOperand(obj *ClassObject, op *core.OpCode, name string) bool
 	return known && closed && actual == name
 }
 func nativeEnumMemberOperand(obj *ClassObject, op *core.OpCode, code int, owner, name, descriptor string) bool {
+	if !nativeEnumOpcode(op, code) {
+		return false
+	}
 	index, known := nativeEnumCPIndex(op)
 	if !known || index == 0 || int(index) > len(obj.ConstantPool) {
 		return false

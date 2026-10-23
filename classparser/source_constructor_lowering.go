@@ -43,6 +43,7 @@ type sourceConstructorLoweringAuthority struct {
 	mu                          sync.Mutex
 	pending, active             map[string]*sourceConstructorLoweringPublication
 	nativePending, nativeActive map[string]constructorNativeSourceOrigin
+	enumPending, enumActive     map[string]constructorNativeSourceOrigin
 }
 
 type constructorNativeSourceOrigin struct{ originalHash, sourceHash [32]byte }
@@ -306,6 +307,9 @@ func (c *ClassObjectDumper) planArtifactConstructorLowering(boundary *constructo
 }
 
 func (c *ClassObjectDumper) publishConstructorLowering(source string, methods []*dumpedMethods) bool {
+	if !c.publishEnumArrayLowering(source) {
+		return false
+	}
 	if len(c.constructorLowerings) == 0 {
 		return true
 	}
@@ -344,6 +348,21 @@ func (a *sourceConstructorLoweringAuthority) sourceReturned(owner string, source
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	hash := sha256.Sum256(source)
+	if origin, found := a.enumPending[owner]; found {
+		if origin.sourceHash != hash {
+			if _, active := a.enumActive[owner]; active {
+				return fmt.Errorf("enum lowering: changed returned source")
+			}
+		} else {
+			if prior, active := a.enumActive[owner]; active && prior != origin {
+				return fmt.Errorf("enum lowering: conflicting source publication")
+			}
+			if a.enumActive == nil {
+				a.enumActive = map[string]constructorNativeSourceOrigin{}
+			}
+			a.enumActive[owner] = origin
+		}
+	}
 	if origin, found := a.nativePending[owner]; found && origin.sourceHash == hash {
 		if a.active[owner] != nil {
 			return fmt.Errorf("constructor lowering: conflicting native and flat source publication")
