@@ -345,22 +345,59 @@ func (c *ClassObjectDumper) publishConstructorLowering(source string, methods []
 }
 
 func (a *sourceConstructorLoweringAuthority) sourceReturned(owner string, source []byte) error {
+	// A child's comment is not its owning compilation unit. Native readers
+	// carry only source-origin records, never flat executable-lowering power.
+	// Import their enum origins only when this exact complete owning source
+	// is actually returned through the reconstruction API.
+	var enums []sourceEnumArrayOrigin
+	if a.jar != nil && a.jar.sourceLambdaMetadata != nil {
+		if publication := a.jar.sourceLambdaMetadata.publication(owner, string(source)); publication != nil {
+			enums = publication.enums
+		}
+		if len(enums) != 0 {
+			if err := a.jar.nativeMemberReader(nil).Work.CheckAlloc(int64(len(enums)+1) * 192); err != nil {
+				return err
+			}
+		}
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	hash := sha256.Sum256(source)
+	toActivate := map[string]constructorNativeSourceOrigin{}
+	for _, origin := range enums {
+		candidate := constructorNativeSourceOrigin{origin.originalHash, hash}
+		if _, duplicate := toActivate[origin.owner]; duplicate {
+			return fmt.Errorf("enum lowering: duplicate source origin")
+		}
+		toActivate[origin.owner] = candidate
+	}
 	if origin, found := a.enumPending[owner]; found {
 		if origin.sourceHash != hash {
 			if _, active := a.enumActive[owner]; active {
 				return fmt.Errorf("enum lowering: changed returned source")
 			}
 		} else {
-			if prior, active := a.enumActive[owner]; active && prior != origin {
+			if prior, known := toActivate[owner]; known && prior != origin {
 				return fmt.Errorf("enum lowering: conflicting source publication")
 			}
+			toActivate[owner] = origin
+		}
+	}
+	for binary, origin := range toActivate {
+		if prior, active := a.enumActive[binary]; active && prior != origin {
+			return fmt.Errorf("enum lowering: conflicting completed owning sources")
+		}
+	}
+	activateEnums := func() {
+		// Commit only at a successful return, while holding the lock. A
+		// later native/constructor conflict cannot leave partial authority.
+		if len(toActivate) != 0 {
 			if a.enumActive == nil {
 				a.enumActive = map[string]constructorNativeSourceOrigin{}
 			}
-			a.enumActive[owner] = origin
+			for binary, origin := range toActivate {
+				a.enumActive[binary] = origin
+			}
 		}
 	}
 	if origin, found := a.nativePending[owner]; found && origin.sourceHash == hash {
@@ -374,6 +411,7 @@ func (a *sourceConstructorLoweringAuthority) sourceReturned(owner string, source
 			a.nativeActive = map[string]constructorNativeSourceOrigin{}
 		}
 		a.nativeActive[owner] = origin
+		activateEnums()
 		return nil
 	}
 	p := a.pending[owner]
@@ -381,6 +419,7 @@ func (a *sourceConstructorLoweringAuthority) sourceReturned(owner string, source
 		if a.active[owner] != nil {
 			return fmt.Errorf("constructor lowering: changed source requires a fresh artifact")
 		}
+		activateEnums()
 		return nil
 	}
 	if prior := a.active[owner]; prior != nil && !reflect.DeepEqual(prior, p) {
@@ -390,6 +429,7 @@ func (a *sourceConstructorLoweringAuthority) sourceReturned(owner string, source
 		a.active = map[string]*sourceConstructorLoweringPublication{}
 	}
 	a.active[owner] = p
+	activateEnums()
 	return nil
 }
 

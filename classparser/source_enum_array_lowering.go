@@ -10,6 +10,11 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
+type sourceEnumArrayOrigin struct {
+	owner        string
+	originalHash [32]byte
+}
+
 // The original backing-array protocol is proved before enum source is
 // published. A speculative native reader cannot enroll this flat-source
 // transaction. As with constructor lowering, permission becomes active only

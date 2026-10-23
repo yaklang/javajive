@@ -38,7 +38,7 @@ func enumArrayLoweringInputs(t *testing.T) ([]byte, []byte, *JarReconstructionAr
 
 func TestAdversarialEnumArrayLoweringKeepsCompletePacketAndConsumerProof(t *testing.T) {
 	original, compiled, artifact := enumArrayLoweringInputs(t)
-	for _, variant := range []string{"control", "unreturned source", "stale original", "field universe", "extra method", "visibility", "helper flags", "array order", "array opcode", "extra instruction", "other consumer", "wrong call kind", "method handle", "handler", "frame", "unknown PC table", "max stack", "work", "output", "canceled"} {
+	for _, variant := range []string{"control", "renamed helper", "expanded integer", "unreturned source", "pending namespace", "stale original", "field universe", "extra method", "visibility", "helper flags", "array order", "array opcode", "extra instruction", "other consumer", "wrong call kind", "method handle", "handler", "frame", "unknown PC table", "max stack", "work", "output", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			object := mustParseLowering(t, bytes.Clone(compiled))
 			var initializer, helper, fold *MemberInfo
@@ -70,8 +70,26 @@ func TestAdversarialEnumArrayLoweringKeepsCompletePacketAndConsumerProof(t *test
 			authority := artifact.source.jar.sourceConstructorLowering
 			want := bytes.Clone(original)
 			switch variant {
+			case "renamed helper":
+				index := uint16(object.ConstantPoolManager.AddUtf8Info("compiler$array$packet"))
+				helper.NameIndex = index
+				member := nativeConstantMember(object.ConstantPool[ref-1])
+				if member == nil {
+					t.Fatal("authored helper reference")
+				}
+				object.ConstantPool[member.NameAndTypeIndex-1].(*ConstantNameAndTypeInfo).NameIndex = index
+			case "expanded integer":
+				if array.Code[0] != 0x06 {
+					t.Fatal("authored compact integer")
+				}
+				array.Code = append([]byte{0x10, 3}, array.Code[1:]...)
 			case "unreturned source":
 				authority = &sourceConstructorLoweringAuthority{}
+			case "pending namespace":
+				authority.mu.Lock()
+				origin := authority.enumActive["PacketValues"]
+				authority.mu.Unlock()
+				authority = &sourceConstructorLoweringAuthority{jar: authority.jar, parent: authority, enumPending: map[string]constructorNativeSourceOrigin{"PacketValues": origin}}
 			case "stale original":
 				old := mustParseLowering(t, want)
 				old.ConstantPoolManager.AddUtf8Info("unused but independently owned physical namespace")
@@ -145,12 +163,26 @@ func TestAdversarialEnumArrayLoweringKeepsCompletePacketAndConsumerProof(t *test
 			}
 			inputBefore, wantBefore := bytes.Clone(input), bytes.Clone(want)
 			got, err := authority.lowerEnumArrayHelper("PacketValues", want, input, work)
-			if variant == "control" {
+			if variant == "control" || variant == "renamed helper" || variant == "expanded integer" {
 				if err != nil || bytes.Equal(got, input) {
 					t.Fatal("positive fresh packet edit", err)
 				}
 				if finished, err := artifact.FinishClass("PacketValues.class", input); err != nil || finished == nil {
 					t.Fatal("positive complete original universe and remaining parameter/metadata obligations", err)
+				}
+				if variant == "expanded integer" {
+					result := mustParseLowering(t, got)
+					found := false
+					for _, method := range result.Methods {
+						name, _ := sourceBridgeUTF8(result, method.NameIndex)
+						if name == "<clinit>" {
+							body := constructorLoweringCode(method).Code
+							found = body[call] == 0x10 && body[call+1] == 3
+						}
+					}
+					if !found {
+						t.Fatal("fresh integer encoding replaced by original bytes")
+					}
 				}
 			} else if err == nil {
 				if !bytes.Equal(got, input) || sourceMethodMetadataClosed(mustParseLowering(t, original), got, nil) == nil {

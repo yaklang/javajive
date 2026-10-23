@@ -230,6 +230,7 @@ type sourceLambdaPublication struct {
 	plans                    []*sourceLambdaMetadataPlan
 	constructors             []*sourceConstructorMetadataPlan
 	anonymous                []*sourceAnonymousClassMetadataPlan
+	enums                    []sourceEnumArrayOrigin
 }
 
 func (a *sourceLambdaMetadataAuthority) publication(owner, source string) *sourceLambdaPublication {
@@ -255,10 +256,14 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 	if own != nil && own.sourceHash != hash {
 		own = nil
 	}
-	if own == nil && len(c.sourceLambdaMembers) == 0 && len(c.sourceConstructorMembers) == 0 {
+	ownEnum := c.nativeEnumBacking != nil && c.nativeEnumBacking.object == c.obj && !c.sourceDegraded && c.artifactLambdaMetadataAllowed()
+	if own == nil && !ownEnum && len(c.sourceLambdaMembers) == 0 && len(c.sourceConstructorMembers) == 0 {
 		return true
 	}
-	if !c.artifactLambdaMetadataAllowed() || len(c.sourceLambdaMembers) > 4096 || len(members) != len(c.nativeRenderedMemberNames) {
+	// Enum-only origins transport a completed lexical source packet; they
+	// grant no lambda, constructor or anonymous metadata edits to this owner.
+	// The old domain remains mandatory below whenever such plans are present.
+	if c.options.SourceCompiler.effective() != ModernJavac || c.options.TargetSourceVersion != 8 || len(c.sourceLambdaMembers) > 4096 || len(members) != len(c.nativeRenderedMemberNames) {
 		return false
 	}
 	publication := &sourceLambdaPublication{owner: c.obj.GetClassName(), sourceHash: hash}
@@ -292,6 +297,15 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 		publication.anonymous = append(publication.anonymous, plan)
 		return true
 	}
+	enumSeen := map[string]bool{}
+	addEnum := func(origin sourceEnumArrayOrigin) bool {
+		if origin.owner == "" || origin.originalHash == ([32]byte{}) || enumSeen[origin.owner] || len(publication.enums) >= 4096 || !nativeProofWork(c.Work, int64(len(origin.owner))+1) {
+			return false
+		}
+		enumSeen[origin.owner] = true
+		publication.enums = append(publication.enums, origin)
+		return true
+	}
 	bytes := int64(0)
 	for _, member := range c.sourceConstructorMembers {
 		cost := int64(len(source)) + 1
@@ -318,6 +332,11 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 			}
 			for _, plan := range nested.anonymous {
 				if !addAnonymous(plan) {
+					return false
+				}
+			}
+			for _, origin := range nested.enums {
+				if !addEnum(origin) {
 					return false
 				}
 			}
@@ -366,12 +385,28 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 				return false
 			}
 		}
+		for _, origin := range member.publication.enums {
+			if !addEnum(origin) {
+				return false
+			}
+		}
+	}
+	if (len(publication.plans) != 0 || len(publication.constructors) != 0 || len(publication.anonymous) != 0) && !c.artifactLambdaMetadataAllowed() {
+		return false
 	}
 	raw, bound := a.original(c.obj, c.Work)
 	if !bound {
 		return false
 	}
 	publication.originalHash = sha256.Sum256(raw)
+	if ownEnum && !addEnum(sourceEnumArrayOrigin{c.obj.GetClassName(), publication.originalHash}) {
+		return false
+	}
+	if c.sourceDegraded {
+		// A partial owning unit is not executable reconstruction authority.
+		// Existing metadata plans keep their independent narrower contracts.
+		publication.enums = nil
+	}
 	size := int64(128 + len(publication.owner) + len(publication.plans)*16)
 	for _, plan := range publication.constructors {
 		size += int64(128 + len(plan.owner) + len(plan.descriptor) + len(plan.flags)*2)
@@ -379,12 +414,15 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 	for _, plan := range publication.anonymous {
 		size += int64(160 + len(plan.owner) + len(plan.classKey) + len(plan.constructorDescriptor) + len(plan.inferredExceptions))
 	}
+	for _, origin := range publication.enums {
+		size += int64(96 + len(origin.owner))
+	}
 	if c.Work != nil && c.Work.CheckAlloc(size) != nil {
 		return false
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if prior := a.publications[publication.owner]; prior != nil && prior.originalHash == publication.originalHash && prior.sourceHash == publication.sourceHash && slices.Equal(prior.plans, publication.plans) && slices.EqualFunc(prior.constructors, publication.constructors, sourceConstructorMetadataPlansEqual) && slices.EqualFunc(prior.anonymous, publication.anonymous, sourceAnonymousMetadataPlansEqual) {
+	if prior := a.publications[publication.owner]; prior != nil && prior.originalHash == publication.originalHash && prior.sourceHash == publication.sourceHash && slices.Equal(prior.plans, publication.plans) && slices.EqualFunc(prior.constructors, publication.constructors, sourceConstructorMetadataPlansEqual) && slices.EqualFunc(prior.anonymous, publication.anonymous, sourceAnonymousMetadataPlansEqual) && slices.Equal(prior.enums, publication.enums) {
 		// The typed/source checks above still run on a cache hit. Reusing the
 		// same immutable publication must not spend retained-memory allowance.
 		return true
