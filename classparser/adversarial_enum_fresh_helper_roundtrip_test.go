@@ -58,7 +58,7 @@ func TestAdversarialEnumFreshHelperOriginalVersionsKeepArrayAndMethodIdentity(t 
 	}
 }
 
-func enumFreshHelperRoundTrip(t *testing.T, owner, debug string, release int) {
+func enumFreshHelperRoundTrip(t *testing.T, owner, debug string, release int, mutate ...func(map[string][]byte)) {
 	t.Helper()
 	modern, java := t04Tools(t)
 	native := os.Getenv("JAVA8_JAVAC")
@@ -68,6 +68,9 @@ func enumFreshHelperRoundTrip(t *testing.T, owner, debug string, release int) {
 	fixture := strings.ReplaceAll(enumFreshHelperFixture, "PacketValues", owner)
 	driver := owner + "Driver"
 	files := compileLambdaParameterMetadataFixtureWithSourcesAtRelease(t, native, NativeJavac8, fixture, owner, debug, nil, release, false)
+	for _, change := range mutate {
+		change(files)
+	}
 	run := func(dir string, want bool) {
 		t.Helper()
 		for _, mode := range []string{"-ea", "-da"} {
