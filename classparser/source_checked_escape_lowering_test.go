@@ -142,6 +142,7 @@ func TestAdversarialCheckedEscapeCompletionRequiresCaughtIdentityAndClosedUses(t
 				body.ExceptionTable = []*ExceptionTableEntry{{StartPc: 0, EndPc: 1, HandlerPc: 1}}
 				body.AttrLen += 8
 			case "helper annotation":
+				obj.ConstantPoolManager.AddUtf8Info("RuntimeVisibleAnnotations")
 				helper.Attributes = append(helper.Attributes, &UnparsedAttribute{Name: "RuntimeVisibleAnnotations", Info: []byte{0, 0}, Length: 2})
 			case "extra method":
 				copy := *helper
@@ -163,6 +164,7 @@ func TestAdversarialCheckedEscapeCompletionRequiresCaughtIdentityAndClosedUses(t
 				// not be retained after replacing RuntimeException with Throwable.
 				for _, a := range code.Attributes {
 					if u, ok := a.(*UnparsedAttribute); ok && u.Name == "StackMapTable" {
+						code.AttrLen += uint32(3) - uint32(len(u.Info))
 						u.Info = []byte{0, 1, byte(call + 3)}
 						u.Length = 3
 					}
