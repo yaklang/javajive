@@ -62,7 +62,15 @@ func TestAdversarialIndependentNestedSubclassKeepsInheritedCovariantBridge(t *te
 
 func testIndependentInheritedBridge(t *testing.T, modern, java, native, fixture, root, debug string, parameters bool, expected string) {
 	t.Helper()
+	testIndependentInheritedBridgeWithOriginal(t, modern, java, native, fixture, root, debug, parameters, expected, nil)
+}
+
+func testIndependentInheritedBridgeWithOriginal(t *testing.T, modern, java, native, fixture, root, debug string, parameters bool, expected string, mutate func(map[string][]byte)) {
+	t.Helper()
 	files := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, fixture, root, debug, parameters)
+	if mutate != nil {
+		mutate(files)
+	}
 	run := func(dir string) {
 		t.Helper()
 		for _, mode := range []string{"-ea", "-da"} {
