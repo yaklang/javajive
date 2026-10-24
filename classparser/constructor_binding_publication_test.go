@@ -25,7 +25,7 @@ func TestConstructorBindingPublicationRejectsStaleWriterAndOriginal(t *testing.T
 		t.Fatal(err)
 	}
 	defer artifact.Close()
-	for _, variant := range []string{"control", "missing span", "shifted span", "changed cached signature", "changed cached code", "changed published code", "changed descriptor", "foreign member", "foreign publisher", "missing authority", "changed original capture"} {
+	for _, variant := range []string{"control", "missing span", "shifted span", "changed cached signature", "changed cached code", "changed published code", "changed descriptor", "foreign member", "missing member", "foreign publisher", "missing authority", "changed original capture"} {
 		t.Run(variant, func(t *testing.T) {
 			obj := mustParseLowering(t, bytes.Clone(files[owner+".class"]))
 			d := artifact.source.jar.nativeMemberReader(obj)
@@ -76,6 +76,8 @@ func TestConstructorBindingPublicationRejectsStaleWriterAndOriginal(t *testing.T
 			case "foreign member":
 				copy := *bound.member
 				bound.member = &copy
+			case "missing member":
+				bound.member = nil
 			case "foreign publisher":
 				bound.sourceDumper = NewClassObjectDumper(obj)
 			case "missing authority":

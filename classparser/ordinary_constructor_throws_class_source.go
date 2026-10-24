@@ -103,7 +103,7 @@ func (s *ordinaryConstructorClassSourceReceipt) closed() bool {
 			return false
 		}
 		if signature := m.constructorBindingSignature; signature != "" {
-			if cached.constructorBindingSignature != signature || cached.constructorBindingCode != m.constructorBindingCode || m.constructorBindingCode != m.code || cached.member != m.member || cached.descriptor != m.descriptor || s.c.options.sourceConstructorLowering == nil || !s.c.reconstructionPhysicalHeader() || m.methodName != "<init>" {
+			if cached.constructorBindingSignature != signature || cached.constructorBindingCode != m.constructorBindingCode || m.constructorBindingCode != m.code || m.member == nil || cached.member != m.member || cached.descriptor != m.descriptor || s.c.options.sourceConstructorLowering == nil || !s.c.reconstructionPhysicalHeader() || m.methodName != "<init>" {
 				return false
 			}
 			if descriptor, valid := sourceBridgeUTF8(s.c.obj, m.member.DescriptorIndex); !valid || descriptor != m.descriptor {
