@@ -454,11 +454,14 @@ func nativeMemberProofWithSourceMetadata(obj, enclosing *ClassObject, work *work
 				}
 			}
 		}
+		bridge := bridges[desc]
 		if n == "<init>" && m.AccessFlags&0x1000 != 0 {
-			if bridge := bridges[desc]; bridge == nil || bridge.method != m {
+			if bridge == nil || bridge.method != m {
 				return nil
 			}
-			continue
+			// A legacy target regenerates this declaration; a nest-access
+			// target must emit it. Both need the same proved enclosing-port
+			// projection and this-delegation path, not a second capture write.
 		}
 		if p.static {
 			continue
@@ -484,7 +487,7 @@ func nativeMemberProofWithSourceMetadata(obj, enclosing *ClassObject, work *work
 			continue
 		}
 		ps, ret, e := callbinding.Descriptor(desc)
-		if e != nil || ret != "V" || len(ps) == 0 || ps[0] != "L"+owner+";" || p.constructors[desc] != nil || m.AccessFlags&^uint16(0x0087) != 0 {
+		if e != nil || ret != "V" || len(ps) == 0 || ps[0] != "L"+owner+";" || p.constructors[desc] != nil || bridge == nil && m.AccessFlags&^uint16(0x0087) != 0 {
 			return nil
 		}
 		seenSignature := false
