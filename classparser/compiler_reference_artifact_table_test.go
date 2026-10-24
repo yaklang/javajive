@@ -1,6 +1,7 @@
 package javaclassparser
 
 import (
+	"bytes"
 	"encoding/binary"
 	"os"
 	"path/filepath"
@@ -19,7 +20,10 @@ func TestCompilerReferenceParameterTableNeedsOriginalArtifactAndCompilerSchema(t
 	files := compileLambdaParameterMetadataFixture(t, compiler, NativeJavac8, fixture, "LocalReceiverOwner", "none", true)
 	for _, variant := range []string{"artifact", "plain source", "stale original", "changed port name", "changed port flags", "wrong language", "unknown compiler"} {
 		t.Run(variant, func(t *testing.T) {
-			obj := mustParseLowering(t, files["LocalReceiverOwner.class"])
+			// Parsed attribute payloads can retain slices of their input. Each
+			// adversarial world owns its bytes; a mutation must not corrupt the
+			// next world's independently valid original class.
+			obj := mustParseLowering(t, bytes.Clone(files["LocalReceiverOwner.class"]))
 			var method *MemberInfo
 			var table *UnparsedAttribute
 			for _, m := range obj.Methods {
