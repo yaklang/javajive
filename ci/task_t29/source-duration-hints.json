@@ -7,6 +7,12 @@
   "latest_partial_measured_ci_head": "ddafe1ef5ce5ea8b3f214f8f792104c0ff7d95ae",
   "latest_partial_measured_ci_run": 40069295132,
   "latest_partial_measured_completed_parents": 2994,
+  "local_bridge_fallback_parent_seconds": {
+    "TestAdversarialExactSuperBridgePreservesDeclarationAndDispatch": 98.76,
+    "TestAdversarialLegacyInheritedBridgeRetainsOriginalSuperDispatch": 24.59,
+    "TestAdversarialVisibilityBridgeDoesNotInventCovariantDeclarations": 35.25
+  },
+  "local_bridge_fallback_revision": "0a417dcba8af0159f02657cd5a82cb11c394f760",
   "local_current_fallback_parent_seconds": {
     "TestAdversarialConstructorBindingPublicationRejectsStaleWriterAndOriginal": 0.65,
     "TestAdversarialConstructorNoargPreludePreservesOriginalAbruptOrder": 95.46,
@@ -782,6 +788,7 @@
     "TestAdversarialErasedSamReturnControlKeepsEagerCaptureAndCheckedFailures": 29.63,
     "TestAdversarialErasedSelfBoundArithmeticRoundTrip": 4.64,
     "TestAdversarialErasedWidenedAssignmentHundredStructureBank": 20.24,
+    "TestAdversarialExactSuperBridgePreservesDeclarationAndDispatch": 177.722,
     "TestAdversarialExceptionBeforeStateLocalWebRoundTrip": 6.49,
     "TestAdversarialExceptionContractWithoutGuessedCatchTypesRoundTrip": 5.67,
     "TestAdversarialExpandedLocalOpenFileKeepsCallerFlags": 0,
@@ -1076,6 +1083,7 @@
     "TestAdversarialLayeredMemberSuperPreservesOriginalEnclosingAndEarlyObservation": 10.41,
     "TestAdversarialLayeredMemberSuperPreservesRenamedDeclarations": 10.38,
     "TestAdversarialLegacyEnumConstantMetadataKeepsExecutableOwnershipRoundTrip": 116.9,
+    "TestAdversarialLegacyInheritedBridgeRetainsOriginalSuperDispatch": 44.251,
     "TestAdversarialLegacyLocalMetadataKeepsExecutableCaptureBindingsRoundTrip": 103.51,
     "TestAdversarialLegacyOwnEnumSwitchRetainsEveryOriginalClassAndBehavior": 14.09,
     "TestAdversarialLegacyPrivateCallsRetainOriginalAccessAndDelegation": 20.14,
@@ -1751,6 +1759,7 @@
     "TestAdversarialVarargsReferencesPreserveBehaviorThroughBothPublicModes": 33.9,
     "TestAdversarialVarargsResultConversionBankPreservesTypedInvocationFrontier": 61.8,
     "TestAdversarialVarargsResultsPreserveBehaviorThroughBothPublicModes": 36.42,
+    "TestAdversarialVisibilityBridgeDoesNotInventCovariantDeclarations": 63.434,
     "TestAdversarialVisibilityBridgeEffects": 24.9,
     "TestAdversarialVisibilityBridgeEffectsNativeCompiler": 19.76,
     "TestAdversarialVisibilityBridgeLexicalCall": 9.81,
