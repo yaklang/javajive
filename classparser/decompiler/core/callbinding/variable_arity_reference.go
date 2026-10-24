@@ -56,8 +56,9 @@ func (q *variableArityQuery) allocate(n int64) bool {
 // they are not poly expressions. No potentially applicable method is removed
 // merely because its declared arity differs from the original target's arity.
 // Unknown metadata/conversion is never treated as a negative applicability
-// result. Generic/inaccessible/opposite-kind/bridge families and override-equivalent
-// declarations require separate source binding proofs and remain unsupported.
+// result. Override-equivalent declarations are normalized only with original
+// public instance access, ancestry and return-substitutability evidence. Bridges
+// additionally require a certified forwarding body; generic families stay unknown.
 func SelectVariableArityReference(w Witness, sam string, provider Provider, work *workbudget.Budget) VariableArityReferencePlan {
 	out := VariableArityReferencePlan{}
 	reject := func(reason string) VariableArityReferencePlan { out.Reason = reason; return out }
@@ -94,42 +95,17 @@ func SelectVariableArityReference(w Witness, sam string, provider Provider, work
 		}
 		active[name] = true
 		defer delete(active, name)
+		declarations := map[string]bool{}
 		for _, method := range class.Methods {
 			if method.Name != w.Name {
 				continue
 			}
 			parameters, _, err := Descriptor(method.Desc)
-			if err != nil || len(family) >= 256 || len(method.Exceptions) > 128 || !q.charge(int64(len(method.Desc)+len(method.Signature)+len(method.Exceptions))+1) || !q.allocate(int64(len(family)+1)*256+int64(len(method.Exceptions))*16) {
+			if err != nil || declarations[method.Desc] || len(family) >= 256 || len(method.Exceptions) > 128 || !q.charge(int64(len(method.Desc)+len(method.Signature)+len(method.Exceptions))+1) || !q.allocate(int64(len(family)+1)*256+int64(len(method.Exceptions))*16) {
 				return false
 			}
-			if w.Kind == Static && !method.Static {
-				// TypeName::method has a second, unbound-instance search with
-				// the first SAM input as receiver. Until that search has its own
-				// complete applicability proof, do not silently remove any
-				// arity-eligible instance candidate from a static reference.
-				unbound := len(arguments) - 1
-				if unbound >= 0 && (len(parameters) == unbound || method.Varargs && len(parameters) > 0 && unbound >= len(parameters)-1) {
-					return false
-				}
-				continue
-			}
-			// Arity alone can disprove applicability, including for generic
-			// methods. An eligible generic candidate needs inference, however.
-			potential := len(parameters) == len(arguments) || method.Varargs && len(parameters) > 0 && len(arguments) >= len(parameters)-1
-			if !potential {
-				continue
-			}
-			if !method.Public || method.Static != (w.Kind == Static) || method.Bridge || method.Generic || strings.HasPrefix(class.Signature, "<") || w.Kind == Static && class.IsInterface {
-				return false
-			}
-			if method.Varargs && (len(parameters) == 0 || !strings.HasPrefix(parameters[len(parameters)-1], "[")) {
-				return false
-			}
-			for _, prior := range family {
-				if !q.charge(1) || slices.Equal(prior.parameters, parameters) {
-					return false
-				}
-			}
+			declarations[method.Desc] = true
+
 			method.Exceptions = slices.Clone(method.Exceptions)
 			family = append(family, variableArityCandidate{name, method, parameters})
 		}
@@ -145,6 +121,11 @@ func SelectVariableArityReference(w Witness, sam string, provider Provider, work
 	}
 	if !collect(w.Owner, 0) || len(family) == 0 {
 		return reject("complete source overload family unavailable")
+	}
+	var normalized bool
+	family, normalized = q.sourceOverrideFamily(family, w.Kind, len(arguments))
+	if !normalized || len(family) == 0 {
+		return reject("source override family unavailable")
 	}
 	targets := 0
 	for _, candidate := range family {

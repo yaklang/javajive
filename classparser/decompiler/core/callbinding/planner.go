@@ -19,6 +19,14 @@ const (
 )
 
 type Method struct {
+	// Public is the caller's source-access view, not necessarily ACC_PUBLIC.
+	// Override proofs must use the original access flags instead.
+	AccessFlags      uint16 `json:",omitempty"`
+	AccessFlagsKnown bool   `json:",omitempty"`
+	// CovariantBridgeTarget certifies a pure this/unchanged-arguments virtual
+	// forwarder to this owner's ordinary method. It does not prove overriding
+	// or return substitutability; the binding query checks those separately.
+	CovariantBridgeTarget                    string   `json:",omitempty"`
 	Signature                                string   `json:",omitempty"`
 	Exceptions                               []string `json:",omitempty"`
 	ExceptionsKnown                          bool     `json:",omitempty"`
