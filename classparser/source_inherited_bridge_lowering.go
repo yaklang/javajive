@@ -103,7 +103,11 @@ func inheritedBridgeForwardPacket(object *ClassObject, method *MemberInfo, opcod
 }
 
 func (c *ClassObjectDumper) inheritedBridgeOriginal(method *MemberInfo) *inheritedBridgePacket {
-	if c.obj.MajorVersion != 52 || method.AccessFlags != 0x1041 {
+	// The admitted program uses only the class-super invocation protocol:
+	// covariance and synthetic bridges already exist in the Java 5 format.
+	// Its receiver, argument slots, direct superclass and exact target are
+	// proved below; none of those obligations depends on Java 8 metadata.
+	if c.obj.MajorVersion < 49 || c.obj.MajorVersion > 52 || method.AccessFlags != 0x1041 {
 		return nil
 	}
 	p := inheritedBridgeForwardPacket(c.obj, method, core.OP_INVOKESPECIAL, c.Work)
