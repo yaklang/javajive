@@ -146,7 +146,12 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 	}
 	for key, flags := range fields {
 		actual, found := freshFields[key]
-		if !found || actual != flags || !enumArrayUTF8Equal(want, wantMembers[key].NameIndex, got, freshMembers[key].NameIndex) || !enumArrayUTF8Equal(want, wantMembers[key].DescriptorIndex, got, freshMembers[key].DescriptorIndex) {
+		// A source declaration cannot encode an original synthetic field marker.
+		// Keep that independent obligation pending, exactly as the final field
+		// metadata restorer does. Array lowering changes no field bytes and must
+		// still prove every executable flag and the complete field bijection.
+		flagsMatch := flags & ^syntheticFieldFlag == actual & ^syntheticFieldFlag && (actual&syntheticFieldFlag == 0 || flags&syntheticFieldFlag != 0)
+		if !found || !flagsMatch || !enumArrayUTF8Equal(want, wantMembers[key].NameIndex, got, freshMembers[key].NameIndex) || !enumArrayUTF8Equal(want, wantMembers[key].DescriptorIndex, got, freshMembers[key].DescriptorIndex) {
 			return decline()
 		}
 	}

@@ -163,6 +163,8 @@ type ClassObjectDumper struct {
 	interfaceLambdaInitializer     *interfaceLambdaInitializerReceipt
 	constructorBoundaryHelpers     []*dumpedMethods
 	privateNestOwnPlan             *privateNestPlan
+	nestPrivateUsesKnown           bool
+	nestPrivateUses                map[nestPrivateUseKey]bool
 	dumpedMethodsSet               map[string]*dumpedMethods
 	ordinaryConstructorClassSource *ordinaryConstructorClassSourceReceipt
 	// Performance hint only; the actual publication spans still prove ownership.
@@ -2243,7 +2245,7 @@ func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
 		//}
 		_ = accessFlagsVerbose
 		accessFlags := accessCode
-		if c.nestDemotePrivate() {
+		if c.nestDemotePrivateMember(field) {
 			accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "private", ""))
 		}
 		name, err := c.obj.getUtf8(field.NameIndex)
@@ -3939,7 +3941,7 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 	// separate access bridge rather than changing the original declaration.
 	// A proved lexical access family needs the original private constructors;
 	// widening them would prevent javac from regenerating its synthetic bridge.
-	if c.nestDemotePrivate() && !isSerializationHookMethod(name) && (name == "<init>" || method.AccessFlags&StaticFlag != 0) && !(name == "<init>" && c.nativeAnonymousRoot != nil && len(c.nativeAnonymousRoot.bridges) > 0) {
+	if c.nestDemotePrivateMember(method) && !isSerializationHookMethod(name) && (name == "<init>" || method.AccessFlags&StaticFlag != 0) && !(name == "<init>" && c.nativeAnonymousRoot != nil && len(c.nativeAnonymousRoot.bridges) > 0) {
 		accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "private", ""))
 	}
 	methodType, err := types.ParseMethodDescriptor(descriptor)
