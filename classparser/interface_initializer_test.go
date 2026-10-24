@@ -100,6 +100,68 @@ func TestInterfaceInitializerArrayTemporaryRequiresClosedAdjacentFixedType(t *te
 	}
 }
 
+func TestInterfaceWrappedArrayRequiresSingleOrderedClosedUse(t *testing.T) {
+	for _, variant := range []string{"control", "later effect", "earlier effect", "duplicate", "conditional", "instance call", "missing origin", "consumer before elements", "outer before inner", "field before consumer", "receiver effect", "unbound operand", "opaque operand", "cycle", "too deep"} {
+		t.Run(variant, func(t *testing.T) {
+			typ := types.NewJavaArrayType(types.NewJavaPrimer(types.JavaInteger))
+			local := values.NewJavaRef(utils.NewRootVariableId(), nil, typ)
+			array := &values.NewExpression{JavaType: typ, HasOriginPC: true, OriginPC: 1, HasEvaluationEndPC: true, EvaluationEndPC: 5, Initializer: []values.JavaValue{values.NewJavaLiteral(7, types.NewJavaPrimer(types.JavaInteger))}}
+			call := func(pc int, args ...values.JavaValue) *values.FunctionCallExpression {
+				return &values.FunctionCallExpression{Kind: values.InvokeStatic, IsStatic: true, HasOriginPC: true, OriginPC: pc, ClassName: "example.Factories", FunctionName: "wrap", Descriptor: "([I)Ljava/lang/Object;", FuncType: &types.JavaFuncType{ReturnType: types.NewJavaClass("java.lang.Object")}, Arguments: args}
+			}
+			inner := call(6, local)
+			cast := &values.CastExpression{Value: inner, TargetType: types.NewJavaClass("java.lang.Object")}
+			outer := call(8, values.NewJavaLiteral(7, types.NewJavaPrimer(types.JavaInteger)), cast)
+			plan := &interfaceInitializerSegment{write: interfaceFieldWrite{pc: 10}, prefix: []statements.Statement{statements.NewAssignStatement(local, array, false)}, value: outer}
+			switch variant {
+			case "later effect":
+				outer.Arguments = append(outer.Arguments, call(7))
+			case "earlier effect":
+				outer.Arguments[0] = call(0)
+			case "duplicate":
+				outer.Arguments = append(outer.Arguments, local)
+			case "conditional":
+				outer.Arguments[1] = &values.TernaryExpression{Condition: values.NewJavaLiteral(true, types.NewJavaPrimer(types.JavaBoolean)), TrueValue: local, FalseValue: values.JavaNull}
+			case "instance call":
+				inner.Kind = values.InvokeVirtual
+			case "missing origin":
+				inner.HasOriginPC = false
+			case "consumer before elements":
+				inner.OriginPC = array.EvaluationEndPC
+			case "outer before inner":
+				outer.OriginPC = inner.OriginPC
+			case "field before consumer":
+				plan.write.pc = outer.OriginPC
+			case "receiver effect":
+				outer.Object = call(0)
+			case "unbound operand":
+				outer.Arguments = append(outer.Arguments, values.NewJavaRef(utils.NewRootVariableId(), nil, typ))
+			case "opaque operand":
+				outer.Arguments = append(outer.Arguments, &values.CustomValue{})
+			case "cycle":
+				inner.Arguments = []values.JavaValue{outer}
+			case "too deep":
+				for i := 0; i < 40; i++ {
+					plan.value = &values.CastExpression{Value: plan.value, TargetType: typ}
+				}
+			}
+			result, proved := interfaceInitializerArrayExpression(plan, &CodeAttribute{Code: make([]byte, 12)})
+			if variant == "control" || variant == "later effect" {
+				if !proved || result == plan.value {
+					t.Fatal("closed call path should replace only the private local")
+				}
+				copy := result.(*values.FunctionCallExpression)
+				replaced := copy.Arguments[1].(*values.CastExpression).Value.(*values.FunctionCallExpression)
+				if copy.Witness() != outer.Witness() || replaced.Witness() != inner.Witness() || replaced.Arguments[0] != array || inner.Arguments[0] != local || plan.value != outer {
+					t.Fatal("changed binding, array identity or original expression tree")
+				}
+			} else if proved {
+				t.Fatal("unproved expression cannot borrow allocation movement")
+			}
+		})
+	}
+}
+
 func TestInterfaceInitializerPartitionRequiresOriginalStoresAndPrivateLocals(t *testing.T) {
 	cases := []struct {
 		name   string

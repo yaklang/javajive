@@ -450,11 +450,11 @@ func (c *ClassObjectDumper) renderInterfaceInitializers(body []statements.Statem
 	return helpers, nil
 }
 
-// Eliminate an adjacent, private array temporary at its single field store.
+// Eliminate an adjacent, private array temporary at its single expression use.
 // Partitioning has already proved the original store order and that no local
-// crosses segments. There is no expression between the allocation and its use:
-// the allocation tree (including element calls, identity and first failure) is
-// retained verbatim and evaluated once. An explicit array creation has a fixed
+// crosses segments. Calls/casts on the use path keep their order; preceding
+// arguments must be effect-free. The allocation tree (including element calls,
+// identity and first failure) is retained verbatim and evaluated once. An explicit array creation has a fixed
 // type; unlike a poly invocation, removing its local assignment context cannot
 // change overload selection or generic inference. A different local type may
 // carry a required conversion, so it must not borrow this proof.
@@ -470,12 +470,8 @@ func interfaceInitializerArrayExpression(plan *interfaceInitializerSegment, code
 	if !ok || local == nil || local.Id == nil || local.IsThis || local.IsParam || local.CustomValue != nil || local.StackVar != nil {
 		return nil, false
 	}
-	result, ok := values.UnpackSoltValue(plan.value).(*values.JavaRef)
-	if !ok || result == nil || !values.SameLocal(local, result) {
-		return nil, false
-	}
 	array, ok := values.UnpackSoltValue(assignment.JavaValue).(*values.NewExpression)
-	if !ok || array == nil || array.ArgumentsGetter != nil || array.ConstructorCall != nil || !nativeAnonymousInitializerSameArrayType(array.Type(), local.Type()) || !nativeAnonymousInitializerSameArrayType(array.Type(), result.Type()) {
+	if !ok || array == nil || array.ArgumentsGetter != nil || array.ConstructorCall != nil || !nativeAnonymousInitializerSameArrayType(array.Type(), local.Type()) {
 		return nil, false
 	}
 	if !array.HasOriginPC || array.OriginPC < 0 || array.OriginPC >= plan.write.pc || plan.write.pc >= len(code.Code) {
@@ -486,14 +482,93 @@ func interfaceInitializerArrayExpression(plan *interfaceInitializerSegment, code
 	}
 	// Do not expose a self-reference, embedded local assignment or a local
 	// dependency that was valid only inside the helper's declaration scope.
-	if closedInterfacePrefix(nil, array, "") != nil {
+	if closedInterfacePrefix(nil, array, "") != nil || closedInterfacePrefix(plan.prefix, plan.value, "") != nil {
 		return nil, false
 	}
 	effects, references := values.InspectValue(array)
 	if effects&values.EffectOpaque != 0 || len(references) != 0 {
 		return nil, false
 	}
-	return assignment.JavaValue, true
+	endPC := array.OriginPC
+	if array.HasEvaluationEndPC {
+		endPC = array.EvaluationEndPC
+	}
+	remaining := 2048
+	var reconnect func(values.JavaValue, int) (values.JavaValue, int, int, bool)
+	reconnect = func(value values.JavaValue, depth int) (values.JavaValue, int, int, bool) {
+		remaining--
+		if remaining < 0 || depth > 32 || sourceProofNil(value) {
+			return nil, 0, 0, false
+		}
+		effects, refs := values.InspectValue(value)
+		if effects&values.EffectOpaque != 0 {
+			return nil, 0, 0, false
+		}
+		if len(refs) == 0 {
+			return value, 0, 0, true
+		}
+		switch v := values.UnpackSoltValue(value).(type) {
+		case *values.JavaRef:
+			if v == nil || !values.SameLocal(local, v) || !nativeAnonymousInitializerSameArrayType(array.Type(), v.Type()) {
+				return nil, 0, 0, false
+			}
+			return assignment.JavaValue, 1, endPC, true
+		case *values.CastExpression:
+			if v == nil || v.TargetType == nil {
+				return nil, 0, 0, false
+			}
+			child, count, pc, proved := reconnect(v.Value, depth+1)
+			if !proved || count != 1 {
+				break
+			}
+			if v.OriginalCheckCast {
+				if v.OriginPC <= pc || v.OriginPC >= plan.write.pc {
+					return nil, 0, 0, false
+				}
+				pc = v.OriginPC
+			}
+			copy := *v
+			copy.Value = child
+			return &copy, count, pc, true
+		case *values.FunctionCallExpression:
+			if v == nil || v.Kind != values.InvokeStatic || !v.HasOriginPC || v.OriginPC >= plan.write.pc {
+				break
+			}
+			// A source receiver expression must not add an evaluation ahead of
+			// the original allocation, even when the resolved call is static.
+			objectEffects, objectRefs := values.InspectValue(v.Object)
+			if objectEffects != 0 || len(objectRefs) != 0 {
+				return nil, 0, 0, false
+			}
+			copy := v.Clone()
+			position := -1
+			for i, arg := range v.Arguments {
+				child, count, pc, proved := reconnect(arg, depth+1)
+				if !proved || count > 1 {
+					return nil, 0, 0, false
+				}
+				if count == 1 {
+					if position >= 0 || v.OriginPC <= pc {
+						return nil, 0, 0, false
+					}
+					position, copy.Arguments[i] = i, child
+				} else if position < 0 {
+					effects, _ := values.InspectValue(arg)
+					if effects != 0 {
+						return nil, 0, 0, false
+					}
+				}
+			}
+			if position >= 0 {
+				return copy, 1, v.OriginPC, true
+			}
+		}
+		// Off-path expressions stay intact. A conditional, embedded write or
+		// opaque rendering containing the local cannot borrow this proof.
+		return nil, 0, 0, false
+	}
+	result, uses, _, proved := reconnect(plan.value, 0)
+	return result, proved && uses == 1
 }
 
 func (c *ClassObjectDumper) interfaceInitializerStubs(reason error) []*dumpedMethods {
