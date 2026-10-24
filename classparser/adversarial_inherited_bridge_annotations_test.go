@@ -154,3 +154,70 @@ func checkInheritedBridgeAnnotationLoweringBoundaries(t *testing.T, name string,
 		})
 	}
 }
+
+// A bridge's annotation use cannot change the original annotation type's
+// retention or declaration target. Compiler output is not policy evidence.
+func TestInheritedBridgeAnnotationPolicyRequiresOriginalDeclaration(t *testing.T) {
+	files := nativeCompileClasses(t, `import java.lang.annotation.*;
+ @Retention(RetentionPolicy.RUNTIME) @Target({ElementType.METHOD,ElementType.PARAMETER}) @interface Both{}
+ @Target({ElementType.METHOD,ElementType.PARAMETER}) @interface ClassBoth{}
+ @Retention(RetentionPolicy.SOURCE) @Target({ElementType.METHOD,ElementType.PARAMETER}) @interface SourceBoth{}
+ @Retention(RetentionPolicy.RUNTIME) @Target(ElementType.METHOD) @interface MethodOnly{}
+ @Retention(RetentionPolicy.RUNTIME) @Target(ElementType.PARAMETER) @interface ParameterOnly{}
+ @Retention(RetentionPolicy.RUNTIME) @Target(ElementType.TYPE_USE) @interface TypeOnly{}
+ class NotAnnotation{}
+ class AnnotationSubject { @Both public Object read(@Both long n,double d,Object value){return value;} }`)
+	for _, scenario := range []string{"original", "missing definition", "wrong identity", "not annotation", "wrong method target", "wrong parameter target", "type-only target", "class in visible table", "source retention", "runtime in invisible table"} {
+		t.Run(scenario, func(t *testing.T) {
+			object := mustParseLowering(t, files["AnnotationSubject.class"])
+			reader := NewClassObjectDumper(object)
+			reader.foldSiblingResolver = func(name string) ([]byte, bool) {
+				if scenario == "missing definition" {
+					return nil, false
+				}
+				if scenario == "wrong identity" {
+					return files["AnnotationSubject.class"], true
+				}
+				raw, ok := files[name+".class"]
+				return raw, ok
+			}
+			var method *MemberInfo
+			for _, candidate := range object.Methods {
+				n, _ := sourceBridgeUTF8(object, candidate.NameIndex)
+				if n == "read" {
+					method = candidate
+				}
+			}
+			if method == nil {
+				t.Fatal("missing authored declaration")
+			}
+			for _, attribute := range method.Attributes {
+				switch a := attribute.(type) {
+				case *RuntimeVisibleAnnotationsAttribute:
+					switch scenario {
+					case "not annotation":
+						a.Annotations[0].TypeName = "LNotAnnotation;"
+					case "wrong method target":
+						a.Annotations[0].TypeName = "LParameterOnly;"
+					case "type-only target":
+						a.Annotations[0].TypeName = "LTypeOnly;"
+					case "class in visible table":
+						a.Annotations[0].TypeName = "LClassBoth;"
+					case "source retention":
+						a.Annotations[0].TypeName = "LSourceBoth;"
+					case "runtime in invisible table":
+						a.IsInvisible = true
+					}
+				case *RuntimeVisibleParameterAnnotationsAttribute:
+					if scenario == "wrong parameter target" {
+						a.ParameterAnnotations[0][0].TypeName = "LMethodOnly;"
+					}
+				}
+			}
+			descriptor, _ := sourceBridgeUTF8(object, method.DescriptorIndex)
+			if got := reader.inheritedBridgeAnnotationsRepresentable(method, descriptor); got != (scenario == "original") {
+				t.Fatalf("original policy representable=%v", got)
+			}
+		})
+	}
+}
