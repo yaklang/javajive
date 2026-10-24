@@ -92,6 +92,18 @@ func (c *ClassObjectDumper) constructorForwardingPackets(requiredFlags uint16) m
 				}
 				code = a
 			case *ExceptionsAttribute:
+			case *UnparsedAttribute:
+				// A fresh explicit inner constructor can receive MethodParameters
+				// for its hidden enclosing port. Those non-executable rows are
+				// restored separately after flags establish the method bijection.
+				// The original ownership grammar still admits no such extra role.
+				if requiredFlags != 0 || a == nil || a.Name != "MethodParameters" {
+					valid = false
+				} else {
+					textWork := int64(0)
+					_, present, err := sourceParameterRows(obj, method, c.Work, &textWork)
+					valid = valid && present && err == nil
+				}
 			default:
 				valid = false
 			}

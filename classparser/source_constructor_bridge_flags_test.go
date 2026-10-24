@@ -3,6 +3,7 @@ package javaclassparser
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"testing"
@@ -24,7 +25,7 @@ func TestAdversarialConstructorBridgeFlagsRequireOriginalAndFreshTypedPacket(t *
 	originals := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, originalSource, "FlagOwner", "none", false)
 	for _, release := range []int{8, 11, 16, 21} {
 		fresh := compileLambdaParameterMetadataFixtureWithSourcesAtRelease(t, modern, ModernJavac, freshSource, "FlagOwner", "none", nil, release, false)["FlagOwner$Child.class"]
-		for _, variant := range []string{"control", "fresh receiver", "fresh argument", "fresh marker used", "fresh target visibility", "fresh bridge visibility", "fresh extra effect", "fresh throws", "fresh extra method", "fresh missing method", "fresh preview", "fresh future", "original receiver", "original modern", "original marker spelling", "both marker spelling", "work", "output", "canceled"} {
+		for _, variant := range []string{"control", "fresh receiver", "fresh argument", "fresh marker used", "fresh target visibility", "fresh bridge visibility", "fresh extra effect", "fresh throws", "fresh extra method", "fresh missing method", "fresh preview", "fresh future", "original receiver", "original modern", "original marker spelling", "both marker spelling", "valid parameter rows", "wrong row count", "unknown row flags", "duplicate parameter table", "work", "output", "canceled"} {
 			t.Run(fmt.Sprintf("release%d/%s", release, variant), func(t *testing.T) {
 				o, c := mustParseLowering(t, bytes.Clone(originals["FlagOwner$Child.class"])), mustParseLowering(t, bytes.Clone(fresh))
 				bridge := func(obj *ClassObject) *MemberInfo {
@@ -83,6 +84,22 @@ func TestAdversarialConstructorBridgeFlagsRequireOriginalAndFreshTypedPacket(t *
 					if variant == "both marker spelling" {
 						cb.DescriptorIndex = uint16(c.ConstantPoolManager.AddUtf8Info("(Ljava/lang/Object;JLIndependentUnusedPort;)V"))
 					}
+				case "valid parameter rows", "wrong row count", "unknown row flags", "duplicate parameter table":
+					info := make([]byte, 13)
+					info[0] = 3 // Object, long, marker: rows count parameters, not words.
+					binary.BigEndian.PutUint16(info[1:], uint16(c.ConstantPoolManager.AddUtf8Info("independentName")))
+					if variant == "wrong row count" {
+						info = info[:9]
+						info[0] = 2
+					}
+					if variant == "unknown row flags" {
+						binary.BigEndian.PutUint16(info[3:], 0x0008)
+					}
+					attribute := &UnparsedAttribute{Name: "MethodParameters", AttrNameIndex: uint16(c.ConstantPoolManager.AddUtf8Info("MethodParameters")), Length: uint32(len(info)), Info: info}
+					cb.Attributes = append(cb.Attributes, attribute)
+					if variant == "duplicate parameter table" {
+						cb.Attributes = append(cb.Attributes, attribute)
+					}
 				case "work":
 					work = workbudget.New(nil, workbudget.Limits{MaxRequestWork: 1})
 				case "output":
@@ -99,7 +116,10 @@ func TestAdversarialConstructorBridgeFlagsRequireOriginalAndFreshTypedPacket(t *
 				mustParseLowering(t, input)
 				before, old := bytes.Clone(input), bytes.Clone(authority)
 				result, err := restoreReconstructionSyntheticFlags(authority, input, work)
-				positive := variant == "control" || variant == "both marker spelling"
+				positive := variant == "control" || variant == "both marker spelling" || variant == "valid parameter rows"
+				if variant == "valid parameter rows" && err == nil {
+					result, err = RestoreMethodParameterMetadata(authority, result, nil)
+				}
 				if positive {
 					if err != nil || bytes.Equal(result, input) || sourceMethodMetadataClosed(o, result, nil) != nil {
 						t.Fatal("typed synthetic declaration not restored", err)
