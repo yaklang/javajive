@@ -277,12 +277,14 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 	// grant no lambda, constructor or anonymous metadata edits to this owner.
 	// Each transported plan retains its own original/target capability.
 	if !enumPublicationAllowed || len(c.sourceLambdaMembers) > 4096 || len(members) != len(c.nativeRenderedMemberNames) {
+		fmt.Printf("SEAL_DIAG %s:280\n", c.obj.GetClassName())
 		return false
 	}
 	publication := &sourceLambdaPublication{owner: c.obj.GetClassName(), sourceHash: hash}
 	seen := map[string]bool{}
 	add := func(plan *sourceLambdaMetadataPlan) bool {
 		if plan == nil || seen[plan.owner] || len(publication.plans) >= 4096 || !nativeProofWork(c.Work, 1) {
+			fmt.Printf("SEAL_DIAG %s:286\n", c.obj.GetClassName())
 			return false
 		}
 		seen[plan.owner] = true
@@ -290,19 +292,23 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 		return true
 	}
 	if own != nil && !add(own) {
+		fmt.Printf("SEAL_DIAG %s:293\n", c.obj.GetClassName())
 		return false
 	}
 	constantPublications, closed := c.flatEnumPublicationsClosed(source)
 	if !closed {
+		fmt.Printf("SEAL_DIAG %s:297\n", c.obj.GetClassName())
 		return false
 	}
 	for _, nested := range constantPublications {
 		// Flat constant bodies have no arbitrary nested declaration authority.
 		if len(nested.constructors) != 0 || len(nested.anonymous) != 0 || len(nested.enums) != 0 {
+			fmt.Printf("SEAL_DIAG %s:302\n", c.obj.GetClassName())
 			return false
 		}
 		for _, plan := range nested.plans {
 			if !add(plan) {
+				fmt.Printf("SEAL_DIAG %s:306\n", c.obj.GetClassName())
 				return false
 			}
 		}
@@ -310,6 +316,7 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 	constructorSeen := map[string]bool{}
 	addConstructor := func(plan *sourceConstructorMetadataPlan) bool {
 		if plan == nil || constructorSeen[plan.owner] || len(publication.constructors) >= 4096 || !nativeProofWork(c.Work, 1) {
+			fmt.Printf("SEAL_DIAG %s:313\n", c.obj.GetClassName())
 			return false
 		}
 		constructorSeen[plan.owner] = true
@@ -319,6 +326,7 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 	anonymousSeen := map[string]bool{}
 	addAnonymous := func(plan *sourceAnonymousClassMetadataPlan) bool {
 		if plan == nil || anonymousSeen[plan.owner] || len(publication.anonymous) >= 4096 || !nativeProofWork(c.Work, 1) {
+			fmt.Printf("SEAL_DIAG %s:322\n", c.obj.GetClassName())
 			return false
 		}
 		anonymousSeen[plan.owner] = true
@@ -328,6 +336,7 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 	enumSeen := map[string]bool{}
 	addEnum := func(origin sourceEnumArrayOrigin) bool {
 		if origin.owner == "" || origin.originalHash == ([32]byte{}) || enumSeen[origin.owner] || len(publication.enums) >= 4096 || !nativeProofWork(c.Work, int64(len(origin.owner))+1) {
+			fmt.Printf("SEAL_DIAG %s:331\n", c.obj.GetClassName())
 			return false
 		}
 		enumSeen[origin.owner] = true
@@ -338,33 +347,40 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 	for _, member := range c.sourceConstructorMembers {
 		cost := int64(len(source)) + 1
 		if cost > (128<<20)-bytes || !c.artifactConstructorPublicationClosed(member, source) {
+			fmt.Printf("SEAL_DIAG %s:341\n", c.obj.GetClassName())
 			return false
 		}
 		bytes += cost
 		if member.plan != nil && !addConstructor(member.plan) {
+			fmt.Printf("SEAL_DIAG %s:345\n", c.obj.GetClassName())
 			return false
 		}
 		if member.anonymous != nil && !addAnonymous(member.anonymous) {
+			fmt.Printf("SEAL_DIAG %s:348\n", c.obj.GetClassName())
 			return false
 		}
 		if nested := member.publication; nested != nil {
 			for _, plan := range nested.plans {
 				if !add(plan) {
+					fmt.Printf("SEAL_DIAG %s:353\n", c.obj.GetClassName())
 					return false
 				}
 			}
 			for _, plan := range nested.constructors {
 				if !addConstructor(plan) {
+					fmt.Printf("SEAL_DIAG %s:358\n", c.obj.GetClassName())
 					return false
 				}
 			}
 			for _, plan := range nested.anonymous {
 				if !addAnonymous(plan) {
+					fmt.Printf("SEAL_DIAG %s:363\n", c.obj.GetClassName())
 					return false
 				}
 			}
 			for _, origin := range nested.enums {
 				if !addEnum(origin) {
+					fmt.Printf("SEAL_DIAG %s:368\n", c.obj.GetClassName())
 					return false
 				}
 			}
@@ -372,11 +388,13 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 	}
 	for _, member := range c.sourceLambdaMembers {
 		if member.object == nil || member.publication == nil || c.nativeMemberRoot == nil {
+			fmt.Printf("SEAL_DIAG %s:375\n", c.obj.GetClassName())
 			return false
 		}
 		name := member.object.GetClassName()
 		child := c.nativeMemberRoot.children[name]
 		if child == nil || child.object != member.object || child.owner != c.obj.GetClassName() || member.publication.owner != name {
+			fmt.Printf("SEAL_DIAG %s:380\n", c.obj.GetClassName())
 			return false
 		}
 		matches := 0
@@ -387,50 +405,61 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 		}
 		cost := int64(len(source)+len(member.packet)) + 1
 		if matches != 1 || cost > (128<<20)-bytes || !nativeProofWork(c.Work, cost) {
+			fmt.Printf("SEAL_DIAG %s:390\n", c.obj.GetClassName())
 			return false
 		}
 		bytes += cost
 		start := strings.Index(source, member.packet)
 		if start < 0 || strings.Contains(source[start+len(member.packet):], member.packet) {
+			fmt.Printf("SEAL_DIAG %s:395\n", c.obj.GetClassName())
 			return false
 		}
 		raw, bound := a.original(member.object, c.Work)
 		if !bound || sha256.Sum256(raw) != member.publication.originalHash {
+			fmt.Printf("SEAL_DIAG %s:399\n", c.obj.GetClassName())
 			return false
 		}
 		for _, plan := range member.publication.plans {
 			if !add(plan) {
+				fmt.Printf("SEAL_DIAG %s:403\n", c.obj.GetClassName())
 				return false
 			}
 		}
 		for _, plan := range member.publication.constructors {
 			if !addConstructor(plan) {
+				fmt.Printf("SEAL_DIAG %s:408\n", c.obj.GetClassName())
 				return false
 			}
 		}
 		for _, plan := range member.publication.anonymous {
 			if !addAnonymous(plan) {
+				fmt.Printf("SEAL_DIAG %s:413\n", c.obj.GetClassName())
 				return false
 			}
 		}
 		for _, origin := range member.publication.enums {
 			if !addEnum(origin) {
+				fmt.Printf("SEAL_DIAG %s:418\n", c.obj.GetClassName())
 				return false
 			}
 		}
 	}
 	if (len(publication.plans) != 0 || len(publication.anonymous) != 0) && !c.artifactLambdaMetadataAllowed() {
+		fmt.Printf("SEAL_DIAG %s:423\n", c.obj.GetClassName())
 		return false
 	}
 	if len(publication.constructors) != 0 && !c.artifactConstructorMetadataAllowed() {
+		fmt.Printf("SEAL_DIAG %s:426\n", c.obj.GetClassName())
 		return false
 	}
 	raw, bound := a.original(c.obj, c.Work)
 	if !bound {
+		fmt.Printf("SEAL_DIAG %s:430\n", c.obj.GetClassName())
 		return false
 	}
 	publication.originalHash = sha256.Sum256(raw)
 	if ownEnum && !addEnum(sourceEnumArrayOrigin{c.obj.GetClassName(), publication.originalHash}) {
+		fmt.Printf("SEAL_DIAG %s:434\n", c.obj.GetClassName())
 		return false
 	}
 	if c.sourceDegraded || legacySourceHasFailureMarker(source) {
@@ -449,6 +478,7 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 		size += int64(96 + len(origin.owner))
 	}
 	if c.Work != nil && c.Work.CheckAlloc(size) != nil {
+		fmt.Printf("SEAL_DIAG %s:452\n", c.obj.GetClassName())
 		return false
 	}
 	a.mu.Lock()
@@ -459,6 +489,7 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 		return true
 	}
 	if size > (16<<20)-a.bytes || len(a.publications) >= 4096 {
+		fmt.Printf("SEAL_DIAG %s:462\n", c.obj.GetClassName())
 		return false
 	}
 	if a.publications == nil {
