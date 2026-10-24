@@ -88,3 +88,26 @@ public class InitPacketDriver {public static void main(String[]args){
 `
 	testInterfaceLambdaInitializerFamily(t, fixture, "wrapped-array:failure:identity:no-retry\n")
 }
+
+func TestAdversarialInterfaceWrappedGenericArrayRetainsInferenceBoundary(t *testing.T) {
+	fixture := `
+ interface InitPacketItem<T>{T value();}
+ class InitPacketEffects {
+  static final InitPacketItem<String> FIRST=new InitPacketItem<String>(){public String value(){return "first";}};
+  static final InitPacketItem<Integer> SECOND=new InitPacketItem<Integer>(){public Integer value(){return 23;}};
+  static <T> java.util.List<T> wrap(java.util.List<? extends T> input){return java.util.Collections.unmodifiableList(input);}
+ }
+ interface InitPacketContract {
+  java.util.List<InitPacketItem<?>> STANDARD=java.util.Collections.unmodifiableList(java.util.Arrays.asList(new InitPacketItem<?>[]{InitPacketEffects.FIRST,InitPacketEffects.SECOND}));
+  java.util.List<InitPacketItem<?>> CUSTOM=InitPacketEffects.wrap(java.util.Arrays.asList(new InitPacketItem<?>[]{InitPacketEffects.SECOND,InitPacketEffects.FIRST}));
+ }
+ public class InitPacketDriver {public static void main(String[]args){
+  if(InitPacketContract.class.getDeclaredMethods().length!=0)throw new AssertionError("invented initializer declaration");
+  if(InitPacketContract.STANDARD.size()!=2||InitPacketContract.STANDARD.get(0)!=InitPacketEffects.FIRST||InitPacketContract.STANDARD.get(1)!=InitPacketEffects.SECOND||InitPacketContract.CUSTOM.get(0)!=InitPacketEffects.SECOND||InitPacketContract.CUSTOM.get(1)!=InitPacketEffects.FIRST)throw new AssertionError("element identity or order");
+  if(!InitPacketContract.STANDARD.get(0).value().equals("first")||!InitPacketContract.STANDARD.get(1).value().equals(23))throw new AssertionError("generic values");
+  try{InitPacketContract.CUSTOM.clear();throw new AssertionError("wrapper lost");}catch(UnsupportedOperationException expected){}
+  System.out.println("generic-array:inference:identity:order");
+ }}
+ `
+	testInterfaceLambdaInitializerFamily(t, fixture, "generic-array:inference:identity:order\n")
+}
