@@ -337,19 +337,28 @@ func compileLambdaParameterMetadataFixtureWithSourcesAtRelease(t *testing.T, com
 	if log, err := exec.Command(compiler, args...).CombinedOutput(); err != nil {
 		t.Fatal("independent original compiler", err, string(log))
 	}
-	entries, err := os.ReadDir(dir)
+	files := map[string][]byte{}
+	// Authored package variants live below the output root. Keep their actual
+	// binary paths, including any independently compiled sibling observers.
+	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".class") {
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			rel, err := filepath.Rel(dir, path)
+			if err != nil {
+				return err
+			}
+			files[filepath.ToSlash(rel)] = raw
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
-	}
-	files := map[string][]byte{}
-	for _, entry := range entries {
-		if strings.HasSuffix(entry.Name(), ".class") {
-			raw, err := os.ReadFile(filepath.Join(dir, entry.Name()))
-			if err != nil {
-				t.Fatal(err)
-			}
-			files[entry.Name()] = raw
-		}
 	}
 	return files
 }
