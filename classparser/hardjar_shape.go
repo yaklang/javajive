@@ -107,7 +107,8 @@ func fixHardjarCodeShapes(body string) string {
 	// A method name cannot justify inventing an early return.
 	body = rewriteInstanceCastFromSibling(body)
 	body = dropEmptyTargetOnRepeatable(body)
-	body = retypeMixedIteratorElemToRaw(body)
+	// Erased next() use-site casts do not constrain a generic declaration.
+	// Distinct iterator lifetimes are reconstructed by the typed local graph.
 	body = retypeSelfWrapDollarNewFromCalleeParam(body)
 	body = retypeFlatMapFunctionRawStream(body)
 	body = wrapGetClassAsRawClassArg(body)
@@ -7170,100 +7171,6 @@ func firstThisCallArg(member, ident string) (string, int) {
 			return name, idx
 		}
 		from = close
-	}
-}
-
-func nextCastTypesOfIdent(member, ident string) []string {
-	needle := ident + ".next()"
-	var out []string
-	seen := map[string]struct{}{}
-	from := 0
-	for {
-		rel := strings.Index(member[from:], needle)
-		if rel < 0 {
-			return out
-		}
-		i := from + rel
-		if i < 2 || member[i-1] != '(' || member[i-2] != ')' {
-			from = i + 1
-			continue
-		}
-		open := matchingOpenParen(member, i-2)
-		if open < 0 {
-			from = i + 1
-			continue
-		}
-		typ, ok, after := readJavaIdent(member[open+1:])
-		if !ok || !strings.HasPrefix(after, ")") {
-			from = i + 1
-			continue
-		}
-		if lastDottedIdent(typ) == "" || isStmtKeyword(typ) || isDecompilerLocal(typ) || isPrimitiveOrObjectName(typ) {
-			from = i + 1
-			continue
-		}
-		if _, ok := seen[typ]; !ok {
-			seen[typ] = struct{}{}
-			out = append(out, typ)
-		}
-		from = i + len(needle)
-	}
-}
-
-// retypeMixedIteratorElemToRaw retypes `Iterator<T> ident` to raw Iterator when
-// the same slot is next()-cast to more than one element type (IndexFileDeleter
-// reuses a local for Directory.listAll strings then SegmentInfos.iterator()).
-func retypeMixedIteratorElemToRaw(body string) string {
-	needle := "Iterator<"
-	from := 0
-	for {
-		rel := strings.Index(body[from:], needle)
-		if rel < 0 {
-			return body
-		}
-		i := from + rel
-		open := i + len("Iterator")
-		if open >= len(body) || body[open] != '<' {
-			from = i + 1
-			continue
-		}
-		close := matchingCloseAngle(body, open)
-		if close < 0 || close-open > 80 {
-			from = i + 1
-			continue
-		}
-		elem := body[open+1 : close]
-		if elem == "" || strings.ContainsAny(elem, "\n;") {
-			from = i + 1
-			continue
-		}
-		rest := strings.TrimLeft(body[close+1:], " \t")
-		ident, ok, _ := readJavaIdent(rest)
-		if !ok || !isDecompilerLocal(ident) {
-			from = i + 1
-			continue
-		}
-		start := prevMemberStart(body, i)
-		end := nextMemberStart(body, i)
-		member := body[start:end]
-		casts := nextCastTypesOfIdent(member, ident)
-		elemSimple := lastDottedIdent(rawTypeName(elem))
-		mixed := len(casts) > 1
-		if !mixed && len(casts) == 1 && lastDottedIdent(rawTypeName(casts[0])) != elemSimple {
-			mixed = true
-		}
-		if !mixed {
-			from = close
-			continue
-		}
-		old := "Iterator<" + elem + "> " + ident
-		if !strings.Contains(member, old) {
-			from = close
-			continue
-		}
-		neu := strings.Replace(member, old, "Iterator "+ident, 1)
-		body = body[:start] + neu + body[end:]
-		from = start + len(neu)
 	}
 }
 

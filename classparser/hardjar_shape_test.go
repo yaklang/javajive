@@ -2153,25 +2153,22 @@ func TestRewriteInstanceCastFromSiblingNoSibling(t *testing.T) {
 	}
 }
 
+// Keep the historical regression's distinct local lifetimes, but exercise the
+// real compiler/decompiler path instead of requiring a raw-type text rewrite.
 func TestRetypeMixedIteratorElemToRaw(t *testing.T) {
-	in := "class C {\n\tvoid m() {\n\t\tIterator<String> var6 = var1.iterator();\n\t\tvar7 = ((String)(var6.next()));\n\t\tvar6 = var0.iterator();\n\t\tvar7_1 = ((SegmentCommitInfo)(var6.next()));\n\t}\n}\n"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	out := retypeMixedIteratorElemToRaw(in)
-	if strings.Contains(out, "Iterator<String> var6") {
-		t.Fatalf("Iterator<String> still present:\n%s", out)
-	}
-	if !strings.Contains(out, "Iterator var6") {
-		t.Fatalf("missing raw Iterator:\n%s", out)
+	const source = `public class IteratorSlotOwner {public static long fold(java.util.List<String> a,java.util.List<Integer> b){long sum=0;{java.util.Iterator<String> it=a.iterator();while(it.hasNext()){sum+=it.next().length();}}{java.util.Iterator<Integer> it=b.iterator();while(it.hasNext()){sum=sum*31+it.next().intValue();}}return sum;}}
+ class IteratorSlotDriver {public static void main(String[]args){long actual=IteratorSlotOwner.fold(java.util.Arrays.asList("abc","x"),java.util.Arrays.asList(7,-11));if(actual!=((4L*31+7)*31-11))throw new AssertionError("slot lifetimes");System.out.println("iterator:slot:lifetimes");}}`
+	for _, debug := range []string{"none", "source,lines,vars"} {
+		t.Run(debug, func(t *testing.T) {
+			roundTripConstructorBridgeArtifact(t, source, "IteratorSlotOwner", "IteratorSlotDriver", "iterator:slot:lifetimes\n", debug, 8)
+		})
 	}
 }
 
 func TestRetypeMixedIteratorElemToRawKeepsClassWildcard(t *testing.T) {
-	in := "class C {\n\tvoid m() {\n\t\tIterator<Class<?>> var4 = var1.iterator();\n\t\tvar5 = ((Class)(var4.next()));\n\t}\n}\n"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	out := retypeMixedIteratorElemToRaw(in)
-	if !strings.Contains(out, "Iterator<Class<?>> var4") {
-		t.Fatalf("Class<?> iterator was stripped:\n%s", out)
-	}
+	const source = `public class IteratorClassOwner {public static String names(java.util.Iterator<Class<?>> it){String result="";while(it.hasNext()){Class<?> type=it.next();result+=type==null?"null;":type.getName()+";";}return result;}}
+ class IteratorClassDriver {public static void main(String[]args)throws Exception{java.lang.reflect.Type p=IteratorClassOwner.class.getDeclaredMethod("names",java.util.Iterator.class).getGenericParameterTypes()[0];if(!(p instanceof java.lang.reflect.ParameterizedType))throw new AssertionError("iterator generic declaration");java.lang.reflect.Type element=((java.lang.reflect.ParameterizedType)p).getActualTypeArguments()[0];if(!(element instanceof java.lang.reflect.ParameterizedType)||((java.lang.reflect.ParameterizedType)element).getRawType()!=Class.class||!(((java.lang.reflect.ParameterizedType)element).getActualTypeArguments()[0] instanceof java.lang.reflect.WildcardType))throw new AssertionError("nested wildcard");String actual=IteratorClassOwner.names(java.util.Arrays.<Class<?>>asList(null,Object.class,String[].class).iterator());if(!actual.equals("null;java.lang.Object;[Ljava.lang.String;;"))throw new AssertionError(actual);System.out.println("iterator:class:wildcard");}}`
+	roundTripConstructorBridgeArtifact(t, source, "IteratorClassOwner", "IteratorClassDriver", "iterator:class:wildcard\n", "none", 8)
 }
 
 func TestRetypeSelfWrapDollarNewFromCalleeParam(t *testing.T) {
