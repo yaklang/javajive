@@ -34,6 +34,21 @@ func nativeMemberJointBridgeNameTypes(p *nativeMemberFamily, obj *ClassObject, w
 	}
 	return nativeConstructorBridgeNameTypes(obj, p.bridgeOwners(), work)
 }
+
+// Explicit forwarding declarations require a nameable source parameter type.
+// Compiler-regenerated anonymous classes and enum tables do not have a Java
+// type name, even though their binary names exist. Those roles retain their
+// existing projection; they are not covered by modern bridge completion.
+func (p *nativeMemberFamily) retainsConstructorBridge(b *nativeConstructorAccessBridge) bool {
+	if p == nil || !p.usesNestAccess || b == nil {
+		return false
+	}
+	if p.emptyMarkers[b.marker] != nil {
+		return true
+	}
+	return p.anonymous != nil && p.anonymous.owner == p.owner && p.anonymous.standalone[b.marker] != nil
+}
+
 func nativeMemberJointBridgeMarkersClosed(p *nativeMemberFamily, work *workbudget.Budget) bool {
 	if p == nil {
 		return false
@@ -56,7 +71,7 @@ func nativeMemberJointBridgeMarkersClosed(p *nativeMemberFamily, work *workbudge
 			if p.anonymous == nil {
 				return false
 			}
-			if p.usesNestAccess {
+			if p.retainsConstructorBridge(bridge) {
 				// A retained port is an ordinary, nameable binary type. Its
 				// independently proved standalone source stays outside the nest;
 				// no anonymous ordinal or private permission is regenerated.
@@ -255,7 +270,7 @@ func nativeMemberStaticBridgeSource(plan *nativeMemberAllocation, args []class_c
 		return fail()
 	}
 	descriptor, sourceArgs := bridge.target, args[:len(args)-1]
-	if p.usesNestAccess {
+	if p.retainsConstructorBridge(bridge) {
 		descriptor, sourceArgs = bridge.descriptor, args
 	}
 	invoke := &values.FunctionCallExpression{ClassName: strings.ReplaceAll(plan.child.object.GetClassName(), "/", "."), FunctionName: "<init>", Descriptor: descriptor, Kind: values.InvokeSpecial, IsSpecialInvoke: true, HasOriginPC: true, OriginPC: plan.invokePC}
@@ -292,16 +307,14 @@ func (z *JarFS) nativeMemberJointBridgeReferencesClosed(p *nativeMemberFamily, i
 	if p == nil || index == nil || !index.valid || !nativeProofWork(work, 1) {
 		return false
 	}
-	if p.usesNestAccess {
-		// No marker type or constructor edge is erased by this profile.
-		// Require the retained source role before leaving ordinary descriptor
-		// references to the unchanged archive/private-access checks.
-		return nativeMemberJointBridgeMarkersClosed(p, work)
-	}
 	markers := map[string]bool{}
 	for _, bridges := range p.bridgeOwners() {
 		for _, bridge := range bridges {
-			markers[bridge.marker] = true
+			// Retained source types keep their original descriptor and call
+			// edges. Projected compiler-owned types still need archive closure.
+			if !p.retainsConstructorBridge(bridge) {
+				markers[bridge.marker] = true
+			}
 		}
 	}
 	users := map[string]bool{}

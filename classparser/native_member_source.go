@@ -1412,7 +1412,7 @@ func nativeMemberBinding(ctx *class_context.ClassContext, p *nativeMemberFamily,
 		cl.Methods = append([]callbinding.Method(nil), cl.Methods...)
 		filtered := cl.Methods[:0]
 		for _, m := range cl.Methods {
-			if m.Name == "<init>" && bridges[m.Desc] != nil && !p.usesNestAccess {
+			if m.Name == "<init>" && bridges[m.Desc] != nil && !p.retainsConstructorBridge(bridges[m.Desc]) {
 				continue
 			}
 			filtered = append(filtered, m)
@@ -1762,7 +1762,7 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			return fail()
 		}
 		ctor := nativeMemberConstructorForAllocation(plan.child, desc)
-		if p.usesNestAccess {
+		if p.retainsConstructorBridge(plan.child.accessBridges[desc]) {
 			ctor = plan.child.constructors[desc]
 		}
 		if ctor == nil {
@@ -1774,7 +1774,7 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			if len(sourceArgs) == 0 || !nativeMemberBridgeSourceDummy(sourceArgs[len(sourceArgs)-1].Value) {
 				return fail()
 			}
-			if !p.usesNestAccess {
+			if !p.retainsConstructorBridge(plan.child.accessBridges[desc]) {
 				sourceArgs = sourceArgs[:len(sourceArgs)-1]
 			}
 		}
@@ -1898,7 +1898,7 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 				keyword = "super"
 			}
 			target := nativeMemberConstructorForAllocation(targetClass, desc)
-			if p.usesNestAccess {
+			if p.retainsConstructorBridge(targetClass.accessBridges[desc]) {
 				target = targetClass.constructors[desc]
 			}
 			if ctor == nil || target == nil || ctor.delegateOwner != name || ctor.delegatePC != pc || ctor.delegateDescriptor != desc || len(args) < 1 {
@@ -1931,7 +1931,7 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 					p.failed = true
 					return "", false
 				}
-				if !p.usesNestAccess {
+				if !p.retainsConstructorBridge(targetClass.accessBridges[desc]) {
 					operands = operands[:len(operands)-1]
 				}
 			}

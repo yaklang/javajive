@@ -4154,7 +4154,7 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 	// A retained native bridge is also an original physical method declaration.
 	// Its containing class still has lexical member visibility; only the bridge
 	// parameters keep their own descriptor instead of borrowing a target's T.
-	retainedConstructor := c.nativeMemberRoot != nil && c.nativeMemberRoot.usesNestAccess && c.nativeMemberRoot.constructorBridges(c.obj.GetClassName())[descriptor] != nil
+	retainedConstructor := c.nativeMemberRoot != nil && c.nativeMemberRoot.retainsConstructorBridge(c.nativeMemberRoot.constructorBridges(c.obj.GetClassName())[descriptor])
 	if name == "<init>" && !retainedConstructor && !c.reconstructionPhysicalHeader() && c.getenv("JDEC_NO_SYN_BRIDGE_CTOR_RETYPE") == "" &&
 		c.isSyntheticAccessBridgeCtor(descriptor, method.AccessFlags) {
 		c.reTypeSyntheticBridgeCtorParams(descriptor, methodType.FunctionType())
@@ -13548,10 +13548,10 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		if c.nativeCaptureFields != nil && c.nativeMemberCurrent == nil && name == "<init>" || c.nativeAnonymousRoot != nil && c.nativeAnonymousRoot.accessBridgeDescriptor(c.obj, name, descriptor) {
 			continue
 		}
-		if c.nativeMemberCurrent != nil && name == "<init>" && c.nativeMemberCurrent.accessBridges[descriptor] != nil && !c.nativeMemberRoot.usesNestAccess {
+		if c.nativeMemberCurrent != nil && name == "<init>" && c.nativeMemberCurrent.accessBridges[descriptor] != nil && !c.nativeMemberRoot.retainsConstructorBridge(c.nativeMemberCurrent.accessBridges[descriptor]) {
 			continue
 		}
-		if p := c.nativeMemberRoot; p != nil && c.obj.GetClassName() == p.owner && name == "<init>" && p.rootAccessBridges[descriptor] != nil && !p.usesNestAccess {
+		if p := c.nativeMemberRoot; p != nil && c.obj.GetClassName() == p.owner && name == "<init>" && p.rootAccessBridges[descriptor] != nil && !p.retainsConstructorBridge(p.rootAccessBridges[descriptor]) {
 			continue
 		}
 		if p := c.nativeMemberRoot; p != nil && p.getters[nativeMemberGetterKey(c.obj.GetClassName(), name, descriptor)] != nil {

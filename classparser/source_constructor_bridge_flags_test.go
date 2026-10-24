@@ -112,6 +112,14 @@ func TestAdversarialConstructorBridgeFlagsRequireOriginalAndFreshTypedPacket(t *
 				}
 				code.AttrLen = uint32(int(code.AttrLen) + len(code.Code) - originalCodeLength)
 				authority, input := o.Bytes(), c.Bytes()
+				if variant == "duplicate parameter table" {
+					// This classfile is invalid before forwarding proof: the parser
+					// must refuse duplicate singleton attributes, without a flag edit.
+					if result, err := restoreReconstructionSyntheticFlags(authority, input, nil); err == nil || result != nil {
+						t.Fatal("duplicate singleton parameter table was accepted")
+					}
+					return
+				}
 				// Even rejected candidates must be structurally parseable; otherwise a
 				// parser failure would hide whether the forwarding proof rejected them.
 				mustParseLowering(t, input)

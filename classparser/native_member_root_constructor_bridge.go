@@ -200,10 +200,10 @@ func nativeRootBridgeSourceDelegation(p *nativeMemberFamily, obj *ClassObject, c
 		return fail()
 	}
 	target, sourceArgs := plan.target, args
-	if !p.usesNestAccess && len(sourceArgs) > 0 {
+	if !p.retainsConstructorBridge(p.constructorBridges(name)[descriptor]) && len(sourceArgs) > 0 {
 		sourceArgs = sourceArgs[:len(sourceArgs)-1]
 	}
-	if p.usesNestAccess {
+	if p.retainsConstructorBridge(p.constructorBridges(name)[descriptor]) {
 		target = plan.descriptor
 	}
 	targets := 0
@@ -278,7 +278,7 @@ func nativeRootBridgeSourceAllocation(plan *nativeMemberAllocation, args []class
 		return fail()
 	}
 	target, sourceArgs := bridge.target, args[:len(args)-1]
-	if p.usesNestAccess {
+	if p.retainsConstructorBridge(bridge) {
 		target, sourceArgs = bridge.descriptor, args
 	}
 	count := 0
