@@ -36,6 +36,70 @@ func interfaceInitializerFixture() ([]statements.Statement, []interfaceFieldWrit
 	ret := statements.NewReturnStatement(nil)
 	return []statements.Statement{assignment, storeElement, storeFirst, storeSecond, ret}, []interfaceFieldWrite{{"ARRAY", first.Description, 4, first}, {"VIEW", second.Description, 8, second}}, []string{"ARRAY", "VIEW"}
 }
+
+func TestInterfaceInitializerArrayTemporaryRequiresClosedAdjacentFixedType(t *testing.T) {
+	fixture := func() (*interfaceInitializerSegment, *CodeAttribute, *values.NewExpression, *values.JavaRef) {
+		typ := types.NewJavaArrayType(types.NewJavaPrimer(types.JavaInteger))
+		local := values.NewJavaRef(utils.NewRootVariableId(), nil, typ)
+		array := &values.NewExpression{JavaType: typ, HasOriginPC: true, OriginPC: 1, HasEvaluationEndPC: true, EvaluationEndPC: 5, Initializer: []values.JavaValue{values.NewJavaLiteral(7, types.NewJavaPrimer(types.JavaInteger))}}
+		return &interfaceInitializerSegment{write: interfaceFieldWrite{pc: 6}, prefix: []statements.Statement{statements.NewAssignStatement(local, array, false)}, value: local}, &CodeAttribute{Code: make([]byte, 10)}, array, local
+	}
+	cases := []struct {
+		name   string
+		change func(*interfaceInitializerSegment, *CodeAttribute, *values.NewExpression, *values.JavaRef)
+	}{
+		{"intervening effect", func(p *interfaceInitializerSegment, _ *CodeAttribute, _ *values.NewExpression, _ *values.JavaRef) {
+			p.prefix = append(p.prefix, statements.NewExpressionStatement(values.JavaNull))
+		}},
+		{"different use", func(p *interfaceInitializerSegment, _ *CodeAttribute, a *values.NewExpression, _ *values.JavaRef) {
+			p.value = values.NewJavaRef(utils.NewRootVariableId(), nil, a.Type())
+		}},
+		{"self reference", func(_ *interfaceInitializerSegment, _ *CodeAttribute, a *values.NewExpression, r *values.JavaRef) {
+			a.Initializer[0] = r
+		}},
+		{"unbound dependency", func(_ *interfaceInitializerSegment, _ *CodeAttribute, a *values.NewExpression, _ *values.JavaRef) {
+			a.Initializer[0] = values.NewJavaRef(utils.NewRootVariableId(), nil, a.Type())
+		}},
+		{"different assignment type", func(_ *interfaceInitializerSegment, _ *CodeAttribute, _ *values.NewExpression, r *values.JavaRef) {
+			r.JavaType = types.NewJavaArrayType(types.NewJavaPrimer(types.JavaLong))
+		}},
+		{"unknown allocation origin", func(_ *interfaceInitializerSegment, _ *CodeAttribute, a *values.NewExpression, _ *values.JavaRef) {
+			a.HasOriginPC = false
+		}},
+		{"incomplete element witness", func(_ *interfaceInitializerSegment, _ *CodeAttribute, a *values.NewExpression, _ *values.JavaRef) {
+			a.HasEvaluationEndPC = false
+		}},
+		{"elements after field store", func(p *interfaceInitializerSegment, _ *CodeAttribute, a *values.NewExpression, _ *values.JavaRef) {
+			a.EvaluationEndPC = p.write.pc
+		}},
+		{"allocation after field store", func(p *interfaceInitializerSegment, _ *CodeAttribute, a *values.NewExpression, _ *values.JavaRef) {
+			a.OriginPC = p.write.pc
+		}},
+		{"handler boundary", func(_ *interfaceInitializerSegment, c *CodeAttribute, _ *values.NewExpression, _ *values.JavaRef) {
+			c.ExceptionTable = []*ExceptionTableEntry{{StartPc: 0, EndPc: 5, HandlerPc: 8}}
+		}},
+		{"opaque initializer", func(_ *interfaceInitializerSegment, _ *CodeAttribute, a *values.NewExpression, _ *values.JavaRef) {
+			a.Initializer[0] = &values.CustomValue{}
+		}},
+		{"opaque allocation rendering", func(_ *interfaceInitializerSegment, _ *CodeAttribute, a *values.NewExpression, _ *values.JavaRef) {
+			a.ArgumentsGetter = func() string { return "" }
+		}},
+	}
+	p, code, array, _ := fixture()
+	if result, proved := interfaceInitializerArrayExpression(p, code); !proved || result != array || len(p.prefix) != 1 {
+		t.Fatal("closed adjacent array must retain its allocation tree without mutating the plan")
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			p, code, array, local := fixture()
+			tt.change(p, code, array, local)
+			if _, proved := interfaceInitializerArrayExpression(p, code); proved {
+				t.Fatal("unproved temporary must remain in its original initializer segment")
+			}
+		})
+	}
+}
+
 func TestInterfaceInitializerPartitionRequiresOriginalStoresAndPrivateLocals(t *testing.T) {
 	cases := []struct {
 		name   string

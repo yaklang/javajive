@@ -378,7 +378,9 @@ func (c *ClassObjectDumper) renderInterfaceInitializers(body []statements.Statem
 	}
 	if directExpressions {
 		for i := range plans {
-			if value, proved := c.interfaceInitializerLambdaExpression(&plans[i], code); proved {
+			if value, proved := interfaceInitializerArrayExpression(&plans[i], code); proved {
+				plans[i].prefix, plans[i].value = nil, value
+			} else if value, proved := c.interfaceInitializerLambdaExpression(&plans[i], code); proved {
 				plans[i].prefix, plans[i].value = nil, value
 			}
 		}
@@ -447,6 +449,53 @@ func (c *ClassObjectDumper) renderInterfaceInitializers(body []statements.Statem
 	}
 	return helpers, nil
 }
+
+// Eliminate an adjacent, private array temporary at its single field store.
+// Partitioning has already proved the original store order and that no local
+// crosses segments. There is no expression between the allocation and its use:
+// the allocation tree (including element calls, identity and first failure) is
+// retained verbatim and evaluated once. An explicit array creation has a fixed
+// type; unlike a poly invocation, removing its local assignment context cannot
+// change overload selection or generic inference. A different local type may
+// carry a required conversion, so it must not borrow this proof.
+func interfaceInitializerArrayExpression(plan *interfaceInitializerSegment, code *CodeAttribute) (values.JavaValue, bool) {
+	if plan == nil || code == nil || len(code.ExceptionTable) != 0 || len(plan.prefix) != 1 {
+		return nil, false
+	}
+	assignment, ok := plan.prefix[0].(*statements.AssignStatement)
+	if !ok || assignment == nil || assignment.ArrayMember != nil {
+		return nil, false
+	}
+	local, ok := values.UnpackSoltValue(assignment.LeftValue).(*values.JavaRef)
+	if !ok || local == nil || local.Id == nil || local.IsThis || local.IsParam || local.CustomValue != nil || local.StackVar != nil {
+		return nil, false
+	}
+	result, ok := values.UnpackSoltValue(plan.value).(*values.JavaRef)
+	if !ok || result == nil || !values.SameLocal(local, result) {
+		return nil, false
+	}
+	array, ok := values.UnpackSoltValue(assignment.JavaValue).(*values.NewExpression)
+	if !ok || array == nil || array.ArgumentsGetter != nil || array.ConstructorCall != nil || !nativeAnonymousInitializerSameArrayType(array.Type(), local.Type()) || !nativeAnonymousInitializerSameArrayType(array.Type(), result.Type()) {
+		return nil, false
+	}
+	if !array.HasOriginPC || array.OriginPC < 0 || array.OriginPC >= plan.write.pc || plan.write.pc >= len(code.Code) {
+		return nil, false
+	}
+	if len(array.Initializer) != 0 && (!array.HasEvaluationEndPC || array.EvaluationEndPC < array.OriginPC || array.EvaluationEndPC >= plan.write.pc) {
+		return nil, false
+	}
+	// Do not expose a self-reference, embedded local assignment or a local
+	// dependency that was valid only inside the helper's declaration scope.
+	if closedInterfacePrefix(nil, array, "") != nil {
+		return nil, false
+	}
+	effects, references := values.InspectValue(array)
+	if effects&values.EffectOpaque != 0 || len(references) != 0 {
+		return nil, false
+	}
+	return assignment.JavaValue, true
+}
+
 func (c *ClassObjectDumper) interfaceInitializerStubs(reason error) []*dumpedMethods {
 	c.appendDiagnostic(DecompileDiagnostic{Code: "unproven_interface_initializer", Method: "<clinit>()V", Message: reason.Error()})
 	if c.report != nil {
