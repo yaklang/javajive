@@ -110,6 +110,11 @@ func TestAdversarialConstructorBindingSignatureRequiresOriginalEnclosingPort(t *
 			if ok != want || ok && got != expected {
 				t.Fatalf("accepted=%v want=%v signature=%q", ok, want, got)
 			}
+			declaration, declared := constructorEnclosingDeclarationSignature(obj, method, work)
+			wantDeclaration := want || variant == "same arity plain rival"
+			if declared != wantDeclaration || declared && declaration != expected {
+				t.Fatalf("exact declaration=%v want=%v signature=%q", declared, wantDeclaration, declaration)
+			}
 			if !bytes.Equal(before, obj.Bytes()) {
 				t.Fatal("binding view mutated original")
 			}

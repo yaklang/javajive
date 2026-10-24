@@ -1,6 +1,8 @@
 package values
 
 import (
+	"context"
+	"github.com/yaklang/javajive/internal/workbudget"
 	"testing"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
@@ -59,6 +61,7 @@ func TestConstructorBareNullRequiresUniqueCompleteOriginalBinding(t *testing.T) 
 				table.Signature = "Ljava/util/ArrayList<Ljava/lang/String;>;"
 				want = true
 			case "class formal parameter":
+				want = true
 				table.Signature = "<T:Ljava/lang/String;>Ljava/lang/Object;"
 				table.Methods[0].Signature = "(TT;)V"
 				table.Methods[0].Generic = true
@@ -99,6 +102,72 @@ func TestConstructorBareNullRequiresUniqueCompleteOriginalBinding(t *testing.T) 
 			}
 			if variant == "same arity" && call.renderArgAt(0, ctx) == "null" {
 				t.Fatal("competing reference overload still requires binding")
+			}
+		})
+	}
+}
+
+func TestConstructorNullGenericBindingRequiresOriginalDeclarationScopes(t *testing.T) {
+	for _, variant := range []string{"parameterized", "class formal", "method formal", "unbound", "wrong erasure", "malformed", "primitive rival", "reference rival", "hidden outer port", "missing lift", "wrong lift", "wrong lift owner", "caller method binder", "foreign receiver scope", "canceled", "budget"} {
+		t.Run(variant, func(t *testing.T) {
+			desc := "(Ljava/util/List;)V"
+			table := callbinding.Class{Name: "proof/Owner", Signature: "<T:Ljava/lang/Number;>Ljava/lang/Object;", MembersComplete: true, Methods: []callbinding.Method{{Name: "<init>", Desc: desc, Signature: "(Ljava/util/List<TT;>;)V", Generic: true}}}
+			ctx := &class_context.ClassContext{ClassName: "proof.Owner", FunctionName: "<init>"}
+			receiver := NewJavaRef(nil, nil, types.NewJavaClass("proof.Owner"))
+			receiver.IsThis = true
+			call := &FunctionCallExpression{ClassName: "proof.Owner", FunctionName: "<init>", Descriptor: desc, Object: receiver, Arguments: []JavaValue{NewOriginalNullLiteral(5)}, Kind: InvokeSpecial, IsSpecialInvoke: true, OriginPC: 6, HasOriginPC: true}
+			want := variant == "parameterized" || variant == "class formal" || variant == "primitive rival" || variant == "hidden outer port"
+			switch variant {
+			case "class formal":
+				table.Methods[0].Signature = "(TT;)V"
+				table.Methods[0].Desc = "(Ljava/lang/Number;)V"
+				call.Descriptor = table.Methods[0].Desc
+			case "method formal":
+				table.Methods[0].Signature = "<M:Ljava/lang/Object;>(Ljava/util/List<TM;>;)V"
+			case "unbound":
+				table.Methods[0].Signature = "(Ljava/util/List<TU;>;)V"
+			case "wrong erasure":
+				table.Methods[0].Signature = "(Ljava/util/Set<TT;>;)V"
+			case "malformed":
+				table.Methods[0].Signature = "(Ljava/util/List<TT;>;)Vx"
+			case "primitive rival":
+				table.Methods = append(table.Methods, callbinding.Method{Name: "<init>", Desc: "(I)V"})
+			case "reference rival":
+				table.Methods = append(table.Methods, callbinding.Method{Name: "<init>", Desc: "(Ljava/util/Set;)V"})
+			case "hidden outer port", "missing lift", "wrong lift", "wrong lift owner":
+				table.Signature = ""
+				ctx.LexicalTypeParamSignatures = []string{"<T:Ljava/lang/Number;>Ljava/lang/Object;"}
+				table.Methods[0].Desc = "(Lproof/Outer;Ljava/util/List;)V"
+				call.Descriptor = table.Methods[0].Desc
+				call.Arguments = []JavaValue{NewJavaRef(nil, nil, types.NewJavaClass("proof.Outer")), NewOriginalNullLiteral(5)}
+				if variant != "missing lift" {
+					ctx.SiblingClassSig = func(name string) (string, map[string]string, bool) {
+						sig := "(Lproof/Outer;Ljava/util/List<TT;>;)V"
+						if variant == "wrong lift" {
+							sig = "(Lproof/Outer;Ljava/util/Set<TT;>;)V"
+						}
+						return "Ljava/lang/Object;", map[string]string{class_context.MethodDescKey("<init>", call.Descriptor): sig}, variant != "wrong lift owner" && name == table.Name
+					}
+				}
+			case "caller method binder":
+				table.Signature = ""
+				ctx.CurrentMethodSig = "<T:Ljava/lang/Number;>()V"
+			case "foreign receiver scope":
+				table.Signature = ""
+				ctx.LexicalTypeParamSignatures = []string{"<T:Ljava/lang/Number;>Ljava/lang/Object;"}
+				ctx.ClassName = "proof.Child"
+				ctx.SupperClassName = "proof.Owner"
+			case "canceled":
+				c, cancel := context.WithCancel(context.Background())
+				cancel()
+				ctx.Work = workbudget.New(c, workbudget.Limits{})
+			case "budget":
+				ctx.Work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
+			}
+			ctx.InvocationMetadata = func(n string) (callbinding.Class, bool) { return table, n == table.Name }
+			index := len(call.Arguments) - 1
+			if got := call.uniqueDelegationNullArgument(index, ctx); got != want {
+				t.Fatalf("proof=%v want=%v", got, want)
 			}
 		})
 	}

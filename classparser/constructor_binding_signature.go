@@ -14,6 +14,17 @@ import (
 // source binding view: the original Signature/descriptor remain immutable.
 // A same-arity rival needs an overload proof, not an erased-bound cast removal.
 func constructorEnclosingBindingSignature(object *ClassObject, method *MemberInfo, work *workbudget.Budget, resolver ...func(string) (*ClassObject, bool)) (string, bool) {
+	return constructorEnclosingSignature(object, method, true, work, resolver...)
+}
+
+// A declaration is identified by its complete descriptor and original member,
+// unlike an arity-only call-site query. Overloads do not make that declaration
+// ambiguous. Keep the stronger arity requirement on the call-binding API above.
+func constructorEnclosingDeclarationSignature(object *ClassObject, method *MemberInfo, work *workbudget.Budget, resolver ...func(string) (*ClassObject, bool)) (string, bool) {
+	return constructorEnclosingSignature(object, method, false, work, resolver...)
+}
+
+func constructorEnclosingSignature(object *ClassObject, method *MemberInfo, uniqueArity bool, work *workbudget.Budget, resolver ...func(string) (*ClassObject, bool)) (string, bool) {
 	if object == nil || method == nil || len(object.Methods) > 4096 || !nativeProofWork(work, int64(len(object.Methods))+1) {
 		return "", false
 	}
@@ -43,7 +54,7 @@ func constructorEnclosingBindingSignature(object *ClassObject, method *MemberInf
 		if e != nil || ret != "V" {
 			return "", false
 		}
-		if len(ps) == len(params) {
+		if uniqueArity && len(ps) == len(params) || !uniqueArity && desc == descriptor {
 			if m != method {
 				return "", false
 			}
@@ -92,7 +103,12 @@ func constructorEnclosingBindingSignature(object *ClassObject, method *MemberInf
 	// final synthetic captures from physical parameter slots, followed by SUPER
 	// and a closed suffix. A similarly named field or copied value is no proof.
 	packet := constructorLoweringPacketFor(object, method, true, true, work)
-	if packet == nil || len(packet.plan.captures) != 1 || packet.plan.captures[0].slot != 1 || packet.plan.captures[0].field.descriptor != params[0] {
+	captured := packet != nil && len(packet.plan.captures) == 1 && packet.plan.captures[0].slot == 1 && packet.plan.captures[0].field.descriptor == params[0]
+	if !captured && !uniqueArity {
+		proof := memberScopeConstructorGraph(object, owner, true, work, nil)[descriptor]
+		captured = proof != nil && proof.forward != nil
+	}
+	if !captured {
 		return "", false
 	}
 	start := strings.IndexByte(signature, '(')

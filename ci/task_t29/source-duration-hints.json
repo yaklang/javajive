@@ -39,12 +39,16 @@
     "TestNativeCheckedHandlerContainersPreserveThrowProof"
   ],
   "local_latest_changed_roots": [
-    "TestAdversarialEnumArrayFieldContractComposesWithoutWaivingFlags",
-    "TestAdversarialEnumSyntheticStorageKeepsTypedArgumentsAndFieldContract",
-    "TestAdversarialFlatNestRetainsPrivateMembersWithoutPeerUses",
-    "TestAdversarialNestPrivateUseIndexNeedsEveryReciprocalPeer"
+    "TestAdversarialConstructorBindingResolvesOriginalEnclosingScopes",
+    "TestAdversarialConstructorBindingSignatureRequiresOriginalEnclosingPort",
+    "TestAdversarialMemberConstructorChainPreservesCaptureAndGenericScope",
+    "TestAdversarialMemberConstructorCompletionRetainsFreshCodeAndExactEdges",
+    "TestAdversarialMemberConstructorGraphRequiresClosedCapturePaths",
+    "TestAdversarialSiblingConstructorArityIncludesNonGenericRivals",
+    "TestAdversarialStaticAbsenceComposesWithLegacyVersionAndSyntheticMethods",
+    "TestAdversarialStaticAbsenceRequiresExactNonSyntheticMethodFlags"
   ],
-  "local_latest_frozen_revision": "4c38a89195861b393b3cccba8fac748b4e90f225",
+  "local_latest_frozen_revision": "6db8315eb9f7a22b0c05668d6ed164d9bca73320",
   "measured_checkout_heads": [
     "8f3a843a53c2716671919ddecb0dfff51121aec7",
     "9c94287899bfb2f7cff6eeb713212ab570e46649",
@@ -1226,7 +1230,10 @@
     "TestAdversarialMaterializedUpdatesPreserveEarlierArguments": 41,
     "TestAdversarialMemberAssertionMixedInitializationNativeCompiler": 67.77,
     "TestAdversarialMemberAssertionMixedInitializationRoundTrip": 148.62,
+    "TestAdversarialMemberConstructorChainPreservesCaptureAndGenericScope": 4.901,
+    "TestAdversarialMemberConstructorCompletionRetainsFreshCodeAndExactEdges": 0.611,
     "TestAdversarialMemberConstructorFrameHundredStructureBank": 46.25,
+    "TestAdversarialMemberConstructorGraphRequiresClosedCapturePaths": 0.161,
     "TestAdversarialMemberConstructorLambdaImplementationsRoundTrip": 11.56,
     "TestAdversarialMemberConstructorLocalKeepsOriginalMethodFormalScope": 12.88,
     "TestAdversarialMemberConstructorLocalMethodFormalShadowsOwnerFormal": 13.25,
@@ -1749,6 +1756,8 @@
     "TestAdversarialStandaloneAssertionMixedInitializationNativeCompiler": 33.14,
     "TestAdversarialStandaloneAssertionMixedInitializationRoundTrip": 71.68,
     "TestAdversarialStandaloneEnumOriginalDriverRoundTrip": 32.01,
+    "TestAdversarialStaticAbsenceComposesWithLegacyVersionAndSyntheticMethods": 8.48,
+    "TestAdversarialStaticAbsenceRequiresExactNonSyntheticMethodFlags": 0.611,
     "TestAdversarialStaticBooleanSetterPreservesLowBitAndNullQualifier": 8.76,
     "TestAdversarialStaticClassLoweringRequiresClosedDeclarationsAndUnusedDefault": 1.71,
     "TestAdversarialStaticClassOwnersKeepValueNamespaceAndEffects": 23.53,

@@ -2821,7 +2821,7 @@ func (c *ClassObjectDumper) buildGenericDeclarationSignatures(platform bool) fun
 					_, ps, _ := types.ParseMethodSignatureFull(sigStr, c.FuncCtx)
 					if len(ps) == len(methodParamFieldDescriptors(descriptor)) {
 						methodSigs[descKey] = sigStr
-					} else if lifted, proved := constructorEnclosingBindingSignature(sObj, m, c.Work, c.nativeAnnotationDeclarationResolver()); proved {
+					} else if lifted, proved := constructorEnclosingDeclarationSignature(sObj, m, c.Work, c.nativeAnnotationDeclarationResolver()); proved {
 						methodSigs[descKey] = lifted
 					}
 					continue
@@ -5541,7 +5541,7 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 		c.ordinaryConstructorEmissionSeen = true
 	}
 	if name == "<init>" && request.role == methodSourceDeclaration && c.options.sourceConstructorLowering != nil && c.reconstructionPhysicalHeader() && !dumped.sourceReconstructionFailed() {
-		if signature, proved := constructorEnclosingBindingSignature(c.obj, method, c.Work, c.nativeAnnotationDeclarationResolver()); proved {
+		if signature, proved := constructorEnclosingDeclarationSignature(c.obj, method, c.Work, c.nativeAnnotationDeclarationResolver()); proved {
 			// Signature projection owes this exact completed declaration even
 			// when Object.<init> needs no executable capture reordering. Enroll
 			// its real writer span before any class-wide legacy source rules.

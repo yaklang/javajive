@@ -8,13 +8,14 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 // An original untyped null is applicable to every reference formal. When a
 // complete constructor table has exactly one candidate of this arity, adding
 // a descriptor cast cannot improve binding, but it does invent a CHECKCAST
 // absent from the original operand packet. Constructors are not inherited;
-// all varargs and same-arity rivals still need the ordinary binding proof.
+// all varargs and reference-compatible same-arity rivals still need the ordinary binding proof.
 // Class formals alone do not make a constructor generic: a declaration whose
 // own Signature is absent still has exactly its descriptor parameter types,
 // regardless of how the receiver's unrelated class formals are instantiated.
@@ -45,7 +46,7 @@ func (f *FunctionCallExpression) uniqueDelegationNullArgument(i int, ctx *class_
 		return false
 	}
 	table, known := ctx.InvocationMetadata(owner)
-	if !known || table.Name != owner || !table.MembersComplete {
+	if !known || table.Name != owner || !table.MembersComplete || len(table.Methods) > 4096 || ctx.Work.Charge(workbudget.CounterGraphScans, int64(len(table.Methods))+1) != nil {
 		return false
 	}
 	matched := 0
@@ -60,12 +61,76 @@ func (f *FunctionCallExpression) uniqueDelegationNullArgument(i int, ctx *class_
 		if len(ps) != len(params) {
 			continue
 		}
-		if method.Desc != f.Descriptor || method.Generic || method.Signature != "" {
+		if method.Desc != f.Descriptor {
+			// An unboxed primitive formal cannot accept the original null.
+			// This excludes a rival without making assumptions about other
+			// argument types or source spellings.
+			if !callbinding.Reference(ps[i]) {
+				continue
+			}
+			return false
+		}
+		if !delegationNullSignatureClosed(method, table, ctx) {
 			return false
 		}
 		matched++
 	}
 	return matched == 1
+}
+
+// Null is applicable to every reference type, including a declared class
+// variable or parameterized type. Validate the complete target declaration in
+// its own scope; caller method variables must not supply missing binders. An
+// exact descriptor-keyed provider may expose a separately proved hidden-port
+// lift, but an arity-only Signature is never sufficient.
+func delegationNullSignatureClosed(method callbinding.Method, table callbinding.Class, ctx *class_context.ClassContext) bool {
+	if method.Signature == "" {
+		return !method.Generic
+	}
+	if !method.Generic || !strings.HasPrefix(method.Signature, "(") || len(method.Signature) > 4096 {
+		return false
+	}
+	scopes := []string{table.Signature}
+	if table.Name == strings.ReplaceAll(ctx.ClassName, ".", "/") {
+		if len(ctx.LexicalTypeParamSignatures) > 64 {
+			return false
+		}
+		scopes = nil
+		for j := len(ctx.LexicalTypeParamSignatures) - 1; j >= 0; j-- {
+			scopes = append(scopes, ctx.LexicalTypeParamSignatures[j])
+		}
+		scopes = append(scopes, table.Signature)
+	}
+	size := len(method.Signature)
+	for _, scope := range scopes {
+		size += len(scope)
+	}
+	if ctx.Work.Charge(workbudget.CounterGraphScans, int64(size)*130+1) != nil {
+		return false
+	}
+	erased, _, valid := types.EraseLexicalOwnerMethodSignatureWithThrows(scopes, method.Signature)
+	if !valid {
+		return false
+	}
+	if erased == method.Desc {
+		return true
+	}
+	if ctx.SiblingClassSig == nil {
+		return false
+	}
+	classSig, methods, known := ctx.SiblingClassSig(table.Name)
+	// An absent class Signature has its ordinary Object/parent descriptor
+	// in the provider; no synthetic source formals may replace original ones.
+	if !known || table.Signature != "" && classSig != table.Signature {
+		return false
+	}
+	lifted := methods[class_context.MethodDescKey("<init>", method.Desc)]
+	ports, result, err := callbinding.Descriptor(method.Desc)
+	if err != nil || result != "V" || len(ports) == 0 || !callbinding.Reference(ports[0]) || lifted != "("+ports[0]+method.Signature[1:] {
+		return false
+	}
+	actual, _, valid := types.EraseLexicalOwnerMethodSignatureWithThrows(scopes, lifted)
+	return valid && actual == method.Desc
 }
 
 // Source expressions can become more specific than their JVM erasure (for

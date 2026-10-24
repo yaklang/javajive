@@ -21,7 +21,7 @@ func (c *ClassObjectDumper) publishConstructorBindingSignatures(source string, m
 		if m == nil || m.member == nil || m.methodName != "<init>" {
 			continue
 		}
-		signature, ok := constructorEnclosingBindingSignature(c.obj, m.member, c.Work, c.nativeAnnotationDeclarationResolver())
+		signature, ok := constructorEnclosingDeclarationSignature(c.obj, m.member, c.Work, c.nativeAnnotationDeclarationResolver())
 		if !ok {
 			continue
 		}
@@ -121,7 +121,7 @@ func (a *sourceConstructorLoweringAuthority) restoreConstructorBindingSignatures
 	var added []byte
 	var edits []compiledMetadataEdit
 	for _, before := range want.Methods {
-		lifted, proved := constructorEnclosingBindingSignature(want, before, work, resolve)
+		lifted, proved := constructorEnclosingDeclarationSignature(want, before, work, resolve)
 		if !proved {
 			continue
 		}
@@ -164,7 +164,16 @@ func (a *sourceConstructorLoweringAuthority) restoreConstructorBindingSignatures
 		if fresh == nil {
 			fresh = constructorLoweringPacketFor(got, after, false, false, work, 1)
 		}
-		if old == nil || fresh == nil || !reflect.DeepEqual(old.plan, fresh.plan) {
+		packetMatches := old != nil && fresh != nil && reflect.DeepEqual(old.plan, fresh.plan)
+		if !packetMatches {
+			outer, _, _, member := originalMemberOwner(want)
+			provider := d.buildInvocationMetadata()
+			oldGraph := memberScopeConstructorGraph(want, outer, true, work, provider)
+			freshGraph := memberScopeConstructorGraph(got, outer, false, work, provider)
+			prior, next := oldGraph[desc], freshGraph[desc]
+			packetMatches = member && prior != nil && next != nil && prior.forward != nil && next.forward != nil && reflect.DeepEqual(oldGraph, freshGraph)
+		}
+		if !packetMatches {
 			return fail("fresh constructor packet changed")
 		}
 		if signature == originalSig {

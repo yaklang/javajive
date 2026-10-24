@@ -236,6 +236,8 @@ func (a *sourceConstructorLoweringAuthority) restoreMemberGenericScope(original,
 		return decline()
 	}
 	provider := d.buildInvocationMetadata()
+	originalConstructors := memberScopeConstructorGraph(want, owner, true, work, provider)
+	freshConstructors := memberScopeConstructorGraph(got, owner, false, work, provider)
 	stage = "member signatures"
 	constructors := 0
 	// An access constructor forwards its unchanged typed operands to a
@@ -265,7 +267,7 @@ func (a *sourceConstructorLoweringAuthority) restoreMemberGenericScope(original,
 			if !ok || !freshOK || before != descriptor || after != descriptor {
 				// A member constructor Signature excludes the proved hidden outer port.
 				// Align through that typed capture proof, never by argument count alone.
-				lifted, proved := constructorEnclosingBindingSignature(want, m, work, d.nativeAnnotationDeclarationResolver())
+				lifted, proved := constructorEnclosingDeclarationSignature(want, m, work, d.nativeAnnotationDeclarationResolver())
 				if name != "<init>" || !proved {
 					return decline()
 				}
@@ -295,12 +297,8 @@ func (a *sourceConstructorLoweringAuthority) restoreMemberGenericScope(original,
 		}
 		constructors++
 		stage = "constructor capture " + descriptor
-		before := constructorLoweringTypedPacketFor(want, m, true, true, work, provider)
-		after := constructorLoweringTypedPacketFor(got, next, true, false, work, provider, 1)
-		if after == nil {
-			after = constructorLoweringTypedPacketFor(got, next, false, false, work, provider, 1)
-		}
-		if before == nil || after == nil || !reflect.DeepEqual(before.plan, after.plan) || len(before.plan.captures) != 1 || before.plan.captures[0].slot != 1 || before.plan.captures[0].field.descriptor != "L"+owner+";" {
+		before, after := originalConstructors[descriptor], freshConstructors[descriptor]
+		if next == nil || before == nil || after == nil || !reflect.DeepEqual(before, after) {
 			return decline()
 		}
 	}
@@ -488,33 +486,5 @@ func originalMemberScopeCapturesClosed(obj *ClassObject, work *workbudget.Budget
 	if !member || flags&StaticFlag != 0 || len(obj.Methods) > 4096 {
 		return false
 	}
-	d := NewClassObjectDumper(obj)
-	d.Work = work
-	bridges := d.originalNativeConstructorAccessBridges()
-	count := 0
-	for _, method := range obj.Methods {
-		if method == nil || !nativeProofWork(work, 1) {
-			return false
-		}
-		name, known := sourceBridgeUTF8(obj, method.NameIndex)
-		if !known {
-			return false
-		}
-		if name != "<init>" {
-			continue
-		}
-		descriptor, known := sourceBridgeUTF8(obj, method.DescriptorIndex)
-		if !known {
-			return false
-		}
-		if bridge := bridges[descriptor]; bridge != nil && bridge.method == method {
-			continue
-		}
-		packet := constructorLoweringPacketFor(obj, method, true, true, work)
-		if packet == nil || len(packet.plan.captures) != 1 || packet.plan.captures[0].slot != 1 || packet.plan.captures[0].field.descriptor != "L"+owner+";" {
-			return false
-		}
-		count++
-	}
-	return count > 0
+	return memberScopeConstructorGraph(obj, owner, true, work, nil) != nil
 }

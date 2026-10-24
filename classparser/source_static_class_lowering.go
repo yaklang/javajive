@@ -19,23 +19,27 @@ func staticClassOriginalDomain(object *ClassObject, work *workbudget.Budget) boo
 	// The fresh default constructor still needs the full unused-packet check.
 	// This is a declaration proof, independent of a compiler's capture or
 	// enum protocol. ACC_SYNTHETIC has its class-file meaning since version
-	// 49; every supported non-preview version has the same constructor
-	// absence contract. The fresh executable deletion is still proved below.
+	// 49. Java4 already has the same constructor-absence contract, but cannot
+	// use that later access flag. The fresh executable deletion is still proved
+	// below; old input versions do not authorize an unproved Code shape.
 	// PUBLIC, FINAL and SYNTHETIC do not create instance state or a
 	// constructor. Keep them independent of the no-instance-member proof;
 	// interfaces, enums, annotations and abstract declarations have separate
 	// source rules and cannot use this ordinary-class completion.
-	if object == nil || object.MajorVersion < 49 || object.MajorVersion > 65 || object.MinorVersion != 0 || object.AccessFlags&0x0020 == 0 || object.AccessFlags&^uint16(0x1031) != 0 || object.GetSupperClassName() != "java/lang/Object" || len(object.Interfaces) != 0 || len(object.Methods) > 4096 {
+	if object == nil || object.MajorVersion < 48 || object.MajorVersion > 65 || object.MinorVersion != 0 || object.MajorVersion < 49 && object.AccessFlags&0x1000 != 0 || object.AccessFlags&0x0020 == 0 || object.AccessFlags&^uint16(0x1031) != 0 || object.GetSupperClassName() != "java/lang/Object" || len(object.Interfaces) != 0 || len(object.Methods) > 4096 {
 		return false
 	}
 	for _, method := range object.Methods {
+		if method == nil || object.MajorVersion < 49 && method.AccessFlags&syntheticMethodFlag != 0 {
+			return false
+		}
 		name, known := sourceBridgeUTF8(object, method.NameIndex)
 		if !known || name == "<init>" || method.AccessFlags&8 == 0 || !nativeProofWork(work, 1) {
 			return false
 		}
 	}
 	for _, field := range object.Fields {
-		if field == nil || field.AccessFlags&8 == 0 || !nativeProofWork(work, 1) {
+		if field == nil || field.AccessFlags&8 == 0 || object.MajorVersion < 49 && field.AccessFlags&syntheticFieldFlag != 0 || !nativeProofWork(work, 1) {
 			return false
 		}
 	}
@@ -204,7 +208,11 @@ func (a *sourceConstructorLoweringAuthority) lowerStaticClassDefaultConstructor(
 			constructor = m
 			continue
 		}
-		if flags, known := expected[k]; !known || flags != m.AccessFlags {
+		// Source cannot spell a declared synthetic method marker. Keep the
+		// exact method bijection and every other flag; the independent synthetic
+		// restorer still owes this missing original bit after the default
+		// constructor is removed. This step changes no ordinary method bytes.
+		if flags, known := expected[k]; !known || flags&^syntheticMethodFlag != m.AccessFlags&^syntheticMethodFlag || m.AccessFlags&syntheticMethodFlag != 0 && flags&syntheticMethodFlag == 0 {
 			return decline()
 		}
 	}
