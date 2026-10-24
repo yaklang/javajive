@@ -16,6 +16,7 @@ import (
 // Explicit SUPER arguments, shared ports and ordinary constructors grant none.
 type sourceConstructorMetadataPlan struct {
 	owner, descriptor string
+	sourceMajor       uint16
 	originalHash      [32]byte
 	flags             []uint16
 	omitParameters    bool
@@ -31,7 +32,7 @@ type sourceConstructorMemberPublication struct {
 }
 
 func sourceConstructorMetadataPlansEqual(left, right *sourceConstructorMetadataPlan) bool {
-	return left != nil && right != nil && left.owner == right.owner && left.descriptor == right.descriptor && left.originalHash == right.originalHash && left.omitParameters == right.omitParameters && left.omitSignature == right.omitSignature && slices.Equal(left.flags, right.flags)
+	return left != nil && right != nil && left.owner == right.owner && left.descriptor == right.descriptor && left.originalHash == right.originalHash && left.sourceMajor == right.sourceMajor && left.omitParameters == right.omitParameters && left.omitSignature == right.omitSignature && slices.Equal(left.flags, right.flags)
 }
 
 func (a *sourceLambdaMetadataAuthority) constructorPlan(owner string) *sourceConstructorMetadataPlan {
@@ -40,15 +41,47 @@ func (a *sourceLambdaMetadataAuthority) constructorPlan(owner string) *sourceCon
 	return a.constructors[owner]
 }
 
+// All-hidden constructor metadata has no dependency on the Java8 lambda
+// naming protocol. It grants only a completed anonymous allocation's attribute
+// obligation; lambda names, static-anonymous flags and executable lowering keep
+// their separate permissions. The actual original bytes bind every plan.
+func (c *ClassObjectDumper) artifactConstructorMetadataAllowed() bool {
+	if c == nil || c.obj == nil || c.obj.MajorVersion < 49 || c.obj.MajorVersion > 52 || c.obj.MinorVersion != 0 || c.options.SourceCompiler.effective() != ModernJavac || c.options.TargetSourceVersion < 8 || c.options.TargetSourceVersion > 21 || c.options.sourceLambdaMetadata == nil || hasOriginalNestAttribute(c.obj, "NestHost") || hasOriginalNestAttribute(c.obj, "NestMembers") {
+		return false
+	}
+	_, bound := c.options.sourceLambdaMetadata.original(c.obj, c.Work)
+	return bound
+}
+
+func (plan *sourceConstructorMetadataPlan) targetMatches(original, fresh *ClassObject, target sourceCaptureMetadataTarget) bool {
+	if plan == nil || original == nil || fresh == nil {
+		return false
+	}
+	major := plan.sourceMajor
+	if major == 0 {
+		// Existing standalone restoration retains its Java8-only permission.
+		return target.matches(original, fresh)
+	}
+	if target.major != 0 {
+		// The physical MR9/10 compiler can recompile an emitted base8 unit.
+		// This permission does not authorize arbitrary target substitution.
+		if major != 52 || target.major < 53 || target.major > 54 {
+			return false
+		}
+		major = target.major
+	}
+	return original.MajorVersion >= 49 && original.MajorVersion <= 52 && original.MinorVersion == 0 && !hasOriginalNestAttribute(original, "NestHost") && !hasOriginalNestAttribute(original, "NestMembers") && major >= 52 && major <= 65 && fresh.MajorVersion == major && fresh.MinorVersion == 0 && (major >= 55 || !hasOriginalNestAttribute(fresh, "NestHost") && !hasOriginalNestAttribute(fresh, "NestMembers"))
+}
+
 func (c *ClassObjectDumper) artifactConstructorPlan(child *nativeAnonymousClass) *sourceConstructorMetadataPlan {
-	if child == nil || child.object == nil || !c.artifactLambdaMetadataAllowed() || child.object.MajorVersion != 52 || child.sharedParameterRoles || len(child.superParams) != 0 {
+	if child == nil || child.object == nil || !c.artifactConstructorMetadataAllowed() || child.object.MajorVersion < 49 || child.object.MajorVersion > 52 || child.object.MinorVersion != 0 || hasOriginalNestAttribute(child.object, "NestHost") || hasOriginalNestAttribute(child.object, "NestMembers") || child.sharedParameterRoles || len(child.superParams) != 0 {
 		return nil
 	}
 	params, result, err := callbinding.Descriptor(child.descriptor)
 	if err != nil || result != "V" || len(params) == 0 || len(params) > 255 {
 		return nil
 	}
-	plan := &sourceConstructorMetadataPlan{owner: child.object.GetClassName(), descriptor: child.descriptor, flags: make([]uint16, len(params))}
+	plan := &sourceConstructorMetadataPlan{sourceMajor: uint16(c.options.TargetSourceVersion + 44), owner: child.object.GetClassName(), descriptor: child.descriptor, flags: make([]uint16, len(params))}
 	for field, index := range child.fields {
 		if index < 0 || index >= len(params) || plan.flags[index] != 0 || !nativeProofWork(c.Work, 1) {
 			return nil
@@ -104,7 +137,7 @@ func (c *ClassObjectDumper) artifactConstructorPlan(child *nativeAnonymousClass)
 // Called at the successful typed allocation renderer, after capture, SUPER,
 // lexical access and body proofs. A provisional body alone cannot activate it.
 func (c *ClassObjectDumper) recordArtifactConstructorPublication(group *nativeAnonymousFamily, child *nativeAnonymousClass, sub *ClassObjectDumper, source string) bool {
-	if !c.artifactLambdaMetadataAllowed() {
+	if !c.artifactConstructorMetadataAllowed() {
 		return true
 	}
 	if group == nil || group != c.nativeAnonymousRoot || group.owner != c.obj.GetClassName() || child == nil || child.object == nil || group.children[child.object.GetClassName()] != child || sub == nil || sub.obj != child.object {
@@ -185,7 +218,7 @@ func restoreImplicitConstructorParameterMetadataAtTarget(original, compiled []by
 	if err != nil {
 		return nil, err
 	}
-	if want.GetClassName() != plan.owner || got.GetClassName() != plan.owner || !target.matches(want, got) || want.AccessFlags != got.AccessFlags || want.GetSupperClassName() != got.GetSupperClassName() || !slices.Equal(want.GetInterfacesName(), got.GetInterfacesName()) || len(want.Methods) != len(got.Methods) || len(got.Methods) > 4096 {
+	if want.GetClassName() != plan.owner || got.GetClassName() != plan.owner || !plan.targetMatches(want, got, target) || want.AccessFlags != got.AccessFlags || want.GetSupperClassName() != got.GetSupperClassName() || !slices.Equal(want.GetInterfacesName(), got.GetInterfacesName()) || len(want.Methods) != len(got.Methods) || len(got.Methods) > 4096 {
 		return fail("class or constructor universe changed")
 	}
 	find := func(object *ClassObject) (*MemberInfo, bool) {
