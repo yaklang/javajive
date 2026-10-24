@@ -501,10 +501,16 @@ func nativeMemberConstructorForAllocation(child *nativeMemberClass, desc string)
 	if child == nil {
 		return nil
 	}
+	constructor := child.constructors[desc]
+	if constructor != nil && constructor.accessBridge != nil && child.accessBridges[desc] != constructor.accessBridge {
+		// Keeping a physical declaration does not turn a revoked synthetic
+		// bridge certificate into an ordinary constructor permission.
+		return nil
+	}
 	if bridge := child.accessBridges[desc]; bridge != nil {
 		return child.constructors[bridge.target]
 	}
-	return child.constructors[desc]
+	return constructor
 }
 func nativeMemberBridgeSourceDummy(value any) bool {
 	v, ok := value.(values.JavaValue)

@@ -15,6 +15,7 @@ import (
 )
 
 type nativeMemberConstructor struct {
+	accessBridge                                                    *nativeConstructorAccessBridge
 	descriptor, sourceDescriptor, delegateOwner, delegateDescriptor string
 	capturePC, delegatePC                                           int
 	projectedSuper                                                  bool
@@ -525,7 +526,7 @@ func nativeMemberProofWithSourceMetadata(obj, enclosing *ClassObject, work *work
 			return nil
 		}
 		ops := constructorMotionOps(d)
-		cp := &nativeMemberConstructor{descriptor: desc, sourceDescriptor: "(" + strings.Join(ps[1:], "") + ")V", capturePC: -1, delegatePC: -1}
+		cp := &nativeMemberConstructor{accessBridge: bridge, descriptor: desc, sourceDescriptor: "(" + strings.Join(ps[1:], "") + ")V", capturePC: -1, delegatePC: -1}
 		start := 0
 		if len(ops) >= 3 {
 			if field := constructorMotionMember(obj, ops[2], core.OP_PUTFIELD); field != nil && field.Name == obj.GetClassName() && field.Member == p.field && field.Description == ps[0] && core.GetRetrieveIdx(ops[0]) == 0 && constructorMotionLoad(ops[0], "Ljava/lang/Object;") && core.GetRetrieveIdx(ops[1]) == 1 && constructorMotionLoad(ops[1], ps[0]) {
