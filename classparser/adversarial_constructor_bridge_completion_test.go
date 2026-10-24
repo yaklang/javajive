@@ -32,14 +32,21 @@ class AccessDriver {public static void main(String[]args)throws Exception{Class<
 
 // Every fixture first runs its authored original, then compiles an owning
 // source family with no original family classes on its classpath.
-func roundTripConstructorBridgeArtifact(t *testing.T, fixture, owner, driver, oracle, debug string, target int) {
+func roundTripConstructorBridgeArtifact(t *testing.T, fixture, owner, driver, oracle, debug string, target int, originalRelease ...int) {
 	t.Helper()
 	modern, java := t04Tools(t)
 	native := os.Getenv("JAVA8_JAVAC")
 	if native == "" {
 		t.Fatal("native original compiler required")
 	}
-	files := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, fixture, owner, debug, false)
+	release := 8
+	if len(originalRelease) > 1 {
+		t.Fatal("one original release required")
+	}
+	if len(originalRelease) == 1 {
+		release = originalRelease[0]
+	}
+	files := compileLambdaParameterMetadataFixtureWithSourcesAtRelease(t, native, NativeJavac8, fixture, owner, debug, nil, release, false)
 	run := func(dir, phase string) {
 		t.Helper()
 		out, err := exec.Command(java, "-Xverify:all", "-cp", dir, driver).CombinedOutput()
