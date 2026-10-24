@@ -9,6 +9,25 @@ import (
 	"testing"
 )
 
+func TestMultiCatchLocalAssignCollapses(t *testing.T) {
+	id := utils.NewRootVariableId()
+	id.SetName("var6")
+	union := types.NewMultiCatchType([]types.JavaType{
+		types.NewJavaClass("java.lang.IllegalArgumentException"),
+		types.NewJavaClass("java.lang.SecurityException"),
+	})
+	ref := values.NewJavaRef(id, nil, union)
+	ref.WebDeclType = union
+	ctx := &class_context.ClassContext{}
+	got := NewAssignStatement(ref, values.NewJavaLiteral("null", types.NewJavaClass("java.lang.Object")), true).String(ctx)
+	if strings.Contains(got, " | ") {
+		t.Fatalf("union leaked: %s", got)
+	}
+	if !strings.Contains(got, "Exception") {
+		t.Fatalf("missing collapsed type: %s", got)
+	}
+}
+
 func TestSwitchCaseDeclarationIsBlocked(t *testing.T) {
 	id := utils.NewRootVariableId()
 	id.SetName("flag")

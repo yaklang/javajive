@@ -2980,6 +2980,21 @@ func ternaryHasClassLiteralArm(tern *values.TernaryExpression) bool {
 // `A | B varN;` is invalid Java (jackson FromStringDeserializer). Collapse to Exception
 // so the later `varN = e` from the catch still type-checks. Kill-switch:
 // JDEC_MULTICATCH_LOCAL_DECL_OFF=1.
+func isMultiCatchType(t types.JavaType) bool {
+	if t == nil {
+		return false
+	}
+	if _, ok := t.(*types.JavaMultiCatchType); ok {
+		return true
+	}
+	raw := t.RawType()
+	if raw == nil {
+		return false
+	}
+	_, ok := raw.(*types.JavaMultiCatchType)
+	return ok
+}
+
 func localDeclType(t types.JavaType) types.JavaType {
 	if t == nil {
 		return t
@@ -2987,7 +3002,7 @@ func localDeclType(t types.JavaType) types.JavaType {
 	if jdecenv.Get("JDEC_MULTICATCH_LOCAL_DECL_OFF") != "" {
 		return t
 	}
-	if _, ok := t.RawType().(*types.JavaMultiCatchType); ok {
+	if isMultiCatchType(t) {
 		return types.NewJavaClass("java.lang.Exception")
 	}
 	return t
@@ -3139,10 +3154,12 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) (source st
 			// degrades this method cleanly instead of crashing.
 			return values.IncompleteSourceValue(funcCtx) + " " + assign
 		}
-		if _, ok := declType.RawType().(*types.JavaMultiCatchType); ok {
+		if isMultiCatchType(declType) {
 			// A multi-catch union type is legal only inside `catch (A | B e)`. If the exception
 			// value is hoisted into an ordinary local (`cause = e` after the catch), render it as
 			// a common Throwable subtype so the declaration remains valid Java.
+			// The slot sometimes stores the raw *JavaMultiCatchType, whose RawType() is the
+			// embedded type and not the union itself.
 			declType = localDeclType(declType)
 		}
 		// When the slot's resolved type is a WIDER int-category primitive than the initializer's
@@ -3248,6 +3265,8 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) (source st
 			assign = fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
 			declType = a.LeftValue.Type()
 		}
+		// WebDeclType and later wideners can put the union back after the earlier collapse.
+		declType = localDeclType(declType)
 		return declType.String(funcCtx) + " " + assign
 	} else {
 		// Narrowing REASSIGNMENT to a byte/char/short target (field/local) whose RHS is int-typed:

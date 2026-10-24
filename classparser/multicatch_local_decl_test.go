@@ -1,6 +1,8 @@
 package javaclassparser
 
 import (
+	"archive/zip"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -36,6 +38,43 @@ func TestMultiCatchLocalDeclIsLoadBearing(t *testing.T) {
 	}
 	if !strings.Contains(off, "IllegalArgumentException | MalformedURLException var") {
 		t.Errorf("fix OFF: expected leaked union local decl, got:\n%s", snippetUnion(off))
+	}
+}
+
+func TestECJMultiCatchLocalIsNotADeclaration(t *testing.T) {
+	const jarPath = "/home/wlz/Target/ekp/lib/bes-el.jar"
+	const member = "javax/el/StaticFieldELResolver.class"
+	zf, err := zip.OpenReader(jarPath)
+	if err != nil {
+		t.Skip(err)
+	}
+	defer zf.Close()
+	var raw []byte
+	for _, f := range zf.File {
+		if f.Name != member {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err = io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		break
+	}
+	if len(raw) == 0 {
+		t.Fatal("class missing")
+	}
+	t.Setenv("JDEC_MULTICATCH_LOCAL_DECL_OFF", "")
+	src, err := Decompile(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !onlyInCatch(src, " | ") {
+		t.Fatalf("union type leaked outside catch:\n%s", snippetUnion(src))
 	}
 }
 
