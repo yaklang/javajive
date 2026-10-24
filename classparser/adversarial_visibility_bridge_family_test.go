@@ -42,12 +42,21 @@ func TestAdversarialVisibilityBridgeDoesNotInventCovariantDeclarations(t *testin
 	if native == "" {
 		t.Fatal("native original compiler required")
 	}
-	for _, root := range []string{"BridgeOuter", "RenamedVisibilityScope"} {
-		for _, debug := range []string{"none", "source,lines,vars"} {
-			for _, parameters := range []bool{false, true} {
-				t.Run(fmt.Sprintf("%s/%s/parameters%v", root, debug, parameters), func(t *testing.T) {
-					testIndependentInheritedBridge(t, modern, java, native, strings.ReplaceAll(inheritedVisibilityBridgeFixture, "BridgeOuter", root), root, debug, parameters, "4:access:bridge:inherited:generic:identity\n")
-				})
+	// Parameter erasure and result covariance are independent reasons for a
+	// compiler bridge; cover either axis alone as well as their composition.
+	for _, declaration := range []struct{ name, method string }{
+		{"argument-and-result", "T read(T value);"},
+		{"argument-only", "String read(T value);"},
+		{"result-only", "T read(String value);"},
+	} {
+		for _, root := range []string{"BridgeOuter", "RenamedVisibilityScope"} {
+			for _, debug := range []string{"none", "source,lines,vars"} {
+				for _, parameters := range []bool{false, true} {
+					t.Run(fmt.Sprintf("%s/%s/%s/parameters%v", declaration.name, root, debug, parameters), func(t *testing.T) {
+						fixture := strings.Replace(inheritedVisibilityBridgeFixture, "T read(T value);", declaration.method, 1)
+						testIndependentInheritedBridge(t, modern, java, native, strings.ReplaceAll(fixture, "BridgeOuter", root), root, debug, parameters, "4:access:bridge:inherited:generic:identity\n")
+					})
+				}
 			}
 		}
 	}
