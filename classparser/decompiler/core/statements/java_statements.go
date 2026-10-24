@@ -4067,7 +4067,7 @@ func (a *SwitchStatement) String(funcCtx *class_context.ClassContext) string {
 	selector, names, projected := a.SourceSelection(funcCtx)
 	casesStrs := []string{}
 	for _, c := range a.Cases {
-		body := StatementsString(c.Body, funcCtx)
+		body := switchCaseBody(StatementsString(c.Body, funcCtx))
 		if c.IsDefault {
 			casesStrs = append(casesStrs, fmt.Sprintf("default:\n%s", body))
 			continue
@@ -4082,6 +4082,16 @@ func (a *SwitchStatement) String(funcCtx *class_context.ClassContext) string {
 		selector = a.Value.String(funcCtx)
 	}
 	return fmt.Sprintf("switch(%s) {\n%s\n}", selector, strings.Join(casesStrs, "\n"))
+}
+
+// switchCaseBody wraps a case body in a block. A local declaration is not a
+// statement in the Java grammar, so "case 1: boolean flag;" does not parse.
+// The braces do not stop fall-through.
+func switchCaseBody(body string) string {
+	if strings.TrimSpace(body) == "" {
+		return "{}"
+	}
+	return "{\n" + body + "\n}"
 }
 
 func NewSwitchStatement(value values.JavaValue, cases []*CaseItem) *SwitchStatement {
