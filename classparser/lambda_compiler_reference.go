@@ -129,42 +129,51 @@ func (c *ClassObjectDumper) compilerVarargsParameterSchema(shape *lambdaVarargsA
 	}
 	switch c.options.SourceCompiler {
 	case ModernJavac:
-		return table == nil
+		if table == nil {
+			return true
+		}
+		// A source artifact can preserve the original Java 8 adapter's
+		// parameter table after modern javac independently regenerates Code.
+		// Plain source has no such permission. The ordinary source/factory
+		// publication and exact fresh method-universe checks still apply.
+		if !c.artifactLambdaMetadataAllowed() {
+			return false
+		}
 	case NativeJavac8:
 		if c.options.TargetSourceVersion != 8 {
 			return false
 		}
-		if table == nil {
-			return native8UnmarkedLambdaParametersClosed(c.obj, shape.method, c.Work)
-		}
-		if !native8LambdaParameterCompilerFlagClosed(c.obj, c.Work) {
-			return false
-		}
-		formals, _, err := callbinding.Descriptor(shape.member.Description)
-		if err != nil {
-			return false
-		}
-		fixed := len(formals) - 1
-		names := []string{"rec$"}
-		for i := 1; i < len(shape.parameters); i++ {
-			prefix := "x$"
-			if i > fixed {
-				prefix = "xva$"
-			}
-			names = append(names, prefix+strconv.Itoa(i-1))
-		}
-		if !slices.Equal(table.names, names) || len(table.flags) != len(names) {
-			return false
-		}
-		for _, flags := range table.flags {
-			if flags != 0x1000 {
-				return false
-			}
-		}
-		return true
 	default:
 		return false
 	}
+	if table == nil {
+		return native8UnmarkedLambdaParametersClosed(c.obj, shape.method, c.Work)
+	}
+	if shape.receiverCount() != 1 || !native8LambdaParameterCompilerFlagClosed(c.obj, c.Work) {
+		return false
+	}
+	formals, _, err := callbinding.Descriptor(shape.member.Description)
+	if err != nil {
+		return false
+	}
+	fixed := len(formals) - 1
+	names := []string{"rec$"}
+	for i := 1; i < len(shape.parameters); i++ {
+		prefix := "x$"
+		if i > fixed {
+			prefix = "xva$"
+		}
+		names = append(names, prefix+strconv.Itoa(i-1))
+	}
+	if !slices.Equal(table.names, names) || len(table.flags) != len(names) {
+		return false
+	}
+	for _, flags := range table.flags {
+		if flags != 0x1000 {
+			return false
+		}
+	}
+	return true
 }
 
 // The fixed public binding kernel can also query a positively proved package
