@@ -72,7 +72,7 @@ func FixedFactoryAssignmentView(value JavaValue, target types.JavaType, ctx *cla
 			if effects != 0 || len(refs) != 0 {
 				return false
 			}
-			family, err := callbinding.FamilyOf(v.Witness(), ctx.InvocationMetadata)
+			family, err := callbinding.FamilyOf(callbinding.Witness{Owner: strings.ReplaceAll(v.ClassName, ".", "/"), Name: v.FunctionName, Desc: v.Descriptor}, ctx.InvocationMetadata)
 			if err != nil || !family.Complete || family.Target == nil || !family.Target.Static || family.Target.Bridge || len(family.Methods) != 1 {
 				return false
 			}
