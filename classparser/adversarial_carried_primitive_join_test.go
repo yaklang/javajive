@@ -116,19 +116,30 @@ public class CarryDriver {public static void main(String[] args){int rows=0;for(
 					resolve := resolverFromClasses(classMapFromDir(t, dir))
 					for _, mode := range []DecompileMode{Precision, Compatibility} {
 						t.Run(string(mode), func(t *testing.T) {
-							result, err := DecompileWithOptions(original, DecompileOptions{Mode: mode, TargetSourceVersion: 8, Resolve: resolve, EnvSnapshot: map[string]string{}})
-							if err != nil || len(result.StubMethods) != 0 || strings.Contains(result.Source, DecompileStubMarker) {
-								t.Fatal("complete source", err, result.Diagnostics)
+							for _, policy := range []string{"normal", "no-source-rewrites", "no-core-cleanups"} {
+								t.Run(policy, func(t *testing.T) {
+									environment := map[string]string{}
+									if policy == "no-source-rewrites" {
+										environment["JDEC_NO_SOURCE_REWRITES"] = "1"
+									}
+									if policy == "no-core-cleanups" {
+										environment["JDEC_NO_CORE_CLEANUPS"] = "1"
+									}
+									result, err := DecompileWithOptions(original, DecompileOptions{Mode: mode, TargetSourceVersion: 8, Resolve: resolve, EnvSnapshot: environment})
+									if err != nil || len(result.StubMethods) != 0 || strings.Contains(result.Source, DecompileStubMarker) {
+										t.Fatal("complete source", err, result.Diagnostics)
+									}
+									out := t.TempDir()
+									src := filepath.Join(out, "CarryOwner.java")
+									if err := os.WriteFile(src, []byte(result.Source), 0600); err != nil {
+										t.Fatal(err)
+									}
+									if log, err := exec.Command(javac, "-proc:none", "--release", "8", "-g:"+debug, "-cp", dir, "-d", out, src).CombinedOutput(); err != nil {
+										t.Fatal("recompile", err, string(log), result.Source)
+									}
+									run(out + string(os.PathListSeparator) + dir)
+								})
 							}
-							out := t.TempDir()
-							src := filepath.Join(out, "CarryOwner.java")
-							if err := os.WriteFile(src, []byte(result.Source), 0600); err != nil {
-								t.Fatal(err)
-							}
-							if log, err := exec.Command(javac, "-proc:none", "--release", "8", "-g:"+debug, "-cp", dir, "-d", out, src).CombinedOutput(); err != nil {
-								t.Fatal("recompile", err, string(log), result.Source)
-							}
-							run(out + string(os.PathListSeparator) + dir)
 						})
 					}
 				})
