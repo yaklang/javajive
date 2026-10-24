@@ -172,32 +172,20 @@ func TestHistoricalJarAudit(t *testing.T) {
 			srcRoot := filepath.Join(dir, "sources")
 			target := compileRelease(jarSpecs[name], input.Path)
 			resolve := historicalDeclarationResolver(t, input.Deps)
-			var files []string
-			var units, fail int
-			var artifact *classparser.JarSourceArtifact
-			var reconstruction *classparser.JarReconstructionArtifact
+			policy := "plain"
 			if os.Getenv("HISTORICAL_JAR_RECONSTRUCTION_ARTIFACT") == "1" {
 				if os.Getenv("HISTORICAL_JAR_SOURCE_ARTIFACT") == "1" {
 					t.Fatal("select exactly one artifact contract")
 				}
-				var err error
-				reconstruction, err = classparser.NewJarReconstructionArtifactFromLocal(input.Path, target, classparser.ModernJavac, resolve)
-				if err != nil {
-					t.Fatal("explicit reconstruction artifact", err)
-				}
-				defer reconstruction.Close()
-				files, units, fail = decompileAllFromSourceReader(t, input.Path, srcRoot, 0, reconstruction)
+				policy = "reconstruction"
 			} else if os.Getenv("HISTORICAL_JAR_SOURCE_ARTIFACT") == "1" {
-				var err error
-				artifact, err = classparser.NewJarSourceArtifactFromLocal(input.Path, target, classparser.ModernJavac, resolve)
-				if err != nil {
-					t.Fatal("explicit source artifact", err)
-				}
-				defer artifact.Close()
-				files, units, fail = decompileAllFromSourceReader(t, input.Path, srcRoot, 0, artifact)
-			} else {
-				files, units, fail = decompileAllWithResolverAtSourceVersion(t, input.Path, srcRoot, 0, resolve, target)
+				policy = "source"
 			}
+			plan := historicalRenderAtCompilerTarget(t, input.Path, srcRoot, target, policy, resolve)
+			defer plan.close()
+			files, units, fail := plan.files, plan.units, plan.failures
+			artifact, reconstruction := plan.artifact, plan.reconstruction
+			target = plan.target
 			o.SourceUnits = units
 			o.DecompileFailures = fail
 			for _, f := range files {
@@ -215,7 +203,7 @@ func TestHistoricalJarAudit(t *testing.T) {
 			}
 			clsRoot := filepath.Join(dir, "classes")
 			var raw string
-			o.CompilerErrors, raw, o.CompilePasses = historicalTreeCompile(t, files, cp, clsRoot, compileRelease(jarSpecs[name], input.Path))
+			o.CompilerErrors, raw, o.CompilePasses = historicalTreeCompile(t, files, cp, clsRoot, target)
 			if err := os.WriteFile(filepath.Join(dir, "javac.log"), []byte(raw), 0644); err != nil {
 				t.Fatal(err)
 			}
@@ -276,14 +264,7 @@ func historicalTreeCompile(t *testing.T, files []string, classpath, outDir strin
 		minRelease = 8
 	}
 	base, versioned, releases := splitMRFiles(files)
-	var base8, j9 []string
-	for _, f := range base {
-		if isJava9SslAlpnFile(f) {
-			j9 = append(j9, f)
-		} else {
-			base8 = append(base8, f)
-		}
-	}
+
 	run := func(fs []string, release int, dst, cp, sourcepath string) string {
 		if len(fs) == 0 {
 			return ""
@@ -319,24 +300,14 @@ func historicalTreeCompile(t *testing.T, files []string, classpath, outDir strin
 		passes = append(passes, historicalCompilePass{Release: release, Sources: len(fs), ExitCode: exitCode})
 		return string(out)
 	}
-	// okhttp Android10Platform calls Java 9 SSL ALPN methods directly (Android SDK 29 /
-	// @IgnoreJRERequirement). It is referenced by Platform.findAndroidPlatform in the BASE
-	// tree, so it cannot be a second pass (Platform.java would then fail with "cannot find
-	// symbol: class Android10Platform"). Compile the whole base tree at --release 9 instead.
-	baseRelease := minRelease
-	if len(j9) > 0 {
-		if baseRelease < 9 {
-			baseRelease = 9
-		}
-		base8 = append(base8, j9...)
-	}
-	if len(base8) > 0 {
-		raw = run(base8, baseRelease, outDir, classpath, "")
+	baseRelease := historicalBaseCompileTarget(files, minRelease)
+	if len(base) > 0 {
+		raw = run(base, baseRelease, outDir, classpath, "")
 	}
 	mrSrc := ""
 	if len(releases) > 0 {
 		srcRoot := ""
-		for _, f := range base8 {
+		for _, f := range base {
 			slash := filepath.ToSlash(f)
 			if strings.Contains(slash, "/META-INF/") {
 				continue

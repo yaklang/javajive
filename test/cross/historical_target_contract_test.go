@@ -78,16 +78,13 @@ class ApiDriver {public static void main(String[]args)throws Exception{javax.net
 				b, e := os.ReadFile(filepath.Join(support, n+".class"))
 				return b, e == nil
 			}
-			a, err := classparser.NewJarReconstructionArtifactFromLocal(jar, 8, classparser.ModernJavac, resolve)
-			if err != nil {
-				t.Fatal(err)
+			plan := historicalRenderAtCompilerTarget(t, jar, sources, 8, "reconstruction", resolve)
+			defer plan.close()
+			if plan.failures != 0 || plan.target != 9 {
+				t.Fatal("selected source target", plan.failures, plan.target)
 			}
-			defer a.Close()
-			files, _, failures := decompileAllFromSourceReader(t, jar, sources, 0, a)
-			if failures != 0 {
-				t.Fatal("source generation", failures)
-			}
-			errors, raw, passes := historicalTreeCompile(t, files, support, classes, 8)
+			a, files := plan.reconstruction, plan.files
+			errors, raw, passes := historicalTreeCompile(t, files, support, classes, plan.target)
 			if errors != 0 || len(passes) != 1 || passes[0].Release != 9 || passes[0].ExitCode != 0 {
 				t.Fatal("required SDK compilation", errors, passes, raw)
 			}
