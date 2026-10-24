@@ -198,7 +198,7 @@ func constructorSuffixFamilyAtTargetWithCompilerRoundTrip(t *testing.T, fixture,
 		path := filepath.Join(out, name+".class")
 		fresh, err := os.ReadFile(path)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatal("fresh constructor declaration absent", name, err, string(sources[name]))
 		}
 		if name == owner {
 			primaryFresh = bytes.Clone(fresh)
