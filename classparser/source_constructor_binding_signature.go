@@ -20,13 +20,14 @@ func (c *ClassObjectDumper) publishConstructorBindingSignatures(source string, m
 		if m == nil || m.member == nil || m.methodName != "<init>" {
 			continue
 		}
-		if _, ok := constructorEnclosingBindingSignature(c.obj, m.member, c.Work); !ok {
+		signature, ok := constructorEnclosingBindingSignature(c.obj, m.member, c.Work)
+		if !ok {
 			continue
 		}
 		if c.sourceDegraded || m.sourceReconstructionFailed() || legacySourceHasFailureMarker(source) {
 			return true
 		}
-		if m.sourceDumper != c || m.sourceObject != c.obj || m.sourceRequest.role != methodSourceDeclaration || c.dumpedMethodsSet[m.sourceCacheKey] != m || m.code == "" || strings.Count(source, m.code) != 1 {
+		if m.constructorBindingSignature != signature || m.constructorBindingCode != m.code || m.sourceDumper != c || m.sourceObject != c.obj || m.sourceRequest.role != methodSourceDeclaration || c.dumpedMethodsSet[m.sourceCacheKey] != m || m.code == "" || strings.Count(source, m.code) != 1 {
 			return false
 		}
 		found = true

@@ -5605,6 +5605,16 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 		scope.publishedCode = dumped.code
 		c.ordinaryConstructorEmissionSeen = true
 	}
+	if name == "<init>" && request.role == methodSourceDeclaration && c.options.sourceConstructorLowering != nil && c.reconstructionPhysicalHeader() && !dumped.sourceReconstructionFailed() {
+		if signature, proved := constructorEnclosingBindingSignature(c.obj, method, c.Work); proved {
+			// Signature projection owes this exact completed declaration even
+			// when Object.<init> needs no executable capture reordering. Enroll
+			// its real writer span before any class-wide legacy source rules.
+			dumped.constructorBindingSignature = signature
+			dumped.constructorBindingCode = dumped.code
+			c.ordinaryConstructorEmissionSeen = true
+		}
+	}
 	if renderedConstructorPlan != nil && renderedConstructorPlan.lowering != nil {
 		dumped.constructorLowering = renderedConstructorPlan.lowering
 		dumped.constructorLoweringCode = dumped.code
@@ -5617,14 +5627,16 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 }
 
 type dumpedMethods struct {
-	inheritedBridge         *inheritedBridgePacket
-	inheritedBridgeCode     string
-	constructorLowering     *sourceConstructorLoweringPlan
-	constructorLoweringCode string
-	serializableReferences  *serializableReferenceMethodGraph
-	compilerReference       *lambdaCompilerReference
-	lambdaEmission          *lambdaMethodEmission
-	enumLambdaInitializer   *enumLambdaInitializerReceipt
+	inheritedBridge             *inheritedBridgePacket
+	inheritedBridgeCode         string
+	constructorLowering         *sourceConstructorLoweringPlan
+	constructorLoweringCode     string
+	constructorBindingSignature string
+	constructorBindingCode      string
+	serializableReferences      *serializableReferenceMethodGraph
+	compilerReference           *lambdaCompilerReference
+	lambdaEmission              *lambdaMethodEmission
+	enumLambdaInitializer       *enumLambdaInitializerReceipt
 	// Only the concrete declaration writer sets these offsets. Class recovery
 	// may edit an unsealed body without parsing or reinterpreting its header.
 	sourceBodyStart, sourceBodyEnd int
