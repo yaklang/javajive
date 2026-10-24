@@ -271,7 +271,7 @@ func historicalTreeCompile(t *testing.T, files []string, classpath, outDir strin
 			t.Fatalf("mkdir %s: %v", dst, err)
 		}
 		args := append(append([]string{}, javacLocaleArgs...),
-			"-encoding", "UTF-8", "--release", strconv.Itoa(release), "-nowarn", "-proc:none", "-Xmaxerrs", "100000")
+			"-encoding", "UTF-8", "--release", strconv.Itoa(release), "-nowarn", "-proc:none", "-Xpkginfo:always", "-Xmaxerrs", "100000")
 		if cp != "" {
 			args = append(args, "-cp", cp)
 		}

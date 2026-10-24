@@ -15,6 +15,8 @@ import (
 // metadata obligation. ReadFile returns Java source under the original class
 // paths, as JarFS does. Recompile with the selected compiler profile, then call
 // RestoreClassMetadata for each rebuilt class before publishing the artifact.
+// Use javac -Xpkginfo:always when compiling these units so a package-info.java
+// with no annotations still regenerates its original package descriptor.
 // Plain JarFS source admission remains unchanged.
 //
 // This contract preserves ordinary synthetic storage fields and exact original
