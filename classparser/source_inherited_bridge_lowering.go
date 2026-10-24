@@ -545,7 +545,7 @@ func inheritedBridgeConsumersClosed(object *ClassObject, bridges map[*MemberInfo
 		for _, op := range constructorMotionOps(d) {
 			switch op.Instr.OpCode {
 			case core.OP_INVOKEVIRTUAL, core.OP_INVOKESPECIAL, core.OP_INVOKESTATIC, core.OP_INVOKEINTERFACE:
-				index, ok := nativeEnumCPIndex(op)
+				index, ok := sourceInvocationCPIndex(object, op, work)
 				if !ok {
 					return false
 				}

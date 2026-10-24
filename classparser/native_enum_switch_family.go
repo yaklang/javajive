@@ -142,7 +142,9 @@ func nativeEnumSwitchOrdinalClosed(p *nativeMemberFamily, work *workbudget.Budge
 		// unused access marker. That consumes no additional source ordinal.
 		// Prove that shared original role; an independent empty marker still
 		// needs a different compiler numbering protocol and is not admitted.
-		if len(p.emptyMarkers) > 0 || !nativeMemberJointBridgeMarkersClosed(p, work) {
+		// This proves source ordinals only. Artifact admission separately
+		// requires every original binary constructor port to be retained.
+		if len(p.emptyMarkers) > 0 || !nativeMemberJointBridgeMarkersClosed(p, work, false) {
 			return false
 		}
 	}

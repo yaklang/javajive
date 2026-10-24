@@ -164,7 +164,7 @@ func TestAdversarialEnumFreshHelperBoundaryCountsKeepFreshInstructions(t *testin
 	// testing.T places a supplementary character in its temporary directory.
 	// The actual class name and descriptors still exercise the full UTF-16 name.
 	for ownerIndex, owner := range []string{"FreshBoundaryChoice", "边界𐐀Choice"} {
-		for _, count := range []int{0, 1, 129} {
+		for _, count := range []int{0, 1, 129, 255, 256, 257, 511} {
 			for _, debug := range []string{"none", "source,lines,vars"} {
 				t.Run(fmt.Sprintf("owner%d/%d/%s", ownerIndex, count, debug), func(t *testing.T) {
 					constants := make([]string, count)

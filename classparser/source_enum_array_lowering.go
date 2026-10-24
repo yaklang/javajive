@@ -123,6 +123,13 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 	if len(fields) != len(freshFields) {
 		return decline()
 	}
+	// Constant ordinals are int operands, not byte-sized indexes. The parsed
+	// classfile field tables bound this inventory; account for its maps and
+	// ordered views through the request budget. Complete packet lengths and
+	// the JVM Code size limit below still bound the executable transformation.
+	if work.CheckAlloc(int64(len(want.Fields)+len(got.Fields)+1)*192) != nil {
+		return nil, work.Err()
+	}
 	wantMembers, freshMembers := map[sourceFieldIdentity]*MemberInfo{}, map[sourceFieldIdentity]*MemberInfo{}
 	for _, pair := range []struct {
 		object *ClassObject
@@ -151,7 +158,7 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 			return decline()
 		}
 		if field.AccessFlags&0x4000 != 0 {
-			if field.AccessFlags != 0x4019 || desc != "L"+owner+";" || len(constants) == 256 {
+			if field.AccessFlags != 0x4019 || desc != "L"+owner+";" {
 				return decline()
 			}
 			constants = append(constants, name)

@@ -145,7 +145,16 @@ func (a *sourceConstructorLoweringAuthority) restoreConstructorBindingSignatures
 		}
 		signature, valid := nativeMethodLocalOriginalSignature(got, after.Attributes, work)
 		originalSig, validOriginal := nativeMethodLocalOriginalSignature(want, before.Attributes, work)
-		if !valid || !validOriginal || signature != lifted && signature != originalSig {
+		binding := signature == lifted || signature == originalSig
+		if valid && validOriginal && !binding && a.memberReferenceSourceReturned(want.GetClassName(), original, work) && memberReferenceAttributesUnannotated(before.Attributes) && memberReferenceAttributesUnannotated(after.Attributes) {
+			// Compose the proved enclosing port lift with the independent owner
+			// argument relocation. Both complete signatures must erase to this
+			// exact constructor descriptor; the typed capture packet below still
+			// proves the initialization boundary and unchanged physical slots.
+			scopes, local, known := d.flattenedMethodLexicalScopesResolved(resolve)
+			binding = known && !local && memberReferenceSignatureProjection(lifted, signature, desc, scopes, d.buildSiblingSourceClassFormals(), resolve, work)
+		}
+		if !valid || !validOriginal || !binding {
 			return fail("fresh signature is not the proved lifted binding")
 		}
 		old := constructorLoweringPacketFor(want, before, true, true, work)

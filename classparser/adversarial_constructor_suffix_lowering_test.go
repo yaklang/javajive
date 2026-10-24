@@ -212,6 +212,25 @@ func constructorSuffixFamilyAtTargetWithCompilerRoundTrip(t *testing.T, fixture,
 			t.Fatal("input mutated", name)
 		}
 		if again, err := a.FinishClass(name+".class", finished); err != nil || !bytes.Equal(again, finished) {
+			if err == nil {
+				before, after := mustParseLowering(t, finished), mustParseLowering(t, again)
+				t.Logf("second completion constants %d -> %d, class attributes %#v -> %#v", len(before.ConstantPool), len(after.ConstantPool), before.Attributes, after.Attributes)
+				for group, members := range [][]*MemberInfo{before.Methods, before.Fields} {
+					next := after.Methods
+					if group == 1 {
+						next = after.Fields
+					}
+					for i, member := range members {
+						if i >= len(next) {
+							break
+						}
+						x, _, _ := sourceMethodSignatureKey(before, member)
+						y, _, _ := sourceMethodSignatureKey(after, next[i])
+						n, _ := sourceBridgeUTF8(before, member.NameIndex)
+						t.Logf("second completion member %s flags %x -> %x signature %q -> %q", n, member.AccessFlags, next[i].AccessFlags, x, y)
+					}
+				}
+			}
 			t.Fatal("completion not idempotent", name, err)
 		}
 		if err := os.WriteFile(path, finished, 0600); err != nil {

@@ -12,7 +12,7 @@ import (
 
 func TestNativeMemberBridgeNeedsJointOriginalMarker(t *testing.T) {
 	files := nativeCompileClasses(t, nativeMemberPrivateBridgeFixture)
-	for _, variant := range []string{"original", "copied declaration", "no anonymous plan", "missing marker", "wrong ordinal", "foreign marker", "static cut missing", "missing child", "budget", "canceled"} {
+	for _, variant := range []string{"original", "copied declaration", "plain nest inline marker", "nest inline marker", "nest standalone marker", "nest foreign standalone", "no anonymous plan", "missing marker", "wrong ordinal", "foreign marker", "static cut missing", "missing child", "budget", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			z := nativeArchive(t, files)
 			defer z.Close()
@@ -35,8 +35,19 @@ func TestNativeMemberBridgeNeedsJointOriginalMarker(t *testing.T) {
 				t.Fatal("bridge proof")
 			}
 			var work *workbudget.Budget
-			good := variant == "original" || variant == "copied declaration"
+			retainBinaryPorts := variant != "plain nest inline marker"
+			good := variant == "original" || variant == "copied declaration" || variant == "nest standalone marker" || !retainBinaryPorts
 			switch variant {
+			case "nest inline marker", "plain nest inline marker":
+				p.usesNestAccess = true
+			case "nest standalone marker", "nest foreign standalone":
+				p.usesNestAccess = true
+				marker := p.anonymous.children[bridge.marker].object
+				if variant == "nest foreign standalone" {
+					marker = root
+				}
+				p.anonymous.standalone = map[string]*ClassObject{bridge.marker: marker}
+				delete(p.anonymous.children, bridge.marker)
 			case "copied declaration":
 				obj, _ := Parse(append([]byte(nil), files["BridgeOwner$Child.class"]...))
 				for _, m := range obj.Methods {
@@ -66,7 +77,7 @@ func TestNativeMemberBridgeNeedsJointOriginalMarker(t *testing.T) {
 				cancel()
 				work = workbudget.New(ctx, workbudget.Limits{})
 			}
-			if got := nativeMemberJointBridgeMarkersClosed(p, work); got != good {
+			if got := nativeMemberJointBridgeMarkersClosed(p, work, retainBinaryPorts); got != good {
 				t.Fatalf("marker proof=%v", got)
 			}
 		})

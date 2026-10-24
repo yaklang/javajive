@@ -16,7 +16,7 @@ func (c *ClassObjectDumper) publishMemberReferenceSignatures(source string) bool
 		return true
 	}
 	found := false
-	for _, method := range c.obj.Methods {
+	for _, method := range append(append([]*MemberInfo(nil), c.obj.Methods...), c.obj.Fields...) {
 		if method == nil || !nativeProofWork(c.Work, 1) {
 			return false
 		}
@@ -76,7 +76,7 @@ func (a *sourceConstructorLoweringAuthority) memberReferenceSourceReturned(owner
 	return active && origin.sourceHash != ([32]byte{}) && origin.originalHash == sha256.Sum256(original)
 }
 
-// Restore only a present method Signature whose complete type graph is the
+// Restore only a present member Signature whose complete type graph is the
 // proved relocation of original enclosing arguments. Existing constants and
 // every fresh method byte remain unchanged except the Signature's two-byte
 // index. The ordinary final metadata gate still checks all other contracts.
@@ -101,118 +101,168 @@ func (a *sourceConstructorLoweringAuthority) restoreMemberReferenceSignatures(or
 	if err != nil {
 		return nil, err
 	}
-	layout := &compiledMetadataLayout{methods: map[*MemberInfo]compiledMetadataSpan{}}
+	layout := &compiledMetadataLayout{methods: map[*MemberInfo]compiledMetadataSpan{}, fields: map[*MemberInfo]compiledMetadataSpan{}}
 	got, err := parseWithMetadataLayout(reader, nil, layout)
 	if err != nil {
 		return nil, err
 	}
-	if want.MajorVersion < 49 || want.MajorVersion > 52 || got.MajorVersion < 52 || got.MajorVersion > 65 || want.MinorVersion != 0 || got.MinorVersion != 0 || !sourceParameterClassIdentityClosed(want, got) || len(want.Methods) != len(got.Methods) || len(got.Methods) > 4096 {
+	if want.MajorVersion < 49 || want.MajorVersion > 52 || got.MajorVersion < 52 || got.MajorVersion > 65 || want.MinorVersion != 0 || got.MinorVersion != 0 || !sourceParameterClassIdentityClosed(want, got) || len(want.Methods) != len(got.Methods) || len(want.Fields) != len(got.Fields) || len(got.Methods) > 4096 || len(got.Fields) > 4096 {
 		return compiled, work.Check()
 	}
 	ws, wv := nativeMethodLocalOriginalSignature(want, want.Attributes, work)
 	gs, gv := nativeMethodLocalOriginalSignature(got, got.Attributes, work)
-	if !wv || !gv || ws != gs {
-		return compiled, work.Check() // Changing the current binder needs its own scope proof.
-	}
 	d := NewClassObjectDumper(want)
 	d.Work, d.foldSiblingResolver, d.declarationResolver = work, a.jar.enumSiblingResolver(), a.jar.declarationResolver
 	scopes, methodScope, valid := d.flattenedMethodLexicalScopesResolved(d.nativeAnnotationDeclarationResolver())
 	if !valid || methodScope {
 		return compiled, work.Check()
 	}
-	projected, resolve := d.buildSiblingSourceClassFormals(), d.nativeAnnotationDeclarationResolver()
-	if projected == nil || work.CheckAlloc(int64(len(compiled))*2+int64(len(got.Methods))*256) != nil {
+	environment := ws == gs
+	if wv && gv && !environment && a.memberGenericSourceReturned(want.GetClassName(), original, work) {
+		// The later scope transaction independently discharges this same
+		// class projection before any bytes become a finished artifact.
+		environment = len(types.ClassFormalTypeParamNames(ws)) == 0 && memberScopeProjectedClassSignature(want, gs, scopes, d.nativeAnnotationDeclarationResolver(), work) || memberOwnScopeProjectedClassSignature(want, gs, scopes, work)
+	}
+	if !wv || !gv || !environment {
 		return compiled, work.Check()
 	}
-	index := map[sourceLambdaMethodIdentity]*MemberInfo{}
-	for _, m := range got.Methods {
-		if m == nil || !nativeProofWork(work, 1) {
-			return fail("fresh method inventory")
-		}
-		n, nk := sourceBridgeUTF8(got, m.NameIndex)
-		d, dk := sourceBridgeUTF8(got, m.DescriptorIndex)
-		key := sourceLambdaMethodIdentity{n, d}
-		if !nk || !dk || index[key] != nil {
-			return fail("fresh method identity")
-		}
-		index[key] = m
+	projected, resolve := d.buildSiblingSourceClassFormals(), d.nativeAnnotationDeclarationResolver()
+	if projected == nil || work.CheckAlloc(int64(len(compiled))*2+int64(len(got.Methods)+len(got.Fields))*256) != nil {
+		return compiled, work.Check()
+	}
+	oldFields, oldFieldsErr := sourceFieldIdentities(want, work)
+	newFields, newFieldsErr := sourceFieldIdentities(got, work)
+	if oldFieldsErr != nil || newFieldsErr != nil {
+		return fail("field identity")
 	}
 	count := len(got.ConstantPool) + 1
 	var added []byte
 	var edits []compiledMetadataEdit
-	for _, old := range want.Methods {
-		if old == nil || !nativeProofWork(work, 1) {
-			return fail("original method inventory")
+	for group, oldMembers := range [][]*MemberInfo{want.Methods, want.Fields} {
+		newMembers, spans := got.Methods, layout.methods
+		if group == 1 {
+			newMembers, spans = got.Fields, layout.fields
 		}
-		name, nk := sourceBridgeUTF8(want, old.NameIndex)
-		desc, dk := sourceBridgeUTF8(want, old.DescriptorIndex)
-		key := sourceLambdaMethodIdentity{name, desc}
-		next := index[key]
-		delete(index, key)
-		if !nk || !dk || next == nil || next.AccessFlags != old.AccessFlags {
-			return compiled, work.Check()
+		index := map[sourceLambdaMethodIdentity]*MemberInfo{}
+		for _, m := range newMembers {
+			if m == nil || !nativeProofWork(work, 1) {
+				return fail("fresh method inventory")
+			}
+			n, nk := sourceBridgeUTF8(got, m.NameIndex)
+			d, dk := sourceBridgeUTF8(got, m.DescriptorIndex)
+			key := sourceLambdaMethodIdentity{n, d}
+			if !nk || !dk || index[key] != nil {
+				return fail("fresh method identity")
+			}
+			index[key] = m
 		}
-		ws, wp, wv := sourceMethodSignatureKey(want, old)
-		gs, gp, gv := sourceMethodSignatureKey(got, next)
-		if !wv || !gv {
-			return fail("malformed method signature")
-		}
-		if name == "<init>" || !wp || !gp || ws == gs {
-			continue
-		}
-		oldText, oldValid := nativeMethodLocalOriginalSignature(want, old.Attributes, work)
-		newText, newValid := nativeMethodLocalOriginalSignature(got, next.Attributes, work)
-		if !oldValid || !newValid || !memberReferenceSignatureProjection(oldText, newText, desc, scopes, projected, resolve, work) {
-			continue
-		}
-		for _, attr := range old.Attributes {
-			switch u := attr.(type) {
-			case *TypeAnnotationsAttribute, *RuntimeVisibleTypeAnnotationsAttribute:
+		for _, old := range oldMembers {
+			if old == nil || !nativeProofWork(work, 1) {
+				return fail("original method inventory")
+			}
+			name, nk := sourceBridgeUTF8(want, old.NameIndex)
+			desc, dk := sourceBridgeUTF8(want, old.DescriptorIndex)
+			key := sourceLambdaMethodIdentity{name, desc}
+			next := index[key]
+			delete(index, key)
+			if !nk || !dk || next == nil {
 				return compiled, work.Check()
-			case *UnparsedAttribute:
-				if u != nil && (u.Name == "RuntimeVisibleTypeAnnotations" || u.Name == "RuntimeInvisibleTypeAnnotations") {
-					return compiled, work.Check()
+			}
+			flagsMatch := next.AccessFlags == old.AccessFlags
+			if group == 1 {
+				// Java cannot spell a field's synthetic marker. Apply the same
+				// complete identity/flag contract as RestoreSyntheticFieldMetadata,
+				// which discharges only that missing marker later in FinishClass.
+				// This edit never changes flags and cannot admit a fresh marker.
+				key := sourceFieldIdentity{name, desc}
+				before, after := oldFields[key], newFields[key]
+				flagsMatch = before & ^syntheticFieldFlag == after & ^syntheticFieldFlag && (after&syntheticFieldFlag == 0 || before&syntheticFieldFlag != 0)
+			}
+			if !flagsMatch {
+				if group == 1 {
+					return fail("field flags changed")
 				}
+				return compiled, work.Check()
 			}
-		}
-		span, known := layout.methods[next]
-		if !known || span.start < layout.poolEnd || span.end > len(compiled) || span.end-span.start < 8 {
-			return fail("method span")
-		}
-		// Signature keys are already validated MUTF-8 code-unit payloads.
-		// Re-encoding them as UTF-8 text would corrupt supplementary names.
-		payload := []byte(ws)
-		if len(payload) > 65535 || count >= 65535 || len(added)+len(payload)+3 > 1<<20 {
-			return fail("signature constant budget")
-		}
-		sigIndex := uint16(count)
-		count++
-		added = append(added, CONSTANT_Utf8, byte(len(payload)>>8), byte(len(payload)))
-		added = append(added, payload...)
-		raw, found := compiled[span.start:span.end], false
-		for pos := 8; pos < len(raw); {
-			if len(raw)-pos < 6 {
-				return fail("truncated attribute")
+			ws, wp, wv := sourceMethodSignatureKey(want, old)
+			gs, gp, gv := sourceMethodSignatureKey(got, next)
+			if !wv || !gv {
+				return fail("malformed method signature")
 			}
-			size := int64(binary.BigEndian.Uint32(raw[pos+2:]))
-			if size > int64(len(raw)-pos-6) || !nativeProofWork(work, size+1) {
-				return fail("attribute length")
+			if name == "<init>" || wp == gp && ws == gs {
+				continue
 			}
-			name, known := sourceBridgeUTF8(got, binary.BigEndian.Uint16(raw[pos:]))
-			if !known || name == "RuntimeVisibleTypeAnnotations" || name == "RuntimeInvisibleTypeAnnotations" {
-				return compiled, work.Check() // A relocated type path needs a separate proof.
-			}
-			if name == "Signature" {
-				if found || size != 2 {
-					return fail("signature attribute")
+			oldText, oldValid := nativeMethodLocalOriginalSignature(want, old.Attributes, work)
+			newText, newValid := nativeMethodLocalOriginalSignature(got, next.Attributes, work)
+			if group == 1 {
+				oldText, newText, desc = "()"+oldText, "()"+newText, "()"+desc
+				// A separate active lexical-scope transaction can still owe
+				// erasure of hidden outer binders. Defer only its exact complete
+				// projection; the later scope completion rechecks it atomically.
+				ownerSignature, ownerValid := nativeMethodLocalOriginalSignature(want, want.Attributes, work)
+				if oldValid && newValid && wp && ownerValid && len(types.ClassFormalTypeParamNames(ownerSignature)) > 0 && a.memberGenericSourceReturned(want.GetClassName(), original, work) {
+					expected, known := types.ProjectHiddenLexicalMethodSignature(scopes, oldText)
+					if known && (gp && expected == newText || !gp && expected == desc) {
+						continue
+					}
 				}
-				found = true
-				edits = append(edits, compiledMetadataEdit{compiledMetadataSpan{span.start + pos + 6, span.start + pos + 8}, []byte{byte(sigIndex >> 8), byte(sigIndex)}})
+				if !wp || !gp {
+					return fail("field signature presence changed")
+				}
+			} else if !wp || !gp {
+				continue
 			}
-			pos += 6 + int(size)
-		}
-		if !found {
-			return fail("missing fresh signature")
+			if !oldValid || !newValid || !memberReferenceSignatureProjection(oldText, newText, desc, scopes, projected, resolve, work) {
+				if group == 1 {
+					return fail("unproved field signature projection")
+				}
+				continue
+			}
+			if !memberReferenceAttributesUnannotated(old.Attributes) || !memberReferenceAttributesUnannotated(next.Attributes) {
+				if group == 1 {
+					return fail("unproved annotated field projection")
+				}
+				return compiled, work.Check()
+			}
+			span, known := spans[next]
+			if !known || span.start < layout.poolEnd || span.end > len(compiled) || span.end-span.start < 8 {
+				return fail("method span")
+			}
+			// Signature keys are already validated MUTF-8 code-unit payloads.
+			// Re-encoding them as UTF-8 text would corrupt supplementary names.
+			payload := []byte(ws)
+			if len(payload) > 65535 || count >= 65535 || len(added)+len(payload)+3 > 1<<20 {
+				return fail("signature constant budget")
+			}
+			sigIndex := uint16(count)
+			count++
+			added = append(added, CONSTANT_Utf8, byte(len(payload)>>8), byte(len(payload)))
+			added = append(added, payload...)
+			raw, found := compiled[span.start:span.end], false
+			for pos := 8; pos < len(raw); {
+				if len(raw)-pos < 6 {
+					return fail("truncated attribute")
+				}
+				size := int64(binary.BigEndian.Uint32(raw[pos+2:]))
+				if size > int64(len(raw)-pos-6) || !nativeProofWork(work, size+1) {
+					return fail("attribute length")
+				}
+				name, known := sourceBridgeUTF8(got, binary.BigEndian.Uint16(raw[pos:]))
+				if !known || name == "RuntimeVisibleTypeAnnotations" || name == "RuntimeInvisibleTypeAnnotations" {
+					return compiled, work.Check() // A relocated type path needs a separate proof.
+				}
+				if name == "Signature" {
+					if found || size != 2 {
+						return fail("signature attribute")
+					}
+					found = true
+					edits = append(edits, compiledMetadataEdit{compiledMetadataSpan{span.start + pos + 6, span.start + pos + 8}, []byte{byte(sigIndex >> 8), byte(sigIndex)}})
+				}
+				pos += 6 + int(size)
+			}
+			if !found {
+				return fail("missing fresh signature")
+			}
 		}
 	}
 	if err := work.Check(); err != nil {
@@ -222,4 +272,18 @@ func (a *sourceConstructorLoweringAuthority) restoreMemberReferenceSignatures(or
 		edits = append(edits, compiledMetadataEdit{compiledMetadataSpan{8, 10}, []byte{byte(count >> 8), byte(count)}}, compiledMetadataEdit{compiledMetadataSpan{layout.poolEnd, layout.poolEnd}, added})
 	}
 	return applyCompiledMetadataEdits(compiled, edits, work)
+}
+
+func memberReferenceAttributesUnannotated(attrs []AttributeInfo) bool {
+	for _, attr := range attrs {
+		switch u := attr.(type) {
+		case *TypeAnnotationsAttribute, *RuntimeVisibleTypeAnnotationsAttribute:
+			return false
+		case *UnparsedAttribute:
+			if u != nil && (u.Name == "RuntimeVisibleTypeAnnotations" || u.Name == "RuntimeInvisibleTypeAnnotations") {
+				return false
+			}
+		}
+	}
+	return true
 }
