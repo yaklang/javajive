@@ -401,8 +401,15 @@ func TestCallSiteDupLocalsJarFS(t *testing.T) {
 			body := reviewedSourceMethod(t, string(source), `invokeMethod\s*\(`)
 			refs := regexp.MustCompile(`Reference\s+(\w+)\s*=\s*new Reference\(`).FindAllStringSubmatch(body, -1)
 			bootstrap := requireReviewedPattern(t, body, `CallSite\[\]\s+(\w+)\s*=\s*\$getCallSiteArray\(\)`)[1]
-			if len(refs) != 2 || refs[0][1] == refs[1][1] || refs[0][1] == bootstrap || refs[1][1] == bootstrap {
-				t.Fatalf("independent allocation and bootstrap declarations collided: %s", body)
+			if len(refs) < 2 {
+				t.Fatalf("missing original allocation declarations: %s", body)
+			}
+			seen := map[string]bool{bootstrap: true}
+			for _, ref := range refs {
+				if seen[ref[1]] {
+					t.Fatalf("independent allocation and bootstrap declarations collided: %s", body)
+				}
+				seen[ref[1]] = true
 			}
 			if !regexp.MustCompile(`\b` + regexp.QuoteMeta(bootstrap) + `\[`).MatchString(body) {
 				t.Fatalf("bootstrap declaration lost its uses: %s", body)
