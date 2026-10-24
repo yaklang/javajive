@@ -217,6 +217,13 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 	if !enumArrayInstructionSpans(oldCode.Code, oldOps) || !enumArrayInstructionSpans(initCode.Code, initOps) || !enumArrayInstructionSpans(arrayCode.Code, arrayOps) {
 		return decline()
 	}
+	if nativeEnumOpcode(oldOps[0], core.OP_GOTO) || nativeEnumOpcode(oldOps[0], core.OP_GOTO_W) {
+		var known bool
+		oldOps, known = enumArrayOriginalEntryPath(oldCode, oldOps, work)
+		if !known {
+			return decline()
+		}
+	}
 	peak := uint16(1)
 	if len(constants) != 0 {
 		peak = 4
