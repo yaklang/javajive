@@ -73,9 +73,9 @@ type nativeMemberFamily struct {
 	failed                bool
 	bridgeCalls           map[string]int
 	emptyMarkers          map[string]*ClassObject
-	// Newer compilers use nestmates and need not emit an unused access marker.
-	// Keep its original class as a separate source unit instead of consuming it.
-	retainEmptyMarkers bool
+	// A nest-access target does not regenerate old access constructors or their
+	// marker classes. Preserve their declarations AND actual call edges.
+	usesNestAccess bool
 }
 
 // Source ownership comes from one original self row, never dollar spelling.
@@ -638,7 +638,7 @@ func (c *ClassObjectDumper) planNativeMemberFamilyFromRoot(independent *nativeMe
 	if !nestKnown {
 		return nil
 	}
-	p := &nativeMemberFamily{independentRoot: independent, modernNestObjects: modernNest, owner: c.obj.GetClassName(), children: map[string]*nativeMemberClass{}, lexicalObjects: map[string]*ClassObject{c.obj.GetClassName(): c.obj}, retainEmptyMarkers: c.options.TargetSourceVersion >= 11}
+	p := &nativeMemberFamily{independentRoot: independent, modernNestObjects: modernNest, owner: c.obj.GetClassName(), children: map[string]*nativeMemberClass{}, lexicalObjects: map[string]*ClassObject{c.obj.GetClassName(): c.obj}, usesNestAccess: c.options.TargetSourceVersion >= 11}
 	resolveDeclaration := c.nativeAnnotationDeclarationResolver()
 	queue := []*ClassObject{c.obj}
 	for cursor := 0; cursor < len(queue); cursor++ {
@@ -1412,7 +1412,7 @@ func nativeMemberBinding(ctx *class_context.ClassContext, p *nativeMemberFamily,
 		cl.Methods = append([]callbinding.Method(nil), cl.Methods...)
 		filtered := cl.Methods[:0]
 		for _, m := range cl.Methods {
-			if m.Name == "<init>" && bridges[m.Desc] != nil {
+			if m.Name == "<init>" && bridges[m.Desc] != nil && !p.usesNestAccess {
 				continue
 			}
 			filtered = append(filtered, m)
@@ -1762,6 +1762,9 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			return fail()
 		}
 		ctor := nativeMemberConstructorForAllocation(plan.child, desc)
+		if p.usesNestAccess {
+			ctor = plan.child.constructors[desc]
+		}
 		if ctor == nil {
 			return fail()
 		}
@@ -1771,7 +1774,9 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			if len(sourceArgs) == 0 || !nativeMemberBridgeSourceDummy(sourceArgs[len(sourceArgs)-1].Value) {
 				return fail()
 			}
-			sourceArgs = sourceArgs[:len(sourceArgs)-1]
+			if !p.usesNestAccess {
+				sourceArgs = sourceArgs[:len(sourceArgs)-1]
+			}
 		}
 		for _, arg := range sourceArgs {
 			v, ok := arg.Value.(values.JavaValue)
@@ -1893,6 +1898,9 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 				keyword = "super"
 			}
 			target := nativeMemberConstructorForAllocation(targetClass, desc)
+			if p.usesNestAccess {
+				target = targetClass.constructors[desc]
+			}
 			if ctor == nil || target == nil || ctor.delegateOwner != name || ctor.delegatePC != pc || ctor.delegateDescriptor != desc || len(args) < 1 {
 				p.failed = true
 				return "", false
@@ -1923,7 +1931,9 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 					p.failed = true
 					return "", false
 				}
-				operands = operands[:len(operands)-1]
+				if !p.usesNestAccess {
+					operands = operands[:len(operands)-1]
+				}
 			}
 			for _, arg := range operands {
 				v, ok := arg.(values.JavaValue)

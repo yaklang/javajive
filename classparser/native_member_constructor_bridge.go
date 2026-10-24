@@ -56,6 +56,16 @@ func nativeMemberJointBridgeMarkersClosed(p *nativeMemberFamily, work *workbudge
 			if p.anonymous == nil {
 				return false
 			}
+			if p.usesNestAccess {
+				// A retained port is an ordinary, nameable binary type. Its
+				// independently proved standalone source stays outside the nest;
+				// no anonymous ordinal or private permission is regenerated.
+				marker := p.anonymous.standalone[bridge.marker]
+				if marker == nil || marker.GetClassName() != bridge.marker || p.anonymous.owner != p.owner {
+					return false
+				}
+				continue
+			}
 			marker := p.anonymous.children[bridge.marker]
 			if marker == nil || marker.object == nil || marker.ordinal != 1 || p.anonymous.owner != p.owner || marker.object.GetClassName() != bridge.marker {
 				return false
@@ -244,15 +254,19 @@ func nativeMemberStaticBridgeSource(plan *nativeMemberAllocation, args []class_c
 	if !nativeMemberBridgeSourceDummy(args[len(args)-1].Value) {
 		return fail()
 	}
-	invoke := &values.FunctionCallExpression{ClassName: strings.ReplaceAll(plan.child.object.GetClassName(), "/", "."), FunctionName: "<init>", Descriptor: bridge.target, Kind: values.InvokeSpecial, IsSpecialInvoke: true, HasOriginPC: true, OriginPC: plan.invokePC}
-	for _, arg := range args[:len(args)-1] {
+	descriptor, sourceArgs := bridge.target, args[:len(args)-1]
+	if p.usesNestAccess {
+		descriptor, sourceArgs = bridge.descriptor, args
+	}
+	invoke := &values.FunctionCallExpression{ClassName: strings.ReplaceAll(plan.child.object.GetClassName(), "/", "."), FunctionName: "<init>", Descriptor: descriptor, Kind: values.InvokeSpecial, IsSpecialInvoke: true, HasOriginPC: true, OriginPC: plan.invokePC}
+	for _, arg := range sourceArgs {
 		v, ok := arg.Value.(values.JavaValue)
 		if !ok {
 			return fail()
 		}
 		invoke.Arguments = append(invoke.Arguments, v)
 	}
-	mt, e := types.ParseMethodDescriptor(bridge.target)
+	mt, e := types.ParseMethodDescriptor(descriptor)
 	if e != nil || len(mt.FunctionType().ParamTypes) != len(invoke.Arguments) {
 		return fail()
 	}
@@ -275,6 +289,15 @@ func nativeMemberStaticBridgeSource(plan *nativeMemberAllocation, args []class_c
 // lexical family. Method handles and source-spellable marker declarations are
 // not unused compiler arguments, even when their erasures happen to match.
 func (z *JarFS) nativeMemberJointBridgeReferencesClosed(p *nativeMemberFamily, index *nativeMemberIndex, work *workbudget.Budget) bool {
+	if p == nil || index == nil || !index.valid || !nativeProofWork(work, 1) {
+		return false
+	}
+	if p.usesNestAccess {
+		// No marker type or constructor edge is erased by this profile.
+		// Require the retained source role before leaving ordinary descriptor
+		// references to the unchanged archive/private-access checks.
+		return nativeMemberJointBridgeMarkersClosed(p, work)
+	}
 	markers := map[string]bool{}
 	for _, bridges := range p.bridgeOwners() {
 		for _, bridge := range bridges {

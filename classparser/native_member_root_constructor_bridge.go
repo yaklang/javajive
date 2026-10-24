@@ -199,9 +199,16 @@ func nativeRootBridgeSourceDelegation(p *nativeMemberFamily, obj *ClassObject, c
 	if !known || !declaration.MembersComplete || p.failed {
 		return fail()
 	}
+	target, sourceArgs := plan.target, args
+	if !p.usesNestAccess && len(sourceArgs) > 0 {
+		sourceArgs = sourceArgs[:len(sourceArgs)-1]
+	}
+	if p.usesNestAccess {
+		target = plan.descriptor
+	}
 	targets := 0
 	for _, method := range declaration.Methods {
-		if method.Name == "<init>" && method.Desc == plan.target {
+		if method.Name == "<init>" && method.Desc == target {
 			targets++
 		}
 	}
@@ -211,15 +218,15 @@ func nativeRootBridgeSourceDelegation(p *nativeMemberFamily, obj *ClassObject, c
 	if len(args) == 0 || !nativeMemberBridgeSourceDummy(args[len(args)-1]) {
 		return fail()
 	}
-	call := &values.FunctionCallExpression{ClassName: owner, FunctionName: "<init>", Descriptor: plan.target, Kind: values.InvokeSpecial, IsSpecialInvoke: true}
-	for _, arg := range args[:len(args)-1] {
+	call := &values.FunctionCallExpression{ClassName: owner, FunctionName: "<init>", Descriptor: target, Kind: values.InvokeSpecial, IsSpecialInvoke: true}
+	for _, arg := range sourceArgs {
 		value, ok := arg.(values.JavaValue)
 		if !ok {
 			return fail()
 		}
 		call.Arguments = append(call.Arguments, value)
 	}
-	mt, err := types.ParseMethodDescriptor(plan.target)
+	mt, err := types.ParseMethodDescriptor(target)
 	if err != nil || len(mt.FunctionType().ParamTypes) != len(call.Arguments) {
 		return fail()
 	}
@@ -270,24 +277,28 @@ func nativeRootBridgeSourceAllocation(plan *nativeMemberAllocation, args []class
 	if !known || !declaration.MembersComplete || p.failed {
 		return fail()
 	}
+	target, sourceArgs := bridge.target, args[:len(args)-1]
+	if p.usesNestAccess {
+		target, sourceArgs = bridge.descriptor, args
+	}
 	count := 0
 	for _, m := range declaration.Methods {
-		if m.Name == "<init>" && m.Desc == bridge.target {
+		if m.Name == "<init>" && m.Desc == target {
 			count++
 		}
 	}
 	if count != 1 {
 		return fail()
 	}
-	invoke := &values.FunctionCallExpression{ClassName: owner, FunctionName: "<init>", Descriptor: bridge.target, Kind: values.InvokeSpecial, IsSpecialInvoke: true, HasOriginPC: true, OriginPC: plan.invokePC}
-	for _, arg := range args[:len(args)-1] {
+	invoke := &values.FunctionCallExpression{ClassName: owner, FunctionName: "<init>", Descriptor: target, Kind: values.InvokeSpecial, IsSpecialInvoke: true, HasOriginPC: true, OriginPC: plan.invokePC}
+	for _, arg := range sourceArgs {
 		v, ok := arg.Value.(values.JavaValue)
 		if !ok {
 			return fail()
 		}
 		invoke.Arguments = append(invoke.Arguments, v)
 	}
-	mt, err := types.ParseMethodDescriptor(bridge.target)
+	mt, err := types.ParseMethodDescriptor(target)
 	if err != nil || len(mt.FunctionType().ParamTypes) != len(invoke.Arguments) {
 		return fail()
 	}

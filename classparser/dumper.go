@@ -13544,10 +13544,10 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		if c.nativeCaptureFields != nil && c.nativeMemberCurrent == nil && name == "<init>" || c.nativeAnonymousRoot != nil && c.nativeAnonymousRoot.accessBridgeDescriptor(c.obj, name, descriptor) {
 			continue
 		}
-		if c.nativeMemberCurrent != nil && name == "<init>" && c.nativeMemberCurrent.accessBridges[descriptor] != nil && !c.nativeMemberRoot.retainEmptyMarkers {
+		if c.nativeMemberCurrent != nil && name == "<init>" && c.nativeMemberCurrent.accessBridges[descriptor] != nil && !c.nativeMemberRoot.usesNestAccess {
 			continue
 		}
-		if p := c.nativeMemberRoot; p != nil && c.obj.GetClassName() == p.owner && name == "<init>" && p.rootAccessBridges[descriptor] != nil && !p.retainEmptyMarkers {
+		if p := c.nativeMemberRoot; p != nil && c.obj.GetClassName() == p.owner && name == "<init>" && p.rootAccessBridges[descriptor] != nil && !p.usesNestAccess {
 			continue
 		}
 		if p := c.nativeMemberRoot; p != nil && p.getters[nativeMemberGetterKey(c.obj.GetClassName(), name, descriptor)] != nil {
