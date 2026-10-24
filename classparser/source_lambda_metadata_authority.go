@@ -263,14 +263,19 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 	if own != nil && own.sourceHash != hash {
 		own = nil
 	}
-	ownEnum := c.nativeEnumBacking != nil && c.nativeEnumBacking.object == c.obj && !c.sourceDegraded && !legacySourceHasFailureMarker(source) && c.artifactLambdaMetadataAllowed()
+	// A completed lexical enum declaration proves ownership of source, not
+	// compatibility with javac 8's lambda naming algorithm. Keep these domains
+	// independent: the actual enum lowering re-proves its original/fresh code,
+	// while lambda/constructor/anonymous plans retain their narrower gate below.
+	enumPublicationAllowed := c.options.SourceCompiler.effective() == ModernJavac && c.options.TargetSourceVersion >= 8 && c.options.TargetSourceVersion <= 21
+	ownEnum := enumPublicationAllowed && c.nativeEnumBacking != nil && c.nativeEnumBacking.object == c.obj && !c.sourceDegraded && !legacySourceHasFailureMarker(source)
 	if own == nil && !ownEnum && len(c.sourceLambdaMembers) == 0 && len(c.sourceConstructorMembers) == 0 && len(c.sourceFlatEnumBodies) == 0 {
 		return true
 	}
 	// Enum-only origins transport a completed lexical source packet; they
 	// grant no lambda, constructor or anonymous metadata edits to this owner.
 	// The old domain remains mandatory below whenever such plans are present.
-	if c.options.SourceCompiler.effective() != ModernJavac || c.options.TargetSourceVersion != 8 || len(c.sourceLambdaMembers) > 4096 || len(members) != len(c.nativeRenderedMemberNames) {
+	if !enumPublicationAllowed || len(c.sourceLambdaMembers) > 4096 || len(members) != len(c.nativeRenderedMemberNames) {
 		return false
 	}
 	publication := &sourceLambdaPublication{owner: c.obj.GetClassName(), sourceHash: hash}
