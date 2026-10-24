@@ -12,15 +12,27 @@ import (
 func TestAdversarialConstructorLoweringCheckedSuperRetainsOriginalDeclaration(t *testing.T) {
 	for _, release := range []int{4, 8} {
 		for _, shape := range []string{"instance", "static"} {
-			for _, profile := range []SourceCompilerProfile{ModernJavac, NativeJavac8} {
-				for _, debug := range []string{"none", "source,lines,vars"} {
-					t.Run(fmt.Sprintf("release%d/%s/%s/%s", release, shape, profile, debug), func(t *testing.T) {
-						fixture := constructorCheckedSuperFixture
-						if shape == "static" {
-							fixture = strings.Replace(fixture, "SuffixBase make(", "static SuffixBase make(", 1)
-						}
-						constructorSuffixFamilyAtTargetWithCompilerRoundTrip(t, fixture, debug, []string{"SuffixOwner$1"}, "24:checked:super:identity:early:capture:metadata\n", release, 8, profile)
-					})
+			for _, parent := range []string{"ordinary", "custom renamed", "ordered throws and overload"} {
+				for _, profile := range []SourceCompilerProfile{ModernJavac, NativeJavac8} {
+					for _, debug := range []string{"none", "source,lines,vars"} {
+						t.Run(fmt.Sprintf("release%d/%s/%s/%s/%s", release, shape, parent, profile, debug), func(t *testing.T) {
+							fixture := constructorCheckedSuperFixture
+							if shape == "static" {
+								fixture = strings.Replace(fixture, "SuffixBase make(", "static SuffixBase make(", 1)
+							}
+							switch parent {
+							case "custom renamed":
+								fixture = strings.ReplaceAll(fixture, "java.io.IOException", "ObservedFailure")
+								fixture = "class ObservedFailure extends java.io.IOException {ObservedFailure(String text){super(text);}}\n" + fixture
+								fixture = strings.ReplaceAll(strings.ReplaceAll(fixture, "SuffixBase", "AlternateBase"), "SuffixWitness", "InitializationTrace")
+							case "ordered throws and overload":
+								fixture = strings.Replace(fixture, "SuffixBase(Object input)throws java.io.IOException", "SuffixBase(Object input)throws java.io.EOFException,java.io.IOException,java.sql.SQLException,java.lang.IllegalStateException", 1)
+								fixture = strings.Replace(fixture, "abstract Object value();", "SuffixBase(boolean unused)throws java.lang.ReflectiveOperationException{} abstract Object value();", 1)
+								fixture = strings.Replace(fixture, "final long seed)throws java.io.IOException", "final long seed)throws java.io.IOException,java.sql.SQLException", 1)
+							}
+							constructorSuffixFamilyAtTargetWithCompilerRoundTrip(t, fixture, debug, []string{"SuffixOwner$1"}, "24:checked:super:identity:early:capture:metadata\n", release, 8, profile)
+						})
+					}
 				}
 			}
 		}
