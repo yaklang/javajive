@@ -769,6 +769,11 @@ func SafeIdentifier(name string) string {
 		b.WriteByte('_')
 	}
 	name = b.String()
+	// A bare "$" is a Java identifier, but the Java lexer uses "$" as its
+	// own token, so "ByteVector $" and "this.$" do not parse.
+	if name == "$" {
+		return "_dollar"
+	}
 	if _, ok := javaKeywords[name]; ok {
 		return name + "_"
 	}
