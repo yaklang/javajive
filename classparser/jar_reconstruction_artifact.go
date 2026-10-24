@@ -45,6 +45,11 @@ import (
 // proving that every use directly rethrows a non-null caught operand with
 // identical handler coverage and no alternate entry into its continuation.
 // All retained instruction PCs and the original method universe stay fixed.
+// A returned pre-default-method abstract interface can owe removal of fresh
+// default bridges. Each removed declaration must be an exact typed forwarder
+// to an original abstract override, and its erased contract must still resolve
+// through the complete original interface hierarchy. Retained fresh methods
+// and annotations are unchanged, preserving original initialization semantics.
 type JarReconstructionArtifact struct{ source *JarSourceArtifact }
 
 var _ fs.ReadFileFS = (*JarReconstructionArtifact)(nil)

@@ -50,3 +50,32 @@ class ArrayDriver {public static void main(String[]args){ArrayProtocol owner=new
 		}
 	}
 }
+
+// Multiple erased return contracts can produce multiple fresh default bridges.
+// A diamond must be resolved by declaration identity, not by traversal count;
+// retained declaration annotations and the implementation's result identity
+// remain observable after removal of only the added forwarding declarations.
+func TestAdversarialInterfaceBridgePreservesDiamondCovarianceAndAnnotations(t *testing.T) {
+	const source = `@java.lang.annotation.Retention(java.lang.annotation.RetentionPolicy.RUNTIME) @interface BridgeMark {String value();}
+interface GenericRoot<T>{T value();}
+interface NumericContract extends GenericRoot<Number>{Number value();}
+interface LeftContract extends NumericContract{}
+interface RightContract extends NumericContract{}
+class DiamondEffects {static int calls;static Integer result;}
+public interface DiamondProtocol extends LeftContract,RightContract {@BridgeMark("leaf") Integer value();class Impl implements DiamondProtocol {public Integer value(){DiamondEffects.calls++;return DiamondEffects.result;}}}
+class DiamondDriver {public static void main(String[]args)throws Exception{DiamondProtocol p=new DiamondProtocol.Impl();int rows=0;for(Integer n:new Integer[]{null,new Integer(-129),new Integer(128),new Integer(Integer.MIN_VALUE),new Integer(Integer.MAX_VALUE)}){DiamondEffects.result=n;DiamondEffects.calls=0;if(p.value()!=n||((LeftContract)p).value()!=n||((RightContract)p).value()!=n||((GenericRoot)p).value()!=n||DiamondEffects.calls!=4)throw new AssertionError("diamond dispatch or result identity");rows++;}int count=0;for(java.lang.reflect.Method m:DiamondProtocol.class.getDeclaredMethods()){if(!m.getName().equals("value"))throw new AssertionError("extra method");BridgeMark mark=m.getAnnotation(BridgeMark.class);if(mark==null||!mark.value().equals("leaf"))throw new AssertionError("annotation");if(m.getReturnType()==Integer.class&&(m.isBridge()||m.isSynthetic()))throw new AssertionError("original declaration flags");count++;}if(count!=EXPECTED_METHODS)throw new AssertionError("method universe:"+count);System.out.println(rows+":interface:diamond:covariance:annotations:identity");}}`
+	for _, original := range []int{5, 7, 8} {
+		for _, target := range []int{8, 16} {
+			for _, debug := range []string{"none", "source,lines,vars"} {
+				t.Run(fmt.Sprintf("original%d/target%d/%s", original, target, debug), func(t *testing.T) {
+					methods := "1"
+					if original == 8 {
+						methods = "3"
+					}
+					fixture := strings.ReplaceAll(source, "EXPECTED_METHODS", methods)
+					roundTripConstructorBridgeArtifact(t, fixture, "DiamondProtocol", "DiamondDriver", "5:interface:diamond:covariance:annotations:identity\n", debug, target, original)
+				})
+			}
+		}
+	}
+}
