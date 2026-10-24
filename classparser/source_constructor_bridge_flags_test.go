@@ -20,7 +20,7 @@ func TestAdversarialConstructorBridgeFlagsRequireOriginalAndFreshTypedPacket(t *
 		t.Fatal("native original compiler required")
 	}
 	const originalSource = `class FlagOwner {static class Child {private Child(Object p,long q)throws java.io.IOException{}}static Child make(Object p,long q)throws java.io.IOException{return new Child(p,q);}}`
-	const freshSource = `class FlagOwner {static class Child {private Child(Object p,long q)throws java.io.IOException{} Child(Object p,long q,FlagOwner$1 marker)throws java.io.IOException{this(p,q);}}static Child make(Object p,long q)throws java.io.IOException{return new Child(p,q);}}class FlagOwner$1 {}`
+	const freshSource = `class FlagOwner {static class Child {private Child(Object p,long q)throws java.io.IOException{} Child(Object p,long q,FlagOwner$1 marker)throws java.io.IOException{this(p,q);}}static Child make(Object p,long q)throws java.io.IOException{return new Child(p,q,null);}}class FlagOwner$1 {}`
 	originals := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, originalSource, "FlagOwner", "none", false)
 	for _, release := range []int{8, 11, 16, 21} {
 		fresh := compileLambdaParameterMetadataFixtureWithSourcesAtRelease(t, modern, ModernJavac, freshSource, "FlagOwner", "none", nil, release, false)["FlagOwner$Child.class"]
@@ -39,6 +39,7 @@ func TestAdversarialConstructorBridgeFlagsRequireOriginalAndFreshTypedPacket(t *
 				}
 				ob, cb := bridge(o), bridge(c)
 				code := constructorLoweringCode(cb)
+				originalCodeLength := len(code.Code)
 				var work *workbudget.Budget
 				switch variant {
 				case "fresh receiver":
@@ -91,6 +92,7 @@ func TestAdversarialConstructorBridgeFlagsRequireOriginalAndFreshTypedPacket(t *
 					cancel()
 					work = workbudget.New(ctx, workbudget.Limits{})
 				}
+				code.AttrLen = uint32(int(code.AttrLen) + len(code.Code) - originalCodeLength)
 				authority, input := o.Bytes(), c.Bytes()
 				// Even rejected candidates must be structurally parseable; otherwise a
 				// parser failure would hide whether the forwarding proof rejected them.
