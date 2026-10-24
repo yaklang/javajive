@@ -131,3 +131,44 @@ func TestSourceConstructorPreludeCompletionRejectsChangedInvocations(t *testing.
 		})
 	}
 }
+
+func TestSourceConstructorPreludeCompletionKeepsInvocationMultiplicityAndOrder(t *testing.T) {
+	files := constructorNoargPreludeOriginal(t, "none", "ordered pair", true)
+	original, fresh, artifact := constructorNoargPreludeRoundTrip(t, files, "none", ModernJavac)
+	for _, variant := range []string{"control", "reversed", "duplicated"} {
+		t.Run(variant, func(t *testing.T) {
+			obj := mustParseLowering(t, bytes.Clone(fresh))
+			method, known := sourceAnonymousConstructorMethod(obj, "(Ljava/lang/Object;I)V", nil)
+			if !known {
+				t.Fatal("fresh constructor")
+			}
+			packet := constructorLoweringReadPacket(obj, method, false, false, false, nil, nil, 0, 2)
+			if packet == nil || len(packet.preludeOrigins) != 2 {
+				t.Fatal("two fresh ordered calls")
+			}
+			code := constructorLoweringCode(method)
+			a, b := packet.preludeOrigins[0].pc, packet.preludeOrigins[1].pc
+			first := bytes.Clone(code.Code[a : a+3])
+			if variant == "reversed" {
+				copy(code.Code[a:a+3], code.Code[b:b+3])
+				copy(code.Code[b:b+3], first)
+			}
+			if variant == "duplicated" {
+				copy(code.Code[b:b+3], first)
+			}
+			input := obj.Bytes()
+			before := sha256.Sum256(input)
+			result, err := artifact.source.jar.sourceConstructorLowering.lower(original, input, nil)
+			if variant == "control" {
+				if err != nil || len(result) == 0 {
+					t.Fatal("ordered calls refused", err)
+				}
+			} else if err == nil || result != nil {
+				t.Fatal("changed invocation order/multiplicity accepted", err)
+			}
+			if sha256.Sum256(input) != before {
+				t.Fatal("fresh input mutated")
+			}
+		})
+	}
+}

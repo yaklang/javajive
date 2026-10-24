@@ -25,6 +25,13 @@ func constructorNoargPreludeOriginal(t *testing.T, debug, category string, nop b
 		fixture = strings.Replace(fixture, "before(int mode){", "before(){int mode=UnusedPrefixEffects.mode;", 1)
 		fixture = strings.Replace(fixture, "UnusedPrefixEffects.before(mode)", "UnusedPrefixEffects.before()", 1)
 	}
+	if category == "ordered pair" {
+		fixture = strings.Replace(fixture, " static void finish", ` static Object[] second(int mode){trace+="Q";if(mode==4)throw prefix;return null;}
+ static void finish`, 1)
+		fixture = strings.Replace(fixture, "UnusedPrefixEffects.before(mode);UnusedPrefixEffects.finish", "UnusedPrefixEffects.before(mode);Object[] other=UnusedPrefixEffects.second(mode);UnusedPrefixEffects.finish", 1)
+		fixture = strings.Replace(fixture, "mode==1?UnusedPrefixEffects.prefix", "mode==1||mode==4?UnusedPrefixEffects.prefix", 1)
+		fixture = strings.Replace(fixture, `mode==1?"P":mode==2?"PS":"PSB"`, `mode==1?"P":mode==4?"PQ":mode==2?"PQS":"PQSB"`, 1)
+	}
 	files := nativeCompileSourceReleaseClasses(t, map[string]string{"UnusedPrefixOwner.java": fixture}, debug, "8")
 	object := mustParseLowering(t, bytes.Clone(files["UnusedPrefixOwner.class"]))
 	for _, method := range object.Methods {
@@ -44,11 +51,17 @@ func constructorNoargPreludeOriginal(t *testing.T, debug, category string, nop b
 		if category == "zero arguments" {
 			end, call = 8, 4
 		}
+		if category == "ordered pair" {
+			end = 15
+		}
 		if code == nil {
 			t.Fatal("missing authored constructor Code")
 		}
-		if len(code.ExceptionTable) != 0 || len(code.Code) <= end || code.Code[0] != 0x2a || code.Code[1] != 0xb7 || call == 5 && code.Code[4] != 0x1c || code.Code[call] != 0xb8 || code.Code[end-1] != store {
+		if len(code.ExceptionTable) != 0 || len(code.Code) <= end || code.Code[0] != 0x2a || code.Code[1] != 0xb7 || call == 5 && code.Code[4] != 0x1c || code.Code[call] != 0xb8 || code.Code[8] != store && category != "zero arguments" || category == "zero arguments" && code.Code[7] != store {
 			t.Fatalf("independent compiler fixture changed: %x", code.Code)
+		}
+		if category == "ordered pair" && (code.Code[9] != 0x1c || code.Code[10] != 0xb8 || code.Code[13] != 0x3a || code.Code[14] != 4) {
+			t.Fatalf("independent second call packet changed: %x", code.Code)
 		}
 		old := bytes.Clone(code.Code)
 		padding := 0
@@ -81,8 +94,8 @@ func constructorNoargPreludeOriginal(t *testing.T, debug, category string, nop b
 					start := int(binary.BigEndian.Uint16(table.Info[at:]))
 					length := int(binary.BigEndian.Uint16(table.Info[at+2:]))
 					slot := int(binary.BigEndian.Uint16(table.Info[at+8:]))
-					if slot == 3 && start == end {
-						start, length = end-4+padding, length+4
+					if slot == 3 && start == 9 && category != "zero arguments" || slot == 3 && start == 8 && category == "zero arguments" || category == "ordered pair" && slot == 4 && start == 15 {
+						start, length = start-4+padding, length+4
 					} else if start == 0 && length == len(old) {
 						length += padding
 					} else {
@@ -101,7 +114,7 @@ func constructorNoargPreludeOriginal(t *testing.T, debug, category string, nop b
 }
 
 func TestAdversarialConstructorNoargPreludePreservesOriginalAbruptOrder(t *testing.T) {
-	for _, category := range []string{"reference", "wide", "zero arguments"} {
+	for _, category := range []string{"reference", "wide", "zero arguments", "ordered pair"} {
 		for _, debug := range []string{"none", "source,lines,vars"} {
 			for _, padding := range []string{"plain", "nop"} {
 				for _, profile := range []SourceCompilerProfile{ModernJavac, NativeJavac8} {
