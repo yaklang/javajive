@@ -92,6 +92,29 @@ public class BridgeOuter extends BridgeBase {
  static Object leaf(){return new Leaf();}
 }
 
+class BridgeDerived extends BridgeOuter.Leaf {
+ public %s read(long n,double d,Object v){throw new AssertionError("super bridge became virtual");}
+ public Object special(long n,double d,Object v)throws Throwable {
+  java.lang.invoke.MethodHandle h=java.lang.invoke.MethodHandles.lookup().findSpecial(BridgeOuter.Leaf.class,"read",java.lang.invoke.MethodType.methodType(%s.class,long.class,double.class,Object.class),BridgeDerived.class);
+  %s
+ }
+}
+class BridgeDriver {public static void main(String[]args)throws Exception {
+ Object leaf=BridgeOuter.leaf();java.lang.reflect.Method bridge=null;
+ for(java.lang.reflect.Method m:Class.forName("BridgeOuter$Leaf").getDeclaredMethods()){if(bridge!=null||!m.isSynthetic()||!m.isBridge()||m.getReturnType()!=%s.class)throw new AssertionError("exact original bridge universe");bridge=m;}
+ if(bridge==null)throw new AssertionError("missing original bridge");
+ if(args.length>0&&args[0].equals("special")){leaf=new BridgeDerived();bridge=BridgeDerived.class.getDeclaredMethod("special",long.class,double.class,Object.class);}
+ bridge.setAccessible(true);int rows=0;Object shared=new Object();
+ for(long n:new long[]{Long.MIN_VALUE,0,Long.MAX_VALUE})for(double d:new double[]{-0.0,Double.NaN,Double.POSITIVE_INFINITY})for(Object v:new Object[]{null,shared})for(boolean fail:new boolean[]{false,true}) {
+  BridgeEffects.fail=fail;BridgeEffects.calls=0;BridgeEffects.observed=new Object();boolean caught=false;
+  try{Object result=bridge.invoke(leaf,n,d,v);if(%s)throw new AssertionError("typed result");}catch(java.lang.reflect.InvocationTargetException e){if(e.getCause()!=BridgeEffects.error)throw e;caught=true;}
+  if(caught!=fail||BridgeEffects.calls!=1||BridgeEffects.observed!=v)throw new AssertionError("invocation target/effects/identity");rows++;
+ }
+ System.out.println(rows+":exact:super:bridge:result:identity");
+}}
+`, result, result, forwarding, result, body, result, result, special, result, check)
+}
+
 func checkExactSuperBridgeBoundaries(t *testing.T, owner string, original, fresh []byte, artifact *JarReconstructionArtifact) {
 	t.Helper()
 	base := artifact.source.jar.sourceConstructorLowering
@@ -201,26 +224,4 @@ func checkExactSuperBridgeBoundaries(t *testing.T, owner string, original, fresh
 			}
 		})
 	}
-}
-class BridgeDerived extends BridgeOuter.Leaf {
- public %s read(long n,double d,Object v){throw new AssertionError("super bridge became virtual");}
- public Object special(long n,double d,Object v)throws Throwable {
-  java.lang.invoke.MethodHandle h=java.lang.invoke.MethodHandles.lookup().findSpecial(BridgeOuter.Leaf.class,"read",java.lang.invoke.MethodType.methodType(%s.class,long.class,double.class,Object.class),BridgeDerived.class);
-  %s
- }
-}
-class BridgeDriver {public static void main(String[]args)throws Exception {
- Object leaf=BridgeOuter.leaf();java.lang.reflect.Method bridge=null;
- for(java.lang.reflect.Method m:Class.forName("BridgeOuter$Leaf").getDeclaredMethods()){if(bridge!=null||!m.isSynthetic()||!m.isBridge()||m.getReturnType()!=%s.class)throw new AssertionError("exact original bridge universe");bridge=m;}
- if(bridge==null)throw new AssertionError("missing original bridge");
- if(args.length>0&&args[0].equals("special")){leaf=new BridgeDerived();bridge=BridgeDerived.class.getDeclaredMethod("special",long.class,double.class,Object.class);}
- bridge.setAccessible(true);int rows=0;Object shared=new Object();
- for(long n:new long[]{Long.MIN_VALUE,0,Long.MAX_VALUE})for(double d:new double[]{-0.0,Double.NaN,Double.POSITIVE_INFINITY})for(Object v:new Object[]{null,shared})for(boolean fail:new boolean[]{false,true}) {
-  BridgeEffects.fail=fail;BridgeEffects.calls=0;BridgeEffects.observed=new Object();boolean caught=false;
-  try{Object result=bridge.invoke(leaf,n,d,v);if(%s)throw new AssertionError("typed result");}catch(java.lang.reflect.InvocationTargetException e){if(e.getCause()!=BridgeEffects.error)throw e;caught=true;}
-  if(caught!=fail||BridgeEffects.calls!=1||BridgeEffects.observed!=v)throw new AssertionError("invocation target/effects/identity");rows++;
- }
- System.out.println(rows+":exact:super:bridge:result:identity");
-}}
-`, result, result, forwarding, result, body, result, result, special, result, check)
 }
