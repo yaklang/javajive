@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
@@ -106,6 +107,43 @@ func TestCarriedPrimitiveJoinRequiresClosedTypedBypass(t *testing.T) {
 			snap := d.carriedPrimitivePhiSeeds[root]
 			if snap == nil || snap.LeftValue != ref || snap.JavaValue != seed {
 				t.Fatal("bypass initialization must precede condition")
+			}
+		})
+	}
+}
+
+func TestCarriedPrimitiveInstructionPacketRequiresItsActualWriter(t *testing.T) {
+	typ := types.NewJavaPrimer(types.JavaInteger)
+	value := values.NewJavaLiteral(7, typ)
+	ref := values.NewJavaRef(utils.NewRootVariableId(), value, typ)
+	op := &OpCode{Id: 4, Instr: &Instruction{OpCode: OP_IFNULL}}
+	writer := statements.NewAssignStatement(ref, value, true)
+	d := &Decompiler{carriedPrimitivePhiSeeds: map[*OpCode]*statements.AssignStatement{op: writer}}
+	for _, kind := range []string{"closed", "copied writer", "foreign opcode", "swapped", "extra node", "different opcode id", "nonconditional tail"} {
+		t.Run(kind, func(t *testing.T) {
+			first := NewNode(writer)
+			first.Id = op.Id
+			last := NewNode(&statements.ConditionStatement{Condition: values.NewJavaLiteral(true, types.NewJavaPrimer(types.JavaBoolean))})
+			last.Id = op.Id
+			chain := []*Node{first, last}
+			instruction := op
+			switch kind {
+			case "copied writer":
+				first.Statement = statements.NewAssignStatement(ref, value, true)
+			case "foreign opcode":
+				copy := *op
+				instruction = &copy
+			case "swapped":
+				chain[0], chain[1] = chain[1], chain[0]
+			case "extra node":
+				chain = append([]*Node{NewNode(writer)}, chain...)
+			case "different opcode id":
+				first.Id++
+			case "nonconditional tail":
+				last.Statement = writer
+			}
+			if d.carriedPrimitiveSourceChain(chain, last, instruction) != (kind == "closed") {
+				t.Fatal("unowned instruction packet accepted", kind)
 			}
 		})
 	}

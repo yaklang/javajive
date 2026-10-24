@@ -134,7 +134,7 @@ func (d *Decompiler) lowerCarriedPrimitiveJoin(merge, root *OpCode, slot *values
 // certified writer before that branch when instruction packets become nodes;
 // name/shape equality cannot enroll some unrelated assignment or condition.
 func (d *Decompiler) carriedPrimitiveSourceChain(chain []*Node, primary *Node, op *OpCode) bool {
-	if len(chain) != 2 || chain[1] != primary || op == nil || !isConditionalBranchOpcode(op.Instr.OpCode) || d.carriedPrimitivePhiSeeds[op] == nil {
+	if len(chain) != 2 || chain[1] != primary || op == nil || op.Instr == nil || !isConditionalBranchOpcode(op.Instr.OpCode) || d.carriedPrimitivePhiSeeds[op] == nil {
 		return false
 	}
 	if chain[0].Statement != d.carriedPrimitivePhiSeeds[op] || chain[0].Id != primary.Id {
