@@ -15,7 +15,7 @@ import (
 // declared method universe and initialization of implementing classes (JVMS
 // 5.4.3.4, 5.5). Only the original abstract protocol grants this obligation.
 func legacyAbstractInterfaceDomain(obj *ClassObject, work *workbudget.Budget) bool {
-	if obj == nil || obj.MajorVersion < 49 || obj.MajorVersion >= 52 || obj.MinorVersion != 0 || obj.AccessFlags&^uint16(1) != 0x0600 || obj.GetSupperClassName() != "java/lang/Object" || len(obj.Methods) > 4096 {
+	if obj == nil || obj.MajorVersion < 49 || obj.MajorVersion >= 52 || obj.MinorVersion != 0 || hasOriginalNestAttribute(obj, "NestHost") || hasOriginalNestAttribute(obj, "NestMembers") || obj.AccessFlags&^uint16(1) != 0x0600 || obj.GetSupperClassName() != "java/lang/Object" || len(obj.Methods) > 4096 {
 		return false
 	}
 	methods := 0
@@ -33,7 +33,7 @@ func legacyAbstractInterfaceDomain(obj *ClassObject, work *workbudget.Budget) bo
 			}
 			continue
 		}
-		if strings.HasPrefix(n, "<") || m.AccessFlags != 0x0401 || constructorLoweringCode(m) != nil {
+		if strings.HasPrefix(n, "<") || m.AccessFlags&^uint16(0x0080) != 0x0401 || constructorLoweringCode(m) != nil {
 			return false
 		}
 		methods++
@@ -73,7 +73,7 @@ func inheritedAbstractInterfaceMethod(d *ClassObjectDumper, name, descriptor str
 			}
 			if n == name && desc == descriptor {
 				matches++
-				if matches > 1 || m.AccessFlags != 0x0401 || constructorLoweringCode(m) != nil {
+				if matches > 1 || m.AccessFlags&^uint16(0x0080) != 0x0401 || constructorLoweringCode(m) != nil {
 					return false
 				}
 				found = true
@@ -275,7 +275,7 @@ func (a *sourceConstructorLoweringAuthority) lowerLegacyInterfaceBridges(owner s
 		desc, _ := sourceBridgeUTF8(got, method.DescriptorIndex)
 		target := interfaceBridgeForwardTarget(got, method, provider, work)
 		originalTarget := before[n+"\x00"+target]
-		if target == "" || originalTarget == nil || originalTarget.AccessFlags != 0x0401 || !inheritedAbstractInterfaceMethod(d, n, desc) {
+		if target == "" || originalTarget == nil || originalTarget.AccessFlags&^uint16(0x0080) != 0x0401 || !inheritedAbstractInterfaceMethod(d, n, desc) {
 			return decline()
 		}
 		edits = append(edits, compiledMetadataEdit{layout.methods[method], nil})
@@ -283,6 +283,9 @@ func (a *sourceConstructorLoweringAuthority) lowerLegacyInterfaceBridges(owner s
 	// Interface invocation can inherit the original abstract declaration.
 	// A direct default-super consumer has different selection semantics and
 	// is outside this obligation, even when its symbolic descriptor matches.
+	if work.CheckAlloc(int64(len(got.ConstantPool))*32) != nil {
+		return nil, work.Err()
+	}
 	removedRefs := map[uint16]bool{}
 	for i, constant := range got.ConstantPool {
 		if !nativeProofWork(work, 1) {
