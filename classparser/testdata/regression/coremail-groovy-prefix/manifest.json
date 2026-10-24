@@ -1,0 +1,40 @@
+{
+  "origin": "weixin.war/WEB-INF/lib/groovy-all-2.0.1.jar",
+  "files": [
+    {
+      "path": "groovy/util/CliBuilder$_expandArgumentFile_closure2.class",
+      "sha256": "44476616eb81117a7a51d05a399e3bb37b4bc370ccda0553c5ca5f2ac37f2f20",
+      "size": 3033
+    },
+    {
+      "path": "groovy/lang/Closure.class",
+      "sha256": "12ea3f7644a008db56eab2f687ebf68d0b8dd34ca5b4ff3b6d6bd37f6ab67987",
+      "size": 12415
+    },
+    {
+      "path": "groovy/lang/GroovyObjectSupport.class",
+      "sha256": "0faa92d6d8ed61079fa3b93c59d32dafb711473dc74fc8cb569b667d090561ec",
+      "size": 1594
+    },
+    {
+      "path": "groovy/lang/GroovyObject.class",
+      "sha256": "294fb185c15e9746232cf60521b078cc8ab3c2c2b6f370db16735477bdd78a10",
+      "size": 429
+    },
+    {
+      "path": "groovy/lang/Writable.class",
+      "sha256": "0aec4bc44f151a832e7729e34ce4036b9c0773252a5d99c0096ff736757615c9",
+      "size": 212
+    },
+    {
+      "path": "org/codehaus/groovy/runtime/GeneratedClosure.class",
+      "sha256": "5ce003884b4fac2e5d3a253361a6c4c383668043a76fbaf48c6da19ccadbf5ea",
+      "size": 141
+    },
+    {
+      "path": "groovy/lang/GroovyCallable.class",
+      "size": 257,
+      "sha256": "21c12c4943c9c66d9ed2dfd3a222a8c3ca05232b75f57688f1cb96348c25dbbd"
+    }
+  ]
+}
