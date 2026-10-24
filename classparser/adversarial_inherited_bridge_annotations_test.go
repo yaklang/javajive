@@ -118,9 +118,19 @@ func checkInheritedBridgeAnnotationLoweringBoundaries(t *testing.T, name string,
 						method.Attributes = append(method.Attributes[:i], method.Attributes[i+1:]...)
 					case "moved parameter":
 						a.ParameterAnnotations[0], a.ParameterAnnotations[1] = a.ParameterAnnotations[1], a.ParameterAnnotations[0]
+						// This attribute preserves its original serialized table.
+						// Move the complete first row ahead of the two empty rows
+						// in that payload as well, so the parser sees the mutation.
+						if len(a.Info) < 7 || a.Info[0] != 3 || !bytes.Equal(a.Info[len(a.Info)-4:], []byte{0, 0, 0, 0}) {
+							t.Fatal("authored visible table must annotate only parameter zero")
+						}
+						info := append([]byte{3, 0, 0}, a.Info[1:len(a.Info)-4]...)
+						a.Info = append(info, 0, 0)
 					case "short parameter table":
 						a.NumParameters--
 						a.ParameterAnnotations = a.ParameterAnnotations[:2]
+						a.Info = append([]byte{2}, a.Info[1:len(a.Info)-2]...)
+						a.AttrLen = uint32(len(a.Info))
 					default:
 						continue
 					}
