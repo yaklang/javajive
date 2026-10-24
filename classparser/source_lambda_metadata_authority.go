@@ -419,7 +419,10 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 			}
 		}
 	}
-	if (len(publication.plans) != 0 || len(publication.constructors) != 0 || len(publication.anonymous) != 0) && !c.artifactLambdaMetadataAllowed() {
+	if (len(publication.plans) != 0 || len(publication.anonymous) != 0) && !c.artifactLambdaMetadataAllowed() {
+		return false
+	}
+	if len(publication.constructors) != 0 && !c.artifactConstructorMetadataAllowed() {
 		return false
 	}
 	raw, bound := a.original(c.obj, c.Work)
