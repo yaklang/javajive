@@ -1,10 +1,7 @@
 package javaclassparser
 
 import (
-	"fmt"
 	"github.com/yaklang/javajive/internal/jdecenv"
-	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -44,50 +41,39 @@ func (z *JarFS) prepareNativeMemberFamilyFromRoot(root *ClassObject, snap map[st
 	d.options.EnvSnapshot = snap
 	p := d.planNativeMemberFamilyFromRoot(independent)
 	if p == nil {
-		fmt.Printf("FAMILY_DIAG %s:45\n", owner)
 		return nil
 	}
 	if independent != nil && !independent.familyClosed(p, d.Work) {
-		fmt.Printf("FAMILY_DIAG %s:48\n", owner)
 		return nil
 	}
 	if !d.planNativeMemberAnonymousScopes(p) {
-		fmt.Printf("FAMILY_DIAG %s:51\n", owner)
 		return nil
 	}
 	if !nativeMemberCompilerMetadataEligible(root, p, d.options.SourceCompiler, d.options.TargetSourceVersion, d.Work, d.options.sourceLambdaMetadata) {
-		fmt.Printf("FAMILY_DIAG %s:54\n", owner)
 		return nil
 	}
 	// Ordinal completeness is a post-forest invariant. It grants no source
 	// access by itself; the following archive and permission proofs still run.
 	if !nativeMemberAccessorRegistrationsClosed(p, d.Work) {
-		fmt.Printf("FAMILY_DIAG %s:59\n", owner)
 		return nil
 	}
 	if !nativeEnumSwitchOrdinalClosed(p, d.Work) {
-		fmt.Printf("FAMILY_DIAG %s:62\n", owner)
 		return nil
 	}
 	if !nativeMemberJointBridgeMarkersClosed(p, d.Work) {
-		fmt.Printf("FAMILY_DIAG %s:65\n", owner)
 		return nil
 	}
 	index := z.originalMemberIndex()
 	if !z.nativeEnumSwitchSourceUsersClosed(p, root, index, d.Work) {
-		fmt.Printf("FAMILY_DIAG %s:69\n", owner)
 		return nil
 	}
 	if p.anonymousForest != nil && !nativeAnonymousForestArchiveClosed(p.anonymousForest, index, d.Work) {
-		fmt.Printf("FAMILY_DIAG %s:72\n", owner)
 		return nil
 	}
 	if !z.nativeMethodLocalArchiveClosed(p, index) {
-		fmt.Printf("FAMILY_DIAG %s:75\n", owner)
 		return nil
 	}
 	if !index.valid || !z.nativeMemberStaticConstantsReferencesClosed(p, index, d.Work) || !nativeMemberPrivateGetterReferencesClosed(p, index, d.Work) || !z.nativeMemberJointBridgeReferencesClosed(p, index, d.Work) {
-		fmt.Printf("FAMILY_DIAG %s:78\n", owner)
 		return nil
 	}
 	if len(p.rootAccessBridges) > 0 && index.handles[owner] {
@@ -97,7 +83,6 @@ func (z *JarFS) prepareNativeMemberFamilyFromRoot(root *ClassObject, snap map[st
 		// and a later receipt from this exact root's rendered implementation.
 		p.rootHandleSource = &nativeMemberClass{object: root, lambdaContext: nativeLambdaImplementationContext{resolve: d.nativeAnnotationDeclarationResolver(), metadata: d.buildInvocationMetadata()}}
 		if !nativeRootBridgeMethodHandlesClosed(root, index, p.rootHandleSource, d.Work) || !z.nativeMemberLambdaArchiveClosed(p.rootHandleSource, index, d.Work) {
-			fmt.Printf("FAMILY_DIAG %s:87\n", owner)
 			return nil
 		}
 	}
@@ -107,11 +92,9 @@ func (z *JarFS) prepareNativeMemberFamilyFromRoot(root *ClassObject, snap map[st
 	for name, group := range p.anonymousUnits {
 		unit := group.children[name]
 		if unit == nil || unit.object == nil || unit.object.GetClassName() != name || !nativeProofWork(d.Work, 1) {
-			fmt.Printf("FAMILY_DIAG %s:96\n", owner)
 			return nil
 		}
 		if !z.nativeAnonymousLambdaChildArchiveClosed(unit, index, d.Work) {
-			fmt.Printf("FAMILY_DIAG %s:99\n", owner)
 			return nil
 		}
 		objects[name] = unit.object
@@ -121,24 +104,20 @@ func (z *JarFS) prepareNativeMemberFamilyFromRoot(root *ClassObject, snap map[st
 	}
 	for name, body := range p.enumConstants {
 		if body == nil || !nativeMemberOrdinaryHandlesClosed(body.object, index, d.Work) {
-			fmt.Printf("FAMILY_DIAG %s:108\n", owner)
 			return nil
 		}
 		objects[name] = body.object
 	}
 	if !z.nativeEnumConstantsArchiveClosed(p, index, d.Work) {
-		fmt.Printf("FAMILY_DIAG %s:113\n", owner)
 		return nil
 	}
 	rootPrivateConstructor := false
 	for _, method := range root.Methods {
 		if !nativeProofWork(d.Work, 1) || method == nil {
-			fmt.Printf("FAMILY_DIAG %s:118\n", owner)
 			return nil
 		}
 		name, known := sourceBridgeUTF8(root, method.NameIndex)
 		if !known {
-			fmt.Printf("FAMILY_DIAG %s:122\n", owner)
 			return nil
 		}
 		rootPrivateConstructor = rootPrivateConstructor || name == "<init>" && method.AccessFlags&2 != 0
@@ -150,12 +129,10 @@ func (z *JarFS) prepareNativeMemberFamilyFromRoot(root *ClassObject, snap map[st
 			}
 			raw, known := z.enumSiblingResolver()(user)
 			if !known {
-				fmt.Printf("FAMILY_DIAG %s:133\n", owner)
 				return nil
 			}
 			other, err := d.parseResolved(raw)
 			if err != nil || other.GetClassName() != user {
-				fmt.Printf("FAMILY_DIAG %s:137\n", owner)
 				return nil
 			}
 			objects[user] = other
@@ -164,29 +141,24 @@ func (z *JarFS) prepareNativeMemberFamilyFromRoot(root *ClassObject, snap map[st
 	for n, child := range p.children {
 		objects[n] = child.object
 		if !nativeMemberOrdinaryHandlesClosed(child.object, index, d.Work, child) {
-			fmt.Printf("FAMILY_DIAG %s:145\n", owner)
 			return nil
 		}
 		if !z.nativeMemberLambdaArchiveClosed(child, index, d.Work) {
-			fmt.Printf("FAMILY_DIAG %s:148\n", owner)
 			return nil
 		}
 		for user := range index.captureUsers[nativeMemberCaptureIndexKey(n, child.field)] {
 			if user != n {
 				if named := p.children[user]; named != nil {
 					if _, valid := nativeMemberLexicalReads(named.object, p, d.Work); !valid {
-						fmt.Printf("FAMILY_DIAG %s:154\n", owner)
 						return nil
 					}
 				} else if local := p.methodLocals[user]; local != nil {
 					if _, valid := nativeMemberLexicalReads(local.object, p, d.Work); !valid {
-						fmt.Printf("FAMILY_DIAG %s:158\n", owner)
 						return nil
 					}
 				} else {
 					group := p.anonymousUnits[user]
 					if group == nil || !nativeMemberProjectedAnonymousCaptureRead(p, group.children[user], n, d.Work) {
-						fmt.Printf("FAMILY_DIAG %s:163\n", owner)
 						return nil
 					}
 				}
@@ -198,12 +170,10 @@ func (z *JarFS) prepareNativeMemberFamilyFromRoot(root *ClassObject, snap map[st
 			}
 			raw, known := z.enumSiblingResolver()(user)
 			if !known {
-				fmt.Printf("FAMILY_DIAG %s:174\n", owner)
 				return nil
 			}
 			other, e := d.parseResolved(raw)
 			if e != nil || other.GetClassName() != user {
-				fmt.Printf("FAMILY_DIAG %s:178\n", owner)
 				return nil
 			}
 			objects[user] = other
@@ -213,25 +183,21 @@ func (z *JarFS) prepareNativeMemberFamilyFromRoot(root *ClassObject, snap map[st
 		reader := z.nativeMemberReader(object)
 		allocations, known := reader.nativeMemberAllocations(p)
 		if !known || !nativeMemberJointBridgeCallersClosed(p, object, allocations, d.Work) {
-			fmt.Printf("FAMILY_DIAG %s:187\n", owner)
 			return nil
 		}
 	}
 	for name, bridges := range p.bridgeOwners() {
 		for descriptor := range bridges {
 			if p.bridgeCalls[name+descriptor] == 0 {
-				fmt.Printf("FAMILY_DIAG %s:193\n", owner)
 				return nil
 			}
 		}
 	}
 
 	if !nativeModernNestSourceScopeClosed(p.modernNestObjects, objects, d.Work) {
-		fmt.Printf("FAMILY_DIAG %s:199\n", owner)
 		return nil
 	}
 	if !nativeMemberPrivatePermissionClosed(p, d.nativeAnnotationDeclarationResolver(), d.Work, d.nativePrivatePermissionPlatformParents()) {
-		fmt.Printf("FAMILY_DIAG %s:202\n", owner)
 		return nil
 	}
 
@@ -245,19 +211,15 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 	root, d, p, objects, snap := prepared.root, prepared.reader, prepared.family, prepared.objects, prepared.snapshot
 	owner := p.owner
 	if p.independentRoot != nil && (!p.independentRoot.validFor(d) || !p.independentRoot.familyClosed(p, d.Work)) {
-		fmt.Printf("FAMILY_DIAG %s:215\n", owner)
 		return nil
 	}
 	if !z.nativeMemberIndependentInvocationsClosed(prepared) {
-		fmt.Printf("FAMILY_DIAG %s:218\n", owner)
 		return nil
 	}
 	if !z.nativeMemberAccessRepresentable(p, z.originalMemberIndex(), d.Work, peers...) {
-		fmt.Printf("FAMILY_DIAG %s:221\n", owner)
 		return nil
 	}
 	if len(p.getters) > 0 && !z.nativeMemberAccessorAncestorFlagsClosed(prepared, dependencyGraphClosed, peers...) {
-		fmt.Printf("FAMILY_DIAG %s:224\n", owner)
 		return nil
 	}
 	// Independent direct families have independent commits to ownership.
@@ -269,26 +231,22 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 	}
 	packageRoot := strings.SplitN(owner, "/", 2)[0]
 	if strings.Contains(owner, "/") && lexicalNames[packageRoot] {
-		fmt.Printf("FAMILY_DIAG %s:235\n", owner)
 		return nil
 	}
 	staticDependenciesChecked := false
 	dependencyObjects, known := nativeMemberDependencyObjects(root, p, d.Work)
 	if !known {
-		fmt.Printf("FAMILY_DIAG %s:240\n", owner)
 		return nil
 	}
 	for _, object := range dependencyObjects {
 		references, known := nativeMemberSourceBindingNames(object, d.Work)
 		if !known {
-			fmt.Printf("FAMILY_DIAG %s:245\n", owner)
 			return nil
 		}
 		for _, n := range references {
 			// A default-package class has no qualified spelling to escape a
 			// same-named lexical member declaration. Retain the flat scope.
 			if !strings.Contains(n, "/") && lexicalNames[n] {
-				fmt.Printf("FAMILY_DIAG %s:251\n", owner)
 				return nil
 			}
 			if p.children[n] != nil || n == owner {
@@ -300,7 +258,6 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 			}
 			other, e := d.parseResolved(raw)
 			if e != nil {
-				fmt.Printf("FAMILY_DIAG %s:262\n", owner)
 				return nil
 			}
 			otherOwner, _, otherFlags, isMember := originalMemberOwner(other)
@@ -309,7 +266,6 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 				// can both contribute names. Neither contributes ownership.
 				static := otherFlags&8 != 0
 				if !static && !nativeMemberLexicalAncestorDeclarationDependency(prepared, object, other, d.nativeAnnotationDeclarationResolver(), d.Work) && !nativeMemberIndependentDeclarationDependency(root, other, d.nativeAnnotationDeclarationResolver(), d.Work) && !nativeAnonymousForeignSuperDeclarationUse(p, other, d.Work) {
-					fmt.Printf("FAMILY_DIAG %s:270\n", owner)
 					return nil
 				}
 				// A terminal local refusal owns no source completion to wait on.
@@ -328,7 +284,6 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 					if !dependencyGraphClosed {
 						_, cyclic, known := z.nativeMemberDependencyAdmission(owner, d.Work, snap)
 						if !known || cyclic {
-							fmt.Printf("FAMILY_DIAG %s:288\n", owner)
 							return nil
 						}
 					}
@@ -345,7 +300,6 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 					}
 				}
 				if dependency == nil || dependency.static != static || dependency.owner != otherOwner || dependency.object.GetClassName() != n || dependency.sourceName == "" {
-					fmt.Printf("FAMILY_DIAG %s:304\n", owner)
 					return nil
 				}
 				if p.sourceDependencies == nil {
@@ -388,7 +342,6 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 						independent = p.memberAnonymous[anonOwner]
 					}
 					if independent == nil || independent.owner != anonOwner || independent.standalone[n] == nil {
-						fmt.Printf("FAMILY_DIAG %s:346\n", owner)
 						return nil
 					}
 				}
@@ -397,11 +350,9 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 	}
 
 	if !nativeMemberExternalSupersClosed(p, d.nativeConstructorOperandMetadata(d.buildInvocationMetadata()), d.nativeAnnotationDeclarationResolver(), d.Work) {
-		fmt.Printf("FAMILY_DIAG %s:354\n", owner)
 		return nil
 	}
 	if !nativeAnonymousForeignSupersCommitted(p, d.Work) {
-		fmt.Printf("FAMILY_DIAG %s:357\n", owner)
 		return nil
 	}
 
@@ -410,7 +361,6 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 	// metadata before any body can publish a projected type spelling.
 	for _, object := range dependencyObjects {
 		if _, known := z.nativeMemberReader(object).nativeMemberAllocations(p); !known {
-			fmt.Printf("FAMILY_DIAG %s:365\n", owner)
 			return nil
 		}
 	}
@@ -424,7 +374,6 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 		var err error
 		jdecenv.Run(snap, func() error { _, err = reader.DumpClass(); return err })
 		if err != nil || p.failed {
-			fmt.Printf("FAMILY_DIAG %s:378\n", owner)
 			return nil
 		}
 	}
@@ -433,32 +382,19 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 	var src string
 	var e error
 	jdecenv.Run(snap, func() error { src, e = d.DumpClass(); return e })
-	fmt.Printf("RENDER_DIAG %s err=%v failed=%v degraded=%v bytes=%d\n", owner, e, p.failed, d.sourceDegraded, len(src))
 	if p.rootHandleSource != nil && !nativeMemberLambdaSourceClosed(p.rootHandleSource, d, d.Work) {
-		fmt.Printf("FAMILY_DIAG %s:387\n", owner)
 		return nil
 	}
 	if p.anonymousForest != nil && !p.anonymousForest.scopeSourceComplete(src) {
-		if dir := os.Getenv("JDEC_FAMILY_DIAGNOSTIC_OUT"); dir != "" {
-			os.WriteFile(filepath.Join(dir, "rejected-source.java"), []byte(src), 0600)
-		}
-		for name, g := range p.anonymousForest.groups {
-			ord, known := nativeAnonymousOrdinalsWithinOwner(src, name)
-			fmt.Printf("FOREST_DIAG %s group=%s ord=%v known=%v children=%d failed=%v prefix=%d\n", owner, name, ord, known, len(g.children), g.failed, g.enumPrefix)
-		}
-		fmt.Printf("FAMILY_DIAG %s:390\n", owner)
 		return nil
 	}
 	if !nativeEnumConstantsSourceClosed(p) {
-		fmt.Printf("FAMILY_DIAG %s:393\n", owner)
 		return nil
 	}
 	if !nativeMethodLocalSourceComplete(p) {
-		fmt.Printf("FAMILY_DIAG %s:396\n", owner)
 		return nil
 	}
 	if e != nil || p.failed || !nativeEnumSwitchSourceComplete(p, src, d.Work) || !nativeMemberPrivateGetterSourceClosed(p, src, d.Work) || d.sourceDegraded || p.anonymous != nil && !p.anonymous.completeSource(src) {
-		fmt.Printf("FAMILY_DIAG %s:399\n", owner)
 		return nil
 	}
 
