@@ -2,6 +2,7 @@ package javaclassparser
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"strings"
 	"testing"
@@ -155,6 +156,63 @@ func TestNativeAccessorNestedLayoutRejectsUnsealedBoundaries(t *testing.T) {
 			}
 			if got, known := nativeMemberRegistrationTreeLayout(p, source, members, work, names); known != (variant == "valid") {
 				t.Fatalf("admitted=%v source=%s", known, got)
+			}
+		})
+	}
+}
+
+func TestNativeRegistrationPublicationRequiresCommittedIdentityAndBytes(t *testing.T) {
+	files := nativeCompileClasses(t, nativeAccessorNestedLayoutFixture)
+	for _, variant := range []string{"valid", "root copy", "member copy", "wrong owner", "stale original", "edited output", "duplicated output", "missing receipt", "failed plan", "failed retry", "canceled retry"} {
+		t.Run(variant, func(t *testing.T) {
+			p := nativeRegistrationTreeTestPlan(t, files)
+			source, members, _ := nativeRegistrationTreeTestSources(p, [5]int{0, 0, 0, 2, 1})
+			names := []string{p.owner + "$Start", p.owner + "$Scope"}
+			got, ok := nativeMemberRegistrationTreeLayout(p, source, members, nil, names)
+			if !ok || p.registrationPublication == nil {
+				t.Fatal("committed schedule")
+			}
+			root, member := p.lexicalObjects[p.owner], p.children[names[1]].object
+			before := members[1]
+			hash := sha256.Sum256([]byte(got))
+			switch variant {
+			case "root copy":
+				root, _ = Parse(root.Bytes())
+			case "member copy":
+				member, _ = Parse(member.Bytes())
+			case "wrong owner":
+				member = p.children[p.owner+"$Scope$Reader"].object
+			case "stale original":
+				before += " "
+			case "edited output":
+				hash = sha256.Sum256([]byte(got + " "))
+			case "duplicated output":
+				hash = sha256.Sum256([]byte(got + got))
+			case "missing receipt":
+				delete(p.registrationPublication.members, names[1])
+			case "failed plan":
+				p.failed = true
+			case "failed retry":
+				p.registrationLayouts[names[1]].owner = "Foreign"
+				if _, ok := nativeMemberRegistrationTreeLayout(p, source, members, nil, names); ok {
+					t.Fatal("invalid retry accepted")
+				}
+			case "canceled retry":
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				if _, ok := nativeMemberRegistrationTreeLayout(p, source, members, workbudget.New(ctx, workbudget.Limits{}), names); ok {
+					t.Fatal("canceled retry accepted")
+				}
+			}
+			after, known := p.registrationMemberPacket(root, member, before, hash)
+			if known != (variant == "valid") {
+				t.Fatal("publication capability", variant, known)
+			}
+			if known && (after == before || strings.Count(got, after) != 1 || !strings.Contains(after, "class Reader{")) {
+				t.Fatal("exact relocated owned packet", after)
+			}
+			if strings.HasSuffix(variant, "retry") && p.registrationPublication != nil {
+				t.Fatal("failed transaction retained prior publication")
 			}
 		})
 	}

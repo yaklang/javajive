@@ -15,7 +15,7 @@ type nativeMemberRegistrationPublication struct {
 }
 
 func (p *nativeMemberFamily) registrationMemberPacket(root, member *ClassObject, before string, finalHash [32]byte) (string, bool) {
-	if p == nil || p.failed || root == nil || member == nil || p.owner != root.GetClassName() || p.registrationPublication == nil || p.registrationPublication.sourceHash != finalHash {
+	if p == nil || p.failed || root == nil || member == nil || p.owner != root.GetClassName() || p.lexicalObjects[p.owner] != root || p.registrationPublication == nil || p.registrationPublication.sourceHash != finalHash {
 		return "", false
 	}
 	child := p.children[member.GetClassName()]

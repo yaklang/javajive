@@ -17,8 +17,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	classparser "github.com/yaklang/javajive/classparser"
 )
 
 type historicalCompilePass struct{ Release, Sources, ExitCode int }
