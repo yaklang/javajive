@@ -2102,9 +2102,12 @@ func TestDropClassTCastOfForLoadedType(t *testing.T) {
 func TestFillHashCodeEmptyNullIf(t *testing.T) {
 	in := "class C {\n\tpublic int hashCode() {\n\t\tClassLoader var1 = this.classLoader;\n\t\tif ((var1) != (null)){\n\n\t\t}else{\n\t\t\treturn 1;\n\t\t}\n\t}\n}\n"
 	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	out := fillHashCodeEmptyNullIf(in)
-	if !strings.Contains(out, "return var1.hashCode();") {
-		t.Fatalf("missing hashCode fill:\n%s", out)
+	// The old assertion required fabrication of an early return. Its original
+	// bytecode instead keeps accumulating after the nonnull contribution; the
+	// original-first carried-primitive MVP checks that full algorithm.
+	out := fixHardjarShapes(in)
+	if out != in {
+		t.Fatalf("source syntax cannot prove a missing contribution:\n%s", out)
 	}
 }
 
@@ -2271,9 +2274,6 @@ func TestFillHashCodeEmptyNullIfJarFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	on := string(onb)
-	if !strings.Contains(on, "return var1.hashCode();") {
-		t.Fatalf("ON missing hashCode fill:\n%s", clipForTest(on, "hashCode()"))
-	}
 	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
 	jfs2, err := NewJarFSFromLocal(jar)
 	if err != nil {
@@ -2285,11 +2285,28 @@ func TestFillHashCodeEmptyNullIfJarFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	off := string(offb)
-	if strings.Contains(off, "return var1.hashCode();") {
-		t.Fatalf("OFF already has hashCode fill (switch inert):\n%s", clipForTest(off, "hashCode()"))
+	// Original bytecode has one return after every conditional contribution.
+	// The retired text rule fabricated early returns and made its own switch
+	// load-bearing. Both settings must now retain the same complete algorithm.
+	hashBody := func(source string) string {
+		t.Helper()
+		start := strings.Index(source, "public int hashCode()")
+		if start < 0 {
+			t.Fatal("missing original method")
+		}
+		open := strings.Index(source[start:], "{") + start
+		end := matchingCloseBrace(source, open)
+		if end <= open {
+			t.Fatal("missing method extent")
+		}
+		body := source[open+1 : end]
+		if strings.Count(body, "return ") != 1 || strings.Count(body, ".hashCode()") < 6 || strings.Contains(body, DecompileStubMarker) {
+			t.Fatal("lost common continuation or original contributions", body)
+		}
+		return body
 	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
+	if hashBody(on) != hashBody(off) {
+		t.Fatal("algorithm still depends on source text recovery")
 	}
 }
 

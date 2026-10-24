@@ -102,7 +102,8 @@ func fixHardjarCodeShapes(body string) string {
 	body = dropClassTCastOfForLoadedType(body)
 	body = wrapComparingLongLambdaFromNextCast(body)
 	body = stripStaticAssertionsInEnumConstant(body)
-	body = fillHashCodeEmptyNullIf(body)
+	// Missing branch contributions require typed stack-phi reconstruction.
+	// A method name cannot justify inventing an early return.
 	body = rewriteInstanceCastFromSibling(body)
 	body = dropEmptyTargetOnRepeatable(body)
 	body = retypeMixedIteratorElemToRaw(body)
@@ -6995,65 +6996,6 @@ func minLen(s string, n int) int {
 		return len(s)
 	}
 	return n
-}
-
-func fillHashCodeEmptyNullIf(body string) string {
-	if !strings.Contains(body, "hashCode()") {
-		return body
-	}
-	needle := ") != (null)){"
-	from := 0
-	for {
-		rel := strings.Index(body[from:], needle)
-		if rel < 0 {
-			return body
-		}
-		i := from + rel
-		start := prevMemberStart(body, i)
-		head := body[start:i]
-		brace := strings.Index(head, "{")
-		if brace < 0 {
-			from = i + 1
-			continue
-		}
-		sig := head[:brace]
-		if !strings.Contains(sig, "hashCode()") || !strings.Contains(sig, "int") {
-			from = i + 1
-			continue
-		}
-		identEnd := i
-		for identEnd > 0 && (body[identEnd-1] == ' ' || body[identEnd-1] == '\t') {
-			identEnd--
-		}
-		identStart := identEnd
-		for identStart > 0 && isJavaIdentChar(body[identStart-1]) {
-			identStart--
-		}
-		ident := body[identStart:identEnd]
-		if ident == "" {
-			from = i + 1
-			continue
-		}
-		open := i + len(needle) - 1
-		close := matchingCloseBrace(body, open)
-		if close < 0 {
-			from = i + 1
-			continue
-		}
-		inner := strings.TrimSpace(body[open+1 : close])
-		if inner != "" {
-			from = close
-			continue
-		}
-		after := strings.TrimLeft(body[close+1:], " \t\n")
-		if !strings.HasPrefix(after, "else") {
-			from = close
-			continue
-		}
-		fill := "\n\t\t\treturn " + ident + ".hashCode();\n\t\t"
-		body = body[:open+1] + fill + body[close:]
-		from = open + 1 + len(fill)
-	}
 }
 
 func wrapComparingLongLambdaFromNextCast(body string) string {
