@@ -160,16 +160,18 @@ func TestAdversarialStaticClassLoweringRequiresClosedDeclarationsAndUnusedDefaul
 			}
 			before := bytes.Clone(input)
 			got, err := authority.lowerStaticClassDefaultConstructor(owner, want, input, work)
-			if variant == "control" {
+			if variant == "control" || variant == "ordinary original class" {
 				if err != nil || bytes.Equal(got, input) {
 					t.Fatal("closed fresh default was not removed", err)
 				}
 				result := mustParseLowering(t, got)
-				if result.AccessFlags != 0x1020 || len(result.Methods) != 1 {
+				if result.AccessFlags != mustParseLowering(t, want).AccessFlags || len(result.Methods) != 1 {
 					t.Fatal("original constructor/class-marker contract not restored")
 				}
-				if again, err := artifact.FinishClass(owner+".class", input); err != nil || again == nil {
-					t.Fatal("remaining metadata gate", err)
+				if variant == "control" {
+					if again, err := artifact.FinishClass(owner+".class", input); err != nil || again == nil {
+						t.Fatal("remaining metadata gate", err)
+					}
 				}
 			} else if err == nil && !bytes.Equal(got, input) || err != nil && got != nil {
 				t.Fatal("unproved static class exposed a partial repair", err)

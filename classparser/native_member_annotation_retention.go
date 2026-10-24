@@ -62,6 +62,14 @@ func (c *ClassObjectDumper) nativeMemberAnnotationTablesRepresentable() bool {
 }
 
 func nativeAnnotationDeclarationPolicy(definition *ClassObject, c *ClassObjectDumper) (string, bool, bool) {
+	targets := []string{"TYPE", "TYPE_USE"}
+	if c != nil && c.obj != nil && c.obj.AccessFlags&0x2000 != 0 {
+		targets = append(targets, "ANNOTATION_TYPE")
+	}
+	return nativeAnnotationDeclarationPolicyForTargets(definition, c, targets...)
+}
+
+func nativeAnnotationDeclarationPolicyForTargets(definition *ClassObject, c *ClassObjectDumper, targets ...string) (string, bool, bool) {
 	if definition == nil || c == nil {
 		return "", false, false
 	}
@@ -115,8 +123,10 @@ func nativeAnnotationDeclarationPolicy(definition *ClassObject, c *ClassObjectDu
 					if !ok || enum == nil || enum.TypeName != "Ljava/lang/annotation/ElementType;" {
 						return "", false, false
 					}
-					if enum.ConstName == "TYPE" || enum.ConstName == "TYPE_USE" || enum.ConstName == "ANNOTATION_TYPE" && c.obj.AccessFlags&0x2000 != 0 {
-						target = true
+					for _, allowed := range targets {
+						if enum.ConstName == allowed {
+							target = true
+						}
 					}
 				}
 			}

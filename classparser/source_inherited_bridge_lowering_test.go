@@ -18,7 +18,7 @@ func TestAdversarialInheritedBridgeRequiresExactTypedSuperForwarding(t *testing.
 		t.Fatal("native original compiler required")
 	}
 	files := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, inheritedCovariantBridgeFixture, "BridgeOuter", "none", false)
-	for _, kind := range []string{"control", "not bridge", "wrong receiver", "wrong wide slot", "virtual target", "effectful prefix", "wrong return", "handler", "missing parent", "foreign parent", "final target", "generic target", "duplicate method", "own narrow declaration", "budget", "canceled"} {
+	for _, kind := range []string{"control", "pre-covariant version", "later protocol", "nonzero minor", "not bridge", "wrong receiver", "wrong wide slot", "virtual target", "effectful prefix", "wrong return", "handler", "missing parent", "foreign parent", "final target", "generic target", "duplicate method", "own narrow declaration", "budget", "canceled"} {
 		t.Run(kind, func(t *testing.T) {
 			o := mustParseLowering(t, bytes.Clone(files["BridgeOuter$Leaf.class"]))
 			parent := mustParseLowering(t, bytes.Clone(files["BridgeOuter.class"]))
@@ -46,6 +46,12 @@ func TestAdversarialInheritedBridgeRequiresExactTypedSuperForwarding(t *testing.
 			ops := constructorMotionOps(d)
 			var work *workbudget.Budget
 			switch kind {
+			case "pre-covariant version":
+				o.MajorVersion = 48
+			case "later protocol":
+				o.MajorVersion = 53
+			case "nonzero minor":
+				o.MinorVersion = 1
 			case "not bridge":
 				m.AccessFlags = 1
 			case "wrong receiver":

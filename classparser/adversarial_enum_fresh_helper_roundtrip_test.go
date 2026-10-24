@@ -60,6 +60,33 @@ func TestAdversarialEnumFreshHelperOriginalVersionsKeepArrayAndMethodIdentity(t 
 
 func enumFreshHelperRoundTrip(t *testing.T, owner, debug string, release int, mutate ...func(map[string][]byte)) {
 	t.Helper()
+	enumFreshHelperRoundTripAtTarget(t, owner, debug, release, 8, mutate...)
+}
+
+func TestAdversarialEnumInlineArrayProtocolIsIndependentOfClassVersion(t *testing.T) {
+	for _, release := range []int{9, 11, 16, 21} {
+		for _, owner := range []string{"ModernPacketValues", "RenamedModernPacketValues"} {
+			for _, debug := range []string{"none", "source,lines,vars"} {
+				t.Run(fmt.Sprintf("release%d/%s/%s", release, owner, debug), func(t *testing.T) {
+					// JVM class versions do not require a compiler-specific enum
+					// helper. Author newer class files with the verified inline
+					// protocol; preserve every instruction and run the original
+					// observer before decompiling into the same target version.
+					enumFreshHelperRoundTripAtTarget(t, owner, debug, 8, release, func(files map[string][]byte) {
+						for name, raw := range files {
+							object := mustParseLowering(t, raw)
+							object.MajorVersion = uint16(release + 44)
+							files[name] = object.Bytes()
+						}
+					})
+				})
+			}
+		}
+	}
+}
+
+func enumFreshHelperRoundTripAtTarget(t *testing.T, owner, debug string, release, target int, mutate ...func(map[string][]byte)) {
+	t.Helper()
 	modern, java := t04Tools(t)
 	native := os.Getenv("JAVA8_JAVAC")
 	if native == "" {
@@ -88,7 +115,7 @@ func enumFreshHelperRoundTrip(t *testing.T, owner, debug string, release int, mu
 	if err := os.WriteFile(jar, t23Zip(t, map[string][]byte{owner + ".class": files[owner+".class"]}), 0600); err != nil {
 		t.Fatal(err)
 	}
-	a, err := NewJarReconstructionArtifactFromLocal(jar, 8, ModernJavac, nil)
+	a, err := NewJarReconstructionArtifactFromLocal(jar, target, ModernJavac, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +129,7 @@ func enumFreshHelperRoundTrip(t *testing.T, owner, debug string, release int, mu
 	if err := os.WriteFile(path, src, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if log, err := exec.Command(modern, "-proc:none", "--release", "8", "-g:"+debug, "-cp", out, "-sourcepath", out, "-d", out, path).CombinedOutput(); err != nil {
+	if log, err := exec.Command(modern, "-proc:none", "--release", fmt.Sprint(target), "-g:"+debug, "-cp", out, "-sourcepath", out, "-d", out, path).CombinedOutput(); err != nil {
 		t.Fatal("source only enum compile", err, string(log))
 	}
 	run(out, false)
@@ -116,6 +143,9 @@ func enumFreshHelperRoundTrip(t *testing.T, owner, debug string, release int, mu
 	finished, err := a.FinishClass(owner+".class", fresh)
 	if err != nil {
 		t.Fatal("explicit reconstruction must discharge the fresh array helper before metadata", err)
+	}
+	if again, err := a.FinishClass(owner+".class", finished); err != nil || !bytes.Equal(again, finished) {
+		t.Fatal("completed enum must remain byte-identical", err)
 	}
 	if err := os.WriteFile(filepath.Join(out, owner+".class"), finished, 0600); err != nil {
 		t.Fatal(err)
