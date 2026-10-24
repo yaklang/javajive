@@ -118,7 +118,7 @@ class BridgeDriver {public static void main(String[]args)throws Exception {
 func checkExactSuperBridgeBoundaries(t *testing.T, owner string, original, fresh []byte, artifact *JarReconstructionArtifact) {
 	t.Helper()
 	base := artifact.source.jar.sourceConstructorLowering
-	for _, variant := range []string{"control", "unreturned", "pending", "stale original", "receiver", "wide slot", "virtual dispatch", "effect", "handler", "return category", "flags", "extra method", "duplicate method", "unknown attribute", "changed target"} {
+	for _, variant := range []string{"control", "unreturned", "pending", "stale original", "receiver", "wide slot", "virtual dispatch", "effect", "handler", "return category", "flags", "extra method", "duplicate method", "unknown attribute", "changed target", "already marked virtual", "already marked receiver", "already marked wide slot", "already marked return"} {
 		t.Run("proof/"+variant, func(t *testing.T) {
 			want := bytes.Clone(original)
 			object := mustParseLowering(t, bytes.Clone(fresh))
@@ -148,17 +148,17 @@ func checkExactSuperBridgeBoundaries(t *testing.T, owner string, original, fresh
 				before := mustParseLowering(t, want)
 				before.ConstantPoolManager.AddUtf8Info("different original")
 				want = before.Bytes()
-			case "receiver":
+			case "receiver", "already marked receiver":
 				body.Code[0] = core.OP_ALOAD_1
-			case "wide slot":
+			case "wide slot", "already marked wide slot":
 				body.Code[int(ops[1].CurrentOffset)] = core.OP_LLOAD_2
-			case "virtual dispatch":
+			case "virtual dispatch", "already marked virtual":
 				body.Code[int(call.CurrentOffset)] = core.OP_INVOKEVIRTUAL
 			case "effect":
 				body.Code = append([]byte{core.OP_ACONST_NULL, core.OP_POP}, body.Code...)
 			case "handler":
 				body.ExceptionTable = []*ExceptionTableEntry{{StartPc: 0, EndPc: 1, HandlerPc: 0}}
-			case "return category":
+			case "return category", "already marked return":
 				body.Code[len(body.Code)-1] = core.OP_ATHROW
 			case "flags":
 				method.AccessFlags = 0x0011
@@ -180,6 +180,9 @@ func checkExactSuperBridgeBoundaries(t *testing.T, owner string, original, fresh
 				nt := object.ConstantPool[reference.NameAndTypeIndex-1].(*ConstantNameAndTypeInfo)
 				nt.NameIndex = uint16(object.ConstantPoolManager.AddUtf8Info("anotherTarget"))
 			}
+			if strings.HasPrefix(variant, "already marked ") {
+				method.AccessFlags = 0x1041
+			}
 			if len(body.Attributes) != 0 {
 				t.Fatal("debug-free fresh code required for structural mutants")
 			}
@@ -192,6 +195,17 @@ func checkExactSuperBridgeBoundaries(t *testing.T, owner string, original, fresh
 			result, err := authority.lowerInheritedBridges(owner, want, input, nil)
 			if !bytes.Equal(saved, input) {
 				t.Fatal("caller input mutated")
+			}
+			// Correct bridge flags alone must never grant acceptance to a changed
+			// executable program. Exercise the public artifact completion gate,
+			// in addition to the narrow lowerer's no-edit refusal below.
+			if strings.HasPrefix(variant, "already marked ") {
+				if completed, err := artifact.FinishClass(owner+".class", input); err == nil || completed != nil {
+					t.Fatal("changed bridge program escaped final artifact validation", err)
+				}
+				if !bytes.Equal(saved, input) {
+					t.Fatal("final artifact validation mutated input")
+				}
 			}
 			if variant == "control" {
 				if err != nil || bytes.Equal(result, input) || len(result) != len(input) {
