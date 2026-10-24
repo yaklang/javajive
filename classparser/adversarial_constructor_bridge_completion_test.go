@@ -100,6 +100,10 @@ func roundTripConstructorBridgeArtifact(t *testing.T, fixture, owner, driver, or
 		before := bytes.Clone(fresh)
 		result, err := artifact.FinishClass(name, fresh)
 		if err != nil {
+			for _, sourcePath := range sources {
+				text, _ := os.ReadFile(sourcePath)
+				t.Logf("owning source %s:\n%s", filepath.Base(sourcePath), text)
+			}
 			t.Fatal("exact constructor universe", name, err)
 		}
 		if !bytes.Equal(fresh, before) {
