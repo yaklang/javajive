@@ -390,8 +390,12 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 			return false
 		}
 		bytes += cost
-		start := strings.Index(source, member.packet)
-		if start < 0 || strings.Contains(source[start+len(member.packet):], member.packet) {
+		packet := member.packet
+		if relocated, ok := c.nativeMemberRoot.registrationMemberPacket(c.obj, member.object, packet, hash); ok {
+			packet = relocated
+		}
+		start := strings.Index(source, packet)
+		if start < 0 || strings.Contains(source[start+len(packet):], packet) {
 			return false
 		}
 		raw, bound := a.original(member.object, c.Work)

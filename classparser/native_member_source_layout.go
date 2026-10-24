@@ -84,6 +84,9 @@ func nativeMemberLayoutDeclarations(body string) ([]string, bool) {
 }
 
 func nativeMemberRegistrationLayout(p *nativeMemberFamily, source string, members []string, work *workbudget.Budget, memberOwners ...[]string) (string, bool) {
+	if p != nil {
+		p.registrationPublication = nil
+	}
 	open := javaIndexTopBrace(source)
 	close := -1
 	if open >= 0 {

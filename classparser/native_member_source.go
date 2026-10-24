@@ -39,13 +39,14 @@ type nativeMemberClass struct {
 type nativeMemberFamily struct {
 	// wireNativeMemberSource may create a declaration lookup view without
 	// enrolling any source members or compiler registration events.
-	declarationLookupOnly bool
-	independentRoot       *nativeMemberIndependentRoot
-	modernNestObjects     map[string]*ClassObject
-	methodLocals          map[string]*nativeMethodLocalClass
-	enumConstants         map[string]*nativeEnumConstantBody
-	enumSwitchTables      map[string]*nativeEnumSwitchTable
-	registrationLayouts   map[string]*nativeMemberRegistrationScope
+	declarationLookupOnly   bool
+	independentRoot         *nativeMemberIndependentRoot
+	modernNestObjects       map[string]*ClassObject
+	methodLocals            map[string]*nativeMethodLocalClass
+	enumConstants           map[string]*nativeEnumConstantBody
+	enumSwitchTables        map[string]*nativeEnumSwitchTable
+	registrationLayouts     map[string]*nativeMemberRegistrationScope
+	registrationPublication *nativeMemberRegistrationPublication
 	// Completed ordinary root method packets eligible for declaration-only
 	// scheduling. Initializers and compiler-owned lexical counters stay fixed.
 	registrationMethods    map[string]bool
