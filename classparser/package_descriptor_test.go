@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"math"
 	"testing"
+
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 func TestPackageDescriptorPublicationRejectsChangedDeclarationAndAnnotationGraphs(t *testing.T) {
@@ -83,5 +85,96 @@ func TestPackageDescriptorPublicationRejectsChangedDeclarationAndAnnotationGraph
 	}
 	if again, err := finishPackageDescriptor(original, done, nil); err != nil || !bytes.Equal(again, done) {
 		t.Fatal("publication not idempotent", err)
+	}
+}
+
+func TestPackageDescriptorHistoricalProjectionRequiresClosedDependencies(t *testing.T) {
+	files := nativeCompileSourceReleaseClasses(t, map[string]string{
+		"meta/package-info.java": `@Labels.Tag(kind=Labels.Kind.ONE) package meta;`,
+		"meta/Labels.java": `package meta;import java.lang.annotation.*;public class Labels {
+ public enum Kind {ONE,TWO}
+ @Retention(RetentionPolicy.RUNTIME) @Target(ElementType.PACKAGE) public @interface Tag {Kind kind();}
+}`,
+	}, "none", "8")
+	for _, variant := range []string{"control", "reordered rows", "modern abstract", "modern missing abstract", "public descriptor", "enum descriptor", "future version", "preview version", "missing dependency", "duplicate dependency", "dependency owner", "dependency name", "dependency flags", "anonymous dependency", "descriptor member", "duplicate table", "budget"} {
+		t.Run(variant, func(t *testing.T) {
+			old := mustParseLowering(t, files["meta/package-info.class"])
+			old.MajorVersion, old.AccessFlags = 49, 0x0200
+			fresh := mustParseLowering(t, files["meta/package-info.class"])
+			var table *InnerClassesAttribute
+			for _, attr := range fresh.Attributes {
+				if a, ok := attr.(*InnerClassesAttribute); ok {
+					table = a
+				}
+			}
+			if table == nil || len(table.Classes) != 2 {
+				t.Fatal("nested annotation and enum rows")
+			}
+			var work *workbudget.Budget
+			switch variant {
+			case "reordered rows":
+				table.Classes[0], table.Classes[1] = table.Classes[1], table.Classes[0]
+			case "modern abstract":
+				old.MajorVersion, old.AccessFlags = 52, 0x0600
+			case "modern missing abstract":
+				old.MajorVersion = 50
+			case "public descriptor":
+				old.AccessFlags |= 1
+			case "enum descriptor":
+				old.AccessFlags |= 0x4000
+			case "future version":
+				old.MajorVersion = 66
+			case "preview version":
+				old.MinorVersion = 65535
+			case "missing dependency":
+				table.Classes = table.Classes[:1]
+				table.NumberOfClasses = 1
+			case "duplicate dependency":
+				table.Classes[1] = table.Classes[0]
+			case "dependency owner":
+				table.Classes[0].OuterClassInfoIndex = fresh.SuperClass
+			case "dependency name":
+				table.Classes[0].InnerNameIndex = uint16(fresh.ConstantPoolManager.AddUtf8Info("Different"))
+			case "dependency flags":
+				table.Classes[0].InnerClassAccessFlags ^= 1
+			case "anonymous dependency":
+				table.Classes[0].OuterClassInfoIndex, table.Classes[0].InnerNameIndex = 0, 0
+			case "descriptor member":
+				table.Classes[0].OuterClassInfoIndex = fresh.ThisClass
+			case "duplicate table":
+				fresh.Attributes = append(fresh.Attributes, table)
+			case "budget":
+				work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
+			}
+			input := fresh.Bytes()
+			saved := bytes.Clone(input)
+			out, err := finishPackageDescriptor(old.Bytes(), input, work)
+			if !bytes.Equal(input, saved) {
+				t.Fatal("publication changed caller bytes")
+			}
+			if variant != "control" && variant != "reordered rows" && variant != "modern abstract" {
+				if err == nil || out != nil {
+					t.Fatal("unproved declaration published", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := mustParseLowering(t, out)
+			if got.MajorVersion != fresh.MajorVersion || got.AccessFlags != 0x0600 {
+				t.Fatal("loaded flags or target version changed")
+			}
+			// Exactly the two-byte access_flags word may differ. In particular,
+			// no original pool, annotation table or opaque attribute is copied.
+			r, _ := NewClassReaderWithBudget(input, nil)
+			layout := &compiledMetadataLayout{}
+			if _, err := parseWithMetadataLayout(r, nil, layout); err != nil {
+				t.Fatal(err)
+			}
+			if len(out) != len(input) || !bytes.Equal(out[:layout.poolEnd], input[:layout.poolEnd]) || !bytes.Equal(out[layout.poolEnd+2:], input[layout.poolEnd+2:]) {
+				t.Fatal("unrelated compiler bytes changed")
+			}
+		})
 	}
 }
