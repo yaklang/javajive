@@ -124,6 +124,14 @@ func interfaceBridgeForwardTarget(obj *ClassObject, method *MemberInfo, provider
 			}
 		case *ExceptionsAttribute, *RuntimeVisibleAnnotationsAttribute:
 			// These describe only the added declaration, absent in the original.
+		case *RuntimeVisibleParameterAnnotationsAttribute:
+			// javac copies both RUNTIME and CLASS parameter annotations to its
+			// bridge. They belong to that added declaration, independently of
+			// the cast/forwarding program; the original target keeps its bytes.
+			// A bridge has no hidden constructor ports to justify a short table.
+			if a == nil || int(a.NumParameters) != len(params) || len(a.ParameterAnnotations) != len(params) {
+				return ""
+			}
 		case *UnparsedAttribute:
 			if a == nil || a.Name != "MethodParameters" {
 				return ""
