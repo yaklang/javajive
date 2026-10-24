@@ -38,6 +38,11 @@ class EscapeEffects {static String trace="";static final EscapeFailure checked=n
 public class ` + owner + ` {public static class Child {public static int delta(){return 17;}}static final java.util.function.IntUnaryOperator SHIFT=(x)->x*3+1;static java.util.function.IntUnaryOperator make(int base){return (x)->x+base;}public static int exercise(int mode)throws EscapeFailure {try{return SHIFT.applyAsInt(EscapeEffects.calculate(mode))+make(mode).applyAsInt(5);}finally{EscapeEffects.trace+="F";}}}
 class EscapeDriver {public static void main(String[]args){if(` + owner + `.Child.delta()!=17||` + owner + `.Child.class.getDeclaringClass()!=` + owner + `.class||` + owner + `.class.getDeclaredMethods().length!=4)throw new AssertionError("original method universe");try{if(` + owner + `.class.getDeclaredMethod("exercise",int.class).getExceptionTypes().length!=0)throw new AssertionError("original empty exceptions");}catch(NoSuchMethodException e){throw new AssertionError(e);}int rows=0;for(int mode:new int[]{0,1,2,-1,Integer.MIN_VALUE,Integer.MAX_VALUE}){EscapeEffects.trace="";try{int value=` + owner + `.exercise(mode);int expected=java.math.BigInteger.valueOf(mode).multiply(java.math.BigInteger.valueOf(94)).add(java.math.BigInteger.valueOf(27)).intValue();if(mode<2&&mode>=0||value!=expected||!EscapeEffects.trace.equals("CF"))throw new AssertionError("normal value/order");}catch(Throwable e){if(e!=(mode==0?EscapeEffects.checked:mode==1?EscapeEffects.unchecked:null)||!EscapeEffects.trace.equals("CF"))throw new AssertionError("exception identity/order",e);}rows++;}System.out.println(rows+":escape:identity:finally:method-universe");}}`
 					if owner == "RenamedEscapeOwner" {
+						// Exercise an implicit receiver as well as a static lambda;
+						// the non-BMP identifier also distinguishes UTF-8 from MUTF-8.
+						fixture = strings.ReplaceAll(fixture, "static java.util.function.IntUnaryOperator make", "int bias; java.util.function.IntUnaryOperator make")
+						fixture = strings.ReplaceAll(fixture, "x+base;", "x+base+bias;")
+						fixture = strings.ReplaceAll(fixture, "+make(mode)", "+new "+owner+"().make(mode)")
 						fixture = strings.ReplaceAll(fixture, "make(", "构造𐐀(")
 					}
 					files := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, fixture, owner, debug, false)
