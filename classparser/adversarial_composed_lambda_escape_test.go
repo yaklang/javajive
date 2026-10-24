@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -37,6 +38,45 @@ public class ` + owner + ` {public static class Child {public static int delta()
 class EscapeDriver {public static void main(String[]args){if(` + owner + `.Child.delta()!=17||` + owner + `.Child.class.getDeclaringClass()!=` + owner + `.class||` + owner + `.class.getDeclaredMethods().length!=4)throw new AssertionError("original method universe");try{if(` + owner + `.class.getDeclaredMethod("exercise",int.class).getExceptionTypes().length!=0)throw new AssertionError("original empty exceptions");}catch(NoSuchMethodException e){throw new AssertionError(e);}int rows=0;for(int mode:new int[]{0,1,2,-1,Integer.MIN_VALUE,Integer.MAX_VALUE}){EscapeEffects.trace="";try{int value=` + owner + `.exercise(mode);int expected=java.math.BigInteger.valueOf(mode).multiply(java.math.BigInteger.valueOf(94)).add(java.math.BigInteger.valueOf(27)).intValue();if(mode<2&&mode>=0||value!=expected||!EscapeEffects.trace.equals("CF"))throw new AssertionError("normal value/order");}catch(Throwable e){if(e!=(mode==0?EscapeEffects.checked:mode==1?EscapeEffects.unchecked:null)||!EscapeEffects.trace.equals("CF"))throw new AssertionError("exception identity/order",e);}rows++;}System.out.println(rows+":escape:identity:finally:method-universe");}}`
 					files := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, fixture, owner, debug, false)
 					object := mustParseLowering(t, files[owner+".class"])
+					// Alpha-rename only private lambda implementations and their
+					// own symbolic method references. This is a valid independently
+					// instrumented original, with unchanged Code and bootstrap
+					// handle targets. Application string constants are untouched.
+					renamed := 0
+					for _, method := range object.Methods {
+						oldName, _ := sourceBridgeUTF8(object, method.NameIndex)
+						if !strings.HasPrefix(oldName, "lambda$") {
+							continue
+						}
+						cut := strings.LastIndexByte(oldName, '$')
+						ordinal, err := strconv.Atoi(oldName[cut+1:])
+						if err != nil {
+							t.Fatal(err)
+						}
+						oldIndex := method.NameIndex
+						nameIndex := uint16(object.ConstantPoolManager.AddUtf8Info(oldName[:cut+1] + strconv.Itoa(ordinal+11)))
+						for _, constant := range object.ConstantPool {
+							ref := nativeConstantMember(constant)
+							if ref == nil {
+								continue
+							}
+							target, known := sourceBridgeClassName(object, ref.ClassIndex)
+							if !known || target != owner {
+								continue
+							}
+							nt, ok := object.ConstantPool[ref.NameAndTypeIndex-1].(*ConstantNameAndTypeInfo)
+							if !ok || nt.NameIndex != oldIndex || nt.DescriptorIndex != method.DescriptorIndex {
+								continue
+							}
+							object.ConstantPool = append(object.ConstantPool, &ConstantNameAndTypeInfo{NameIndex: nameIndex, DescriptorIndex: nt.DescriptorIndex})
+							ref.NameAndTypeIndex = uint16(len(object.ConstantPool))
+						}
+						method.NameIndex = nameIndex
+						renamed++
+					}
+					if renamed != 2 {
+						t.Fatal("two independent lambda implementations", renamed)
+					}
 					removed := 0
 					for _, m := range object.Methods {
 						if n, _ := sourceBridgeUTF8(object, m.NameIndex); n == "exercise" {
