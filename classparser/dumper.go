@@ -629,6 +629,22 @@ func (c *ClassObjectDumper) computeSamePkgFQNames() map[string]bool {
 }
 
 func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
+	// Type() asks for JDEC_* on every call. An unbound dump used os.Getenv
+	// and the process env lock serialized every decompile worker. Copy the
+	// environment once for this class. A caller that already bound a snapshot
+	// keeps it; EnterLive below is only for that nested case.
+	if c != nil && c.options.EnvSnapshot == nil {
+		if _, bound := jdecenv.Current(); !bound {
+			snap := jdecenv.CaptureProcess()
+			c.options.EnvSnapshot = snap
+			defer func() { c.options.EnvSnapshot = nil }()
+			_ = jdecenv.Run(snap, func() error {
+				rendered, dumpError = c.DumpClass()
+				return nil
+			})
+			return rendered, dumpError
+		}
+	}
 	if projected := c.descriptorProjectionWithoutEnclosingMethod(); projected != nil {
 		original := c.obj
 		originalProjection := c.descriptorSourceProjection
