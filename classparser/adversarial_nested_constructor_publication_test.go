@@ -23,3 +23,18 @@ class ForestDriver {public static void main(String[]args)throws Exception{int ro
 		}
 	}
 }
+
+// The registration solver must interleave Reader before Scope.read while
+// preserving an anonymous capture publication owned by the same Scope.
+func TestAdversarialNestedRegistrationTransportsConstructorPublication(t *testing.T) {
+	fixture := strings.Replace(nativeAccessorNestedLayoutFixture, `static String trace="";`, `static String trace="";static Object token;`, 1)
+	fixture = strings.Replace(fixture, `Reader reader(){`, `Runnable action(final Object token){return new Runnable(){public void run(){NestedLayoutEffects.token=token;}};}Reader reader(){`, 1)
+	fixture = strings.Replace(fixture, `rows++;`, `Runnable action=scope.action(right);action.run();java.lang.reflect.Constructor<?>ctor=action.getClass().getDeclaredConstructors()[0];Class<?>[]physical=ctor.getParameterTypes();java.lang.reflect.Type[]generic=ctor.getGenericParameterTypes();if(NestedLayoutEffects.token!=right||physical.length!=2||generic.length!=2||generic[0]!=physical[0]||generic[1]!=physical[1])throw new AssertionError("reordered scope capture metadata");rows++;`, 1)
+	for _, owner := range []string{"NestedLayoutOwner", "RenamedLayoutOwner"} {
+		for _, original := range []int{7, 8} {
+			t.Run(fmt.Sprintf("%s/original%d", owner, original), func(t *testing.T) {
+				roundTripConstructorBridgeArtifact(t, strings.ReplaceAll(fixture, "NestedLayoutOwner", owner), owner, "NestedLayoutDriver", "12:nested:ordinals:identity:LRFS\n", "none", 8, original)
+			})
+		}
+	}
+}

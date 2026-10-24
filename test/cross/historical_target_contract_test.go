@@ -41,7 +41,10 @@ class ApiDriver {public static void main(String[]args)throws Exception{javax.net
 				kept := m.Attributes[:0]
 				for _, a := range m.Attributes {
 					switch a.(type) {
-					case *classparser.SignatureAttribute, *classparser.MethodParametersAttribute:
+					case *classparser.SignatureAttribute:
+						continue
+					}
+					if raw, ok := a.(*classparser.UnparsedAttribute); ok && raw.Name == "MethodParameters" {
 						continue
 					}
 					kept = append(kept, a)
