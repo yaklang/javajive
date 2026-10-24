@@ -122,3 +122,27 @@ func TestVariableArityOverridesMatchNearestDeclarationModel(t *testing.T) {
 		}
 	}
 }
+
+func TestVariableArityPrivateExclusionNeedsPositiveAccessEvidence(t *testing.T) {
+	for _, variant := range []string{"proved", "unknown", "public contradiction", "wrong flags", "missing original flags"} {
+		t.Run(variant, func(t *testing.T) {
+			pack := overrideMethod("V")
+			private := Method{Name: pack.Name, Desc: "(Ljava/lang/Object;)V", AccessFlags: 2, AccessFlagsKnown: true, SourceInaccessible: true}
+			switch variant {
+			case "unknown":
+				private.SourceInaccessible = false
+			case "public contradiction":
+				private.Public = true
+			case "wrong flags":
+				private.AccessFlags = 1
+			case "missing original flags":
+				private.AccessFlagsKnown = false
+			}
+			owner := Class{Name: "x/Owner", Public: true, MembersComplete: true, ParentsComplete: true, Methods: []Method{pack, private}}
+			plan := SelectVariableArityReference(Witness{Owner: owner.Name, Name: pack.Name, Desc: pack.Desc, Kind: Virtual}, "(Ljava/lang/Object;)V", func(n string) (Class, bool) { return owner, n == owner.Name }, nil)
+			if plan.Supported != (variant == "proved") {
+				t.Fatalf("%+v", plan)
+			}
+		})
+	}
+}

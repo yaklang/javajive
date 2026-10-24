@@ -23,6 +23,10 @@ type Method struct {
 	// Override proofs must use the original access flags instead.
 	AccessFlags      uint16 `json:",omitempty"`
 	AccessFlagsKnown bool   `json:",omitempty"`
+	// SourceInaccessible is positive access evidence, not !Public. It may
+	// exclude a private declaration only after the source caller's separate
+	// top-level ownership proves that no private/nest access is available.
+	SourceInaccessible bool `json:",omitempty"`
 	// CovariantBridgeTarget certifies a pure this/unchanged-arguments virtual
 	// forwarder to this owner's ordinary method. It does not prove overriding
 	// or return substitutability; the binding query checks those separately.

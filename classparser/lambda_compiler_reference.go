@@ -186,6 +186,13 @@ func (c *ClassObjectDumper) compilerReferenceAccessProvider(provider callbinding
 		if !known || cl.Name != name || len(cl.Methods) > 4096 || len(cl.Parents) > 64 || !nativeProofWork(c.Work, int64(len(cl.Methods)+len(cl.Parents))+1) {
 			return cl, false
 		}
+		if c.Work != nil && c.Work.CheckAlloc(int64(len(cl.Methods))*256) != nil {
+			return cl, false
+		}
+		cl.Methods = slices.Clone(cl.Methods)
+		for i := range cl.Methods {
+			cl.Methods[i].SourceInaccessible = false
+		}
 		if cl.Public {
 			all := true
 			for _, m := range cl.Methods {
@@ -196,6 +203,17 @@ func (c *ClassObjectDumper) compilerReferenceAccessProvider(provider callbinding
 			}
 		}
 		original, ok := c.resolveBridgeClass(name)
+		if ok && original != nil && original.GetClassName() == name && c.obj != nil && name != c.obj.GetClassName() && nativeMemberTopLevelEvidence(original, c.Work) && nativeMemberTopLevelEvidence(c.obj, c.Work) && !hasOriginalNestAttribute(original, "NestHost") && !hasOriginalNestAttribute(original, "NestMembers") && !hasOriginalNestAttribute(c.obj, "NestHost") && !hasOriginalNestAttribute(c.obj, "NestMembers") {
+			// Private members of a distinct original top-level type do not
+			// participate in source overload resolution (JLS 6.6.1). Merely
+			// lacking Public is not enough: package/protected access and nest
+			// membership need their own evidence and remain conservative.
+			var closed bool
+			cl, closed = c.compilerReferenceExcludePrivate(original, cl)
+			if !closed {
+				return cl, false
+			}
+		}
 		if !ok || original == nil || nativeBinaryPackage(name) != nativeBinaryPackage(c.obj.GetClassName()) || len(original.Methods) > 4096 {
 			return cl, true
 		}
@@ -252,6 +270,40 @@ func (c *ClassObjectDumper) compilerReferenceAccessProvider(provider callbinding
 		}
 		return cl, true
 	}
+}
+
+func (c *ClassObjectDumper) compilerReferenceExcludePrivate(original *ClassObject, cl callbinding.Class) (callbinding.Class, bool) {
+	if len(original.Methods) > 4096 || c.Work != nil && c.Work.CheckAlloc(int64(len(cl.Methods))*256) != nil {
+		return cl, false
+	}
+	type key struct{ name, descriptor string }
+	declared := map[key]uint16{}
+	for _, m := range original.Methods {
+		if m == nil || !nativeProofWork(c.Work, 1) {
+			return cl, false
+		}
+		n, nk := sourceBridgeUTF8(original, m.NameIndex)
+		d, dk := sourceBridgeUTF8(original, m.DescriptorIndex)
+		k := key{n, d}
+		if _, duplicate := declared[k]; !nk || !dk || duplicate {
+			return cl, false
+		}
+		declared[k] = m.AccessFlags
+	}
+	delete(declared, key{"<clinit>", "()V"})
+	cl.Methods = slices.Clone(cl.Methods)
+	for i, m := range cl.Methods {
+		if !nativeProofWork(c.Work, 1) {
+			return cl, false
+		}
+		flags, found := declared[key{m.Name, m.Desc}]
+		if !found || !m.AccessFlagsKnown || m.AccessFlags != flags {
+			return cl, false
+		}
+		cl.Methods[i].SourceInaccessible = flags&2 != 0 && !m.Public
+		delete(declared, key{m.Name, m.Desc})
+	}
+	return cl, len(declared) == 0
 }
 
 func (c *ClassObjectDumper) compilerReferenceFunctionalTarget(site compilerReferenceSite, ctx *class_context.ClassContext) types.JavaType {

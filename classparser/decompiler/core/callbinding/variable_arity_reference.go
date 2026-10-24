@@ -105,6 +105,12 @@ func SelectVariableArityReference(w Witness, sam string, provider Provider, work
 				return false
 			}
 			declarations[method.Desc] = true
+			if method.SourceInaccessible {
+				if !method.AccessFlagsKnown || method.AccessFlags&2 == 0 || method.Public {
+					return false
+				}
+				continue
+			}
 
 			method.Exceptions = slices.Clone(method.Exceptions)
 			family = append(family, variableArityCandidate{name, method, parameters})
