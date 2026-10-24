@@ -19,6 +19,7 @@ import (
 type inheritedBridgePacket struct {
 	name, descriptor, targetOwner, targetDescriptor string
 	throws                                          []string
+	implicitVisibilityBridge                        bool
 }
 
 // Only a pure typed forwarding program can be regenerated through a temporary
@@ -153,6 +154,13 @@ func (c *ClassObjectDumper) inheritedBridgeOriginal(method *MemberInfo) *inherit
 			return nil
 		}
 	}
+	// A public subclass exposes a public implementation inherited from its
+	// non-public direct parent through a compiler-provided visibility bridge.
+	// An explicit same-descriptor override changes the source declaration set
+	// and can trigger another erased-interface bridge that the original child
+	// never declared. Keep inheritance as the source representation; the final
+	// artifact still has to prove the original method universe and bridge Code.
+	p.implicitVisibilityBridge = p.descriptor == p.targetDescriptor && c.obj.AccessFlags&1 != 0 && parent.AccessFlags&1 == 0
 	return p
 }
 
@@ -161,7 +169,7 @@ func (c *ClassObjectDumper) inheritedBridgeSource(method *MemberInfo) *dumpedMet
 		return nil
 	}
 	p := c.inheritedBridgeOriginal(method)
-	if p == nil {
+	if p == nil || p.implicitVisibilityBridge {
 		return nil
 	}
 	typ, err := types.ParseMethodDescriptor(p.targetDescriptor)
