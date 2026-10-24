@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
@@ -20,7 +21,7 @@ func (c *ClassObjectDumper) publishConstructorBindingSignatures(source string, m
 		if m == nil || m.member == nil || m.methodName != "<init>" {
 			continue
 		}
-		signature, ok := constructorEnclosingBindingSignature(c.obj, m.member, c.Work)
+		signature, ok := constructorEnclosingBindingSignature(c.obj, m.member, c.Work, c.nativeAnnotationDeclarationResolver())
 		if !ok {
 			continue
 		}
@@ -100,7 +101,17 @@ func (a *sourceConstructorLoweringAuthority) restoreConstructorBindingSignatures
 	}
 	ws, wv := nativeMethodLocalOriginalSignature(want, want.Attributes, work)
 	gs, gv := nativeMethodLocalOriginalSignature(got, got.Attributes, work)
-	if !wv || !gv || ws != gs || !sourceParameterClassIdentityClosed(want, got) || len(want.Methods) != len(got.Methods) {
+	d := NewClassObjectDumper(want)
+	d.Work, d.foldSiblingResolver, d.declarationResolver = work, a.jar.enumSiblingResolver(), a.jar.declarationResolver
+	resolve := d.nativeAnnotationDeclarationResolver()
+	environment := ws == gs
+	if wv && gv && !environment && a.memberGenericSourceReturned(want.GetClassName(), original, work) {
+		scopes, local, valid := d.flattenedMethodLexicalScopesResolved(resolve)
+		// This is the same class projection independently rechecked by the scope
+		// completion later in the transaction. No intermediate bytes are returned.
+		environment = valid && !local && (len(types.ClassFormalTypeParamNames(ws)) == 0 && memberScopeProjectedClassSignature(want, gs, scopes, resolve, work) || memberOwnScopeProjectedClassSignature(want, gs, scopes, work))
+	}
+	if !wv || !gv || !environment || !sourceParameterClassIdentityClosed(want, got) || len(want.Methods) != len(got.Methods) {
 		return fail("class environment changed")
 	}
 	if work.CheckAlloc(int64(len(compiled))*2+int64(len(got.ConstantPool))*64) != nil {
@@ -110,7 +121,7 @@ func (a *sourceConstructorLoweringAuthority) restoreConstructorBindingSignatures
 	var added []byte
 	var edits []compiledMetadataEdit
 	for _, before := range want.Methods {
-		lifted, proved := constructorEnclosingBindingSignature(want, before, work)
+		lifted, proved := constructorEnclosingBindingSignature(want, before, work, resolve)
 		if !proved {
 			continue
 		}

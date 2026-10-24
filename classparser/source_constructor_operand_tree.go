@@ -5,6 +5,7 @@ import (
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
@@ -212,12 +213,12 @@ func constructorLoweringDelegateOperands(object *ClassObject, ops []*core.OpCode
 	return fail()
 }
 
-func constructorLoweringSourceOperand(argument constructorLoweringArgument, origin constructorLoweringOperandOrigin, value values.JavaValue, slots map[int]int, params []values.JavaValue, depth int) bool {
+func constructorLoweringSourceOperand(argument constructorLoweringArgument, origin constructorLoweringOperandOrigin, value values.JavaValue, slots map[int]int, params []values.JavaValue, depth int, ctx *class_context.ClassContext) bool {
 	if depth >= 32 {
 		return false
 	}
 	if argument.invocation == nil {
-		return constructorLoweringSourceArgument(argument, origin.pc, value, slots, params)
+		return constructorLoweringSourceArgument(argument, origin.pc, value, slots, params, ctx)
 	}
 	invocation := argument.invocation
 	if argument.literal != nil || argument.null || len(argument.nullCasts) != 0 || argument.slot != 0 || argument.owner != "" || argument.name != "" {
@@ -261,7 +262,7 @@ func constructorLoweringSourceOperand(argument constructorLoweringArgument, orig
 		return false
 	}
 	for i, child := range invocation.arguments {
-		if !constructorLoweringSourceOperand(child, origin.arguments[i], call.Arguments[i], slots, params, depth+1) {
+		if !constructorLoweringSourceOperand(child, origin.arguments[i], call.Arguments[i], slots, params, depth+1, ctx) {
 			return false
 		}
 	}

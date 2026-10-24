@@ -97,16 +97,16 @@ func constructorSuffixFamilyAtTargetWithCompilerRoundTrip(t *testing.T, fixture,
 	if int(mustParseLowering(t, original[owner+".class"]).MajorVersion) != 44+release {
 		t.Fatal("original compiler target mismatch")
 	}
-	run := func(dir string) {
+	run := func(dir, phase string) {
 		t.Helper()
 		for _, mode := range []string{"-ea", "-da"} {
 			out, err := enumFreshOracleRun(t, java, mode, dir, driver)
 			if err != nil || string(out) != expected {
-				t.Fatal("unchanged original suffix oracle", err, string(out))
+				t.Fatal("unchanged original suffix oracle", phase, err, string(out))
 			}
 		}
 	}
-	run(sourceArtifactWriteFiles(t, original))
+	run(sourceArtifactWriteFiles(t, original), "original")
 	jar := filepath.Join(t.TempDir(), "original.jar")
 	owned := map[string][]byte{}
 	for _, name := range owners {
@@ -223,7 +223,7 @@ func constructorSuffixFamilyAtTargetWithCompilerRoundTrip(t *testing.T, fixture,
 			t.Fatal(err)
 		}
 	}
-	run(out)
+	run(out, "reconstructed")
 	return original[owner+".class"], primaryFresh, a
 }
 

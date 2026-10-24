@@ -142,3 +142,59 @@ func TestAdversarialSiblingConstructorArityIncludesNonGenericRivals(t *testing.T
 		}
 	}
 }
+
+func TestAdversarialConstructorBindingResolvesOriginalEnclosingScopes(t *testing.T) {
+	files := nativeCompileClasses(t, `class BindingOwner<T extends Number> {class Member {Member(T input){}}}`)
+	for _, variant := range []string{"control", "missing resolver", "missing owner", "changed bound", "unbound variable", "wrong owner", "foreign identity", "ownership cycle", "budget", "canceled"} {
+		t.Run(variant, func(t *testing.T) {
+			obj := mustParseLowering(t, bytes.Clone(files["BindingOwner$Member.class"]))
+			outer := mustParseLowering(t, bytes.Clone(files["BindingOwner.class"]))
+			method := obj.Methods[0]
+			if name, _ := sourceBridgeUTF8(obj, method.NameIndex); name != "<init>" {
+				t.Fatal("constructor fixture")
+			}
+			for _, a := range outer.Attributes {
+				if sig, ok := a.(*SignatureAttribute); ok {
+					if variant == "changed bound" {
+						sig.SignatureIndex = uint16(outer.ConstantPoolManager.AddUtf8Info("<T::Ljava/lang/CharSequence;>Ljava/lang/Object;"))
+					}
+					if variant == "unbound variable" {
+						sig.SignatureIndex = uint16(outer.ConstantPoolManager.AddUtf8Info("<U:Ljava/lang/Number;>Ljava/lang/Object;"))
+					}
+				}
+			}
+			if variant == "foreign identity" {
+				outer.ThisClass = uint16(outer.ConstantPoolManager.AddNewClassInfo("ForeignOwner"))
+			}
+			resolve := func(name string) (*ClassObject, bool) {
+				if variant == "missing owner" {
+					return nil, false
+				}
+				if variant == "wrong owner" || variant == "ownership cycle" {
+					return obj, true
+				}
+				return outer, name == "BindingOwner"
+			}
+			var work *workbudget.Budget
+			if variant == "budget" {
+				work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
+			}
+			if variant == "canceled" {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				work = workbudget.New(ctx, workbudget.Limits{})
+			}
+			if variant == "missing resolver" {
+				resolve = nil
+			}
+			original := bytes.Clone(obj.Bytes())
+			got, ok := constructorEnclosingBindingSignature(obj, method, work, resolve)
+			if ok != (variant == "control") || ok && got != "(LBindingOwner;TT;)V" {
+				t.Fatalf("accepted=%v signature=%q", ok, got)
+			}
+			if !bytes.Equal(obj.Bytes(), original) {
+				t.Fatal("mutated original")
+			}
+		})
+	}
+}

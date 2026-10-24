@@ -18,6 +18,7 @@ type compiledMetadataLayout struct {
 	poolEnd              int
 	constants            []compiledMetadataSpan
 	methods              map[*MemberInfo]compiledMetadataSpan
+	fields               map[*MemberInfo]compiledMetadataSpan
 	innerClasses         *InnerClassesAttribute
 	innerClassSpan       compiledMetadataSpan
 	classAttributesStart int

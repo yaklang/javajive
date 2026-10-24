@@ -13,7 +13,7 @@ import (
 // capture identity and the complete payload erasure agree. This is a separate
 // source binding view: the original Signature/descriptor remain immutable.
 // A same-arity rival needs an overload proof, not an erased-bound cast removal.
-func constructorEnclosingBindingSignature(object *ClassObject, method *MemberInfo, work *workbudget.Budget) (string, bool) {
+func constructorEnclosingBindingSignature(object *ClassObject, method *MemberInfo, work *workbudget.Budget, resolver ...func(string) (*ClassObject, bool)) (string, bool) {
 	if object == nil || method == nil || len(object.Methods) > 4096 || !nativeProofWork(work, int64(len(object.Methods))+1) {
 		return "", false
 	}
@@ -58,7 +58,33 @@ func constructorEnclosingBindingSignature(object *ClassObject, method *MemberInf
 	if signature == "" || !valid || !validClass || len(signature) > 4096 || len(classSig) > 4096 || !nativeProofWork(work, int64(len(signature)+len(classSig))*130+1) {
 		return "", false
 	}
-	erased, _, valid := types.EraseLexicalOwnerMethodSignatureWithThrows([]string{classSig}, signature)
+	scopes := []types.LexicalTypeScope{{Signature: classSig}}
+	erasure := func(sig string) (string, bool) {
+		erased, _, valid := types.EraseLexicalScopedMethodSignatureWithThrows(scopes, sig)
+		return erased, valid
+	}
+	erased, valid := erasure(signature)
+	if !valid && len(resolver) == 1 && resolver[0] != nil {
+		d := NewClassObjectDumper(object)
+		d.Work = work
+		var local bool
+		resolve := func(name string) (*ClassObject, bool) {
+			obj, known := resolver[0](name)
+			return obj, known && obj != nil && obj.GetClassName() == name
+		}
+		scopes, local, valid = d.flattenedMethodLexicalScopesResolved(resolve)
+		if !valid || local {
+			return "", false
+		}
+		var signatures []string
+		for _, scope := range scopes {
+			signatures = append(signatures, scope.Signature)
+		}
+		if !nativeMethodLocalBindingBudget(signatures, signature, work) {
+			return "", false
+		}
+		erased, valid = erasure(signature)
+	}
 	if !valid || erased != "("+strings.Join(params[1:], "")+")V" {
 		return "", false
 	}
@@ -74,6 +100,6 @@ func constructorEnclosingBindingSignature(object *ClassObject, method *MemberInf
 		return "", false
 	}
 	lifted := signature[:start+1] + params[0] + signature[start+1:]
-	actual, _, valid := types.EraseLexicalOwnerMethodSignatureWithThrows([]string{classSig}, lifted)
+	actual, valid := erasure(lifted)
 	return lifted, valid && actual == descriptor
 }

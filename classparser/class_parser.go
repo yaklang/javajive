@@ -157,6 +157,9 @@ func (this *ClassParser) readMember() *MemberInfo {
 	if this.metadataLayout != nil && this.attrCtx == attrCtxMethod {
 		this.metadataLayout.methods[member] = compiledMetadataSpan{offset, this.reader.Offset()}
 	}
+	if this.metadataLayout != nil && this.metadataLayout.fields != nil && this.attrCtx == attrCtxField {
+		this.metadataLayout.fields[member] = compiledMetadataSpan{offset, this.reader.Offset()}
+	}
 	return member
 }
 func (this *ClassParser) readAttributes() []AttributeInfo {

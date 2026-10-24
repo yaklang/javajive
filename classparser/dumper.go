@@ -1082,7 +1082,11 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			// them here would clobber legitimate generics.
 			if len(ownFormalNames) > 0 {
 				if classSigStr != "" {
-					for _, n := range types.FreeTypeVarRefsInClassSig(classSigStr) {
+					_, refs, valid := types.SignatureTypeVariableReferences(classSigStr)
+					if !valid {
+						return "", utils.Error("invalid class signature in lexical erasure")
+					}
+					for _, n := range refs {
 						addErase(n)
 					}
 				}
@@ -1138,8 +1142,21 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 					for _, mattr := range method.Attributes {
 						if sa, ok := mattr.(*SignatureAttribute); ok {
 							if ms, err := c.obj.getUtf8(sa.SignatureIndex); err == nil && ms != "" {
-								for _, n := range types.TypeVarRefsInMethodParams(ms) {
-									addErase(n)
+								formals, references, valid := types.SignatureTypeVariableReferences(ms)
+								if !valid {
+									return "", utils.Error("invalid method signature in lexical erasure")
+								}
+								if len(ownFormalNames) == 0 {
+									references = types.TypeVarRefsInMethodParams(ms)
+								}
+								local := make(map[string]bool, len(formals))
+								for _, n := range formals {
+									local[n] = true
+								}
+								for _, n := range references {
+									if !local[n] {
+										addErase(n)
+									}
 								}
 							}
 							break
@@ -1193,6 +1210,12 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		c.FuncCtx.TypeParams = classTypeParamNames
 		c.FuncCtx.RawEraseTypeVars = rawEraseTypeVars
 		c.FuncCtx.StandaloneEraseTypeVars = standaloneEraseTypeVars
+		// Own bounds are rendered only after hidden enclosing bindings have
+		// their proved source erasures. Rendering them during signature discovery
+		// leaves an out-of-scope outer variable in a physical member's class head.
+		if len(standaloneEraseTypeVars) != 0 && len(types.ClassFormalTypeParamNames(classSigStr)) != 0 && c.getenv("JDEC_TYPEPARAM_BOUND_IMPORT_OFF") == "" {
+			classTypeParams = types.ParseClassSignature(classSigStr, c.FuncCtx)
+		}
 		// A no-own-formal subclass that DECLARES the enclosing vars (injected) must still
 		// force-erase them in METHOD PARAMETER positions when the own-formal super
 		// standalone-erased those same names (Itr.output(Object,Object) vs $1.output(K,V)).
@@ -1457,6 +1480,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		// substitution -- the root-cause generalization of the same-class / identity-one-level special
 		// cases. Only wired on the jar / DecompileWithResolver path (foldSiblingResolver != nil).
 		c.FuncCtx.ClassSig = classSigStr
+		c.wireFlattenedLexicalTypeScopes()
 		c.FuncCtx.SiblingClassSig = c.buildSiblingClassSig()
 		c.FuncCtx.LambdaTargetClassSig = c.buildLambdaTargetClassSig()
 		c.FuncCtx.SiblingSourceClassFormals = c.buildSiblingSourceClassFormals()
@@ -2408,159 +2432,67 @@ func defaultInitializerForFieldType(typeName string) string {
 	}
 }
 
-// enclosingTypeParamBounds recovers, for each requested injected free type-variable name, the bound
-// declared on the NEAREST enclosing class. A non-static inner class inherits its enclosing scope's type
-// variables; when Yak flattens it to a top-level `Outer$Inner` unit those variables are re-declared on
-// the flat class (see the JDEC_INNER_TYPEVAR injection) but, until now, with a bare `Object` bound. That
-// drops the real bound, so a use like `Range<C>` (Range requires `C extends Comparable`) fails javac
-// with "type argument C is not within bounds of type-variable C". This walks the binary-name `$` chain
-// (Outer$Mid$Inner -> Outer$Mid -> Outer) via foldSiblingResolver, parses each enclosing class's formal
-// type-parameter bounds, and returns name -> rendered bound clause.
-//
-// SAFETY: a bound is returned ONLY when (a) the enclosing declaration has a real (non-Object) bound and
-// (b) every type variable the bound references is itself in the injected free set, so the reconstructed
-// `<C extends Comparable<?>>` can never reference an undeclared variable. The nearest enclosing scope
-// wins (Java type-variable shadowing). Returns an empty map when no cross-class resolver is available
-// (single-class decompile) or under kill-switch JDEC_INNER_TYPEVAR_BOUND_OFF, so the bare-name behavior
-// is unchanged there. The arity at reference sites is untouched (only the declaration gains `extends`),
-// so this never introduces "wrong number of type arguments".
+// enclosingTypeParamBounds projects original lexical declarations into the
+// requested source variables. Ownership rows and static cuts determine scope;
+// a dollar-spelled prefix is not evidence. External declarations may provide
+// bindings without becoming owned source units. The grammar resolver keeps
+// dependent bounds attached to their declaration and rejects hidden binders.
 func (c *ClassObjectDumper) enclosingTypeParamBounds(free []string) map[string]string {
-	res := map[string]string{}
-	if c.foldSiblingResolver == nil || c.getenv("JDEC_INNER_TYPEVAR_BOUND_OFF") != "" {
-		return res
+	if len(free) == 0 || c.getenv("JDEC_INNER_TYPEVAR_BOUND_OFF") != "" || c.foldSiblingResolver == nil && c.declarationResolver == nil {
+		return nil
 	}
-	freeSet := map[string]bool{}
-	seen := map[string]bool{}
-	for _, n := range free {
-		freeSet[n] = true
+	scopes, _, valid := c.flattenedMethodLexicalScopesResolved(c.nativeAnnotationDeclarationResolver())
+	if !valid {
+		return nil
 	}
-	binName := strings.ReplaceAll(c.obj.GetClassName(), ".", "/")
-	for {
-		idx := strings.LastIndexByte(binName, '$')
-		if idx < 0 {
-			break
-		}
-		binName = binName[:idx]
-		data, ok := c.foldSiblingResolver(binName)
-		if !ok || len(data) == 0 {
-			continue
-		}
-		sObj, err := c.parseResolved(data)
-		if err != nil {
-			continue
-		}
-		sig := ""
-		for _, attr := range sObj.Attributes {
-			if sa, ok := attr.(*SignatureAttribute); ok {
-				if s, err := sObj.getUtf8(sa.SignatureIndex); err == nil {
-					sig = s
-				}
-				break
-			}
-		}
-		if sig == "" {
-			continue
-		}
-		bounds := types.ClassFormalTypeParamBounds(sig, c.FuncCtx)
-		for _, name := range types.ClassFormalTypeParamNames(sig) {
-			if seen[name] {
-				continue
-			}
-			seen[name] = true
-			b := bounds[name]
-			if !freeSet[name] {
-				continue
-			}
-			if _, done := res[name]; done {
-				continue // a nearer enclosing scope already bound it (shadowing)
-			}
-			if b.Clause == "" {
-				continue
-			}
-			inScope := true
-			for _, r := range b.Refs {
-				if !freeSet[r] {
-					inScope = false
-					break
-				}
-			}
-			if inScope {
-				res[name] = b.Clause
-			}
-		}
+	signatures := make([]string, len(scopes))
+	for i, scope := range scopes {
+		signatures[i] = scope.Signature
 	}
-	return res
+	if !nativeMethodLocalBindingBudget(signatures, "()V", c.Work) {
+		return nil
+	}
+	names, bounds, _, valid := types.ProjectLexicalTypeParameters(scopes, free, c.FuncCtx)
+	// This client supplies bounds, not declaration arity. A bound requiring an
+	// additional formal cannot be spelled in the already selected declaration.
+	if !valid || !typeNamesSubset(names, free) {
+		return nil
+	}
+	return bounds
 }
 
-// enclosingTypeParamErasures recovers, for each requested undeclarable enclosing type-variable name, the
-// ERASURE of its bound declared on the NEAREST enclosing class that declares it: the raw dotted class of
-// its first class/interface bound (`E extends InternalEntry<..>` -> "com.google.common.collect...
-// InternalEntry"). It is the standalone-position companion of enclosingTypeParamBounds (which recovers
-// the source bound CLAUSE for a re-DECLARED inner parameter); here the erasure head is what a flattened
-// inner class must render for the variable used as a STANDALONE type (`E nextEntry;`, `advanceTo(E)`),
-// since it cannot declare the variable. Walks the binary-name `$` chain via foldSiblingResolver; the
-// nearest enclosing scope that binds a name wins (type-variable shadowing). Returns an empty map with no
-// resolver (single-class decompile), so the caller defaults every requested name to java.lang.Object.
+// enclosingTypeParamErasures follows original ownership and static cuts. The
+// erasure of a hidden formal still belongs to its declaring environment; a
+// source-owned sibling or a dollar-name prefix cannot supply that evidence.
 func (c *ClassObjectDumper) enclosingTypeParamErasures(vars map[string]bool) (map[string]string, error) {
-	res := map[string]string{}
-	if c.foldSiblingResolver == nil || len(vars) == 0 {
-		return res, nil
+	result := map[string]string{}
+	if len(vars) == 0 || c.foldSiblingResolver == nil && c.declarationResolver == nil {
+		return result, nil
+	}
+	scopes, _, valid := c.flattenedMethodLexicalScopesResolved(c.nativeAnnotationDeclarationResolver())
+	if !valid {
+		return nil, fmt.Errorf("unproved original enclosing erasure scope for %s", c.obj.GetClassName())
 	}
 	names := make([]string, 0, len(vars))
 	for name := range vars {
 		names = append(names, name)
 	}
 	slices.Sort(names)
-	methodErasures, methodScope, err := c.erasedFlattenedMethodFormals(names)
-	if err != nil {
-		return nil, err
+	var signatures []string
+	for _, scope := range scopes {
+		signatures = append(signatures, scope.Signature)
 	}
-	if methodScope {
-		return methodErasures, nil
+	if !nativeMethodLocalBindingBudget(signatures, "()V", c.Work) {
+		return nil, fmt.Errorf("enclosing erasure scope budget exhausted")
 	}
-	seen := map[string]bool{}
-	binName := strings.ReplaceAll(c.obj.GetClassName(), ".", "/")
-	for {
-		idx := strings.LastIndexByte(binName, '$')
-		if idx < 0 {
-			break
-		}
-		binName = binName[:idx]
-		data, ok := c.foldSiblingResolver(binName)
-		if !ok || len(data) == 0 {
-			continue
-		}
-		sObj, err := c.parseResolved(data)
-		if err != nil {
-			continue
-		}
-		sig := ""
-		for _, attr := range sObj.Attributes {
-			if sa, ok := attr.(*SignatureAttribute); ok {
-				if s, err := sObj.getUtf8(sa.SignatureIndex); err == nil {
-					sig = s
-				}
-				break
-			}
-		}
-		if sig == "" {
-			continue
-		}
-		// Shadowing: the NEAREST enclosing scope that DECLARES a name binds it, even when that
-		// declaration is unbounded (erasure Object, i.e. no res entry) -- a farther scope's bound
-		// must not leak through. Track declared-and-resolved names separately from res.
-		erasures := types.ClassFormalTypeParamErasures(sig)
-		for _, name := range types.ClassFormalTypeParamNames(sig) {
-			if !vars[name] || seen[name] {
-				continue
-			}
-			seen[name] = true
-			if e, ok := erasures[name]; ok {
-				res[name] = e
-			}
-		}
+	erasures, valid := types.LexicalTypeParameterErasures(scopes, names)
+	if !valid {
+		return nil, fmt.Errorf("unbound original enclosing erasure for %s", c.obj.GetClassName())
 	}
-	return res, nil
+	for name, descriptor := range erasures {
+		result[name] = strings.ReplaceAll(strings.TrimSuffix(strings.TrimPrefix(descriptor, "L"), ";"), "/", ".")
+	}
+	return result, nil
 }
 
 // enclosingFormalTypeParamsForArity recovers the formal type-parameter NAMES of the NEAREST generic
@@ -2605,34 +2537,15 @@ func (c *ClassObjectDumper) enclosingFormalTypeParamsForArity() []string {
 	if !member || flags&StaticFlag != 0 {
 		return nil
 	}
-	binName := strings.ReplaceAll(c.obj.GetClassName(), ".", "/")
-	for {
-		idx := strings.LastIndexByte(binName, '$')
-		if idx < 0 {
-			break
-		}
-		binName = binName[:idx]
-		data, ok := c.foldSiblingResolver(binName)
-		if !ok || len(data) == 0 {
-			continue
-		}
-		sObj, err := c.parseResolved(data)
-		if err != nil {
-			continue
-		}
-		sig := ""
-		for _, attr := range sObj.Attributes {
-			if sa, ok := attr.(*SignatureAttribute); ok {
-				if s, err := sObj.getUtf8(sa.SignatureIndex); err == nil {
-					sig = s
-				}
-				break
-			}
-		}
-		if sig == "" {
-			continue
-		}
-		if names := types.ClassFormalTypeParamNames(sig); len(names) > 0 {
+	scopes, method, valid := c.flattenedMethodLexicalScopesResolved(c.nativeAnnotationDeclarationResolver())
+	if !valid || method {
+		return nil
+	}
+	// The validated path uses InnerClasses/EnclosingMethod identities and
+	// stops at every static declaration. Binary-name prefixes do not grant
+	// access to an outer binder (including an otherwise unused type formal).
+	for i := len(scopes) - 1; i >= 0; i-- {
+		if names := types.ClassFormalTypeParamNames(scopes[i].Signature); len(names) > 0 {
 			return names
 		}
 	}
@@ -2906,7 +2819,7 @@ func (c *ClassObjectDumper) buildGenericDeclarationSignatures(platform bool) fun
 					_, ps, _ := types.ParseMethodSignatureFull(sigStr, c.FuncCtx)
 					if len(ps) == len(methodParamFieldDescriptors(descriptor)) {
 						methodSigs[descKey] = sigStr
-					} else if lifted, proved := constructorEnclosingBindingSignature(sObj, m, c.Work); proved {
+					} else if lifted, proved := constructorEnclosingBindingSignature(sObj, m, c.Work, c.nativeAnnotationDeclarationResolver()); proved {
 						methodSigs[descKey] = lifted
 					}
 					continue
@@ -2992,7 +2905,7 @@ func (c *ClassObjectDumper) buildSiblingCtorSig() func(internalName string, argc
 							_, sigParams, _ := types.ParseMethodSignatureFull(sigStr, nil)
 							if len(sigParams) != descArgc {
 								var proved bool
-								sigStr, proved = constructorEnclosingBindingSignature(sObj, m, c.Work)
+								sigStr, proved = constructorEnclosingBindingSignature(sObj, m, c.Work, c.nativeAnnotationDeclarationResolver())
 								if !proved {
 									continue
 								}
@@ -4056,6 +3969,13 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 		if sigAttr, ok := attr.(*SignatureAttribute); ok {
 			if sigStr, err := c.obj.getUtf8(sigAttr.SignatureIndex); err == nil && sigStr != "" {
 				methodSigStr = sigStr
+				if c.getenv("JDEC_METHOD_TYPEPARAMS_OFF") == "" {
+					// Method formals shadow enclosing names before their bounds, header
+					// and body are rendered. Remove only the inherited erasure hints;
+					// sibling declarations continue to see the original class context.
+					restore := maskMethodFormalErasure(c.FuncCtx, types.MethodFormalTypeParamNames(sigStr))
+					defer restore()
+				}
 				tps, sigParams, sigRet, sigThrows := types.ParseMethodSignatureFullWithThrows(sigStr, c.FuncCtx)
 				sigThrowsTypes = sigThrows
 				// Gate on sigRet (not sigParams): a zero-arg generic method like
@@ -5619,7 +5539,7 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 		c.ordinaryConstructorEmissionSeen = true
 	}
 	if name == "<init>" && request.role == methodSourceDeclaration && c.options.sourceConstructorLowering != nil && c.reconstructionPhysicalHeader() && !dumped.sourceReconstructionFailed() {
-		if signature, proved := constructorEnclosingBindingSignature(c.obj, method, c.Work); proved {
+		if signature, proved := constructorEnclosingBindingSignature(c.obj, method, c.Work, c.nativeAnnotationDeclarationResolver()); proved {
 			// Signature projection owes this exact completed declaration even
 			// when Object.<init> needs no executable capture reordering. Enroll
 			// its real writer span before any class-wide legacy source rules.

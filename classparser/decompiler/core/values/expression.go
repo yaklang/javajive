@@ -4093,6 +4093,9 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 	if cast := f.witnessDescriptorArgCast(i, arg, funcCtx); cast != "" {
 		return f.renderProvenArgumentCast(i, cast, arg, funcCtx)
 	}
+	if view := f.scopedReceiverArgument(i, funcCtx); view != nil {
+		return f.renderProvenArgumentCast(i, view.String(funcCtx), arg, funcCtx)
+	}
 	argType := f.FuncType.ParamTypes[i]
 	// Recover the generic parameter type the descriptor erased (e.g. BiConsumer<T,V>.accept's
 	// param erases to Object): the source carried a `(V)` cast on the argument, so feed the

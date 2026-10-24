@@ -9,7 +9,7 @@ import (
 )
 
 func TestConstructorBareNullRequiresUniqueCompleteOriginalBinding(t *testing.T) {
-	for _, variant := range []string{"reference", "array", "this", "different arity", "missing owner", "wrong owner", "incomplete", "missing target", "duplicate target", "same arity", "varargs rival", "selected varargs", "invalid rival", "static rival", "bridge rival", "class generic", "method generic", "no origin", "later null", "synthetic null", "copied null", "original cast", "allocation", "other owner", "ordinary method", "wrong invoke", "primitive", "wrong arity"} {
+	for _, variant := range []string{"reference", "array", "this", "different arity", "missing owner", "wrong owner", "incomplete", "missing target", "duplicate target", "same arity", "varargs rival", "selected varargs", "invalid rival", "static rival", "bridge rival", "class generic", "generic superclass", "class formal parameter", "method generic", "signature without flag", "no origin", "later null", "synthetic null", "copied null", "original cast", "allocation", "other owner", "ordinary method", "wrong invoke", "primitive", "wrong arity"} {
 		t.Run(variant, func(t *testing.T) {
 			desc := "(Ljava/lang/String;)V"
 			if variant == "array" {
@@ -54,8 +54,18 @@ func TestConstructorBareNullRequiresUniqueCompleteOriginalBinding(t *testing.T) 
 				table.Methods = append(table.Methods, callbinding.Method{Name: "<init>", Desc: "()V", Bridge: true})
 			case "class generic":
 				table.Signature = "<T:Ljava/lang/Object;>Ljava/lang/Object;"
+				want = true
+			case "generic superclass":
+				table.Signature = "Ljava/util/ArrayList<Ljava/lang/String;>;"
+				want = true
+			case "class formal parameter":
+				table.Signature = "<T:Ljava/lang/String;>Ljava/lang/Object;"
+				table.Methods[0].Signature = "(TT;)V"
+				table.Methods[0].Generic = true
 			case "method generic":
 				table.Methods[0].Generic = true
+			case "signature without flag":
+				table.Methods[0].Signature = "<T:Ljava/lang/String;>(TT;)V"
 			case "no origin":
 				call.HasOriginPC = false
 			case "later null":

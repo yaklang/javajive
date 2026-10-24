@@ -176,5 +176,28 @@ func (a *JarReconstructionArtifact) FinishClass(name string, compiled []byte) ([
 	if err != nil {
 		return nil, err
 	}
+	lowered, err = z.sourceConstructorLowering.restoreMemberReferenceSignatures(original, lowered, reader.Work)
+	if err != nil {
+		return nil, err
+	}
+	if z.sourceConstructorLowering.memberGenericSourceReturned(strings.TrimSuffix(logical, ".class"), original, reader.Work) {
+		// Scope publication checks the complete method contract. Discharge
+		// compiler parameter-name/mandated-bit differences with their existing
+		// independent proof first, rather than rejecting an obligation that
+		// the artifact already knows how to complete. The final metadata gate
+		// below still checks the entire finished result.
+		var lambda *sourceLambdaMetadataPlan
+		if authority := z.sourceLambdaMetadata; authority != nil {
+			lambda = authority.plan(strings.TrimSuffix(logical, ".class"))
+		}
+		lowered, err = restoreMethodParameterMetadata(original, lowered, lambda, reader.Work)
+		if err != nil {
+			return nil, err
+		}
+	}
+	lowered, err = z.sourceConstructorLowering.restoreMemberGenericScope(original, lowered, reader.Work)
+	if err != nil {
+		return nil, err
+	}
 	return a.source.restoreClassMetadata(name, lowered, reconstructionCaptureMetadataTarget(z))
 }

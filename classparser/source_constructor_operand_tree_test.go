@@ -90,7 +90,7 @@ func TestAdversarialConstructorOperandTreeRequiresExactSourceProducers(t *testin
 					depth = 32
 				}
 				want := variant == "control"
-				if got := constructorLoweringSourceOperand(arg, origin, value, slots, params, depth); got != want {
+				if got := constructorLoweringSourceOperand(arg, origin, value, slots, params, depth, nil); got != want {
 					t.Fatalf("source producer %s: got %v want %v", variant, got, want)
 				}
 			})

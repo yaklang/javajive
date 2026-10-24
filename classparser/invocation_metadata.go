@@ -134,7 +134,7 @@ func (c *ClassObjectDumper) buildInvocationMetadata() callbinding.Provider {
 			x := callbinding.Method{Name: name, Desc: desc, Public: m.AccessFlags&1 != 0 || (samePackage && m.AccessFlags&2 == 0), Static: m.AccessFlags&8 != 0, Varargs: m.AccessFlags&0x80 != 0, Bridge: m.AccessFlags&0x40 != 0}
 			x.AccessFlags, x.AccessFlagsKnown = m.AccessFlags, true
 			if m.AccessFlags == 0x1041 && !v.IsInterface {
-				if bridge := inheritedBridgeForwardPacket(obj, m, core.OP_INVOKEVIRTUAL, c.Work); bridge != nil && bridge.targetOwner == n && bridge.targetDescriptor != desc {
+				if bridge := inheritedBridgeForwardPacket(obj, m, core.OP_INVOKEVIRTUAL, c.Work); bridge != nil && !bridge.checkedArguments && bridge.targetOwner == n && bridge.targetDescriptor != desc {
 					x.CovariantBridgeTarget = bridge.targetDescriptor
 				}
 			}

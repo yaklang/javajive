@@ -61,7 +61,7 @@ func recoverParameterizedFieldReceiver(ctx *class_context.ClassContext, value Ja
 			receiver, _ = types.AsParameterizedType(types.NewParameterizedType(raw, nil))
 		}
 		classSig, _, known := ctx.SiblingClassSig(strings.ReplaceAll(receiver.RawClassName, ".", "/"))
-		if !known || len(types.ClassFormalTypeParamNames(classSig)) != len(receiver.TypeArgs) {
+		if !known || len(types.SourceClassFormalNames(ctx, receiver.RawClassName, classSig)) != len(receiver.TypeArgs) {
 			return nil
 		}
 		recovered := types.ResolveInstantiatedFieldType(ctx, ctx.SiblingClassSig, ctx.SiblingFieldSig,

@@ -55,16 +55,18 @@ type sourceConstructorLoweringPublication struct {
 }
 
 type sourceConstructorLoweringAuthority struct {
-	jar                           *JarFS
-	parent                        *sourceConstructorLoweringAuthority
-	mu                            sync.Mutex
-	pending, active               map[string]*sourceConstructorLoweringPublication
-	nativePending, nativeActive   map[string]constructorNativeSourceOrigin
-	enumPending, enumActive       map[string]constructorNativeSourceOrigin
-	staticPending, staticActive   map[string]constructorNativeSourceOrigin
-	bridgePending, bridgeActive   map[string]constructorNativeSourceOrigin
-	bindingPending, bindingActive map[string]constructorNativeSourceOrigin
-	escapePending, escapeActive   map[string]checkedEscapeSourceOrigin
+	jar                               *JarFS
+	parent                            *sourceConstructorLoweringAuthority
+	mu                                sync.Mutex
+	pending, active                   map[string]*sourceConstructorLoweringPublication
+	nativePending, nativeActive       map[string]constructorNativeSourceOrigin
+	enumPending, enumActive           map[string]constructorNativeSourceOrigin
+	staticPending, staticActive       map[string]constructorNativeSourceOrigin
+	bridgePending, bridgeActive       map[string]constructorNativeSourceOrigin
+	bindingPending, bindingActive     map[string]constructorNativeSourceOrigin
+	genericPending, genericActive     map[string]constructorNativeSourceOrigin
+	referencePending, referenceActive map[string]constructorNativeSourceOrigin
+	escapePending, escapeActive       map[string]checkedEscapeSourceOrigin
 }
 
 type constructorNativeSourceOrigin struct{ originalHash, sourceHash [32]byte }
@@ -340,7 +342,7 @@ func (c *ClassObjectDumper) planArtifactConstructorLowering(boundary *constructo
 		return false
 	}
 	for i, argument := range p.plan.arguments {
-		if !constructorLoweringSourceOperand(argument, p.argumentOrigins[i], boundary.delegate.Arguments[i], slots, boundary.params, 0) {
+		if !constructorLoweringSourceOperand(argument, p.argumentOrigins[i], boundary.delegate.Arguments[i], slots, boundary.params, 0, c.FuncCtx) {
 			return false
 		}
 	}
@@ -358,6 +360,12 @@ func (c *ClassObjectDumper) planArtifactConstructorLowering(boundary *constructo
 }
 
 func (c *ClassObjectDumper) publishConstructorLowering(source string, methods []*dumpedMethods) bool {
+	if !c.publishMemberReferenceSignatures(source) {
+		return false
+	}
+	if !c.publishMemberGenericScope(source) {
+		return false
+	}
 	if !c.publishCheckedEscapeLowering(source, methods) {
 		return false
 	}
@@ -426,6 +434,16 @@ func (a *sourceConstructorLoweringAuthority) sourceReturned(owner string, source
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	hash := sha256.Sum256(source)
+	referenceOrigin, referenceFound := a.referencePending[owner]
+	referenceFound = referenceFound && referenceOrigin.sourceHash == hash
+	if previous, active := a.referenceActive[owner]; active && (!referenceFound || previous != referenceOrigin) {
+		return fmt.Errorf("member reference signature: changed returned source")
+	}
+	genericOrigin, genericFound := a.genericPending[owner]
+	genericFound = genericFound && genericOrigin.sourceHash == hash
+	if previous, active := a.genericActive[owner]; active && (!genericFound || previous != genericOrigin) {
+		return fmt.Errorf("member generic scope: changed returned source")
+	}
 	escapeOrigin, escapeFound := a.escapePending[owner]
 	escapeFound = escapeFound && escapeOrigin.sourceHash == hash
 	if previous, active := a.escapeActive[owner]; active && (!escapeFound || previous != escapeOrigin) {
@@ -472,6 +490,18 @@ func (a *sourceConstructorLoweringAuthority) sourceReturned(owner string, source
 		}
 	}
 	activateOrigins := func() {
+		if referenceFound {
+			if a.referenceActive == nil {
+				a.referenceActive = map[string]constructorNativeSourceOrigin{}
+			}
+			a.referenceActive[owner] = referenceOrigin
+		}
+		if genericFound {
+			if a.genericActive == nil {
+				a.genericActive = map[string]constructorNativeSourceOrigin{}
+			}
+			a.genericActive[owner] = genericOrigin
+		}
 		if escapeFound {
 			if a.escapeActive == nil {
 				a.escapeActive = map[string]checkedEscapeSourceOrigin{}

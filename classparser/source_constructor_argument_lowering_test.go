@@ -42,7 +42,7 @@ func TestAdversarialConstructorStaticArgumentRequiresOriginalSourceWitness(t *te
 			case "parameter impostor":
 				arg.slot = 1
 			}
-			if constructorLoweringSourceArgument(arg, 9, &field, nil, nil) != (kind == "control") {
+			if constructorLoweringSourceArgument(arg, 9, &field, nil, nil, nil) != (kind == "control") {
 				t.Fatal("static operand source identity was not proved", kind)
 			}
 		})

@@ -120,7 +120,17 @@ func restoreSyntheticDeclarationFlags(original, compiled []byte, constructorPack
 // Both actual packets must load the same typed arguments, invoke the same
 // private constructor on uninitialized-this, and return without other effects.
 // Whole class/method identities and flags are checked by the caller first.
-func syntheticConstructorMarkerProof(original, fresh *ClassObject, work *workbudget.Budget) func(*MemberInfo) bool {
+func syntheticConstructorMarkerProof(original, fresh *ClassObject, work *workbudget.Budget, completedFlags ...uint16) func(*MemberInfo) bool {
+	flags := uint16(0)
+	if len(completedFlags) > 1 {
+		return nil
+	}
+	if len(completedFlags) == 1 {
+		flags = completedFlags[0]
+		if flags != syntheticMethodFlag {
+			return nil
+		}
+	}
 	if original == nil || original.MajorVersion < 49 || original.MajorVersion > 54 || original.MinorVersion != 0 || hasOriginalNestAttribute(original, "NestHost") || hasOriginalNestAttribute(original, "NestMembers") {
 		return nil
 	}
@@ -134,7 +144,7 @@ func syntheticConstructorMarkerProof(original, fresh *ClassObject, work *workbud
 	a, b := NewClassObjectDumper(original), NewClassObjectDumper(fresh)
 	a.Work, b.Work = work, work
 	// Index each method once, rather than rescanning the class per overload.
-	oldPackets, freshPackets := a.originalNativeConstructorAccessBridges(), b.constructorForwardingPackets(0)
+	oldPackets, freshPackets := a.originalNativeConstructorAccessBridges(), b.constructorForwardingPackets(flags)
 	exceptions := func(object *ClassObject, member *MemberInfo) ([]string, bool) {
 		var result []string
 		seen := false

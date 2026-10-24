@@ -1946,15 +1946,15 @@ func typeVarFieldStoreCast(funcCtx *class_context.ClassContext, left values.Java
 	if funcCtx.Getenv("JDEC_NO_TYPEVAR_FIELD_CAST") != "" {
 		return ""
 	}
-	if len(funcCtx.FieldTypeVars) == 0 {
-		return ""
-	}
 	var fieldName string
 	switch lv := left.(type) {
 	case *values.RefMember:
 		// instance field store `this.field` - the receiver must be `this`.
 		ref, ok := values.UnpackSoltValue(lv.Object).(*values.JavaRef)
 		if !ok || !ref.IsThis {
+			if view := values.ScopedFieldStoreView(funcCtx, left, value); view != nil {
+				return view.String(funcCtx)
+			}
 			return ""
 		}
 		fieldName = class_context.SafeIdentifier(lv.Member)

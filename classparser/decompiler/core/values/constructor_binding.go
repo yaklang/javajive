@@ -15,6 +15,9 @@ import (
 // a descriptor cast cannot improve binding, but it does invent a CHECKCAST
 // absent from the original operand packet. Constructors are not inherited;
 // all varargs and same-arity rivals still need the ordinary binding proof.
+// Class formals alone do not make a constructor generic: a declaration whose
+// own Signature is absent still has exactly its descriptor parameter types,
+// regardless of how the receiver's unrelated class formals are instantiated.
 func (f *FunctionCallExpression) uniqueDelegationNullArgument(i int, ctx *class_context.ClassContext) bool {
 	if f == nil || ctx == nil || ctx.InvocationMetadata == nil || ctx.FunctionName != "<init>" ||
 		f.FunctionName != "<init>" || !f.IsSpecialInvoke || f.Kind != InvokeSpecial || !f.HasOriginPC ||
@@ -42,7 +45,7 @@ func (f *FunctionCallExpression) uniqueDelegationNullArgument(i int, ctx *class_
 		return false
 	}
 	table, known := ctx.InvocationMetadata(owner)
-	if !known || table.Name != owner || !table.MembersComplete || table.Signature != "" {
+	if !known || table.Name != owner || !table.MembersComplete {
 		return false
 	}
 	matched := 0

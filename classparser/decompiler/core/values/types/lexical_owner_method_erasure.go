@@ -17,9 +17,54 @@ type LexicalTypeScope struct {
 
 type lexicalFormal struct {
 	first, signature, name string
+	declaration            string
 	environment            map[string]*lexicalFormal
 	erased                 string
 	visiting               bool
+}
+
+// ProjectLexicalFormalSignature preserves complete original bound grammar and
+// declaration identity. It does not infer a bound from erasure or source text.
+// Callers choose the declaration order; every referenced binder must remain
+// visible with the same identity and be included in that declaration.
+func ProjectLexicalFormalSignature(scopes []LexicalTypeScope, requested []string) (string, bool) {
+	if len(requested) == 0 || len(requested) > 512 {
+		return "", false
+	}
+	selected := map[string]bool{}
+	for _, name := range requested {
+		if selected[name] {
+			return "", false
+		}
+		selected[name] = true
+	}
+	result, closed := "", false
+	_, _, valid := eraseLexicalTypeScopes(scopes, func(scope map[string]*lexicalFormal) {
+		var out strings.Builder
+		out.WriteByte('<')
+		for _, name := range requested {
+			f := scope[name]
+			if f == nil || f.declaration == "" {
+				return
+			}
+			_, refs, ok := SignatureTypeVariableReferences("<" + f.declaration + ">Ljava/lang/Object;")
+			if !ok {
+				return
+			}
+			for _, ref := range refs {
+				if !selected[ref] || f.environment[ref] != scope[ref] {
+					return
+				}
+			}
+			if out.Len()+len(f.declaration) > 65534 {
+				return
+			}
+			out.WriteString(f.declaration)
+		}
+		out.WriteByte('>')
+		result, closed = out.String(), true
+	})
+	return result, valid && closed
 }
 
 // LexicalTypeParameterErasures needs no source rebinding of hidden formals:
@@ -219,6 +264,7 @@ func eraseLexicalTypeScopes(scopes []LexicalTypeScope, accept func(map[string]*l
 			}
 			rest = rest[1:]
 			for _, n := range names {
+				declaration := rest
 				if !strings.HasPrefix(rest, n+":") {
 					return "", nil, false
 				}
@@ -251,6 +297,7 @@ func eraseLexicalTypeScopes(scopes []LexicalTypeScope, accept func(map[string]*l
 					return "", nil, false
 				}
 				next[n].first = first
+				next[n].declaration = declaration[:len(declaration)-len(rest)]
 			}
 			if !strings.HasPrefix(rest, ">") {
 				return "", nil, false

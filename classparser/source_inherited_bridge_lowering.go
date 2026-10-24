@@ -20,6 +20,10 @@ type inheritedBridgePacket struct {
 	name, descriptor, targetOwner, targetDescriptor string
 	throws                                          []string
 	implicitVisibilityBridge                        bool
+	argumentCasts                                   []string
+	checkedArguments                                bool
+	invokePC                                        int
+	invokeIndex                                     uint16
 }
 
 // Only a pure typed forwarding program can be regenerated through a temporary
@@ -87,17 +91,45 @@ func inheritedBridgeForwardPacket(object *ClassObject, method *MemberInfo, opcod
 		return nil
 	}
 	ops := constructorMotionOps(d)
-	if len(ops) != len(params)+3 || !enumArrayInstructionSpans(code.Code, ops) || core.GetRetrieveIdx(ops[0]) != 0 || !constructorMotionLoad(ops[0], "Ljava/lang/Object;") {
+	if len(ops) < len(params)+3 || len(ops) > 2*len(params)+3 || !enumArrayInstructionSpans(code.Code, ops) || core.GetRetrieveIdx(ops[0]) != 0 || !constructorMotionLoad(ops[0], "Ljava/lang/Object;") {
 		return nil
 	}
-	slot := 1
+	call := constructorMotionMember(object, ops[len(ops)-2], opcode)
+	if call == nil || call.Member != name || !nativeSourceBinaryName(call.Name) {
+		return nil
+	}
+	args, ret, err := callbinding.Descriptor(call.Description)
+	if err != nil || len(args) != len(params) {
+		return nil
+	}
+	p.argumentCasts = make([]string, len(params))
+	slot, at := 1, 1
 	for i, param := range params {
-		if core.GetRetrieveIdx(ops[i+1]) != slot || !constructorMotionLoad(ops[i+1], param) {
+		if at >= len(ops)-2 || core.GetRetrieveIdx(ops[at]) != slot || !constructorMotionLoad(ops[at], param) {
+			return nil
+		}
+		at++
+		if at < len(ops)-2 && ops[at].Instr.OpCode == core.OP_CHECKCAST {
+			index, known := nativeEnumCPIndex(ops[at])
+			name, valid := sourceBridgeClassName(object, index)
+			cast := name
+			if !strings.HasPrefix(cast, "[") {
+				cast = "L" + cast + ";"
+			}
+			_, _, syntax := callbinding.Descriptor("(" + cast + ")V")
+			if !known || !valid || syntax != nil || !callbinding.Reference(param) || cast != args[i] {
+				return nil
+			}
+			p.argumentCasts[i], p.checkedArguments = cast, true
+			at++
+		} else if param != args[i] {
 			return nil
 		}
 		slot += constructorEffectType(param).width()
 	}
-	call := constructorMotionMember(object, ops[len(ops)-2], opcode)
+	if at != len(ops)-2 {
+		return nil
+	}
 	stack := slot
 	if result == "J" || result == "D" {
 		stack = max(stack, 2)
@@ -105,11 +137,12 @@ func inheritedBridgeForwardPacket(object *ClassObject, method *MemberInfo, opcod
 	if call == nil || call.Member != name || !nativeSourceBinaryName(call.Name) || !nativeEnumOpcode(ops[len(ops)-1], int(bridgeReturnOpcode(desc))) || int(code.MaxStack) < stack || int(code.MaxLocals) < slot {
 		return nil
 	}
-	args, ret, err := callbinding.Descriptor(call.Description)
 	reference := func(s string) bool { return strings.HasPrefix(s, "L") || strings.HasPrefix(s, "[") }
-	if err != nil || !slices.Equal(args, params) || ret != result && !(reference(ret) && reference(result)) {
+	if ret != result && !(reference(ret) && reference(result)) {
 		return nil
 	}
+	p.invokeIndex, _ = nativeEnumCPIndex(ops[at])
+	p.invokePC = int(ops[at].CurrentOffset)
 	p.targetOwner, p.targetDescriptor = call.Name, call.Description
 	return p
 }
@@ -243,7 +276,7 @@ func (c *ClassObjectDumper) publishInheritedBridgeLowering(source string, method
 	if a == nil {
 		return true
 	}
-	found := c.reconstructionPhysicalHeader() && legacyAbstractInterfaceDomain(c.obj, c.Work)
+	found := c.reconstructionPhysicalHeader() && (legacyAbstractInterfaceDomain(c.obj, c.Work) || c.inheritedVisibilityDomainParent() != nil)
 	for _, m := range methods {
 		if m == nil || m.inheritedBridge == nil {
 			continue
@@ -357,6 +390,20 @@ func (a *sourceConstructorLoweringAuthority) lowerInheritedBridges(owner string,
 		}
 	}
 	var edits []compiledMetadataEdit
+	visibility := map[*MemberInfo]bool{}
+	if parent := d.inheritedVisibilityDomainParent(); parent != nil {
+		for k, method := range after {
+			if before[k] != nil || !d.extraInheritedVisibilityBridge(got, method, parent) {
+				continue
+			}
+			span, known := layout.methods[method]
+			if !known || span.start < layout.poolEnd || span.end > len(compiled) || span.end-span.start < 8 || binary.BigEndian.Uint16(compiled[span.start:]) != method.AccessFlags {
+				return decline()
+			}
+			visibility[method] = true
+			edits = append(edits, compiledMetadataEdit{span, nil})
+		}
+	}
 	exact := 0
 	consumers := map[*MemberInfo]map[*MemberInfo]bool{}
 	packets := map[*MemberInfo]*inheritedBridgePacket{}
@@ -376,7 +423,7 @@ func (a *sourceConstructorLoweringAuthority) lowerInheritedBridges(owner string,
 			// the covariant case below, no temporary method is removed, so other
 			// callers and method handles continue naming this same declaration.
 			fresh := inheritedBridgeForwardPacket(got, bridge, core.OP_INVOKESPECIAL, work)
-			if bridge.AccessFlags != 1 && bridge.AccessFlags != m.AccessFlags || fresh == nil || fresh.targetOwner != p.targetOwner || fresh.targetDescriptor != p.targetDescriptor || !slices.Equal(p.throws, fresh.throws) {
+			if bridge.AccessFlags != 1 && bridge.AccessFlags != m.AccessFlags || fresh == nil || fresh.targetOwner != p.targetOwner || fresh.targetDescriptor != p.targetDescriptor || !slices.Equal(p.throws, fresh.throws) || !slices.Equal(p.argumentCasts, fresh.argumentCasts) {
 				return decline()
 			}
 			span, known := layout.methods[bridge]
@@ -396,19 +443,28 @@ func (a *sourceConstructorLoweringAuthority) lowerInheritedBridges(owner string,
 		}
 		fresh := inheritedBridgeForwardPacket(got, helper, core.OP_INVOKESPECIAL, work)
 		forward := inheritedBridgeForwardPacket(got, bridge, core.OP_INVOKEVIRTUAL, work)
-		if fresh == nil || forward == nil || fresh.targetOwner != p.targetOwner || fresh.targetDescriptor != p.targetDescriptor || forward.targetOwner != owner || forward.targetDescriptor != p.targetDescriptor || !slices.Equal(p.throws, fresh.throws) || !slices.Equal(p.throws, forward.throws) {
+		if fresh == nil || forward == nil || fresh.checkedArguments || fresh.targetOwner != p.targetOwner || fresh.targetDescriptor != p.targetDescriptor || forward.targetOwner != owner || forward.targetDescriptor != p.targetDescriptor || !slices.Equal(p.throws, fresh.throws) || !slices.Equal(p.throws, forward.throws) || !slices.Equal(p.argumentCasts, forward.argumentCasts) {
 			return decline()
-		}
-		freshCode, err := enumArrayCodePayload(compiled, got, layout.methods[helper], work)
-		if err != nil {
-			return nil, err
 		}
 		bridgeCode, err := enumArrayCodePayload(compiled, got, layout.methods[bridge], work)
 		if err != nil {
 			return nil, err
 		}
-		data := bytes.Clone(compiled[freshCode.span.start:freshCode.span.end])
-		binary.BigEndian.PutUint16(data, bridgeCode.name)
+		// Retain the compiler's bridge loads, CHECKCASTs, return and every PC.
+		// Inline only the helper's proven super invocation, using its fresh CP
+		// entry. Copying the narrow helper body would lose the bridge's checks
+		// and change both verifier types and ClassCastException timing.
+		data := bytes.Clone(compiled[bridgeCode.span.start:bridgeCode.span.end])
+		code := constructorLoweringCode(bridge)
+		if code == nil || len(data) < 14+len(code.Code) || int(binary.BigEndian.Uint32(data[10:])) != len(code.Code) || !bytes.Equal(data[14:14+len(code.Code)], code.Code) || forward.invokePC < 0 || forward.invokePC+3 > len(code.Code) || fresh.invokeIndex == 0 {
+			return decline()
+		}
+		pos := 14 + forward.invokePC
+		if data[pos] != core.OP_INVOKEVIRTUAL || binary.BigEndian.Uint16(data[pos+1:]) != forward.invokeIndex {
+			return decline()
+		}
+		data[pos] = core.OP_INVOKESPECIAL
+		binary.BigEndian.PutUint16(data[pos+1:], fresh.invokeIndex)
 		edits = append(edits, compiledMetadataEdit{bridgeCode.span, data})
 		if consumers[helper] == nil {
 			consumers[helper] = map[*MemberInfo]bool{}
@@ -417,7 +473,7 @@ func (a *sourceConstructorLoweringAuthority) lowerInheritedBridges(owner string,
 		}
 		consumers[helper][bridge] = true
 	}
-	if len(consumers) == 0 && exact == 0 || len(after)-len(consumers) != len(before) {
+	if len(consumers) == 0 && exact == 0 && len(visibility) == 0 || len(after)-len(consumers)-len(visibility) != len(before) {
 		return decline()
 	}
 	for helper, bridges := range consumers {
@@ -425,7 +481,7 @@ func (a *sourceConstructorLoweringAuthority) lowerInheritedBridges(owner string,
 			return decline()
 		}
 	}
-	if len(consumers) == 0 {
+	if len(consumers) == 0 && len(visibility) == 0 {
 		return applyCompiledMetadataEdits(compiled, edits, work)
 	}
 	first := len(compiled)

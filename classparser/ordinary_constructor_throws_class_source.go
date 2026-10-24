@@ -109,7 +109,7 @@ func (s *ordinaryConstructorClassSourceReceipt) closed() bool {
 			if descriptor, valid := sourceBridgeUTF8(s.c.obj, m.member.DescriptorIndex); !valid || descriptor != m.descriptor {
 				return false
 			}
-			if original, proved := constructorEnclosingBindingSignature(s.c.obj, m.member, s.c.Work); !proved || original != signature {
+			if original, proved := constructorEnclosingBindingSignature(s.c.obj, m.member, s.c.Work, s.c.nativeAnnotationDeclarationResolver()); !proved || original != signature {
 				return false
 			}
 		}
