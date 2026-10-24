@@ -362,6 +362,20 @@ func TestNativeSourceLambdaMetadataOpenPublishesOnlyItsCompletedSource(t *testin
 	d := NewClassObjectDumper(object)
 	d.options.TargetSourceVersion, d.options.SourceCompiler, d.options.sourceLambdaMetadata = 8, ModernJavac, artifact.jar.sourceLambdaMetadata
 	retained := artifact.jar.sourceLambdaMetadata.bytes
+	publication := artifact.jar.sourceLambdaMetadata.publication("ArtifactLambdaOwner", string(source))
+	if publication == nil || len(publication.plans) == 0 {
+		t.Fatal("actual lambda naming obligation required for compiler-domain control")
+	}
+	// Enum source origins may cross compiler releases, but carrying an actual
+	// lambda obligation must still require its independently proved compiler
+	// domain. Rejection cannot replace or activate a different publication.
+	for _, target := range []int{11, 16, 21} {
+		d.options.TargetSourceVersion = target
+		if d.sealArtifactLambdaPublication(string(source), nil) || artifact.jar.sourceLambdaMetadata.publication("ArtifactLambdaOwner", string(source)) != publication || artifact.jar.sourceLambdaMetadata.bytes != retained {
+			t.Fatal("enum-only publication domain widened lambda authority", target)
+		}
+	}
+	d.options.TargetSourceVersion = 8
 	for i := 0; i < 3; i++ {
 		if !d.sealArtifactLambdaPublication(string(source), nil) || artifact.jar.sourceLambdaMetadata.bytes != retained {
 			t.Fatal("same completed source spent retained-memory allowance again")
