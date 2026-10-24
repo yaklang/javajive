@@ -40,14 +40,15 @@ func roundTripConstructorBridgeArtifact(t *testing.T, fixture, owner, driver, or
 		t.Fatal("native original compiler required")
 	}
 	files := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, fixture, owner, debug, false)
-	run := func(dir string) {
+	run := func(dir, phase string) {
 		t.Helper()
 		out, err := exec.Command(java, "-Xverify:all", "-cp", dir, driver).CombinedOutput()
 		if err != nil || string(out) != oracle {
-			t.Fatal("original-first constructor bridge oracle", err, string(out))
+			t.Fatal(phase+" constructor bridge oracle", err, string(out))
 		}
 	}
-	run(sourceArtifactWriteFiles(t, files))
+	run(sourceArtifactWriteFiles(t, files), "original")
+	t.Log("independent original JVM oracle passed")
 	owned := map[string][]byte{}
 	support := map[string][]byte{}
 	for name, raw := range files {
@@ -113,7 +114,7 @@ func roundTripConstructorBridgeArtifact(t *testing.T, fixture, owner, driver, or
 			t.Fatal(err)
 		}
 	}
-	run(out)
+	run(out, "rebuilt")
 }
 
 func TestAdversarialConstructorBridgeModernTargetsKeepGenericAndEnclosingBinding(t *testing.T) {
