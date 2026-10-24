@@ -3,6 +3,8 @@ package javaclassparser
 import (
 	"fmt"
 	"github.com/yaklang/javajive/internal/jdecenv"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -436,6 +438,13 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 		return nil
 	}
 	if p.anonymousForest != nil && !p.anonymousForest.scopeSourceComplete(src) {
+		if dir := os.Getenv("JDEC_FAMILY_DIAGNOSTIC_OUT"); dir != "" {
+			os.WriteFile(filepath.Join(dir, "rejected-source.java"), []byte(src), 0600)
+		}
+		for name, g := range p.anonymousForest.groups {
+			ord, known := nativeAnonymousOrdinalsWithinOwner(src, name)
+			fmt.Printf("FOREST_DIAG %s group=%s ord=%v known=%v children=%d failed=%v prefix=%d\n", owner, name, ord, known, len(g.children), g.failed, g.enumPrefix)
+		}
 		fmt.Printf("FAMILY_DIAG %s:390\n", owner)
 		return nil
 	}
