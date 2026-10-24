@@ -80,7 +80,7 @@ func TestCarriedPrimitiveJoinRequiresClosedTypedBypass(t *testing.T) {
 				d.Work = workbudget.New(ctx, workbudget.Limits{})
 			}
 			beforeRoot, beforeArm := root.StackEntry, arm.StackEntry
-			beforeEdges, beforeSnapshots, beforeRefs := len(d.effectfulStackPhiEdges), len(d.evaluationSnapshots), len(d.disFoldRef)
+			beforeEdges, beforeSnapshots, beforeRefs := len(d.effectfulStackPhiEdges), len(d.carriedPrimitivePhiSeeds), len(d.disFoldRef)
 			slot := values.NewSlotValue(seed, typ)
 			got := d.lowerCarriedPrimitiveJoin(merge, root, slot)
 			want := kind == "closed" || kind == "reversed condition" || kind == "long" || kind == "float" || kind == "double"
@@ -91,7 +91,7 @@ func TestCarriedPrimitiveJoinRequiresClosedTypedBypass(t *testing.T) {
 				t.Fatal("original stack evidence changed")
 			}
 			if !want {
-				if slot.GetValue() != seed || len(d.effectfulStackPhiEdges) != beforeEdges || len(d.evaluationSnapshots) != beforeSnapshots || len(d.disFoldRef) != beforeRefs {
+				if slot.GetValue() != seed || len(d.effectfulStackPhiEdges) != beforeEdges || len(d.carriedPrimitivePhiSeeds) != beforeSnapshots || len(d.disFoldRef) != beforeRefs {
 					t.Fatal("rejected proof published partial transformation")
 				}
 				return
@@ -103,8 +103,8 @@ func TestCarriedPrimitiveJoinRequiresClosedTypedBypass(t *testing.T) {
 			if d.effectfulStackPhiEdges[root] != nil || d.effectfulStackPhiEdges[arm].LeftValue != ref || d.effectfulStackPhiEdges[arm].JavaValue != result {
 				t.Fatal("copy must occur only on updating edge")
 			}
-			snap := d.evaluationSnapshots[root]
-			if len(snap) != 1 || snap[0].Ref != ref || snap[0].Value != seed {
+			snap := d.carriedPrimitivePhiSeeds[root]
+			if snap == nil || snap.LeftValue != ref || snap.JavaValue != seed {
 				t.Fatal("bypass initialization must precede condition")
 			}
 		})

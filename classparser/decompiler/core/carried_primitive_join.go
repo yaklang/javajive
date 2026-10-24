@@ -107,10 +107,10 @@ func (d *Decompiler) lowerCarriedPrimitiveJoin(merge, root *OpCode, slot *values
 	ref := sim.NewVar(seed)
 	ref.ResetVarType(typ)
 	ref.WebDeclType = typ.Copy()
-	if d.evaluationSnapshots == nil {
-		d.evaluationSnapshots = map[*OpCode][]EvaluationSnapshot{}
+	if d.carriedPrimitivePhiSeeds == nil {
+		d.carriedPrimitivePhiSeeds = map[*OpCode]*statements.AssignStatement{}
 	}
-	d.evaluationSnapshots[root] = append(d.evaluationSnapshots[root], EvaluationSnapshot{Ref: ref, Value: seed, OriginPC: int(root.CurrentOffset), Operand: true})
+	d.carriedPrimitivePhiSeeds[root] = statements.NewAssignStatement(ref, seed, true)
 	if d.effectfulStackPhiEdges == nil {
 		d.effectfulStackPhiEdges = map[*OpCode]*statements.AssignStatement{}
 	}
@@ -128,4 +128,18 @@ func (d *Decompiler) lowerCarriedPrimitiveJoin(merge, root *OpCode, slot *values
 	}
 	slot.ResetValue(ref)
 	return true
+}
+
+// The initializer and conditional share one original opcode. Keep the exact
+// certified writer before that branch when instruction packets become nodes;
+// name/shape equality cannot enroll some unrelated assignment or condition.
+func (d *Decompiler) carriedPrimitiveSourceChain(chain []*Node, primary *Node, op *OpCode) bool {
+	if len(chain) != 2 || chain[1] != primary || op == nil || !isConditionalBranchOpcode(op.Instr.OpCode) || d.carriedPrimitivePhiSeeds[op] == nil {
+		return false
+	}
+	if chain[0].Statement != d.carriedPrimitivePhiSeeds[op] || chain[0].Id != primary.Id {
+		return false
+	}
+	_, ok := primary.Statement.(*statements.ConditionStatement)
+	return ok
 }

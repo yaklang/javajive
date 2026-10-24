@@ -46,17 +46,18 @@ type branchArrayCall struct {
 }
 
 type Decompiler struct {
-	stackValueProducers    map[values.JavaValue]*OpCode
-	stackLifetimeUseViews  map[values.JavaValue][]*values.SlotValue
-	stackLifetimeCopies    map[values.JavaValue]*values.JavaRef
-	comparisonWordInputs   map[*OpCode][]*statements.AssignStatement
-	effectfulStackPhiEdges map[*OpCode]*statements.AssignStatement
-	stackPhiSources        map[*values.SlotValue]*OpCode
-	stackPhiTypes          map[*values.SlotValue]types.JavaType
-	stackPhiDefinitions    map[*values.JavaRef]*values.SlotValue
-	evaluationSnapshots    map[*OpCode][]EvaluationSnapshot
-	constructorInitialized bool
-	FunctionType           *types.JavaFuncType
+	stackValueProducers      map[values.JavaValue]*OpCode
+	stackLifetimeUseViews    map[values.JavaValue][]*values.SlotValue
+	stackLifetimeCopies      map[values.JavaValue]*values.JavaRef
+	comparisonWordInputs     map[*OpCode][]*statements.AssignStatement
+	effectfulStackPhiEdges   map[*OpCode]*statements.AssignStatement
+	carriedPrimitivePhiSeeds map[*OpCode]*statements.AssignStatement
+	stackPhiSources          map[*values.SlotValue]*OpCode
+	stackPhiTypes            map[*values.SlotValue]types.JavaType
+	stackPhiDefinitions      map[*values.JavaRef]*values.SlotValue
+	evaluationSnapshots      map[*OpCode][]EvaluationSnapshot
+	constructorInitialized   bool
+	FunctionType             *types.JavaFuncType
 	// Physical lambda capture parameters, in their original descriptor
 	// order. This restricts source motion; it grants no factory/binding role.
 	LambdaCaptureOrderSlots []int
@@ -6470,6 +6471,9 @@ func (d *Decompiler) ParseStatement() error {
 		if assign := d.effectfulStackPhiEdges[opcode]; assign != nil {
 			defer func() { appendNode(assign) }()
 		}
+		if initial := d.carriedPrimitivePhiSeeds[opcode]; initial != nil {
+			appendNode(initial)
+		}
 		for _, snap := range d.evaluationSnapshots[opcode] {
 			if !snap.Operand {
 				d.inlineUnchangedLambdaLocalOperands(opcode, snap.Value)
@@ -7057,7 +7061,7 @@ func (d *Decompiler) ParseStatement() error {
 				// An edge-materialized phi is emitted after this opcode's
 				// own statement. Preserve both in their original order, e.g.
 				// CHECKCAST's definition followed by the incoming assignment.
-				if d.effectfulStackPhiEdges[op] == nil && monitorSnapshots[op].Ref == nil {
+				if d.effectfulStackPhiEdges[op] == nil && d.carriedPrimitivePhiSeeds[op] == nil && monitorSnapshots[op].Ref == nil {
 					continue
 				}
 			}
@@ -7082,7 +7086,7 @@ func (d *Decompiler) ParseStatement() error {
 					break
 				}
 			}
-			if !allAssign && !originalMonitorSnapshotChain(chain, primary, idToOpcode[primary.Id], monitorOwners, monitorSnapshots) {
+			if !allAssign && !d.carriedPrimitiveSourceChain(chain, primary, op) && !originalMonitorSnapshotChain(chain, primary, idToOpcode[primary.Id], monitorOwners, monitorSnapshots) {
 				continue
 			}
 			// Detach the orphan nodes from whatever the wiring loop hooked them to.
