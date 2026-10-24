@@ -39,13 +39,15 @@ func constructorNoargPreludeOriginal(t *testing.T, debug, category string, nop b
 		}
 		// Independent authored fixture: javac emits this/SUPER in bytes 0..3,
 		// followed by parameter/static-call/dead-store (or a no-argument call).
-		// The production
-		// packet recognizer and lowering are not used to build the original.
+		// The production packet recognizer and lowering do not build the original.
 		end, call := 9, 5
 		if category == "zero arguments" {
 			end, call = 8, 4
 		}
-		if code == nil || len(code.ExceptionTable) != 0 || len(code.Code) <= end || code.Code[0] != 0x2a || code.Code[1] != 0xb7 || call == 5 && code.Code[4] != 0x1c || code.Code[call] != 0xb8 || code.Code[end-1] != store {
+		if code == nil {
+			t.Fatal("missing authored constructor Code")
+		}
+		if len(code.ExceptionTable) != 0 || len(code.Code) <= end || code.Code[0] != 0x2a || code.Code[1] != 0xb7 || call == 5 && code.Code[4] != 0x1c || code.Code[call] != 0xb8 || code.Code[end-1] != store {
 			t.Fatalf("independent compiler fixture changed: %x", code.Code)
 		}
 		old := bytes.Clone(code.Code)
@@ -105,7 +107,17 @@ func TestAdversarialConstructorNoargPreludePreservesOriginalAbruptOrder(t *testi
 				for _, profile := range []SourceCompilerProfile{ModernJavac, NativeJavac8} {
 					t.Run(category+"/"+debug+"/"+padding+"/"+string(profile), func(t *testing.T) {
 						files := constructorNoargPreludeOriginal(t, debug, category, padding == "nop")
-						constructorNoargPreludeRoundTrip(t, files, debug, profile)
+						for _, policy := range []string{"normal", "no-source-rewrites", "no-core-cleanups"} {
+							t.Run(policy, func(t *testing.T) {
+								if policy == "no-source-rewrites" {
+									t.Setenv("JDEC_NO_SOURCE_REWRITES", "1")
+								}
+								if policy == "no-core-cleanups" {
+									t.Setenv("JDEC_NO_CORE_CLEANUPS", "1")
+								}
+								constructorNoargPreludeRoundTrip(t, files, debug, profile)
+							})
+						}
 					})
 				}
 			}
