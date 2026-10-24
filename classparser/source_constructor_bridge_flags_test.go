@@ -95,7 +95,8 @@ func TestAdversarialConstructorBridgeFlagsRequireOriginalAndFreshTypedPacket(t *
 					if variant == "unknown row flags" {
 						binary.BigEndian.PutUint16(info[3:], 0x0008)
 					}
-					attribute := &UnparsedAttribute{Name: "MethodParameters", AttrNameIndex: uint16(c.ConstantPoolManager.AddUtf8Info("MethodParameters")), Length: uint32(len(info)), Info: info}
+					c.ConstantPoolManager.AddUtf8Info("MethodParameters")
+					attribute := &UnparsedAttribute{Name: "MethodParameters", Length: uint32(len(info)), Info: info}
 					cb.Attributes = append(cb.Attributes, attribute)
 					if variant == "duplicate parameter table" {
 						cb.Attributes = append(cb.Attributes, attribute)
