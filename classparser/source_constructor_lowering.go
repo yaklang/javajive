@@ -42,6 +42,7 @@ type sourceConstructorLoweringPlan struct {
 	owner, descriptor, super, superDescriptor string
 	flags                                     uint16
 	captures                                  []constructorLoweringCapture
+	prelude                                   []constructorLoweringArgument
 	arguments                                 []constructorLoweringArgument
 	body                                      bool
 	qualified                                 *constructorLoweringQualifiedSuper
@@ -107,6 +108,7 @@ type constructorLoweringPacket struct {
 	firstEnd, secondEnd int
 	ops                 []*core.OpCode
 	argumentOrigins     []constructorLoweringOperandOrigin
+	preludeOrigins      []constructorLoweringOperandOrigin
 	qualifierGuards     []constructorLoweringQualifierGuard
 }
 
@@ -135,6 +137,14 @@ func constructorLoweringTypedPacketFor(object *ClassObject, method *MemberInfo, 
 }
 
 func constructorLoweringTypedPacketWithQualifier(object *ClassObject, method *MemberInfo, before, original, qualified bool, work *workbudget.Budget, provider callbinding.Provider, captureCount ...int) *constructorLoweringPacket {
+	limit := -1
+	if len(captureCount) == 1 {
+		limit = captureCount[0]
+	}
+	return constructorLoweringReadPacket(object, method, before, original, qualified, work, provider, limit, -1)
+}
+
+func constructorLoweringReadPacket(object *ClassObject, method *MemberInfo, before, original, qualified bool, work *workbudget.Budget, provider callbinding.Provider, captureLimit, preludeLimit int) *constructorLoweringPacket {
 	// The pre-nestmate capture packet has the same typed operands and receiver
 	// initialization cut in Java4 through Java8. Its whole instruction domain
 	// is checked below (including rejection of JSR/RET), independently of the
@@ -184,6 +194,7 @@ func constructorLoweringTypedPacketWithQualifier(object *ClassObject, method *Me
 	}
 	i, peak := 0, 1
 	var argumentOrigins []constructorLoweringOperandOrigin
+	var preludeOrigins []constructorLoweringOperandOrigin
 	var qualifierGuards []constructorLoweringQualifierGuard
 	widening := newConstructorWideningQuery(provider)
 	load := func(op *core.OpCode, slot int, typ string) bool {
@@ -192,7 +203,7 @@ func constructorLoweringTypedPacketWithQualifier(object *ClassObject, method *Me
 	captures := func() bool {
 		seen := map[sourceFieldIdentity]bool{}
 		for i+2 < len(ops) {
-			if len(captureCount) == 1 && len(p.captures) == captureCount[0] {
+			if captureLimit >= 0 && len(p.captures) == captureLimit {
 				break
 			}
 			member := constructorMotionMember(object, ops[i+2], core.OP_PUTFIELD)
@@ -251,14 +262,26 @@ func constructorLoweringTypedPacketWithQualifier(object *ClassObject, method *Me
 		}
 		return len(p.captures) > 0
 	}
+	prefix := func() bool {
+		start := i
+		if captures() {
+			return true
+		}
+		if i != start || len(p.captures) != 0 || preludeLimit == 0 {
+			return false
+		}
+		var known bool
+		p.prelude, preludeOrigins, known = constructorLoweringPrelude(object, code, ops, &i, slots, params, words, preludeLimit, &peak, work)
+		return known
+	}
 	delegate := func() bool {
 		var ok bool
 		p.arguments, argumentOrigins, p.superDescriptor, ok = constructorLoweringDelegateOperands(object, ops, &i, slots, params, p.super, widening, &peak, work, qualified, &qualifierGuards)
 		return ok
 	}
-	first, second := captures, delegate
+	first, second := prefix, delegate
 	if !before {
-		first, second = delegate, captures
+		first, second = delegate, prefix
 	}
 	if !first() || i >= len(ops) {
 		return nil
@@ -271,7 +294,7 @@ func constructorLoweringTypedPacketWithQualifier(object *ClassObject, method *Me
 	if qualified && (original || len(qualifierGuards) != 1 || before && !qualifierGuards[0].noop) {
 		return nil
 	}
-	return &constructorLoweringPacket{p, code, boundary, int(ops[i].CurrentOffset), ops, argumentOrigins, qualifierGuards}
+	return &constructorLoweringPacket{plan: p, code: code, firstEnd: boundary, secondEnd: int(ops[i].CurrentOffset), ops: ops, argumentOrigins: argumentOrigins, preludeOrigins: preludeOrigins, qualifierGuards: qualifierGuards}
 }
 
 func (c *ClassObjectDumper) planArtifactConstructorLowering(boundary *constructorSourceBoundary, code *CodeAttribute, method *MemberInfo, decoder *core.Decompiler) bool {
@@ -283,7 +306,10 @@ func (c *ClassObjectDumper) planArtifactConstructorLowering(boundary *constructo
 	// same initialization cut; lower() re-proves its exact fresh packet,
 	// verifier/debug offsets and typed SUPER operands before moving anything.
 	p := constructorLoweringTypedPacketFor(c.obj, method, true, true, c.Work, c.FuncCtx.InvocationMetadata)
-	if p == nil || p.code != code || len(p.plan.captures) != len(boundary.prefix) || boundary.delegate.OriginPC != boundary.pc || boundary.delegate.Kind != values.InvokeSpecial || boundary.delegate.Descriptor != p.plan.superDescriptor || strings.ReplaceAll(boundary.delegate.ClassName, ".", "/") != p.plan.super || p.secondEnd != boundary.pc+3 {
+	if p == nil || p.code != code || len(p.plan.captures)+len(p.plan.prelude) != len(boundary.prefix) || boundary.delegate.OriginPC != boundary.pc || boundary.delegate.Kind != values.InvokeSpecial || boundary.delegate.Descriptor != p.plan.superDescriptor || strings.ReplaceAll(boundary.delegate.ClassName, ".", "/") != p.plan.super || p.secondEnd != boundary.pc+3 {
+		return false
+	}
+	if len(p.plan.prelude) != 0 && !c.constructorLoweringPreludeSource(boundary, p, decoder, method) {
 		return false
 	}
 	params, _, _ := callbinding.Descriptor(p.plan.descriptor)
@@ -584,7 +610,7 @@ func (a *sourceConstructorLoweringAuthority) lower(original, compiled []byte, wo
 			d, _ := sourceBridgeUTF8(got, candidate.DescriptorIndex)
 			if n == "<init>" && d == packet.plan.descriptor {
 				matches++
-				fresh = constructorLoweringTypedPacketFor(got, candidate, true, false, work, provider, len(packet.plan.captures))
+				fresh = constructorLoweringReadPacket(got, candidate, true, false, false, work, provider, len(packet.plan.captures), len(packet.plan.prelude))
 			}
 		}
 		if matches != 1 || fresh == nil || !reflect.DeepEqual(packet.plan, fresh.plan) {
@@ -633,11 +659,11 @@ func (a *sourceConstructorLoweringAuthority) lower(original, compiled []byte, wo
 			return nil, constructorLoweringFailure(work, "original checked SUPER declaration changed")
 		}
 		permute := true
-		packet := constructorLoweringTypedPacketWithQualifier(got, method, false, false, plan.qualified != nil, work, provider, len(plan.captures))
+		packet := constructorLoweringReadPacket(got, method, false, false, plan.qualified != nil, work, provider, len(plan.captures), len(plan.prelude))
 		if packet == nil || !constructorLoweringExecutablePlanEqual(plan, packet.plan) {
 			// A separately verified already-lowered packet makes completion
 			// idempotent. An arbitrary constructor body is never a substitute.
-			packet = constructorLoweringTypedPacketWithQualifier(got, method, true, false, plan.qualified != nil, work, provider, len(plan.captures))
+			packet = constructorLoweringReadPacket(got, method, true, false, plan.qualified != nil, work, provider, len(plan.captures), len(plan.prelude))
 			if packet == nil || !constructorLoweringExecutablePlanEqual(plan, packet.plan) {
 				return nil, constructorLoweringFailure(work, "fresh constructor does not match original slots, fields and delegation")
 			}

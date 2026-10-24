@@ -157,6 +157,11 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 		return p, nil
 	}
 	if p.pc < 0 {
+		if p.delegate == nil && c.obj.GetSupperClassName() != "java/lang/Object" {
+			if prelude := c.planImplicitConstructorPrelude(code, body, method, p, decoder); prelude != nil {
+				return prelude, nil
+			}
+		}
 		// No-arg super calls may be omitted by the simulator even when the
 		// superclass observes this via virtual dispatch. An earlier capture
 		// write cannot silently move behind that implicit Java source call.
