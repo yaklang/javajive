@@ -40,7 +40,6 @@ class SuffixOwner {
   final T value;
   Member(T value,java.util.Map<Class<?>,java.util.function.BiConsumer<Object,T>> callbacks){this.value=value;this.callbacks=callbacks;}
   Object owner(){return SuffixOwner.this.token;}
-  void add(Object item){all.add(item);callbacks.get(String.class).accept(item,value);}
  }
  Member<String> make(String value,java.util.Map<Class<?>,java.util.function.BiConsumer<Object,String>> callbacks){return new Member<String>(value,callbacks);}
 }
@@ -55,7 +54,7 @@ class SuffixDriver {
    callbacks.put(String.class,(a,b)->{seen[0]=a;seen[1]=b;count[0]++;if(fail)throw expected;});
    SuffixOwner.Member<String> member=owner.make(value,callbacks);
    if(member.owner()!=token||member.value!=value||member.callbacks!=callbacks||!member.all.isEmpty())throw new AssertionError("constructor identity");
-   Throwable actual=null;try{member.add(item);}catch(Throwable t){actual=t;}
+   Throwable actual=null;try{member.all.add(item);member.callbacks.get(String.class).accept(item,member.value);}catch(Throwable t){actual=t;}
    if(actual!=(fail?expected:null)||count[0]!=1||seen[0]!=item||seen[1]!=value||member.all.size()!=1||member.all.get(0)!=item)throw new AssertionError("effects or failure",actual);
    rows++;
   }
