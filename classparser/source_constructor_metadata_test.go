@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -15,19 +16,22 @@ import (
 )
 
 func sourceConstructorMetadataTestInputs(t *testing.T) (map[string][]byte, map[string][]byte, *JarSourceArtifact) {
+	return sourceConstructorMetadataTestInputsAtTarget(t, 8, 8)
+}
+func sourceConstructorMetadataTestInputsAtTarget(t *testing.T, originalRelease, target int) (map[string][]byte, map[string][]byte, *JarSourceArtifact) {
 	t.Helper()
 	modern, _ := t04Tools(t)
 	native := os.Getenv("JAVA8_JAVAC")
 	if native == "" {
 		t.Skip("JAVA8_JAVAC required")
 	}
-	original := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, artifactAnonymousConstructorMetadataFixture, "ArtifactLambdaOwner", "source,lines,vars", false)
-	compiled := compileLambdaParameterMetadataFixture(t, modern, ModernJavac, artifactAnonymousConstructorMetadataFixture, "ArtifactLambdaOwner", "source,lines,vars", false)
+	original := compileLambdaParameterMetadataFixtureWithSourcesAtRelease(t, native, NativeJavac8, artifactAnonymousConstructorMetadataFixture, "ArtifactLambdaOwner", "source,lines,vars", nil, originalRelease, false)
+	compiled := compileLambdaParameterMetadataFixtureWithSourcesAtRelease(t, modern, ModernJavac, artifactAnonymousConstructorMetadataFixture, "ArtifactLambdaOwner", "source,lines,vars", nil, target, false)
 	jar := filepath.Join(t.TempDir(), "constructors.jar")
 	if err := os.WriteFile(jar, t23Zip(t, original), 0600); err != nil {
 		t.Fatal(err)
 	}
-	artifact, err := NewJarSourceArtifactFromLocal(jar, 8, ModernJavac, nil)
+	artifact, err := NewJarSourceArtifactFromLocal(jar, target, ModernJavac, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +121,15 @@ func TestNativeSourceConstructorMetadataRequiresCompletedTypedFamily(t *testing.
 }
 
 func TestNativeSourceConstructorMetadataRejectsChangedPortsAndAttributes(t *testing.T) {
-	originals, compiledFiles, artifact := sourceConstructorMetadataTestInputs(t)
+	testConstructorMetadataRejectsChangedPorts(t, 8, 8)
+}
+func TestAdversarialImplicitConstructorMetadataRejectsCrossTargetDrift(t *testing.T) {
+	for _, pair := range [][2]int{{5, 8}, {7, 8}, {5, 16}, {7, 16}, {8, 16}} {
+		t.Run(fmt.Sprintf("original%d/target%d", pair[0], pair[1]), func(t *testing.T) { testConstructorMetadataRejectsChangedPorts(t, pair[0], pair[1]) })
+	}
+}
+func testConstructorMetadataRejectsChangedPorts(t *testing.T, originalRelease, target int) {
+	originals, compiledFiles, artifact := sourceConstructorMetadataTestInputsAtTarget(t, originalRelease, target)
 	if _, err := artifact.ReadFile("ArtifactLambdaOwner.class"); err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +138,7 @@ func TestNativeSourceConstructorMetadataRejectsChangedPortsAndAttributes(t *test
 		t.Fatal("independent wide-capture difference required")
 	}
 	original, compiled := originals[plan.owner+".class"], compiledFiles[plan.owner+".class"]
-	for _, variant := range []string{"control", "opaque attribute retained", "nil plan", "stale original", "truncated original", "truncated compiled", "wrong owner", "wrong descriptor", "wrong role", "swapped roles", "wrong absence", "wrong class flags", "wrong class version", "changed constructor flags", "extra constructor", "missing constructor", "named hidden parameter", "explicit parameter flags", "duplicate parameter table", "wrong parameter count", "wrong parameter length", "unknown signature", "duplicate signature", "budget", "canceled", "late output budget"} {
+	for _, variant := range []string{"control", "opaque attribute retained", "nil plan", "stale original", "truncated original", "truncated compiled", "wrong owner", "wrong descriptor", "wrong role", "swapped roles", "wrong absence", "wrong class flags", "wrong class version", "wrong selected target", "changed constructor flags", "extra constructor", "missing constructor", "named hidden parameter", "explicit parameter flags", "duplicate parameter table", "wrong parameter count", "wrong parameter length", "unknown signature", "duplicate signature", "budget", "canceled", "late output budget"} {
 		t.Run(variant, func(t *testing.T) {
 			p := *plan
 			p.flags = append([]uint16(nil), plan.flags...)
@@ -188,6 +200,8 @@ func TestNativeSourceConstructorMetadataRejectsChangedPortsAndAttributes(t *test
 			case "wrong class version":
 				obj.MajorVersion++
 				mutated = true
+			case "wrong selected target":
+				p.sourceMajor++
 			case "changed constructor flags":
 				ctor.AccessFlags ^= 1
 				mutated = true
