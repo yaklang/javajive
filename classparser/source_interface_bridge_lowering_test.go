@@ -23,7 +23,7 @@ func TestLegacyInterfaceBridgeRequiresOriginalHierarchyAndPureFreshPacket(t *tes
 	originals := compileLambdaParameterMetadataFixtureWithSourcesAtRelease(t, native, NativeJavac8, source, "ProtocolOwner", "none", nil, 5, false)
 	for _, release := range []int{8, 16} {
 		compiled := compileLambdaParameterMetadataFixtureWithSourcesAtRelease(t, modern, ModernJavac, source, "ProtocolOwner", "none", nil, release, false)["ProtocolOwner.class"]
-		for _, variant := range []string{"control", "unreturned", "stale original", "unknown ancestor", "ancestor default", "ancestor cycle", "receiver", "wide argument", "cast", "invoke kind", "invoke count", "return", "extra effect", "handler", "stack", "locals", "bridge flags", "unknown attribute", "extra ordinary method", "missing original method", "changed original flags", "abstract target code", "fresh preview", "fresh future", "method handle", "budget", "output", "canceled"} {
+		for _, variant := range []string{"control", "unreturned", "stale original", "unknown ancestor", "ancestor default", "ancestor cycle", "receiver", "wide argument", "cast", "invoke kind", "invoke count", "return", "extra effect", "handler", "stack", "locals", "bridge flags", "unknown attribute", "short visible parameter annotations", "short invisible parameter annotations", "extra ordinary method", "missing original method", "changed original flags", "abstract target code", "fresh preview", "fresh future", "method handle", "budget", "output", "canceled"} {
 			t.Run(fmt.Sprintf("release%d/%s", release, variant), func(t *testing.T) {
 				dependency := bytes.Clone(originals["GenericPort.class"])
 				resolve := func(n string) ([]byte, bool) { return dependency, n == "GenericPort" && dependency != nil }
@@ -115,6 +115,13 @@ func TestLegacyInterfaceBridgeRequiresOriginalHierarchyAndPureFreshPacket(t *tes
 				case "unknown attribute":
 					object.ConstantPoolManager.AddUtf8Info("OpaqueBridge")
 					bridge.Attributes = append(bridge.Attributes, &UnparsedAttribute{Name: "OpaqueBridge"})
+				case "short visible parameter annotations", "short invisible parameter annotations":
+					name := "RuntimeVisibleParameterAnnotations"
+					if variant == "short invisible parameter annotations" {
+						name = "RuntimeInvisibleParameterAnnotations"
+					}
+					object.ConstantPoolManager.AddUtf8Info(name)
+					bridge.Attributes = append(bridge.Attributes, &UnparsedAttribute{Name: name, Length: 3, Info: []byte{1, 0, 0}})
 				case "extra ordinary method":
 					copy := *bridge
 					copy.NameIndex = uint16(object.ConstantPoolManager.AddUtf8Info("unrelated"))
