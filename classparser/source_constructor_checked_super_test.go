@@ -10,7 +10,7 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
-func TestSourceConstructorCheckedSuperRequiresCompleteOriginalContract(t *testing.T) {
+func TestAdversarialSourceConstructorCheckedSuperRequiresCompleteOriginalContract(t *testing.T) {
 	original, _, artifact := constructorSuffixFamilyAtTargetWithCompilerRoundTrip(t, constructorCheckedSuperFixture, "none", []string{"SuffixOwner$1"}, "24:checked:super:identity:early:capture:metadata\n", 4, 8, ModernJavac)
 	reader := artifact.source.jar.nativeMemberReader(mustParseLowering(t, bytes.Clone(original)))
 	metadata := reader.buildInvocationMetadata()
@@ -101,7 +101,7 @@ func TestSourceConstructorCheckedSuperRequiresCompleteOriginalContract(t *testin
 	}
 }
 
-func TestSourceConstructorCheckedSuperFinishRejectsUnownedMetadata(t *testing.T) {
+func TestAdversarialSourceConstructorCheckedSuperFinishRejectsUnownedMetadata(t *testing.T) {
 	original, compiled, artifact := constructorSuffixFamilyAtTargetWithCompilerRoundTrip(t, constructorCheckedSuperFixture, "none", []string{"SuffixOwner$1"}, "24:checked:super:identity:early:capture:metadata\n", 4, 8, ModernJavac)
 	base := artifact.source.jar.sourceConstructorLowering
 	publication := base.active["SuffixOwner$1"]

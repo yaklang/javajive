@@ -8,7 +8,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 )
 
-func TestSourceConstructorPreludeRejectsLiveOrProtectedOriginalEffects(t *testing.T) {
+func TestAdversarialSourceConstructorPreludeRejectsLiveOrProtectedOriginalEffects(t *testing.T) {
 	files := constructorNoargPreludeOriginal(t, "none", "reference", true)
 	for _, variant := range []string{"control", "result read", "parameter overwritten", "wide category", "effectful argument", "protected prefix", "call removed"} {
 		t.Run(variant, func(t *testing.T) {
@@ -55,7 +55,7 @@ func TestSourceConstructorPreludeRejectsLiveOrProtectedOriginalEffects(t *testin
 	}
 }
 
-func TestSourceConstructorPreludeCompletionRejectsChangedInvocations(t *testing.T) {
+func TestAdversarialSourceConstructorPreludeCompletionRejectsChangedInvocations(t *testing.T) {
 	files := constructorNoargPreludeOriginal(t, "none", "reference", true)
 	original, fresh, artifact := constructorNoargPreludeRoundTrip(t, files, "none", ModernJavac)
 	base := artifact.source.jar.sourceConstructorLowering
@@ -132,7 +132,7 @@ func TestSourceConstructorPreludeCompletionRejectsChangedInvocations(t *testing.
 	}
 }
 
-func TestSourceConstructorPreludeCompletionKeepsInvocationMultiplicityAndOrder(t *testing.T) {
+func TestAdversarialSourceConstructorPreludeCompletionKeepsInvocationMultiplicityAndOrder(t *testing.T) {
 	files := constructorNoargPreludeOriginal(t, "none", "ordered pair", true)
 	original, fresh, artifact := constructorNoargPreludeRoundTrip(t, files, "none", ModernJavac)
 	for _, variant := range []string{"control", "reversed", "duplicated"} {

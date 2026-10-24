@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestConstructorBindingPublicationRejectsStaleWriterAndOriginal(t *testing.T) {
+func TestAdversarialConstructorBindingPublicationRejectsStaleWriterAndOriginal(t *testing.T) {
 	native := os.Getenv("JAVA8_JAVAC")
 	if native == "" {
 		t.Fatal("original native compiler required")
