@@ -117,6 +117,9 @@ func (a *JarReconstructionArtifact) FinishClass(name string, compiled []byte) ([
 	if release, candidate, physical := physicalClassNamespace(name); physical {
 		z, logical = z.sourceReleaseView(release), candidate
 	}
+	if z != nil && strings.HasSuffix(logical, ".class") && packageDescriptorName(strings.TrimSuffix(logical, ".class")) {
+		return a.source.restoreClassMetadata(name, compiled, sourceCaptureMetadataTarget{})
+	}
 	if z == nil || !strings.HasSuffix(logical, ".class") || !nativeSourceBinaryName(strings.TrimSuffix(logical, ".class")) {
 		return nil, fmt.Errorf("constructor lowering: noncanonical class path %q", name)
 	}

@@ -732,16 +732,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		}
 	}
 	c.sourceDeclarationAccessKnown = true
-	// module-info / package-info are synthetic descriptor pseudo-classes; their internal
-	// name ("module-info" / "package-info") is not a legal Java identifier, so emitting
-	// `class module-info {}` yields un-parseable source. Render a valid minimal compilation
-	// unit instead. (Full JPMS module / package-info annotation reconstruction is a
-	// separate feature.)
-	if rawClassName == "module-info" || rawClassName == "package-info" {
+	// Module declarations require a separate JPMS reconstruction contract.
+	// Package descriptors are rendered below with their actual annotations.
+	if rawClassName == "module-info" {
 		var sb strings.Builder
-		if rawClassName == "package-info" && packageName != "" {
-			sb.WriteString(fmt.Sprintf("package %s;\n\n", packageName))
-		}
 		sb.WriteString(fmt.Sprintf("// decompiled from a synthetic %s descriptor\n", rawClassName))
 		out := sb.String()
 		if err := c.ensureOutput(int64(len(out))); err != nil {
@@ -824,6 +818,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	}
 	if err := c.consultResolverForCancel(); err != nil {
 		return "", err
+	}
+	if rawClassName == "package-info" {
+		return c.dumpPackageDescriptor()
 	}
 	buildInLib := []string{
 		//c.PackageName + ".*",

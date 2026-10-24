@@ -100,7 +100,8 @@ func (a *JarSourceArtifact) restoreClassMetadata(name string, compiled []byte, t
 	if release, candidate, physical := physicalClassNamespace(name); physical {
 		z, logical = z.sourceReleaseView(release), candidate
 	}
-	if z == nil || !strings.HasSuffix(logical, ".class") || !nativeSourceBinaryName(strings.TrimSuffix(logical, ".class")) {
+	packageInfo := strings.HasSuffix(logical, ".class") && packageDescriptorName(strings.TrimSuffix(logical, ".class"))
+	if z == nil || !strings.HasSuffix(logical, ".class") || !nativeSourceBinaryName(strings.TrimSuffix(logical, ".class")) && !packageInfo {
 		return nil, fmt.Errorf("field metadata: noncanonical class path %q", name)
 	}
 	original, err := z.readJarEntry(logical)
@@ -114,6 +115,9 @@ func (a *JarSourceArtifact) restoreClassMetadata(name string, compiled []byte, t
 	}
 	if object.GetClassName()+".class" != logical {
 		return nil, fmt.Errorf("field metadata: archive path and class identity disagree")
+	}
+	if packageInfo {
+		return finishPackageDescriptor(original, compiled, reader.Work)
 	}
 	if z.sourceFieldMetadata != nil && z.sourceFieldMetadata.hasAssertionStorage(object.GetClassName()) {
 		compiled, err = z.sourceFieldMetadata.restoreAssertionStorage(original, compiled, reader.Work)
