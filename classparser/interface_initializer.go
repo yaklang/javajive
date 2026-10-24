@@ -379,6 +379,17 @@ func (c *ClassObjectDumper) renderInterfaceInitializers(body []statements.Statem
 	if directExpressions {
 		for i := range plans {
 			if value, proved := interfaceInitializerArrayExpression(&plans[i], code); proved {
+				fieldType, err := c.interfaceFieldType(plans[i].write.name, plans[i].write.descriptor)
+				if err != nil {
+					return nil, err
+				}
+				if _, generic := types.AsParameterizedType(fieldType); generic {
+					view, closed := values.FixedFactoryAssignmentView(value, fieldType, ctx)
+					if !closed {
+						continue
+					}
+					value = view
+				}
 				plans[i].prefix, plans[i].value = nil, value
 			} else if value, proved := c.interfaceInitializerLambdaExpression(&plans[i], code); proved {
 				plans[i].prefix, plans[i].value = nil, value
