@@ -280,6 +280,64 @@ func (a *sourceConstructorLoweringAuthority) lowerLegacyInterfaceBridges(owner s
 		}
 		edits = append(edits, compiledMetadataEdit{layout.methods[method], nil})
 	}
+	// Interface invocation can inherit the original abstract declaration.
+	// A direct default-super consumer has different selection semantics and
+	// is outside this obligation, even when its symbolic descriptor matches.
+	removedRefs := map[uint16]bool{}
+	for i, constant := range got.ConstantPool {
+		if !nativeProofWork(work, 1) {
+			return decline()
+		}
+		ref, ok := constant.(*ConstantInterfaceMethodrefInfo)
+		if !ok || ref == nil {
+			continue
+		}
+		refOwner, known := sourceBridgeClassName(got, ref.ClassIndex)
+		if !known || int(ref.NameAndTypeIndex) > len(got.ConstantPool) || ref.NameAndTypeIndex == 0 {
+			return decline()
+		}
+		nt, ok := got.ConstantPool[ref.NameAndTypeIndex-1].(*ConstantNameAndTypeInfo)
+		if !ok || nt == nil {
+			return decline()
+		}
+		n, nk := sourceBridgeUTF8(got, nt.NameIndex)
+		desc, dk := sourceBridgeUTF8(got, nt.DescriptorIndex)
+		if !nk || !dk {
+			return decline()
+		}
+		if refOwner == owner && before[n+"\x00"+desc] == nil && after[n+"\x00"+desc] != nil {
+			removedRefs[uint16(i+1)] = true
+		}
+	}
+	for _, constant := range got.ConstantPool {
+		if !nativeProofWork(work, 1) {
+			return decline()
+		}
+		if handle, ok := constant.(*ConstantMethodHandleInfo); ok && handle != nil && removedRefs[handle.ReferenceIndex] {
+			return decline()
+		}
+	}
+	if len(removedRefs) > 0 {
+		for _, method := range got.Methods {
+			code := constructorLoweringCode(method)
+			if code == nil {
+				continue
+			}
+			if !nativeProofWork(work, int64(len(code.Code))+1) {
+				return decline()
+			}
+			decoder := core.NewDecompiler(code.Code, func(i int) values.JavaValue { return GetValueFromCP(got.ConstantPool, i) })
+			decoder.Work = work
+			if decoder.ParseOpcode() != nil {
+				return decline()
+			}
+			for _, op := range constructorMotionOps(decoder) {
+				if (op.Instr.OpCode == core.OP_INVOKESPECIAL || op.Instr.OpCode == core.OP_INVOKESTATIC || op.Instr.OpCode == core.OP_INVOKEVIRTUAL) && len(op.Data) >= 2 && removedRefs[core.Convert2bytesToInt(op.Data[:2])] {
+					return decline()
+				}
+			}
+		}
+	}
 	first := len(compiled)
 	for _, span := range layout.methods {
 		if span.start < first {
