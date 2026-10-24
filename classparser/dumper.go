@@ -13836,8 +13836,10 @@ func methodBodyIsTriviallyEmpty(method *MemberInfo) bool {
 //   - it takes no parameters (descriptor "()V") -- javac never auto-generates a parameterized ctor;
 //   - it is the class's SOLE constructor -- if other ctors exist, no default is generated, so this
 //     no-arg ctor was written explicitly and is part of the public API;
-//   - its accessibility matches the implicit default's (public for a public class, package-private
-//     otherwise) -- a non-public sole ctor (singleton pattern) must be kept or accessibility widens.
+//   - its accessibility matches the emitted declaration's exact access. A
+//     private/protected member class has a private/protected implicit ctor,
+//     not a package-private one. Preserve an explicit declaration when those
+//     contracts differ, even if its body is just the same super() call.
 //
 // Any empty-body constructor failing these is programmer-declared and MUST be emitted.
 func (c *ClassObjectDumper) isOmittableDefaultCtor(descriptor string, ctorAccessVerbose []string) bool {
@@ -13869,7 +13871,11 @@ func (c *ClassObjectDumper) isOmittableDefaultCtor(descriptor string, ctorAccess
 	if !c.sourceDeclarationAccessKnown {
 		return false
 	}
-	return (c.sourceDeclarationAccess&7 == 1) == slices.Contains(ctorAccessVerbose, "public")
+	ctorAccess := uint16(0)
+	if slices.Contains(ctorAccessVerbose, "public") {
+		ctorAccess = 1
+	}
+	return c.sourceDeclarationAccess&7 == ctorAccess
 }
 
 func isIgnorableAssertionOnlyClinit(code string) bool {
