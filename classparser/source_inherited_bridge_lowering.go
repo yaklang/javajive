@@ -35,6 +35,9 @@ func inheritedBridgeForwardPacket(object *ClassObject, method *MemberInfo, opcod
 	if !nk || !dk || !class_context.PreservesJava8Identifier(name) || err != nil {
 		return nil
 	}
+	if _, valid := inheritedBridgeAnnotationTables(method, desc, work); !valid {
+		return nil
+	}
 	code := constructorLoweringCode(method)
 	if code == nil || len(code.Code) > 512 || len(code.ExceptionTable) != 0 || !nativeProofWork(work, int64(len(code.Code))+1) {
 		return nil
@@ -71,6 +74,9 @@ func inheritedBridgeForwardPacket(object *ClassObject, method *MemberInfo, opcod
 				}
 				p.throws = append(p.throws, n)
 			}
+		case *RuntimeVisibleAnnotationsAttribute, *RuntimeVisibleParameterAnnotationsAttribute:
+			// Validated separately above; fresh completion must retain the
+			// exact value graphs at the same declaration/parameter positions.
 		default:
 			return nil
 		}
@@ -172,6 +178,18 @@ func (c *ClassObjectDumper) inheritedBridgeSource(method *MemberInfo) *dumpedMet
 	if p == nil || p.implicitVisibilityBridge {
 		return nil
 	}
+	// Several erased return descriptors may share one narrow source override.
+	// A single declaration can regenerate their annotations only when those
+	// original metadata contracts agree; otherwise keep the existing refusal.
+	for _, other := range c.obj.Methods {
+		if other == method || other == nil || other.AccessFlags != 0x1041 {
+			continue
+		}
+		q := c.inheritedBridgeOriginal(other)
+		if q != nil && q.name == p.name && q.targetDescriptor == p.targetDescriptor && !inheritedBridgeAnnotationsEqual(method, p.descriptor, other, q.descriptor, c.Work) {
+			return nil
+		}
+	}
 	typ, err := types.ParseMethodDescriptor(p.targetDescriptor)
 	if err != nil {
 		return nil
@@ -182,6 +200,19 @@ func (c *ClassObjectDumper) inheritedBridgeSource(method *MemberInfo) *dumpedMet
 		name := fmt.Sprintf("bridgeArgument%d", i)
 		params = append(params, t.String(c.FuncCtx)+" "+name)
 		args = append(args, name)
+	}
+	params = c.applyParameterAnnotations(method, p.name, p.descriptor, params)
+	var annotations []string
+	for _, attribute := range method.Attributes {
+		if table, ok := attribute.(*RuntimeVisibleAnnotationsAttribute); ok {
+			for _, annotation := range table.Annotations {
+				text, err := c.DumpAnnotation(annotation)
+				if err != nil {
+					return nil
+				}
+				annotations = append(annotations, text)
+			}
+		}
 	}
 	throws := []string{}
 	for _, n := range p.throws {
@@ -201,6 +232,9 @@ func (c *ClassObjectDumper) inheritedBridgeSource(method *MemberInfo) *dumpedMet
 		call = "return " + call
 	}
 	source := "public " + ft.ReturnType.String(c.FuncCtx) + " " + p.name + "(" + strings.Join(params, ", ") + ")" + tail + " {\n\t" + call + "\n}"
+	if len(annotations) > 0 {
+		source = strings.Join(annotations, "\n") + "\n" + source
+	}
 	return &dumpedMethods{methodName: p.name, descriptor: p.targetDescriptor, code: source, bodyCode: source, inheritedBridge: p, inheritedBridgeCode: source}
 }
 
@@ -332,6 +366,9 @@ func (a *sourceConstructorLoweringAuthority) lowerInheritedBridges(owner string,
 			continue
 		}
 		bridge := after[k]
+		if !inheritedBridgeAnnotationsEqual(m, p.descriptor, bridge, p.descriptor, work) {
+			return decline()
+		}
 		if p.descriptor == p.targetDescriptor {
 			// A visibility bridge need not change the descriptor. Its explicit
 			// source override already is the entire forwarding program: retain
@@ -354,7 +391,7 @@ func (a *sourceConstructorLoweringAuthority) lowerInheritedBridges(owner string,
 			continue
 		}
 		helper := after[p.name+"\x00"+p.targetDescriptor]
-		if helper == nil || before[key(got, helper)] != nil || helper.AccessFlags != 1 || bridge.AccessFlags != m.AccessFlags {
+		if helper == nil || before[key(got, helper)] != nil || helper.AccessFlags != 1 || bridge.AccessFlags != m.AccessFlags || !inheritedBridgeAnnotationsEqual(m, p.descriptor, helper, p.targetDescriptor, work) {
 			return decline()
 		}
 		fresh := inheritedBridgeForwardPacket(got, helper, core.OP_INVOKESPECIAL, work)
