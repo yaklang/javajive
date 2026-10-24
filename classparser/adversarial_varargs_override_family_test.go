@@ -27,7 +27,7 @@ func TestAdversarialVarargsReferenceOverrideFamilyRetainsOriginalSelection(t *te
 					label = "named"
 				}
 				t.Run(label, func(t *testing.T) {
-					for _, kind := range []string{"covariant bridge", "same return override", "distinct overload", "interface declaration", "transitive override", "covariant bridge chain"} {
+					for _, kind := range []string{"covariant bridge", "same return override", "distinct overload", "interface declaration", "transitive override", "covariant bridge chain", "private fixed overload"} {
 						t.Run(kind, func(t *testing.T) {
 							declaration := "public Object append(Object...items){throw new AssertionError(\"parent dispatch\");}"
 							if kind == "same return override" {
@@ -38,6 +38,8 @@ func TestAdversarialVarargsReferenceOverrideFamilyRetainsOriginalSelection(t *te
 							}
 							fixture := strings.Replace(localVarargsReceiverFixture, "class LocalReceiverTarget {", "class LocalReceiverBase {"+declaration+"}\nclass LocalReceiverTarget extends LocalReceiverBase {", 1)
 							switch kind {
+							case "private fixed overload":
+								fixture = strings.Replace(fixture, "class LocalReceiverTarget extends LocalReceiverBase {", "class LocalReceiverTarget extends LocalReceiverBase {private Object append(Object item){throw new AssertionError(\"private candidate selected\");}", 1)
 							case "interface declaration":
 								fixture = strings.Replace(localVarargsReceiverFixture, "class LocalReceiverTarget {", "interface LocalReceiverBase {Object append(Object...items);}\nclass LocalReceiverTarget implements LocalReceiverBase {", 1)
 							case "transitive override", "covariant bridge chain":
