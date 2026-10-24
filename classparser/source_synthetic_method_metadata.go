@@ -128,7 +128,7 @@ func syntheticConstructorMarkerProof(original, fresh *ClassObject, work *workbud
 	// constructor. Its explicitly emitted forwarding declaration still needs
 	// the unspellable synthetic bit. This accepts no new original ownership
 	// protocol, no missing method, and no change to the freshly compiled Code.
-	if fresh == nil || fresh.MajorVersion < 49 || fresh.MajorVersion > 65 || fresh.MinorVersion != 0 || !nativeAccessorConstantNamespace(fresh, work) {
+	if fresh == nil || fresh.MajorVersion < 49 || fresh.MajorVersion > 65 || fresh.MinorVersion != 0 || fresh.MajorVersion < 55 && (hasOriginalNestAttribute(fresh, "NestHost") || hasOriginalNestAttribute(fresh, "NestMembers")) || !nativeAccessorConstantNamespace(fresh, work) {
 		return nil
 	}
 	a, b := NewClassObjectDumper(original), NewClassObjectDumper(fresh)

@@ -27,7 +27,17 @@ func TestNativeMemberPrivateSuperBridgeRequiresOriginalOperands(t *testing.T) {
 			parent := p.children["SuperOwner$Parent"]
 			var ctor *nativeMemberConstructor
 			for _, c := range child.constructors {
-				ctor = c
+				// A THIS-forwarding access constructor is now represented too.
+				// Select the actual SUPER edge, not map iteration's last entry.
+				if c.delegateOwner == parent.object.GetClassName() {
+					if ctor != nil {
+						t.Fatal("ambiguous original SUPER constructor")
+					}
+					ctor = c
+				}
+			}
+			if ctor == nil {
+				t.Fatal("missing original SUPER constructor")
 			}
 			bridge := parent.accessBridges[ctor.delegateDescriptor]
 			if bridge == nil {
