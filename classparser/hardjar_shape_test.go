@@ -382,39 +382,32 @@ func TestCallSiteDupLocalsJarFS(t *testing.T) {
 		t.Skip(err)
 	}
 	entry := "org/springframework/beans/factory/groovy/GroovyDynamicElementReader.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if strings.Contains(on, "CallSite[] var5 = $getCallSiteArray()") {
-		t.Fatalf("ON still redeclares var5 as CallSite[]:\n%s", clipForTest(on, "var5"))
-	}
-	if !strings.Contains(on, "$getCallSiteArray()") {
-		t.Fatalf("ON missing CallSite bootstrap:\n%s", clipForTest(on, "CallSite"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if !strings.Contains(off, "CallSite[] var5 = $getCallSiteArray()") {
-		t.Fatalf("OFF missing unfixed CallSite[] var5:\n%s", clipForTest(off, "var5"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
+	// The allocation identity fix must survive disabling all old source
+	// rewrites. Requiring the OFF path to redeclare var5 would now reward a
+	// regression; the original-first operand-before-NEW matrix exercises the
+	// same identity rule with independently authored bytecode and JVM oracles.
+	for _, setting := range []string{"", "1"} {
+		t.Run("source-shapes="+setting, func(t *testing.T) {
+			t.Setenv("JDEC_HARDJAR_SHAPE_OFF", setting)
+			jfs, err := NewJarFSFromLocal(jar)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer jfs.Close()
+			source, err := jfs.ReadFile(entry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := reviewedSourceMethod(t, string(source), `invokeMethod\s*\(`)
+			refs := regexp.MustCompile(`Reference\s+(\w+)\s*=\s*new Reference\(`).FindAllStringSubmatch(body, -1)
+			bootstrap := requireReviewedPattern(t, body, `CallSite\[\]\s+(\w+)\s*=\s*\$getCallSiteArray\(\)`)[1]
+			if len(refs) != 2 || refs[0][1] == refs[1][1] || refs[0][1] == bootstrap || refs[1][1] == bootstrap {
+				t.Fatalf("independent allocation and bootstrap declarations collided: %s", body)
+			}
+			if !regexp.MustCompile(`\b` + regexp.QuoteMeta(bootstrap) + `\[`).MatchString(body) {
+				t.Fatalf("bootstrap declaration lost its uses: %s", body)
+			}
+		})
 	}
 }
 

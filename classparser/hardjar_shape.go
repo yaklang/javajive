@@ -37,7 +37,8 @@ func fixHardjarCodeShapes(body string) string {
 	body = fixEnumAssignedStaticField(body)
 	// Monitor and numeric locals can have related generated names. Their
 	// types come from the IR; a source-name prefix cannot prove identity.
-	body = fixCallSiteDupLocals(body)
+	// Local declarations, including forwarded allocations, are named by IR
+	// identity. Bootstrap spelling cannot authorize a textual scope rewrite.
 	body = fixForNameAddAnnoClass(body)
 	body = fixCachedFieldReturn(body)
 	body = fixStringCastToClass(body)
@@ -869,46 +870,6 @@ func fixDupLocalDecls(body string) string {
 		}
 		mend := nextMemberStart(body, mstart+2)
 		chunk := body[mstart:mend]
-		neu := rewriteDupLocalsInMethod(chunk)
-		if neu != chunk {
-			body = body[:mstart] + neu + body[mend:]
-			from = mstart + len(neu)
-			continue
-		}
-		from = mend
-	}
-}
-
-// fixCallSiteDupLocals renames a later declaration of the same varN inside a
-// method that contains `$getCallSiteArray()` (Groovy invokedynamic bootstrap).
-// Those methods dump SSA-style re-decls (`Reference var5` then `CallSite[] var5`)
-// which javac rejects. Other methods are left alone — a global rename over-fired
-// on real Java (okhttp ExchangeFinder).
-func fixCallSiteDupLocals(body string) string {
-	if !strings.Contains(body, "$getCallSiteArray()") {
-		return body
-	}
-	from := 0
-	for {
-		rel := strings.Index(body[from:], "\n\t")
-		if rel < 0 {
-			return body
-		}
-		mstart := from + rel
-		if mstart+2 >= len(body) {
-			return body
-		}
-		c := body[mstart+2]
-		if c == '\t' || c == '\n' || c == ' ' || c == '/' {
-			from = mstart + 2
-			continue
-		}
-		mend := nextMemberStart(body, mstart+2)
-		chunk := body[mstart:mend]
-		if !strings.Contains(chunk, "$getCallSiteArray()") {
-			from = mend
-			continue
-		}
 		neu := rewriteDupLocalsInMethod(chunk)
 		if neu != chunk {
 			body = body[:mstart] + neu + body[mend:]
