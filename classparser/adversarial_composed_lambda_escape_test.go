@@ -2,6 +2,7 @@ package javaclassparser
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"os/exec"
@@ -36,6 +37,9 @@ func TestAdversarialLambdaAndCheckedEscapeObligationsCompose(t *testing.T) {
 class EscapeEffects {static String trace="";static final EscapeFailure checked=new EscapeFailure();static final RuntimeException unchecked=new IllegalStateException("same");static int calculate(int mode)throws EscapeFailure {trace+="C";if(mode==0)throw checked;if(mode==1)throw unchecked;return mode*31+7;}}
 public class ` + owner + ` {public static class Child {public static int delta(){return 17;}}static final java.util.function.IntUnaryOperator SHIFT=(x)->x*3+1;static java.util.function.IntUnaryOperator make(int base){return (x)->x+base;}public static int exercise(int mode)throws EscapeFailure {try{return SHIFT.applyAsInt(EscapeEffects.calculate(mode))+make(mode).applyAsInt(5);}finally{EscapeEffects.trace+="F";}}}
 class EscapeDriver {public static void main(String[]args){if(` + owner + `.Child.delta()!=17||` + owner + `.Child.class.getDeclaringClass()!=` + owner + `.class||` + owner + `.class.getDeclaredMethods().length!=4)throw new AssertionError("original method universe");try{if(` + owner + `.class.getDeclaredMethod("exercise",int.class).getExceptionTypes().length!=0)throw new AssertionError("original empty exceptions");}catch(NoSuchMethodException e){throw new AssertionError(e);}int rows=0;for(int mode:new int[]{0,1,2,-1,Integer.MIN_VALUE,Integer.MAX_VALUE}){EscapeEffects.trace="";try{int value=` + owner + `.exercise(mode);int expected=java.math.BigInteger.valueOf(mode).multiply(java.math.BigInteger.valueOf(94)).add(java.math.BigInteger.valueOf(27)).intValue();if(mode<2&&mode>=0||value!=expected||!EscapeEffects.trace.equals("CF"))throw new AssertionError("normal value/order");}catch(Throwable e){if(e!=(mode==0?EscapeEffects.checked:mode==1?EscapeEffects.unchecked:null)||!EscapeEffects.trace.equals("CF"))throw new AssertionError("exception identity/order",e);}rows++;}System.out.println(rows+":escape:identity:finally:method-universe");}}`
+					if owner == "RenamedEscapeOwner" {
+						fixture = strings.ReplaceAll(fixture, "make(", "构造𐐀(")
+					}
 					files := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, fixture, owner, debug, false)
 					object := mustParseLowering(t, files[owner+".class"])
 					// Alpha-rename only private lambda implementations and their
@@ -143,6 +147,9 @@ class EscapeDriver {public static void main(String[]args){if(` + owner + `.Child
 					if err != nil || !bytes.Equal(source, published) {
 						t.Fatal("same complete native source must activate", err)
 					}
+					if debug == "none" {
+						checkComposedEscapeAuthorityBoundaries(t, owner, files[owner+".class"], unreturned, artifact)
+					}
 					for _, binary := range []string{owner, owner + "$Child"} {
 						fresh, err := os.ReadFile(filepath.Join(out, binary+".class"))
 						if err != nil {
@@ -164,5 +171,91 @@ class EscapeDriver {public static void main(String[]args){if(` + owner + `.Child
 				})
 			}
 		}
+	}
+}
+
+// Mutate the independently compiled inputs and the actual activated receipts,
+// never a fabricated positive plan. The executable pass must preserve the
+// caller's bytes and refuse composition when any identity edge loses proof.
+func checkComposedEscapeAuthorityBoundaries(t *testing.T, owner string, original, compiled []byte, artifact *JarReconstructionArtifact) {
+	t.Helper()
+	base := artifact.source.jar
+	origin := base.sourceConstructorLowering.escapeActive[owner]
+	plan := base.sourceLambdaMetadata.plan(owner)
+	if plan == nil || len(plan.methods) != 2 || origin.helper == "" || plan.sourceHash != origin.sourceHash {
+		t.Fatal("two actual obligations from one completed source required")
+	}
+	for _, variant := range []string{"control", "missing authority", "pending plan", "wrong owner", "stale original", "different source", "empty source", "duplicate original", "duplicate generated", "changed descriptor", "ordinary target", "missing implementation", "ordinary collision", "public implementation", "instance protocol", "wrong version", "helper alias"} {
+		t.Run("authority/"+variant, func(t *testing.T) {
+			p := *plan
+			p.methods = append([]sourceLambdaMetadataMethod(nil), plan.methods...)
+			lambda := &sourceLambdaMetadataAuthority{active: map[string]*sourceLambdaMetadataPlan{owner: &p}}
+			authority := &sourceConstructorLoweringAuthority{jar: &JarFS{sourceLambdaMetadata: lambda}, escapeActive: map[string]checkedEscapeSourceOrigin{owner: origin}}
+			object := mustParseLowering(t, bytes.Clone(compiled))
+			var implementation, ordinary *MemberInfo
+			for _, m := range object.Methods {
+				n, _ := sourceBridgeUTF8(object, m.NameIndex)
+				d, _ := sourceBridgeUTF8(object, m.DescriptorIndex)
+				if n == p.methods[0].generated.name && d == p.methods[0].generated.descriptor {
+					implementation = m
+				}
+				if n == "exercise" {
+					ordinary = m
+				}
+			}
+			if implementation == nil || ordinary == nil {
+				t.Fatal("fixture declarations required")
+			}
+			switch variant {
+			case "missing authority":
+				authority.jar.sourceLambdaMetadata = nil
+			case "pending plan":
+				lambda.plans, lambda.active = lambda.active, nil
+			case "wrong owner":
+				p.owner = "IndependentOwner"
+			case "stale original":
+				p.originalHash[0] ^= 1
+			case "different source":
+				p.sourceHash = sha256.Sum256([]byte("independent returned source"))
+			case "empty source":
+				p.sourceHash = [32]byte{}
+			case "duplicate original":
+				p.methods[1].original = p.methods[0].original
+			case "duplicate generated":
+				p.methods[1].generated = p.methods[0].generated
+			case "changed descriptor":
+				p.methods[0].generated.descriptor = "()V"
+			case "ordinary target":
+				p.methods[0].original = sourceLambdaMethodIdentity{"exercise", "(I)I"}
+			case "missing implementation":
+				implementation.NameIndex = uint16(object.ConstantPoolManager.AddUtf8Info("independentImplementation"))
+			case "ordinary collision":
+				ordinary.NameIndex, ordinary.DescriptorIndex = implementation.NameIndex, implementation.DescriptorIndex
+			case "public implementation":
+				implementation.AccessFlags = 0x1009
+			case "instance protocol":
+				implementation.AccessFlags ^= 0x0008
+			case "wrong version":
+				object.MajorVersion = 53
+			case "helper alias":
+				p.methods[0].generated.name = origin.helper
+			}
+			input := object.Bytes()
+			if _, err := Parse(input); err != nil {
+				t.Fatal("negative must reach executable proof", err)
+			}
+			before := bytes.Clone(input)
+			result, err := authority.lowerCheckedEscapeHelper(owner, original, input, nil)
+			if !bytes.Equal(input, before) {
+				t.Fatal("caller input mutated")
+			}
+			if variant == "control" {
+				if err != nil || bytes.Equal(result, input) || len(mustParseLowering(t, result).Methods)+1 != len(object.Methods) {
+					t.Fatal("composed proof did not discharge exactly one helper", err)
+				}
+			} else if err == nil && !bytes.Equal(result, input) || err != nil && result != nil {
+				t.Fatal("unproved or partial executable output", err)
+			}
+		})
 	}
 }

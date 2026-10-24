@@ -93,6 +93,46 @@ func (a *sourceConstructorLoweringAuthority) checkedEscapeSourceReturned(owner s
 	return origin, active && origin.helper != "" && origin.sourceHash != ([32]byte{}) && origin.originalHash == sha256.Sum256(original)
 }
 
+// The helper discharge and lambda identity restoration are separate pending
+// obligations over the same returned source. Compare the method universe
+// modulo that explicit identity projection, rather than requiring either
+// transformation to have completed first. This grants no lambda edits: the
+// later metadata pass still validates its factory uses and restores the names.
+// A pending/unrelated source plan, an ordinary method, or a many-to-one mapping
+// cannot supply the correspondence. Keys here retain JVM modified-UTF8 bytes,
+// just like the surrounding method-universe check (not decoded Go strings).
+func (a *sourceConstructorLoweringAuthority) checkedEscapeLambdaProjection(owner string, origin checkedEscapeSourceOrigin, want, got *ClassObject, expected map[sourceLambdaMethodIdentity]*MemberInfo, work *workbudget.Budget) (map[sourceLambdaMethodIdentity]sourceLambdaMethodIdentity, bool) {
+	if a.jar == nil || a.jar.sourceLambdaMetadata == nil {
+		return nil, true
+	}
+	plan := a.jar.sourceLambdaMetadata.plan(owner)
+	if plan == nil {
+		return nil, true
+	}
+	if plan.owner != owner || plan.originalHash != origin.originalHash || plan.sourceHash != origin.sourceHash || want.MajorVersion != 52 || got.MajorVersion != 52 || len(plan.methods) == 0 || len(plan.methods) > 4096 || !nativeProofWork(work, int64(len(plan.methods))*8) || work.CheckAlloc(int64(len(plan.methods))*256) != nil {
+		return nil, false
+	}
+	key := func(identity sourceLambdaMethodIdentity) (sourceLambdaMethodIdentity, bool) {
+		if identity.name == "" || identity.descriptor == "" || identity.name == origin.helper || !nativeProofWork(work, int64(len(identity.name)+len(identity.descriptor))+1) {
+			return sourceLambdaMethodIdentity{}, false
+		}
+		name, ne := NewUtf8FromString(identity.name).mutf8BytesChecked()
+		descriptor, de := NewUtf8FromString(identity.descriptor).mutf8BytesChecked()
+		return sourceLambdaMethodIdentity{string(name), string(descriptor)}, ne == nil && de == nil
+	}
+	projection := map[sourceLambdaMethodIdentity]sourceLambdaMethodIdentity{}
+	originals := map[sourceLambdaMethodIdentity]bool{}
+	for _, method := range plan.methods {
+		old, ok := key(method.original)
+		fresh, fk := key(method.generated)
+		if !ok || !fk || old.descriptor != fresh.descriptor || originals[old] || projection[fresh].name != "" || expected[old] == nil || !sourceLambdaImplementationFlags(expected[old].AccessFlags) {
+			return nil, false
+		}
+		originals[old], projection[fresh] = true, old
+	}
+	return projection, true
+}
+
 // Java's throws-only generic adapter has fresh Code `aload_0; athrow`.
 // Its only admitted consumer is `invokestatic adapter; athrow`. Removing the
 // invocation leaves precisely the same Throwable for the terminal ATHROW.
@@ -140,16 +180,22 @@ func (a *sourceConstructorLoweringAuthority) lowerCheckedEscapeHelper(owner stri
 		d, dk := sourceParameterUTF8Key(o, m.DescriptorIndex)
 		return sourceLambdaMethodIdentity{n, d}, nk && dk
 	}
-	expected := map[sourceLambdaMethodIdentity]bool{}
+	expected := map[sourceLambdaMethodIdentity]*MemberInfo{}
 	for _, m := range want.Methods {
 		k, ok := identity(want, m)
 		n, _ := sourceBridgeUTF8(want, m.NameIndex)
-		if !ok || expected[k] || n == origin.helper {
+		if !ok || expected[k] != nil || n == origin.helper {
 			return decline()
 		}
-		expected[k] = true
+		expected[k] = m
+	}
+	projection, known := a.checkedEscapeLambdaProjection(owner, origin, want, got, expected, work)
+	if !known {
+		return decline()
 	}
 	seen := map[sourceLambdaMethodIdentity]bool{}
+	matched := map[sourceLambdaMethodIdentity]bool{}
+	projected := map[sourceLambdaMethodIdentity]bool{}
 	var helper *MemberInfo
 	for _, m := range got.Methods {
 		k, ok := identity(got, m)
@@ -159,18 +205,27 @@ func (a *sourceConstructorLoweringAuthority) lowerCheckedEscapeHelper(owner stri
 		seen[k] = true
 		n, _ := sourceBridgeUTF8(got, m.NameIndex)
 		d, _ := sourceBridgeUTF8(got, m.DescriptorIndex)
-		if n == origin.helper && d == descriptor && !expected[k] {
+		if n == origin.helper && d == descriptor && expected[k] == nil {
 			helper = m
 			continue
 		}
-		if !expected[k] {
+		originalKey := k
+		if target, pending := projection[k]; pending {
+			originalKey = target
+			projected[k] = true
+			if expected[target] == nil || m.AccessFlags != expected[target].AccessFlags {
+				return decline()
+			}
+		}
+		if expected[originalKey] == nil || matched[originalKey] {
 			return decline()
 		}
+		matched[originalKey] = true
 	}
 	if helper == nil {
 		return decline()
 	} // idempotent completion; the metadata gate still checks the universe
-	if len(seen) != len(expected)+1 || helper.AccessFlags != 0x000a {
+	if len(seen) != len(expected)+1 || len(matched) != len(expected) || len(projected) != len(projection) || helper.AccessFlags != 0x000a {
 		return decline()
 	}
 	body := constructorLoweringCode(helper)
