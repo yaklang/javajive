@@ -16,7 +16,7 @@ func TestAdversarialInheritedArgumentBridgeRequiresExactChecksAndSlots(t *testin
 		t.Fatal("native original compiler required")
 	}
 	files := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, inheritedArgumentBridgeFixture, "BridgeOuter", "none", false)
-	for _, variant := range []string{"exact", "wrong first cast", "wrong array cast", "swapped casts", "missing cast", "extra cast", "wrong wide slot", "wrong reference slot", "virtual", "handler", "missing parent", "generic target", "work", "cancelled"} {
+	for _, variant := range []string{"exact", "concrete signature", "wrong first cast", "wrong array cast", "swapped casts", "missing cast", "extra cast", "wrong wide slot", "wrong reference slot", "virtual", "handler", "missing parent", "generic target", "work", "cancelled"} {
 		t.Run(variant, func(t *testing.T) {
 			obj := mustParseLowering(t, bytes.Clone(files["BridgeOuter$Leaf.class"]))
 			parent := mustParseLowering(t, bytes.Clone(files["BridgeOuter.class"]))
@@ -72,11 +72,17 @@ func TestAdversarialInheritedArgumentBridgeRequiresExactChecksAndSlots(t *testin
 				code.Code[int(ops[len(ops)-2].CurrentOffset)] = core.OP_INVOKEVIRTUAL
 			case "handler":
 				code.ExceptionTable = []*ExceptionTableEntry{{StartPc: 0, EndPc: 1, HandlerPc: 0}}
-			case "generic target":
+			case "generic target", "concrete signature":
+				// A descriptor-shaped Signature is fully concrete. Method
+				// formals still require an independent substitution proof.
+				signature := "(JDLjava/lang/String;[Ljava/lang/String;)Ljava/lang/String;"
+				if variant == "generic target" {
+					signature = "<T:Ljava/lang/Object;>" + signature
+				}
 				for _, m := range parent.Methods {
 					n, _ := sourceBridgeUTF8(parent, m.NameIndex)
 					if n == "exchange" && m.AccessFlags == 1 {
-						m.Attributes = append(m.Attributes, &SignatureAttribute{SignatureIndex: uint16(parent.ConstantPoolManager.AddUtf8Info("(JDLjava/lang/String;[Ljava/lang/String;)Ljava/lang/String;"))})
+						m.Attributes = append(m.Attributes, &SignatureAttribute{AttrLen: 2, SignatureIndex: uint16(parent.ConstantPoolManager.AddUtf8Info(signature))})
 					}
 				}
 			case "work":
@@ -85,6 +91,11 @@ func TestAdversarialInheritedArgumentBridgeRequiresExactChecksAndSlots(t *testin
 				base, cancel := context.WithCancel(context.Background())
 				cancel()
 				work = workbudget.New(base, workbudget.Limits{})
+			}
+			if variant == "concrete signature" || variant == "generic target" {
+				if _, err := Parse(parent.Bytes()); err != nil {
+					t.Fatal("target declaration must reach semantic proof", err)
+				}
 			}
 			reader := NewClassObjectDumper(obj)
 			reader.Work = work
@@ -99,7 +110,7 @@ func TestAdversarialInheritedArgumentBridgeRequiresExactChecksAndSlots(t *testin
 				return b, k
 			}
 			packet := reader.inheritedBridgeOriginal(method)
-			if (packet != nil) != (variant == "exact") {
+			if (packet != nil) != (variant == "exact" || variant == "concrete signature") {
 				t.Fatalf("accepted=%v", packet != nil)
 			}
 			if packet != nil && (!packet.checkedArguments || len(packet.argumentCasts) != 4 || packet.argumentCasts[2] != "Ljava/lang/String;" || packet.argumentCasts[3] != "[Ljava/lang/String;") {

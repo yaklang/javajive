@@ -705,11 +705,11 @@ func (a *sourceConstructorLoweringAuthority) lower(original, compiled []byte, wo
 		}
 		permute := true
 		packet := constructorLoweringReadPacket(got, method, false, false, plan.qualified != nil, work, provider, len(plan.captures), len(plan.prelude))
-		if packet == nil || !constructorLoweringExecutablePlanEqual(plan, packet.plan) {
+		if packet == nil || !constructorLoweringFreshPlanEqual(plan, packet.plan) {
 			// A separately verified already-lowered packet makes completion
 			// idempotent. An arbitrary constructor body is never a substitute.
 			packet = constructorLoweringReadPacket(got, method, true, false, plan.qualified != nil, work, provider, len(plan.captures), len(plan.prelude))
-			if packet == nil || !constructorLoweringExecutablePlanEqual(plan, packet.plan) {
+			if packet == nil || !constructorLoweringFreshPlanEqual(plan, packet.plan) {
 				return nil, constructorLoweringFailure(work, "fresh constructor does not match original slots, fields and delegation")
 			}
 			permute = false
@@ -722,6 +722,9 @@ func (a *sourceConstructorLoweringAuthority) lower(original, compiled []byte, wo
 		if err != nil {
 			return nil, err
 		}
+		// The fresh-plan proof permits only loss of the original varargs
+		// marker; visibility and all executable operands were checked above.
+		binary.BigEndian.PutUint16(edit.data, plan.flags)
 		edits = append(edits, edit)
 	}
 	if len(seen) != len(publication.plans) {

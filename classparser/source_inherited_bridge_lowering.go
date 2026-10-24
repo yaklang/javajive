@@ -180,18 +180,37 @@ func (c *ClassObjectDumper) inheritedBridgeOriginal(method *MemberInfo) *inherit
 	}
 	// External original dependencies establish method declarations without
 	// granting source ownership of those classes to this independent unit.
-	parent, ok := c.nativeAnnotationDeclarationResolver()(p.targetOwner)
+	resolve := c.nativeAnnotationDeclarationResolver()
+	parent, ok := resolve(p.targetOwner)
 	if !ok || parent == nil || parent.GetClassName() != p.targetOwner {
 		return nil
 	}
-	_, target := nativeMemberCallTarget(parent, p.name, p.targetDescriptor, false, nil, c.Work)
-	if target == nil || target.AccessFlags != 1 {
+	// The symbolic owner is the direct superclass, but JVM class-method
+	// resolution may find its declaration further up the same original chain.
+	// Keep that symbolic owner for the fresh invokespecial proof; do not replace
+	// it with a guessed declaration owner or skip a nearer incompatible method.
+	declaring, target := nativeMemberCallTarget(parent, p.name, p.targetDescriptor, true, resolve, c.Work)
+	if target == nil || target.AccessFlags & ^uint16(0x80) != 1 {
 		return nil
 	}
-	for _, a := range target.Attributes {
-		if _, ok := a.(*SignatureAttribute); ok {
+	// ACC_VARARGS affects source applicability, not the physical array port
+	// of this already resolved super invocation. Emit a fixed-arity override;
+	// fresh completion still proves the identical target descriptor and slots.
+	// A varargs marker without an array tail is not a valid declaration proof.
+	if target.AccessFlags&0x80 != 0 {
+		args, _, err := callbinding.Descriptor(p.targetDescriptor)
+		if err != nil || len(args) == 0 || !strings.HasPrefix(args[len(args)-1], "[") {
 			return nil
 		}
+	}
+	// Concrete parameterization cannot change this already resolved physical
+	// invocation. Prove its complete erasure using the actual declaration's
+	// constant pool, including throws. Class variables are permitted only
+	// beneath erased arguments; direct variables and method formals still
+	// require a separate substitution certificate.
+	signature, known := nativeMethodLocalOriginalSignature(declaring, target.Attributes, c.Work)
+	if !known || signature != "" && !nativeConcreteMethodSignatureClosed(declaring, signature, p.targetDescriptor, target, c.Work) && !nativeClassInvariantMethodSignatureClosed(declaring, signature, p.targetDescriptor, target, c.Work) {
+		return nil
 	}
 	// A public subclass exposes a public implementation inherited from its
 	// non-public direct parent through a compiler-provided visibility bridge.
