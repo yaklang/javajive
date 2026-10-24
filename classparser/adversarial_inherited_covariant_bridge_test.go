@@ -65,7 +65,7 @@ func testIndependentInheritedBridge(t *testing.T, modern, java, native, fixture,
 	testIndependentInheritedBridgeWithOriginal(t, modern, java, native, fixture, root, debug, parameters, expected, nil)
 }
 
-func testIndependentInheritedBridgeWithOriginal(t *testing.T, modern, java, native, fixture, root, debug string, parameters bool, expected string, mutate func(map[string][]byte)) {
+func testIndependentInheritedBridgeWithOriginal(t *testing.T, modern, java, native, fixture, root, debug string, parameters bool, expected string, mutate func(map[string][]byte), verify ...func(*testing.T, string, []byte, []byte, *JarReconstructionArtifact)) {
 	t.Helper()
 	files := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, fixture, root, debug, parameters)
 	if mutate != nil {
@@ -118,6 +118,9 @@ func testIndependentInheritedBridgeWithOriginal(t *testing.T, modern, java, nati
 		t.Fatal(err)
 	}
 	saved := bytes.Clone(fresh)
+	for _, check := range verify {
+		check(t, name, owned[name+".class"], fresh, a)
+	}
 	finished, err := a.FinishClass(name+".class", fresh)
 	if err != nil {
 		t.Fatal("original inherited bridge method universe", err, string(source), "publication", a.source.jar.sourceConstructorLowering.bridgeActive)
