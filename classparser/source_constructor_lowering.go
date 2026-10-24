@@ -629,10 +629,8 @@ func (a *sourceConstructorLoweringAuthority) lower(original, compiled []byte, wo
 		if originalPacket == nil || !constructorLoweringExecutablePlanEqual(plan, originalPacket.plan) || !a.constructorLoweringQualifiedSuperUnchanged(want, plan, work) {
 			return nil, constructorLoweringFailure(work, "original packet changed")
 		}
-		if plan.checkedSuperExceptions != "" {
-			if exceptions, known := constructorLoweringCheckedSuperExceptions(want, expected[desc], plan, provider, work); !known || exceptions != plan.checkedSuperExceptions {
-				return nil, constructorLoweringFailure(work, "original checked SUPER declaration changed")
-			}
+		if exceptions, known := constructorLoweringCheckedSuperExceptions(want, expected[desc], plan, provider, work); known != (plan.checkedSuperExceptions != "") || known && exceptions != plan.checkedSuperExceptions {
+			return nil, constructorLoweringFailure(work, "original checked SUPER declaration changed")
 		}
 		permute := true
 		packet := constructorLoweringTypedPacketWithQualifier(got, method, false, false, plan.qualified != nil, work, provider, len(plan.captures))

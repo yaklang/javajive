@@ -112,7 +112,7 @@ func TestSourceConstructorCheckedSuperFinishRejectsUnownedMetadata(t *testing.T)
 	for desc := range publication.plans {
 		descriptor = desc
 	}
-	for _, variant := range []string{"control", "opaque attribute", "already finished", "unreturned source", "pending only", "stale original", "changed plan", "wrong throws", "missing throws", "empty throws", "duplicate throws", "Signature", "changed code", "changed flags", "budget", "canceled"} {
+	for _, variant := range []string{"control", "opaque attribute", "already finished", "unreturned source", "pending only", "stale original", "changed plan", "missing plan", "wrong throws", "missing throws", "empty throws", "duplicate throws", "Signature", "changed code", "changed flags", "budget", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			p := *publication
 			p.plans = map[string]*sourceConstructorLoweringPlan{}
@@ -153,6 +153,10 @@ func TestSourceConstructorCheckedSuperFinishRejectsUnownedMetadata(t *testing.T)
 				for _, plan := range p.plans {
 					plan.checkedSuperExceptions = "java/sql/SQLException"
 				}
+			case "missing plan":
+				for _, plan := range p.plans {
+					plan.checkedSuperExceptions = ""
+				}
 			case "wrong throws":
 				table.ExceptionIndexTable[0] = uint16(obj.ConstantPoolManager.AddNewClassInfo("java/sql/SQLException"))
 			case "missing throws":
@@ -182,7 +186,13 @@ func TestSourceConstructorCheckedSuperFinishRejectsUnownedMetadata(t *testing.T)
 				work = workbudget.New(ctx, workbudget.Limits{})
 			}
 			input := obj.Bytes()
-			if _, err := Parse(input); err != nil {
+			if _, err := Parse(input); variant == "duplicate throws" {
+				// Duplicate method attributes are malformed and belong to the
+				// parser refusal, before the semantic projection boundary.
+				if err == nil {
+					t.Fatal("duplicate Exceptions table parsed")
+				}
+			} else if err != nil {
 				t.Fatal("negative input must reach semantic checks", err)
 			}
 			if variant == "already finished" {
