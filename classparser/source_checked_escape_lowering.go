@@ -10,6 +10,13 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
+// Native source renderers may record this one reversible helper obligation.
+// They receive no flat constructor-lowering authority. Activation still waits
+// for the complete owning source to be returned by the artifact API.
+type checkedEscapeSourceRecorder interface {
+	recordCheckedEscapeSource(*ClassObject, string, string, *workbudget.Budget) bool
+}
+
 type checkedEscapeSourceOrigin struct {
 	constructorNativeSourceOrigin
 	helper string
@@ -20,8 +27,11 @@ type checkedEscapeSourceOrigin struct {
 // it. Native inner/interface helpers have different invocation protocols and
 // do not borrow this private-static proof.
 func (c *ClassObjectDumper) publishCheckedEscapeLowering(source string, methods []*dumpedMethods) bool {
-	a := c.options.sourceConstructorLowering
-	if a == nil || !c.reconstructionPhysicalHeader() {
+	var recorder checkedEscapeSourceRecorder = c.nativeCheckedEscapeRecorder
+	if c.options.sourceConstructorLowering != nil {
+		recorder = c.options.sourceConstructorLowering
+	}
+	if recorder == nil || !c.reconstructionPhysicalHeader() {
 		return true
 	}
 	var helper *dumpedMethods
@@ -36,23 +46,34 @@ func (c *ClassObjectDumper) publishCheckedEscapeLowering(source string, methods 
 	if helper == nil {
 		return true
 	}
-	origin := checkedEscapeSourceOrigin{}
+	name := ""
 	if !c.sourceDegraded && !legacySourceHasFailureMarker(source) {
 		if helper.member != nil || helper.isStub || strings.Count(source, helper.code) != 1 || !nativeProofWork(c.Work, int64(len(source))+1) {
 			return false
 		}
-		raw, err := a.jar.readJarEntry(c.obj.GetClassName() + ".class")
-		if err != nil || !bytes.Equal(raw, c.obj.Bytes()) {
+		name = helper.methodName
+	}
+	return recorder.recordCheckedEscapeSource(c.obj, source, name, c.Work)
+}
+
+func (a *sourceConstructorLoweringAuthority) recordCheckedEscapeSource(object *ClassObject, source, helper string, work *workbudget.Budget) bool {
+	if a == nil || a.jar == nil || object == nil || !nativeProofWork(work, 1) {
+		return false
+	}
+	origin := checkedEscapeSourceOrigin{}
+	if helper != "" {
+		raw, err := a.jar.readJarEntry(object.GetClassName() + ".class")
+		if err != nil || !bytes.Equal(raw, object.Bytes()) || !nativeProofWork(work, int64(len(source))+1) {
 			return false
 		}
-		origin = checkedEscapeSourceOrigin{constructorNativeSourceOrigin{sha256.Sum256(raw), sha256.Sum256([]byte(source))}, helper.methodName}
+		origin = checkedEscapeSourceOrigin{constructorNativeSourceOrigin{sha256.Sum256(raw), sha256.Sum256([]byte(source))}, helper}
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.escapePending == nil {
 		a.escapePending = map[string]checkedEscapeSourceOrigin{}
 	}
-	a.escapePending[c.obj.GetClassName()] = origin
+	a.escapePending[object.GetClassName()] = origin
 	return true
 }
 

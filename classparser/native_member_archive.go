@@ -65,6 +65,7 @@ func (z *JarFS) nativeMemberReader(obj *ClassObject) *ClassObjectDumper {
 	d.options.sourceLambdaMetadata = z.sourceLambdaMetadata
 	if z.sourceConstructorLowering != nil {
 		d.options.reconstructionPhysicalRoot = obj
+		d.nativeCheckedEscapeRecorder = z.sourceConstructorLowering
 	}
 	d.foldSiblingResolver = z.enumSiblingResolver()
 	d.declarationResolver = z.declarationResolver

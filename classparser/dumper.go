@@ -60,6 +60,7 @@ type ClassObjectDumper struct {
 	nativeEnumBacking                     *nativeEnumBackingSource
 	rawAssertionStorage                   *sourceAssertionStoragePlan
 	constructorLowerings                  map[string]*sourceConstructorLoweringPlan
+	nativeCheckedEscapeRecorder           checkedEscapeSourceRecorder
 	nativeMemberRoot                      *nativeMemberFamily
 	nativeMethodLocalCurrent              *nativeMethodLocalClass
 	nativeMethodLocalPlacements           map[statements.Statement][]string

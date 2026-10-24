@@ -71,7 +71,7 @@ class EscapeDriver {public static void main(String[]args){if(` + owner + `.Child
 						t.Fatal(err)
 					}
 					defer artifact.Close()
-					source, err := artifact.ReadFile(owner + ".class")
+					source, err := artifact.source.ReadFile(owner + ".class")
 					if err != nil || legacySourceHasFailureMarker(string(source)) {
 						t.Fatal("complete source", err, string(source))
 					}
@@ -88,6 +88,17 @@ class EscapeDriver {public static void main(String[]args){if(` + owner + `.Child
 					}
 					if log, err := exec.Command(javac, "-proc:none", "--release", fmt.Sprint(target), "-g:"+debug, "-cp", out, "-sourcepath", out, "-d", out, path).CombinedOutput(); err != nil {
 						t.Fatal("fresh compilation without original owner", err, string(log), string(source))
+					}
+					unreturned, err := os.ReadFile(filepath.Join(out, owner+".class"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if result, err := artifact.FinishClass(owner+".class", unreturned); err == nil || result != nil {
+						t.Fatal("unreturned native owning source granted executable completion")
+					}
+					published, err := artifact.ReadFile(owner + ".class")
+					if err != nil || !bytes.Equal(source, published) {
+						t.Fatal("same complete native source must activate", err)
 					}
 					for _, binary := range []string{owner, owner + "$Child"} {
 						fresh, err := os.ReadFile(filepath.Join(out, binary+".class"))
