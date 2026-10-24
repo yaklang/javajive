@@ -9,23 +9,31 @@ import (
 // Object.<init> needs no executable capture reordering. Later class recovery
 // must retain the actual declaration that authorized that projection.
 func TestAdversarialConstructorBindingPublicationKeepsCompletedGenericAssignments(t *testing.T) {
-	for _, shape := range []string{"ordinary", "wide", "renamed"} {
-		for _, profile := range []SourceCompilerProfile{ModernJavac, NativeJavac8} {
-			for _, debug := range []string{"none", "source,lines,vars"} {
-				t.Run(shape+"/"+string(profile)+"/"+debug, func(t *testing.T) {
-					source := constructorBindingPublicationFixture
-					member := "SuffixOwner$Member"
-					switch shape {
-					case "wide":
-						source = strings.Replace(source, "Member(T value,", "Member(long left,T value,", 1)
-						source = strings.Replace(source, "callbacks){this.value", "callbacks){if(left!=Long.MIN_VALUE)throw new AssertionError(\"wide port\");this.value", 1)
-						source = strings.Replace(source, "new Member<String>(value,", "new Member<String>(Long.MIN_VALUE,value,", 1)
-					case "renamed":
-						source = strings.ReplaceAll(source, "Member", "Container")
-						member = "SuffixOwner$Container"
-					}
-					constructorSuffixFamilyAtTargetWithCompilerRoundTrip(t, source, debug, []string{member}, "12:binding:publication:identity:exceptions\n", 8, 8, profile)
-				})
+	// The legacy class-text repair was package-gated. Both namespaces must
+	// obey the same publisher boundary; only the test knows that old trigger.
+	for _, pkg := range []string{"", "org.mockito.regression"} {
+		for _, shape := range []string{"ordinary", "wide", "renamed"} {
+			for _, profile := range []SourceCompilerProfile{ModernJavac, NativeJavac8} {
+				for _, debug := range []string{"none", "source,lines,vars"} {
+					t.Run(pkg+"/"+shape+"/"+string(profile)+"/"+debug, func(t *testing.T) {
+						source := constructorBindingPublicationFixture
+						member := "SuffixOwner$Member"
+						switch shape {
+						case "wide":
+							source = strings.Replace(source, "Member(T value,", "Member(long left,T value,", 1)
+							source = strings.Replace(source, "callbacks){this.value", "callbacks){if(left!=Long.MIN_VALUE)throw new AssertionError(\"wide port\");this.value", 1)
+							source = strings.Replace(source, "new Member<String>(value,", "new Member<String>(Long.MIN_VALUE,value,", 1)
+						case "renamed":
+							source = strings.ReplaceAll(source, "Member", "Container")
+							member = "SuffixOwner$Container"
+						}
+						if pkg != "" {
+							source = "package " + pkg + ";\n" + strings.ReplaceAll(source, `Class.forName("SuffixOwner$`, `Class.forName("`+pkg+`.SuffixOwner$`)
+							member = strings.ReplaceAll(pkg, ".", "/") + "/" + member
+						}
+						constructorSuffixFamilyAtTargetWithCompilerRoundTrip(t, source, debug, []string{member}, "12:binding:publication:identity:exceptions\n", 8, 8, profile, pkg)
+					})
+				}
 			}
 		}
 	}

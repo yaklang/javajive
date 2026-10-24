@@ -78,8 +78,15 @@ func constructorSuffixFamilyAtTargetRoundTrip(t *testing.T, fixture, debug strin
 	return constructorSuffixFamilyAtTargetWithCompilerRoundTrip(t, fixture, debug, owners, expected, release, sourceTarget, ModernJavac)
 }
 
-func constructorSuffixFamilyAtTargetWithCompilerRoundTrip(t *testing.T, fixture, debug string, owners []string, expected string, release, sourceTarget int, profile SourceCompilerProfile) ([]byte, []byte, *JarReconstructionArtifact) {
+func constructorSuffixFamilyAtTargetWithCompilerRoundTrip(t *testing.T, fixture, debug string, owners []string, expected string, release, sourceTarget int, profile SourceCompilerProfile, packageName ...string) ([]byte, []byte, *JarReconstructionArtifact) {
 	t.Helper()
+	driver := "SuffixDriver"
+	if len(packageName) == 1 && packageName[0] != "" {
+		driver = packageName[0] + "." + driver
+	}
+	if len(packageName) > 1 {
+		t.Fatal("ambiguous fixture package")
+	}
 	owner := owners[0]
 	modern, java := t04Tools(t)
 	native := os.Getenv("JAVA8_JAVAC")
@@ -93,7 +100,7 @@ func constructorSuffixFamilyAtTargetWithCompilerRoundTrip(t *testing.T, fixture,
 	run := func(dir string) {
 		t.Helper()
 		for _, mode := range []string{"-ea", "-da"} {
-			out, err := enumFreshOracleRun(t, java, mode, dir, "SuffixDriver")
+			out, err := enumFreshOracleRun(t, java, mode, dir, driver)
 			if err != nil || string(out) != expected {
 				t.Fatal("unchanged original suffix oracle", err, string(out))
 			}
