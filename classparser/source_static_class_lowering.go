@@ -9,10 +9,10 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
-// A JVM static synthetic class may have no constructor. Java source cannot
-// express either that absence or ACC_SYNTHETIC: javac adds an Object default
-// constructor even when every original declaration is static. Publication is
-// a separate flat-unit capability, never inferred from a generated-looking name.
+// A JVM class containing only static declarations may have no constructor.
+// Java source cannot express that absence (nor an optional ACC_SYNTHETIC bit):
+// javac adds an Object default constructor. Publication is a separate flat-unit
+// capability, never inferred from a compiler-specific name or synthetic marker.
 func staticClassOriginalDomain(object *ClassObject, work *workbudget.Budget) bool {
 	// An empty declaration universe satisfies the same no-instance-member
 	// proof. In particular an access-marker class may have no methods at all.
@@ -21,7 +21,11 @@ func staticClassOriginalDomain(object *ClassObject, work *workbudget.Budget) boo
 	// enum protocol. ACC_SYNTHETIC has its class-file meaning since version
 	// 49; every supported non-preview version has the same constructor
 	// absence contract. The fresh executable deletion is still proved below.
-	if object == nil || object.MajorVersion < 49 || object.MajorVersion > 65 || object.MinorVersion != 0 || object.AccessFlags != 0x1020 || object.GetSupperClassName() != "java/lang/Object" || len(object.Interfaces) != 0 || len(object.Methods) > 4096 {
+	// PUBLIC, FINAL and SYNTHETIC do not create instance state or a
+	// constructor. Keep them independent of the no-instance-member proof;
+	// interfaces, enums, annotations and abstract declarations have separate
+	// source rules and cannot use this ordinary-class completion.
+	if object == nil || object.MajorVersion < 49 || object.MajorVersion > 65 || object.MinorVersion != 0 || object.AccessFlags&0x0020 == 0 || object.AccessFlags&^uint16(0x1031) != 0 || object.GetSupperClassName() != "java/lang/Object" || len(object.Interfaces) != 0 || len(object.Methods) > 4096 {
 		return false
 	}
 	for _, method := range object.Methods {
@@ -194,7 +198,7 @@ func (a *sourceConstructorLoweringAuthority) lowerStaticClassDefaultConstructor(
 		n, _ := sourceBridgeUTF8(got, m.NameIndex)
 		d, _ := sourceBridgeUTF8(got, m.DescriptorIndex)
 		if n == "<init>" && d == "()V" {
-			if constructor != nil || m.AccessFlags != 0 {
+			if constructor != nil || m.AccessFlags != want.AccessFlags&0x0001 {
 				return decline()
 			}
 			constructor = m
