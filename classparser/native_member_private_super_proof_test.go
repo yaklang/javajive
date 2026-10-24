@@ -160,7 +160,15 @@ func TestNativeMemberPrivateSuperCallerRequiresProvedDelegation(t *testing.T) {
 			child := p.children["SuperOwner$Child"]
 			var ctor *nativeMemberConstructor
 			for _, c := range child.constructors {
-				ctor = c
+				if c.delegateOwner == child.object.GetSupperClassName() {
+					if ctor != nil {
+						t.Fatal("ambiguous original SUPER constructor")
+					}
+					ctor = c
+				}
+			}
+			if ctor == nil {
+				t.Fatal("missing original SUPER constructor")
 			}
 			var work *workbudget.Budget
 			switch variant {
@@ -203,7 +211,15 @@ func TestNativeMemberPrivateSuperSourceRequiresOriginalPCAndPureDummy(t *testing
 			child := p.children["SuperOwner$Child"]
 			var ctor *nativeMemberConstructor
 			for _, c := range child.constructors {
-				ctor = c
+				if c.delegateOwner == child.object.GetSupperClassName() {
+					if ctor != nil {
+						t.Fatal("ambiguous original SUPER constructor")
+					}
+					ctor = c
+				}
+			}
+			if ctor == nil {
+				t.Fatal("missing original SUPER constructor")
 			}
 			id := &utils.VariableId{}
 			ctx := &class_context.ClassContext{ClassName: child.object.GetClassName(), LocalNames: map[*utils.VariableId]string{id: "SuperOwner.this"}}
