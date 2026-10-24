@@ -187,7 +187,7 @@ func (c *ClassObjectDumper) publishInheritedBridgeLowering(source string, method
 	if a == nil {
 		return true
 	}
-	found := false
+	found := c.reconstructionPhysicalHeader() && legacyAbstractInterfaceDomain(c.obj, c.Work)
 	for _, m := range methods {
 		if m == nil || m.inheritedBridge == nil {
 			continue
