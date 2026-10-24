@@ -62,3 +62,38 @@ func TestAdversarialMethodLocalNamesReserveParametersAndExistingSuffixes(t *test
 		t.Fatal("a generated suffix stole a parameter or existing declaration's name")
 	}
 }
+
+// Allocation initialization is forwarded to its invokespecial location. The
+// wrapper retains an exact assignment identity; it is not opaque source text.
+// Names must include that declaration even when no later assignment exists.
+func TestAdversarialMethodLocalNamesIncludeForwardedDeclarationBindings(t *testing.T) {
+	for _, base := range []string{"var5", "argument", "local$renamed"} {
+		t.Run(base, func(t *testing.T) {
+			makeRef := func(name string) *values.JavaRef {
+				r := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaPrimer(types.JavaInteger))
+				r.Id.SetName(name)
+				return r
+			}
+			first, second, reserved := makeRef(base), makeRef(base), makeRef(base+"_1")
+			allocation := statements.NewAssignStatement(first, values.NewJavaLiteral(7, first.Type()), true)
+			forwarded := statements.NewSourceAssignmentForward(allocation)
+			ordinary := statements.NewAssignStatement(second, values.NewJavaLiteral(13, second.Type()), true)
+			root := []statements.Statement{forwarded, ordinary, statements.NewAssignStatement(reserved, values.NewJavaLiteral(23, reserved.Type()), true), statements.NewReturnStatement(first)}
+			resolveLocalNameCollisions(nil, root)
+			if first.Id.String() == second.Id.String() || first.Id.String() == reserved.Id.String() || second.Id.String() == reserved.Id.String() {
+				t.Fatal("forwarded declaration collided with another identity")
+			}
+			if root[0] != forwarded || allocation.LeftValue != first || ordinary.LeftValue != second || first.Id == second.Id {
+				t.Fatal("naming replaced a declaration or merged identities")
+			}
+			if actual, ok := forwarded.SourceAssignmentForward(); !ok || actual != allocation {
+				t.Fatal("forwarding origin lost")
+			}
+			names := first.Id.String() + second.Id.String() + reserved.Id.String()
+			resolveLocalNameCollisions(nil, root)
+			if names != first.Id.String()+second.Id.String()+reserved.Id.String() {
+				t.Fatal("late binding not idempotent")
+			}
+		})
+	}
+}
