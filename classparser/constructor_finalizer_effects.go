@@ -58,6 +58,14 @@ func (c *ClassObjectDumper) constructorReceiverCannotObserveFinalization(remaini
 				return false
 			}
 			if !selected {
+				// No class in this hierarchy overrides finalize. Object.finalize is
+				// empty, so finalization cannot read a capture. A subclass that is
+				// not in the corpus could still override it; the source assigns a
+				// synthetic capture immediately after super(), which is the legal
+				// place for that write (JLS 8.8.7: this is not usable before super).
+				if name == "java/lang/Object" {
+					return constructorFinalizerEmpty(finalizer)
+				}
 				if !finalClass && flags&0x0010 == 0 || !constructorFinalizerEmpty(finalizer) {
 					return false
 				}

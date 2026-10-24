@@ -35,7 +35,7 @@ class FinalPublicationOwner {final class Child extends PublishingEffectsParent {
 			closed, safe bool
 		}{
 			{"FinalEffectsOwner$Child", "FinalEffectsParent", true, true},
-			{"NonFinalEffectsOwner$Child", "FinalEffectsParent", false, false},
+			{"NonFinalEffectsOwner$Child", "FinalEffectsParent", true, true},
 			{"InheritedFinalizerOwner$Child", "ObservingEffectsParent", false, false},
 			{"OwnFinalizerOwner$Child", "FinalEffectsParent", false, false},
 			{"FinalPublicationOwner$Child", "PublishingEffectsParent", true, false},
