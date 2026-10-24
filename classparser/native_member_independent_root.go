@@ -39,12 +39,13 @@ func (c *ClassObjectDumper) originalNativeMemberIndependentRoot() *nativeMemberI
 	if !valid || packet != nil || !nativeMemberIndependentAssertionReferencesClosed(obj, c.Work) {
 		return nil
 	}
-	for _, fields := range [][]*MemberInfo{obj.Fields, obj.Methods} {
-		for _, field := range fields {
-			if field == nil || !nativeProofWork(c.Work, 1) || field.AccessFlags&2 != 0 {
-				return nil
-			}
+	for _, method := range obj.Methods {
+		if method == nil || !nativeProofWork(c.Work, 1) || method.AccessFlags&2 != 0 {
+			return nil
 		}
+	}
+	if !c.nativeIndependentPrivateFieldsClosed(obj) {
+		return nil
 	}
 	raw, found := c.foldSiblingResolver(owner)
 	if !found {
@@ -85,7 +86,7 @@ func (c *ClassObjectDumper) originalNativeMemberIndependentRoot() *nativeMemberI
 	if rows != 1 {
 		return nil
 	}
-	declaration := nativeMemberProofWithDeclarations(obj, outer, c.Work, c.originalNativeConstructorAccessBridges(), nil, c.nativeAnnotationDeclarationResolver(), c.buildInvocationMetadata())
+	declaration := c.proveNativeMemberDeclaration(obj, outer, c.originalNativeConstructorAccessBridges(), nil, c.nativeAnnotationDeclarationResolver())
 	if declaration == nil || !declaration.static || declaration.owner != owner || declaration.name != name || declaration.flags != flags {
 		return nil
 	}
@@ -102,13 +103,8 @@ func (p *nativeMemberIndependentRoot) validFor(c *ClassObjectDumper) bool {
 }
 
 func (p *nativeMemberIndependentRoot) familyClosed(f *nativeMemberFamily, work *workbudget.Budget) bool {
-	if p == nil || p.object == nil || f == nil || f.independentRoot != p || f.owner != p.object.GetClassName() || f.lexicalObjects[f.owner] != p.object || f.lexicalObjects[p.lexicalOwner] != nil || len(f.modernNestObjects) != 0 || len(f.enumConstants) != 0 || len(f.enumSwitchTables) != 0 || len(f.methodLocals) != 0 || len(f.anonymousUnits) != 0 || f.anonymousForest != nil || f.anonymous != nil {
+	if p == nil || p.object == nil || f == nil || f.failed || f.independentRoot != p || f.owner != p.object.GetClassName() || f.lexicalObjects[f.owner] != p.object || f.lexicalObjects[p.lexicalOwner] != nil || len(f.modernNestObjects) != 0 || len(f.enumConstants) != 0 || len(f.enumSwitchTables) != 0 || len(f.methodLocals) != 0 || !p.anonymousForestClosed(f, work) {
 		return false
-	}
-	for _, group := range f.memberAnonymous {
-		if group != nil {
-			return false
-		}
 	}
 	for _, child := range f.children {
 		if child == nil || child.enumSynthesis != nil || child.assertions != nil || child.object == nil || child.object.MinorVersion != 0 || child.object.MajorVersion < 49 || child.object.MajorVersion > 52 || !nativeProofWork(work, 1) {
@@ -116,6 +112,83 @@ func (p *nativeMemberIndependentRoot) familyClosed(f *nativeMemberFamily, work *
 		}
 		packet, known := nativeMemberAssertionProof(child.object, p.lexicalOwner, work)
 		if !known || packet != nil || !nativeMemberIndependentAssertionReferencesClosed(child.object, work) {
+			return false
+		}
+	}
+	return true
+}
+
+// Reopen every anonymous parent from its original EnclosingMethod and bind it
+// to exactly the same jointly prepared object/group. Reaching this static cut
+// closes the path; its physical outer must never enter the private/source scope.
+func (p *nativeMemberIndependentRoot) anonymousForestClosed(f *nativeMemberFamily, work *workbudget.Budget) bool {
+	forest := f.anonymousForest
+	if forest == nil {
+		if len(f.anonymousUnits) != 0 || f.anonymous != nil {
+			return false
+		}
+		for _, group := range f.memberAnonymous {
+			if group != nil {
+				return false
+			}
+		}
+		return true
+	}
+	if forest.root != f.owner || forest.members != f || forest.objects[f.owner] != p.object || forest.objects[p.lexicalOwner] != nil || f.anonymous != forest.groups[f.owner] || len(f.anonymousUnits) != len(forest.units) || len(forest.units) > 64 || len(forest.objects) != 1+len(f.children)+len(forest.units) || len(f.lexicalObjects) != len(forest.objects) || !nativeProofWork(work, 1) || work != nil && work.CheckAlloc(int64(len(forest.objects))*512) != nil {
+		return false
+	}
+	for name, object := range forest.objects {
+		if object == nil || object.GetClassName() != name || f.lexicalObjects[name] != object || !nativeProofWork(work, 1) {
+			return false
+		}
+		if name == f.owner {
+			continue
+		}
+		if child := f.children[name]; child != nil && child.object == object {
+			continue
+		}
+		if unit := forest.units[name]; unit != nil && unit.object == object {
+			continue
+		}
+		return false
+	}
+	for owner, group := range forest.groups {
+		if group == nil || group.failed || group.forest != forest || group.owner != owner || len(group.standalone) != 0 || forest.objects[owner] == nil || f.lexicalObjects[owner] != forest.objects[owner] || !nativeProofWork(work, 1) {
+			return false
+		}
+	}
+	for name, unit := range forest.units {
+		if unit == nil || unit.object == nil || unit.object.GetClassName() != name || forest.objects[name] != unit.object || f.lexicalObjects[name] != unit.object || unit.assertions != nil || !nativeMemberJointAnonymousAccess(f, name, work) || !nativeMemberIndependentAssertionReferencesClosed(unit.object, work) {
+			return false
+		}
+		current := name
+		seen := map[string]bool{}
+		for current != f.owner {
+			if len(seen) >= 64 || seen[current] || !nativeProofWork(work, 1) {
+				return false
+			}
+			seen[current] = true
+			object := forest.objects[current]
+			if object == nil {
+				return false
+			}
+			if owner, _, known := originalAnonymousOwner(object); known {
+				if forest.units[current] == nil || !nativeMemberJointAnonymousAccess(f, current, work) {
+					return false
+				}
+				current = owner
+				continue
+			}
+			child := f.children[current]
+			owner, _, _, known := originalMemberOwner(object)
+			if child == nil || !known || child.owner != owner || child.object != object {
+				return false
+			}
+			current = owner
+		}
+	}
+	for owner, group := range f.memberAnonymous {
+		if group != forest.groups[owner] {
 			return false
 		}
 	}
@@ -168,6 +241,14 @@ func (z *JarFS) nativeMemberIndependentObject(obj *ClassObject) *ClassObject {
 		seen[binary] = true
 		owner, _, flags, known := originalMemberOwner(obj)
 		if !known {
+			// Anonymous children carry no named InnerClasses owner. Their original
+			// EnclosingMethod establishes the path; completed forest publication
+			// still proves exact ownership before suppressing a separate source.
+			if enclosing, method, anonymous := originalAnonymousOwner(obj); anonymous && method != "" {
+				owner, known = enclosing, true
+			}
+		}
+		if !known {
 			if nativeMemberTopLevelEvidence(obj, reader.Work) {
 				return boundary
 			}
@@ -207,16 +288,30 @@ func (z *JarFS) nativeMemberIndependentEntry(obj *ClassObject) *nativeMemberCach
 	if certificate == nil {
 		return nil
 	}
-	policy, _ := json.Marshal(snap)
+	policy, err := json.Marshal(snap)
+	if err != nil {
+		return nil
+	}
 	entry := z.nativeMemberPolicyEntry("independent-static\x00" + root.GetClassName() + "\x00" + string(policy))
 	if entry == nil {
 		return nil
 	}
+	if result := z.nativeIndependentStandaloneEntry(entry, root, snap, certificate); result != nil {
+		return result
+	}
+	participants, cyclic, known := z.nativeMemberDependencyAdmission(root.GetClassName(), reader.Work, snap)
+	if !known {
+		return nil
+	}
+	if cyclic {
+		return z.nativeIndependentTransactionEntry(root, participants, snap)
+	}
 	entry.once.Do(func() {
 		prepared := z.prepareNativeMemberFamilyFromRoot(root, snap, certificate)
-		// This source scope cannot recursively claim another independent scope or
-		// import metadata-only ancestors through a dependency transaction.
-		result := z.finishNativeMemberFamily(prepared, z.nativeMemberStandardLookup, false)
+		// The independently keyed original graph proved this component acyclic.
+		// Every other source dependency therefore follows the condensation DAG.
+		lookup := z.nativeMemberLookup
+		result := z.finishNativeMemberFamily(prepared, lookup, false)
 		if result == nil {
 			return
 		}
@@ -238,4 +333,59 @@ func (z *JarFS) nativeMemberIndependentEntry(obj *ClassObject) *nativeMemberCach
 		entry.source = src
 	})
 	return entry
+}
+
+// A nonleaf boundary may already close without activating an independent peer:
+// terminal physical declarations and ordinary completed families suffice. Keep
+// that original completion path before asking for a larger dependency domain.
+// The separate once publishes only its own result, never an in-progress SCC
+// entry. A successful source partition is pinned before any SCC may claim it.
+func (z *JarFS) nativeIndependentStandaloneEntry(entry *nativeMemberCacheEntry, root *ClassObject, snap map[string]string, certificate *nativeMemberIndependentRoot) *nativeMemberCacheEntry {
+	if z == nil || entry == nil || root == nil || snap == nil || certificate == nil {
+		return nil
+	}
+	entry.standaloneOnce.Do(func() {
+		prepared := z.prepareNativeMemberFamilyFromRoot(root, snap, certificate)
+		if prepared == nil || prepared.family == nil {
+			return
+		}
+		f := prepared.family
+		if len(f.children) == 0 && len(f.methodLocals) == 0 && len(f.enumConstants) == 0 && len(f.enumSwitchTables) == 0 && len(f.anonymousUnits) == 0 && f.anonymous == nil && f.anonymousForest == nil {
+			// Leaves retain the dependency protocol, including atomic peer cycles.
+			return
+		}
+		result := z.finishNativeMemberFamily(prepared, z.nativeMemberStandardLookup, false)
+		if result == nil {
+			return
+		}
+		size := int64(len(result.source))
+		if prepared.reader.Work != nil && prepared.reader.Work.CheckAlloc(size) != nil {
+			return
+		}
+		policy, err := json.Marshal(snap)
+		if err != nil {
+			return
+		}
+		z.nativeMembersMu.Lock()
+		defer z.nativeMembersMu.Unlock()
+		ordinary := z.nativeMembersCache[root.GetClassName()+"\x00"+string(policy)]
+		if entry.transaction != nil || entry.flatSourceCommitted || ordinary != nil && (ordinary.transaction != nil || ordinary.flatSourceCommitted) || size > (16<<20)-z.nativeMembersBytes || !z.reserveOwnershipSource(size) {
+			return
+		}
+		z.nativeMembersBytes += size
+		entry.flatSourceCommitted = true
+		entry.standalone = result
+	})
+	return entry.standalone
+}
+
+// A proved independent static boundary retains its original ClassFile
+// visibility. Its physical outer remains metadata, so the broad flat-unit
+// visibility policy must not widen this separately proved source scope.
+func (c *ClassObjectDumper) nativeMemberIndependentSourceHeader() bool {
+	if c == nil || c.obj == nil || c.nativeMemberCurrent != nil || c.nativeMemberRoot == nil {
+		return false
+	}
+	p := c.nativeMemberRoot
+	return p.owner == c.obj.GetClassName() && p.independentRoot != nil && p.independentRoot.validFor(c) && p.independentRoot.familyClosed(p, c.Work)
 }

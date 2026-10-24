@@ -84,6 +84,9 @@ func nativeMemberLayoutDeclarations(body string) ([]string, bool) {
 }
 
 func nativeMemberRegistrationLayout(p *nativeMemberFamily, source string, members []string, work *workbudget.Budget, memberOwners ...[]string) (string, bool) {
+	if p != nil {
+		p.registrationPublication = nil
+	}
 	open := javaIndexTopBrace(source)
 	close := -1
 	if open >= 0 {
@@ -118,14 +121,18 @@ func nativeMemberRegistrationLayout(p *nativeMemberFamily, source string, member
 		return nativeMemberLayoutNode{text, events}, ok
 	}
 	fixed := make([]nativeMemberLayoutNode, 0, len(declarations))
+	var movable []nativeMemberLayoutNode
 	for _, s := range declarations {
 		n, ok := node(s)
 		if !ok {
 			return "", false
 		}
-		fixed = append(fixed, n)
+		if len(n.events) != 0 && p.registrationMethods[strings.TrimSpace(s)] {
+			movable = append(movable, n)
+		} else {
+			fixed = append(fixed, n)
+		}
 	}
-	var movable []nativeMemberLayoutNode
 	var empty []string
 	for _, s := range members {
 		n, ok := node(s)

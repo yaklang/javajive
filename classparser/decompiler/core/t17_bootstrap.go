@@ -93,6 +93,8 @@ type CallSiteRequest struct {
 
 // DispatchResult is the frozen adapter output. ExecutedBootstrap must stay false.
 type DispatchResult struct {
+	// Method is original diagnostic context attached by the class dumper.
+	Method            string `json:"method,omitempty"`
 	Status            string
 	Family            FeatureFamily
 	Identity          BootstrapIdentity
@@ -242,8 +244,16 @@ func DispatchInvokeDynamic(req CallSiteRequest, d *Decompiler, sim StackSimulati
 	out.Identity = req.Identity
 	out.Capability = cap
 	out.ExecutedBootstrap = false
-	if out.Value == nil {
-		out.Value = unsupportedPlaceholder(req, resultType)
+	// Adapter capability and actual source-value availability are separate.
+	// A qualified unsupported source must retain absence all the way to the
+	// body renderer. Never fill a missing value with a fabricated expression,
+	// and never publish an empty successful adapter as lossless.
+	if out.Value == nil && out.Status == "" {
+		out.Status = "unsupported"
+		out.DiagnosticCode = DiagBootstrapUnknown
+		if out.Reason == "" {
+			out.Reason = "adapter produced no source value"
+		}
 	}
 	return out
 }

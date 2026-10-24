@@ -29,6 +29,14 @@ func nameMethodDeclarationIdentities(params []values.JavaValue, body []statement
 	var visit func([]statements.Statement)
 	visit = func(list []statements.Statement) {
 		for _, statement := range list {
+			// Forwarding moves a declaration to the original initialization
+			// event; it does not erase its identity. Inspect the sealed IR
+			// role, never an opaque callback's text or public annotation.
+			if forward, ok := statement.(*statements.CustomStatement); ok {
+				if assignment, known := forward.SourceAssignmentForward(); known {
+					statement = assignment
+				}
+			}
 			switch s := statement.(type) {
 			case *statements.AssignStatement:
 				if (s.IsFirst || s.IsDeclare) && s.ArrayMember == nil {

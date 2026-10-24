@@ -11,7 +11,7 @@ import (
 // Abstract access graphs test lifetime partition boundaries. They deliberately
 // omit operand stacks and do not claim JVM verifier validity.
 func TestNativeLambdaDefinitionWebRequiresDisjointOriginalReadFrontiers(t *testing.T) {
-	for _, variant := range []string{"disjoint lifetime", "old counter loop", "joined lifetimes", "captured increment", "uninitialized path", "wide lower overlap", "wide upper overlap", "wrong captured slot", "missing definition", "duplicate definition", "no definitions", "foreign LOAD", "nil instruction", "work", "memory", "canceled"} {
+	for _, variant := range []string{"disjoint lifetime", "old counter loop", "single captured lifetime", "single joins old lifetime", "single captured increment", "single missing definition", "mixed frontier representation", "joined lifetimes", "captured increment", "uninitialized path", "wide lower overlap", "wide upper overlap", "wrong captured slot", "missing definition", "duplicate definition", "no definitions", "foreign LOAD", "nil instruction", "work", "memory", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			ops := make([]*core.OpCode, 9)
 			for i := range ops {
@@ -37,8 +37,23 @@ func TestNativeLambdaDefinitionWebRequiresDisjointOriginalReadFrontiers(t *testi
 			}
 			read := &nativeEnumLocalRead{pc: 7, opcode: core.OP_ILOAD_2, slot: 2, descriptor: "I", storePC: -1, storePCs: []int{5, 6}}
 			var work *workbudget.Budget
-			want := variant == "disjoint lifetime" || variant == "old counter loop"
+			want := variant == "disjoint lifetime" || variant == "old counter loop" || variant == "single captured lifetime"
+			if len(variant) >= 7 && variant[:7] == "single " {
+				read.storePC, read.storePCs = 5, nil
+				flow.edges[ops[4]] = nil
+				edge(4, 5)
+				ops[6].Instr.OpCode = core.OP_NOP
+			}
 			switch variant {
+			case "single joins old lifetime":
+				edge(4, 7)
+			case "single captured increment":
+				ops[8].Instr.OpCode = core.OP_IINC
+				ops[8].Data = []byte{2, 1}
+			case "single missing definition":
+				read.storePC = 11
+			case "mixed frontier representation":
+				read.storePC = 5
 			case "old counter loop":
 				edge(3, 2)
 			case "joined lifetimes":

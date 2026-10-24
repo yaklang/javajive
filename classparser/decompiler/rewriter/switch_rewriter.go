@@ -23,6 +23,20 @@ func renderHead(st statements.Statement) string {
 	if st == nil {
 		return ""
 	}
+	// The builtin throw's sealed renderer always starts with this keyword.
+	// Classifying its control flow must not render its operand: that can emit
+	// an entire anonymous class and repeat invocation proofs during CFG scans.
+	if custom, ok := st.(*statements.CustomStatement); ok {
+		if _, known := custom.SourceAssignmentForward(); known {
+			return ""
+		}
+		if kind, _, known := custom.SourceTransferProtocol(); known {
+			return kind
+		}
+		if _, known := custom.SourceThrowOperand(); known {
+			return "throw"
+		}
+	}
 	s := strings.TrimSpace(st.String(&class_context.ClassContext{}))
 	if idx := strings.IndexAny(s, " \t\n;"); idx >= 0 {
 		s = s[:idx]
@@ -34,6 +48,17 @@ func renderHead(st statements.Statement) string {
 // the only abrupt-completion leaf that makes its enclosing switch "complete normally" (control reaches
 // the statement after the switch); continue/return/throw transfer control elsewhere.
 func isBreakStatement(st statements.Statement) bool {
+	if custom, ok := st.(*statements.CustomStatement); ok {
+		if _, known := custom.SourceAssignmentForward(); known {
+			return false
+		}
+		if _, known := custom.SourceThrowOperand(); known {
+			return false
+		}
+		if kind, label, known := custom.SourceTransferProtocol(); known {
+			return kind == "break" && label == ""
+		}
+	}
 	return st != nil && strings.TrimSpace(st.String(&class_context.ClassContext{})) == "break"
 }
 
@@ -677,6 +702,9 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 		if k == node.MergeNode && (node.SwitchEmptyCaseMerge || node.SwitchEmptyDefaultMerge) {
 			return true
 		}
+		if switchTransferEntriesNeedOwnBody(k, v, valueToBodyOffset) {
+			return true
+		}
 		for i, val := range v {
 			if i == len(v)-1 {
 				break
@@ -819,6 +847,37 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 	}
 
 	return nil
+}
+
+// Removing GOTOs and lowering loop edges can map distinct physical switch
+// entries to the same sealed break/continue leaf. They are not grouped labels:
+// physical sorting can put another case between them. Dropping the earlier
+// transfer would then introduce a new fall-through edge. Keep that operand-free
+// transfer at each distinct (or unknown) entry; only a proved common bytecode
+// offset licenses ordinary label grouping. Do not duplicate arbitrary bodies,
+// rendered text, operand evaluations or source-emission receipts.
+func switchTransferEntriesNeedOwnBody(target *core.Node, labels []switchLabel, offsets map[switchLabel]int) bool {
+	if target == nil || len(labels) < 2 {
+		return false
+	}
+	leaf, ok := target.Statement.(*statements.CustomStatement)
+	if !ok || leaf == nil {
+		return false
+	}
+	kind, _, sealed := leaf.SourceTransferProtocol()
+	if !sealed || kind != "continue" && kind != "break" {
+		return false
+	}
+	first, known := offsets[labels[0]]
+	if !known {
+		return true
+	}
+	for _, label := range labels[1:] {
+		if offset, known := offsets[label]; !known || offset != first {
+			return true
+		}
+	}
+	return false
 }
 
 // switchLabel's discriminator is outside the int32 value domain. No legal case

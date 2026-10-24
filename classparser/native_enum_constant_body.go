@@ -25,11 +25,22 @@ type nativeEnumConstantBody struct {
 }
 
 func nativeEnumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAllocation, bodyOrdinal int, bridges map[string]*nativeConstructorAccessBridge, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) *nativeEnumConstantBody {
+	return enumConstantBodyProof(parent, plan, bodyOrdinal, bridges, resolve, work, false)
+}
+
+// Flat publication proves only constructor erasure here. Parameter names, local
+// generic debug tables and the bodies' bootstrap table have separate completion
+// obligations and must not be mistaken for constructor executable effects.
+func flatEnumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAllocation, bodyOrdinal int, bridges map[string]*nativeConstructorAccessBridge, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) *nativeEnumConstantBody {
+	return enumConstantBodyProof(parent, plan, bodyOrdinal, bridges, resolve, work, true)
+}
+
+func enumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAllocation, bodyOrdinal int, bridges map[string]*nativeConstructorAccessBridge, resolve func(string) (*ClassObject, bool), work *workbudget.Budget, flat bool) *nativeEnumConstantBody {
 	if parent == nil || resolve == nil || !nativeProofWork(work, 1) || work != nil && work.CheckAlloc(512) != nil {
 		return nil
 	}
 	obj, known := resolve(plan.allocatedClass)
-	if !known || obj == nil || obj.GetClassName() != plan.allocatedClass || obj.AccessFlags != 0x4030 || obj.GetSupperClassName() != parent.GetClassName() || len(obj.Fields) > 1 || len(obj.Interfaces) != 0 || !nativeAccessorVersion(obj, work) {
+	if !known || obj == nil || obj.GetClassName() != plan.allocatedClass || obj.AccessFlags != 0x4030 || obj.GetSupperClassName() != parent.GetClassName() || len(obj.Fields) > 1 || len(obj.Interfaces) != 0 || !nativeAccessorVersion(obj, work) || !nativeDeclarationNamesCompatible(obj, work) {
 		return nil
 	}
 	// MethodParameters is optional, including on Java 8. The supported
@@ -55,7 +66,7 @@ func nativeEnumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAll
 			return nil
 		}
 	}
-	selfRows, innerTables, enclosing, source := 0, 0, 0, 0
+	selfRows, innerTables, enclosing, source, bootstrap := 0, 0, 0, 0, 0
 	for _, a := range obj.Attributes {
 		if !nativeProofWork(work, 1) {
 			return nil
@@ -94,6 +105,9 @@ func nativeEnumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAll
 					selfRows++
 					flags := row.InnerClassAccessFlags
 					validFlags := flags == 0x4010 || legacyMetadata && flags&0x4000 != 0 && flags & ^uint16(0x4018) == 0
+					if flat && legacyMetadata && flags & ^uint16(0x4018) == 0 {
+						validFlags = true
+					}
 					selfMetadataDifferent = flags != 0x4010
 					if row.OuterClassInfoIndex != 0 || row.InnerNameIndex != 0 || !validFlags {
 						return nil
@@ -105,6 +119,11 @@ func nativeEnumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAll
 				return nil
 			}
 			enclosing++
+		case *BootstrapMethodsAttribute:
+			if !flat || bootstrap != 0 || !flatEnumBodyBootstrapTable(obj, a, work) {
+				return nil
+			}
+			bootstrap++
 		case *SourceFileAttribute:
 			if a == nil || a.AttrLen != 2 || source != 0 {
 				return nil
@@ -171,6 +190,12 @@ func nativeEnumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAll
 				if i < 2 {
 					expected = 0x10
 				}
+				if flat {
+					if !flatEnumConstructorParameter(obj, packet, expected, work) {
+						return nil
+					}
+					continue
+				}
 				if packet[0] != 0 || packet[1] != 0 || packet[2] != expected || packet[3] != 0 {
 					return nil
 				}
@@ -187,6 +212,7 @@ func nativeEnumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAll
 	if (!parametersSeen && !legacyMetadata) || (parametersSeen && obj.MajorVersion < 52) || code == nil || len(code.ExceptionTable) != 0 || len(code.Code) > 512 || !nativeProofWork(work, int64(len(code.Code))) || code.MaxLocals != uint16(nativeMemberParameterWidth(params)+1) || code.MaxStack != uint16(nativeMemberParameterWidth(params)+2) {
 		return nil
 	}
+	debugTables := map[string]bool{}
 	for _, a := range code.Attributes {
 		if !nativeProofWork(work, 1) {
 			return nil
@@ -197,6 +223,13 @@ func nativeEnumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAll
 				return nil
 			}
 		case *UnparsedAttribute:
+			if flat && a != nil && (a.Name == "LocalVariableTable" || a.Name == "LocalVariableTypeTable") {
+				if debugTables[a.Name] || !flatEnumConstructorDebugTable(obj, code, a, params, work) {
+					return nil
+				}
+				debugTables[a.Name] = true
+				continue
+			}
 			if a == nil || a.Name != "LocalVariableTable" || a.Length != uint32(len(a.Info)) || len(a.Info) < 2 || len(a.Info) != 2+10*int(uint16(a.Info[0])<<8|uint16(a.Info[1])) || !nativeProofWork(work, int64(len(a.Info))) {
 				return nil
 			}
@@ -294,7 +327,7 @@ func (c *ClassObjectDumper) nativeMemberEnumConstantAnonymousRole(p *nativeMembe
 		return false
 	}
 	parent := p.children[body.owner]
-	if parent.object == nil || !isGenuineEnum(parent.object) || body.plan.allocatedClass != name || body.plan.descriptor != body.descriptor {
+	if parent == nil || parent.object == nil || parent.enumSynthesis == nil || !isGenuineEnum(parent.object) || body.plan.allocatedClass != name || body.plan.descriptor != body.descriptor {
 		return false
 	}
 	if original, found := parent.enumSynthesis.constants[body.plan.constant]; !found || original != body.plan {
@@ -377,7 +410,16 @@ func (c *ClassObjectDumper) foldNativeEnumConstantBodies() (map[string]string, b
 			p.failed = true
 			return nil, true
 		}
-		out[name] = rendered
+		// The erased constant-specific constructor still registers the original
+		// private enum constructor before javac lowers the constant body. Retain
+		// that proved event in the source schedule, just as for an ordinary
+		// anonymous subclass; argument expressions precede this body fragment.
+		registration, known := c.nativeEnumConstantConstructorRegistration(body)
+		if !known {
+			p.failed = true
+			return nil, true
+		}
+		out[name] = registration + rendered
 		body.rendered = true
 		if body.legacyConstructorMetadata {
 			c.appendDiagnostic(DecompileDiagnostic{Code: "enum_constant_legacy_metadata", Method: body.object.GetClassName() + ".<init>" + body.descriptor, Message: "The original pre-nestmate enum constant constructor packet is proved. Recompilation may add unnamed generated parameter metadata and different STATIC/FINAL bits to its anonymous InnerClasses self row; executable descriptor, final class, forwarding operands and exceptions are preserved."})
@@ -388,6 +430,23 @@ func (c *ClassObjectDumper) foldNativeEnumConstantBodies() (map[string]string, b
 		return nil, true
 	}
 	return out, true
+}
+
+func (c *ClassObjectDumper) nativeEnumConstantConstructorRegistration(body *nativeEnumConstantBody) (string, bool) {
+	if c == nil || body == nil || body.object == nil {
+		return "", false
+	}
+	p, current := c.nativeMemberRoot, c.nativeMemberCurrent
+	if p == nil || p.failed || p.enumConstants[body.object.GetClassName()] != body || current == nil || current != p.children[body.owner] || current.object == nil || current.object.GetClassName() != body.owner ||
+		!c.nativeMemberEnumConstantAnonymousRole(p, body.object) {
+		return "", false
+	}
+	bridge := current.accessBridges[body.superDescriptor]
+	if bridge == nil || !nativeMemberJointBridgeEquivalent(p, current.object, bridge.method, body.superDescriptor, c.Work) {
+		return "", false
+	}
+	registration := nativeMemberConstructorRegistration(p, body.owner, body.superDescriptor)
+	return registration, registration != "" && !p.failed
 }
 
 // Constant classes have no Java source name. Their original references must

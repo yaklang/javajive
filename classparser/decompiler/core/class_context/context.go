@@ -2,6 +2,7 @@ package class_context
 
 import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
+	"github.com/yaklang/javajive/classparser/decompiler/core/fieldbinding"
 	coreutils "github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"maps"
 	"math"
@@ -25,6 +26,23 @@ type SourceCaptureOperand struct {
 	Receiver bool
 }
 type ClassContext struct {
+	// Render-only alpha bindings. Physical JVM symbols remain unchanged in IR.
+	StaticFieldAliases map[string]string
+	// These read-only observations are installed only while a proved ordinary
+	// constructor throws scope renders its final method body. They confer no
+	// allocation, access, argument-cast, capture or initialization permission.
+	SourceAllocationRender      func(AllocationRenderView) (prefix, suffix string)
+	SourceConstructedInvocation func(ConstructedInvocationView)
+	// Observation of a completed canonical ordinary method-reference render.
+	// The consumer must reopen its original factory; this grants no binding.
+	SourceMethodReference func(value any, source string)
+	// Installed only by the final ordinary-method publisher after original
+	// factory, reaching-definition and generic-signature proofs have closed.
+	SourceGenericArgument        func(invocation any, index int) (string, bool)
+	SourceGenericReceiver        func(invocation any) (string, bool)
+	SourceGenericInvocationBound func(invocation any) bool
+	SourceGenericInvocation      func(invocation any, source string, end bool) string
+	SourceRendering              *SourceRenderState
 	// RetainImplicitConstructorCalls keeps the original no-arg superclass
 	// invocation and its PC in proof-only decoding. Normal source rendering
 	// may omit this call because javac inserts it, but effect-boundary proofs
@@ -50,11 +68,15 @@ type ClassContext struct {
 	SourceBranchSwap func(ifSource, elseSource string) bool
 	// Original bytecode/source binding may replace a proved enum table selector
 	// and all of its labels together. Nil keeps the original integer switch.
-	SourceEnumSwitch            func(selector any, labels []int) (string, map[int]string, bool)
-	SourceMemberAllocation      func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
-	SourceMemberCandidate       func(owner string) bool
-	SourceMethodLocalCandidate  func(owner string) bool
-	SourceMethodLocalAllocation func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
+	SourceEnumSwitch     func(selector any, labels []int) (string, map[int]string, bool)
+	SourceParameterStore func(assignment any) (string, bool)
+	// Read-only, exact original member NEW proof; only its enclosing operand
+	// may be implicit and thus have no stand-alone source expression.
+	SourceMemberImplicitEnclosing func(owner, descriptor string, newPC, pc int, value any) bool
+	SourceMemberAllocation        func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
+	SourceMemberCandidate         func(owner string) bool
+	SourceMethodLocalCandidate    func(owner string) bool
+	SourceMethodLocalAllocation   func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
 	// Optional descriptor gate runs before operands are rendered. Knowing a
 	// lexical class does not prove projection of each of its constructors.
 	SourceMemberDescriptorCandidate func(owner, descriptor string) bool
@@ -62,13 +84,28 @@ type ClassContext struct {
 	// SourceInvocationReceiver separates compiler registration comments from a
 	// rendered receiver. javac lowers call arguments before its method select;
 	// Java runtime receiver/argument evaluation remains in the original order.
-	SourceInvocationReceiver   func(source string) (receiver, registration string)
-	SourcePrivateGetter        func(owner, name, descriptor string, pc int, args []any, statement bool) (string, bool)
-	SourceMemberDelegation     func(owner, descriptor string, pc int, args []any) (string, bool)
-	SourceAnonymousCandidate   func(owner string) bool
-	SourceAnonymousAllocation  func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
-	SourceCapturedField        func(pc int, name string, receiver bool) (string, bool)
+	SourceInvocationReceiver  func(source string) (receiver, registration string)
+	SourcePrivateGetter       func(owner, name, descriptor string, pc int, args []any, statement bool) (string, bool)
+	SourceMemberDelegation    func(owner, descriptor string, pc int, args []any) (string, bool)
+	SourceAnonymousCandidate  func(owner string) bool
+	SourceAnonymousAllocation func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
+	// Read-only original anonymous parent Signature; querying this certificate may
+	// not render a body, publish a declaration, or commit a capture failure.
+	SourceAnonymousParentSignature func(owner, descriptor, sourceOwner, methodName, methodDesc string, newPC, pc int) (string, bool)
+	// A read-only local producer certificate returns an invocation proof view.
+	// It must bind the original STORE, unchanged producer and whole-body write
+	// exclusion in this exact source method; it never evaluates the producer.
+	SourceLocalInvocation func(value any, sourceOwner, methodName, methodDesc string) (any, bool)
+	SourceCapturedField   func(pc int, name string, receiver bool) (string, bool)
+	// A retained source proof has its own method coordinates. It must not
+	// resolve this read through a closure over a later live sibling context.
+	// The older hook remains available to callers without this scoped resolver.
+	SourceCapturedFieldAt      func(source *ClassContext, pc int, name string, receiver bool) (string, bool)
 	SourceLexicalCapturedField func(value any, pc int, name string) (string, bool)
+	// A speculative type query can precede constructor source preparation.
+	// Its proof may be unavailable, but it must never commit a projection or
+	// invalidate the family. Rendering retains the separate committing hook.
+	SourceLexicalCapturedFieldType func(value any, pc int, name string) bool
 	// Only an original enclosing-read/invocation certificate may keep a raw
 	// receiver when qualified-this would invent generic substitutions.
 	SourceLexicalInvocationReceiver func(call any) (string, bool)
@@ -90,6 +127,8 @@ type ClassContext struct {
 	CatchEntryNames map[int]string
 	// InvocationMetadata supplies complete member and parent tables, never CP-only guesses.
 	InvocationMetadata callbinding.Provider
+	// OriginalFieldDeclarations is a separate complete, lazy declaration view.
+	OriginalFieldDeclarations fieldbinding.Provider
 	// PrivateNestBridge returns a source access bridge only for a witnessed
 	// original private nestmate invocation. It never widens the target method.
 	PrivateNestBridge func(owner, name, descriptor string, kind uint8, pc int) (string, bool)
@@ -283,6 +322,10 @@ type ClassContext struct {
 	// without class_context importing types. Nil when no cross-class resolver is available (single-class
 	// decompile); set only on the jar / DecompileWithResolver path.
 	SiblingClassSig func(internalName string) (classSig string, methodSigs map[string]string, ok bool)
+	// Lambda target equations can also use exact platform declaration bytes.
+	// This data-only lookup grants no source ownership, constructor effect or
+	// ordinary overload permission. Explicit declarations retain precedence.
+	LambdaTargetClassSig func(internalName string) (classSig string, methodSigs map[string]string, ok bool)
 	// Flattened source declarations can reintroduce verified enclosing formals.
 	// This projection does not alter the original class Signature. It is absent
 	// for native nested source and dependency-only declarations.
@@ -356,9 +399,9 @@ type ClassContext struct {
 	// OverloadFamilyUnproven is set when an invocation's overload family could not
 	// be proven complete, so reconstructed overload selection remains unverified.
 	OverloadFamilyUnproven bool
-	// SourceBridgeTarget proves an omitted receiver-only accessibility bridge
-	// forwards the same descriptor to its direct superclass. This affects only
-	// source return-type lookup; original declarations and invoke witnesses stay.
+	// SourceBridgeTarget proves an omitted accessibility bridge
+	// forwards the same descriptor and original argument categories to its
+	// direct superclass. This affects only source signature lookup; original declarations and invoke witnesses stay.
 	SourceBridgeTarget func(owner, name, descriptor string) (string, bool)
 }
 
@@ -681,18 +724,25 @@ var javaKeywords = map[string]struct{}{
 	"true": {}, "false": {}, "null": {}, "_": {},
 }
 
+// Java identifiers use Unicode character categories. ASCII-only mangling
+// changes otherwise legal JVM member names and breaks linking to original
+// producer classes. Ignorable code points are excluded from the stable-name
+// view: javac removes them before interning, so preserving them as text would
+// not preserve the original symbol. This does not allocate collision-free
+// aliases for names that are not directly representable in Java source.
 func SafeIdentifier(name string) string {
 	if name == "" {
-		return "_"
+		return "__"
 	}
 	var b strings.Builder
 	for i, r := range name {
-		valid := r == '_' || r == '$' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (i > 0 && r >= '0' && r <= '9')
+		bits := java21IdentifierBits(r)
+		valid := bits&1 != 0 || i > 0 && bits&2 != 0
 		if valid {
 			b.WriteRune(r)
 			continue
 		}
-		if i == 0 && r >= '0' && r <= '9' {
+		if i == 0 && bits&2 != 0 {
 			b.WriteByte('_')
 			b.WriteRune(r)
 			continue
@@ -998,6 +1048,10 @@ func (f *ClassContext) CloneForRetry() *ClassContext {
 		return nil
 	}
 	out := *f
+	if f.SourceRendering != nil {
+		state := *f.SourceRendering
+		out.SourceRendering = &state
+	}
 	out.Arguments = append([]string(nil), f.Arguments...)
 	out.TypeParams = append([]string(nil), f.TypeParams...)
 	out.ClassTypeParams = append([]string(nil), f.ClassTypeParams...)
@@ -1027,4 +1081,21 @@ func (f *ClassContext) CloneForRetry() *ClassContext {
 		out.KeySet = utils.NewSet[string](f.KeySet.List())
 	}
 	return &out
+}
+
+// PreservesJava8Identifier is a source-certificate check, not a naming repair.
+// Native Java8 reconstruction needs the original name to survive both rendering
+// and the Java8 compiler alphabet. A renderer accepting a newer Unicode letter
+// does not establish compatibility with that older compiler protocol.
+func PreservesJava8Identifier(name string) bool {
+	if name == "" || SafeIdentifier(name) != name {
+		return false
+	}
+	for i, r := range name {
+		bits := java8IdentifierBits(r)
+		if i == 0 && bits&1 == 0 || i > 0 && bits&2 == 0 {
+			return false
+		}
+	}
+	return true
 }

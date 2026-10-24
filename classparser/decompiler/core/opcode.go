@@ -62,9 +62,18 @@ type OpCode struct {
 	// (the loaded OLD value is still live when the iinc runs -> a post-op used inside an expression
 	// such as `a[i++] = v`, `int j = i++`, `return i++`). When set, statement generation skips the
 	// standalone `i++` statement; emitting it would increment BEFORE the use and change semantics
-	// (the historical `i++; a[i] = v` bug). Pre-increment (`iinc X; iload X`) has no live load at
-	// iinc time, so it is NOT marked and correctly stays `i = i + 1; ... use i`.
+	// (the historical `i++; a[i] = v` bug). An adjacent prefix update is proved
+	// separately when its following load resolves to the same original binding.
 	IincFoldedToPostOp bool
+	// A private adjacent ILOAD can consume the updated value as ++x/--x.
+	// Mark only after resolving that load to the same original local binding.
+	IincFoldedToPreOp bool
+	// The original scalar load/dup/update/store protocol has its old word
+	// represented by one postfix expression in the consumer's execution domain.
+	LocalStoreFoldedToPostOp     bool
+	LocalStoreFoldedToTypedPreOp bool
+	// A proved prefix update consumes this DUP's one numeric materialization.
+	LocalUpdateDupFolded bool
 }
 type CatchNode struct {
 	ExceptionTypeIndex uint16

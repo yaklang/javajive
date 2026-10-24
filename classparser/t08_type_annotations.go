@@ -2,6 +2,7 @@ package javaclassparser
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
@@ -241,6 +242,10 @@ func (c *ClassObjectDumper) noteTypeAnnoCapability(ta *TypeAnnotation, msg strin
 }
 
 func (c *ClassObjectDumper) renderTypeWithAnnos(t types.JavaType, annos []*TypeAnnotation) string {
+	return c.renderTypeDeclarationWithAnnos(t, annos, false)
+}
+
+func (c *ClassObjectDumper) renderTypeDeclarationWithAnnos(t types.JavaType, annos []*TypeAnnotation, variableArity bool) string {
 	for _, ta := range annos {
 		if ta == nil {
 			continue
@@ -258,10 +263,14 @@ func (c *ClassObjectDumper) renderTypeWithAnnos(t types.JavaType, annos []*TypeA
 	if t == nil {
 		return c.renderTypePath(types.NewJavaClass("java.lang.Object"), annos, nil)
 	}
-	return c.renderTypePath(t, annos, nil)
+	return c.renderTypePathDeclaration(t, annos, nil, variableArity)
 }
 
 func (c *ClassObjectDumper) renderTypePath(t types.JavaType, all []*TypeAnnotation, prefix []TypePathEntry) string {
+	return c.renderTypePathDeclaration(t, all, prefix, false)
+}
+
+func (c *ClassObjectDumper) renderTypePathDeclaration(t types.JavaType, all []*TypeAnnotation, prefix []TypePathEntry, variableArity bool) string {
 	here := c.formatAnnotationList(collectAnnosAt(all, prefix))
 	if wildcard, ok := t.(*types.JavaWildcardType); ok && wildcard != nil {
 		mark := "?"
@@ -296,7 +305,13 @@ func (c *ClassObjectDumper) renderTypePath(t types.JavaType, all []*TypeAnnotati
 			if dimAnnos[i] != "" {
 				b.WriteByte(' ')
 				b.WriteString(dimAnnos[i])
-				b.WriteString(" []")
+				b.WriteByte(' ')
+			}
+			// The ellipsis replaces the final source dimension. Type paths
+			// still follow the original array tree, outer-to-inner; nested
+			// generic arguments and element types are ordinary type uses.
+			if variableArity && i == n-1 {
+				b.WriteString("...")
 			} else {
 				b.WriteString("[]")
 			}
@@ -396,6 +411,24 @@ func (c *ClassObjectDumper) applyParamTypeAnnotations(method *MemberInfo, method
 	if len(all) == 0 {
 		return decls
 	}
+	if !nativeProofWork(c.Work, int64(len(all))) || c.Work.CheckAlloc(int64(len(all))*32) != nil {
+		return decls
+	}
+	visibility := make(map[*TypeAnnotation]int, len(all))
+	for _, attribute := range method.Attributes {
+		if table, ok := attribute.(*TypeAnnotationsAttribute); ok {
+			retention := 0
+			if table.IsInvisible {
+				retention = 1
+			}
+			for _, annotation := range table.Annotations {
+				if annotation != nil && annotation.TargetType == 0x16 {
+					visibility[annotation] = retention
+				}
+			}
+		}
+	}
+	parameterTables := [2]*RuntimeVisibleParameterAnnotationsAttribute{paramAnnosFromMethod(method, false), paramAnnosFromMethod(method, true)}
 	out := append([]string{}, decls...)
 	// Data-flow inference may narrow or otherwise mutate the FunctionType used
 	// to render a method body. Type annotations describe declaration types, so
@@ -427,7 +460,45 @@ func (c *ClassObjectDumper) applyParamTypeAnnotations(method *MemberInfo, method
 		if formal < len(declaredParams) {
 			pt = declaredParams[formal]
 		}
-		annotated := c.renderTypeWithAnnos(pt, matching)
+		// One source annotation may have both PARAMETER and TYPE_USE targets.
+		// Its declaration occurrence is appended after this type is rendered;
+		// do not emit the same occurrence a second time from the type table.
+		var declarations [2]map[string]*AnnotationAttribute
+		for retention, table := range parameterTables {
+			if table == nil {
+				continue
+			}
+			row := dumpedParamAnnoIndex(c, methodName, descriptor, len(out), len(table.ParameterAnnotations), i)
+			if row < 0 || row >= len(table.ParameterAnnotations) {
+				continue
+			}
+			if !nativeProofWork(c.Work, int64(len(table.ParameterAnnotations[row]))) || c.Work.CheckAlloc(int64(len(table.ParameterAnnotations[row]))*64) != nil {
+				return decls
+			}
+			declarations[retention] = map[string]*AnnotationAttribute{}
+			for _, declaration := range table.ParameterAnnotations[row] {
+				if declaration == nil {
+					continue
+				}
+				if _, duplicate := declarations[retention][declaration.TypeName]; duplicate {
+					declarations[retention][declaration.TypeName] = nil
+				} else {
+					declarations[retention][declaration.TypeName] = declaration
+				}
+			}
+		}
+		var explicit []*TypeAnnotation
+		for _, annotation := range matching {
+			var declaration *AnnotationAttribute
+			if annotation != nil && annotation.Annotation != nil {
+				declaration = declarations[visibility[annotation]][annotation.Annotation.TypeName]
+			}
+			if !parameterDeclarationCarriesTypeAnnotation(pt, annotation, declaration) {
+				explicit = append(explicit, annotation)
+			}
+		}
+		variableArity := method.AccessFlags&0x80 != 0 && formal == len(declaredParams)-1 && pt != nil && pt.IsArray()
+		annotated := c.renderTypeDeclarationWithAnnos(pt, explicit, variableArity)
 		// Replace the leading type token of "Type name" / "Type... name".
 		sp := strings.LastIndex(out[i], " ")
 		if sp < 0 {
@@ -437,6 +508,30 @@ func (c *ClassObjectDumper) applyParamTypeAnnotations(method *MemberInfo, method
 		out[i] = annotated + out[i][sp:]
 	}
 	return out
+}
+
+// A declaration prefix also annotates the formal's element/base type. Array
+// dimensions and nested type arguments are distinct syntactic occurrences.
+// Match original parsed values and retention tables, never annotation spelling
+// alone or a guessed default value; keep synthetic parameter-table projection.
+func parameterDeclarationCarriesTypeAnnotation(formal types.JavaType, annotation *TypeAnnotation, declaration *AnnotationAttribute) bool {
+	if formal == nil || annotation == nil || annotation.Annotation == nil || declaration == nil {
+		return false
+	}
+	dimensions := 0
+	for formal != nil && formal.IsArray() {
+		dimensions++
+		formal = formal.ElementType()
+	}
+	if len(annotation.TypePath) != dimensions {
+		return false
+	}
+	for _, entry := range annotation.TypePath {
+		if entry.Kind != typePathKindArray || entry.ArgumentIndex != 0 {
+			return false
+		}
+	}
+	return reflect.DeepEqual(declaration, annotation.Annotation)
 }
 
 func (c *ClassObjectDumper) applyThrowsTypeAnnotations(method *MemberInfo, exceptions string) string {

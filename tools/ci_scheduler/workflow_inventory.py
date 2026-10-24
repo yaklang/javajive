@@ -51,6 +51,31 @@ def required_coverage_snapshot(repo_root: Path) -> dict[str, Any]:
 # the explicit task-gates / extended / untrusted-oracle workflows.
 BASELINE_CI_JOBS = ("source", "regression")
 
+# This is a reviewed authored-fixture suite, not a promotion of the external
+# historical corpus. Keep the two roots explicit: a prefix could accidentally
+# select a newly added foreign-JAR test in this mixed package.
+FAST_REBUILT_JAR_TESTS = (
+    "TestRebuiltJarRuntimeSelectionPreservesOriginalAuthority",
+    "TestRebuiltJarRejectsUnknownMetadataAndKeepsPlainPacking",
+)
+FAST_REBUILT_JAR_COMMAND = (
+    "go test -json ./test/cross -run '^("
+    + "|".join(FAST_REBUILT_JAR_TESTS)
+    + ")$' -count=1 -timeout=2m | tee artifacts/rebuilt-jar-runtime-tests.jsonl"
+)
+
+
+def validate_fast_cross_scope(workflow_text: str) -> None:
+    """Allow only the reviewed, bounded authored suite in the required gate.
+
+    This is a guard for the literal checked-in command, not a shell verifier.
+    External JAR discovery, broad package tests and extra commands still need
+    their separately reviewed manual isolation workflow.
+    """
+    commands = [line.strip() for line in workflow_text.splitlines() if "./test/cross" in line]
+    if commands != [FAST_REBUILT_JAR_COMMAND]:
+        raise ValueError("required cross-package tests must select exactly the reviewed authored fixture roots")
+
 
 def action_pins(workflow: Path) -> list[dict[str, Any]]:
     rows = []

@@ -31,14 +31,14 @@ func bindMethodTypeArguments(pattern, actual types.JavaType, variables map[strin
 		}
 		return bindMethodTypeArguments(w.Bound, actual, variables, bindings)
 	}
-	if p, ok := pattern.RawType().(*types.JavaClass); ok && p != nil && variables[p.Name] {
+	if name, variable := types.TypeVariableName(pattern); variable && variables[name] {
 		if _, wildcard := actual.(*types.JavaWildcardType); wildcard {
 			return false
 		}
-		if old := bindings[p.Name]; old != nil {
+		if old := bindings[name]; old != nil {
 			return reflect.DeepEqual(old.RawType(), actual.RawType())
 		}
-		bindings[p.Name] = actual.Copy()
+		bindings[name] = actual.Copy()
 		return true
 	}
 	if p, ok := types.AsParameterizedType(pattern); ok {
@@ -89,7 +89,7 @@ func (f *FunctionCallExpression) genericMethodSignatureQuery(ctx *class_context.
 	if f.IsStatic && sameErasureClassName(f.ClassName, "java.util.concurrent.CompletableFuture") && f.FunctionName == "supplyAsync" &&
 		(f.Descriptor == "(Ljava/util/function/Supplier;)Ljava/util/concurrent/CompletableFuture;" ||
 			f.Descriptor == "(Ljava/util/function/Supplier;Ljava/util/concurrent/Executor;)Ljava/util/concurrent/CompletableFuture;") {
-		v := types.NewJavaClass("$factoryResult")
+		v := types.NewJavaTypeVariable("$factoryResult")
 		params := []types.JavaType{types.NewParameterizedType("java.util.function.Supplier", []types.JavaType{v})}
 		if len(f.Arguments) == 2 {
 			params = append(params, types.NewJavaClass("java.util.concurrent.Executor"))
@@ -150,7 +150,7 @@ func (f *FunctionCallExpression) genericMethodSignatureQuery(ctx *class_context.
 	if ref, ok := UnpackSoltValue(f.Object).(*JavaRef); ok && ref.IsThis {
 		raw = ctx.ClassName
 		for _, name := range types.ClassFormalTypeParamNames(ctx.ClassSig) {
-			args = append(args, types.NewJavaClass(name))
+			args = append(args, types.NewJavaTypeVariable(name))
 		}
 	}
 	evidence := func(n string) (string, map[string]string, bool) { return invocationSignatureEvidence(ctx, n) }
@@ -233,8 +233,8 @@ func (f *FunctionCallExpression) inferredGenericMethodReturnQuery(ctx *class_con
 	// chain would otherwise solve each prefix here and again in receiver recovery,
 	// giving exponential work while ultimately returning the same unknown result.
 	if f.Descriptor != "" {
-		_, methods, known := invocationSignatureEvidence(ctx, strings.ReplaceAll(f.ClassName, ".", "/"))
-		if sig, declared := methods[class_context.MethodDescKey(f.FunctionName, f.Descriptor)]; known && declared && len(types.MethodFormalTypeParamNames(sig)) == 0 {
+		_, sig, declared, known := invocationDeclarationSignature(ctx, strings.ReplaceAll(f.ClassName, ".", "/"), f.FunctionName, f.Descriptor)
+		if known && declared && len(types.MethodFormalTypeParamNames(sig)) == 0 {
 			return nil
 		}
 	}

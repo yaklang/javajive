@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -23,12 +24,20 @@ func t19LambdaAdapter(req CallSiteRequest, d *Decompiler, sim StackSimulation, r
 		return invalidDispatch(req, FamilyLambda, DiagBootstrapArgMismatch, err.Error(), resultType)
 	}
 	static := req.StaticArgs
+	var serializedSource SerializableReferenceSource
+	serializable := false
 	if req.Identity.Name == "altMetafactory" {
-		res, handled := inspectAltMetafactoryFlags(req, resultType)
+		flags, typed := intFromLiteral(static[3])
+		serializable = typed && flags&lambdaFlagSerializable != 0
+		qualified := false
+		if serializable && d != nil && d.SerializableLambdaSource != nil {
+			serializedSource, qualified = d.SerializableLambdaSource(req)
+		}
+		res, handled := inspectAltMetafactoryFlagsWithSerializableSource(req, resultType, qualified)
 		if handled {
 			return res
 		}
-		flags, _ := intFromLiteral(static[3])
+		flags, _ = intFromLiteral(static[3])
 		next := 4
 		if flags&lambdaFlagMarkers != 0 {
 			n, _ := intFromLiteral(static[next])
@@ -69,6 +78,29 @@ func t19LambdaAdapter(req CallSiteRequest, d *Decompiler, sim StackSimulation, r
 	if d == nil || d.FunctionContext == nil {
 		return unsupportedDispatch(req, FamilyLambda, DiagBootstrapUnknown, "lambda reconstruction requires decompiler context", resultType)
 	}
+	if serializable {
+		return t19SerializableReference(req, d, static, impl, resultType, serializedSource)
+	}
+	// A typed Serializable ancestor does not set the original bootstrap's
+	// serialization flag. Source lambda syntax cannot preserve that distinction.
+	if name, known := types.RawClassFQN(resultType); known {
+		if inherited, _ := LambdaInterfaceSerializable(d.FunctionContext.InvocationMetadata, name, d.Work); inherited {
+			return unsupportedLambdaSource(req, "original factory disables serialization on a Serializable target")
+		}
+	}
+	if req.Identity.Name == "altMetafactory" {
+		flags, _ := intFromLiteral(req.StaticArgs[3])
+		if flags&lambdaFlagMarkers != 0 {
+			count, _ := intFromLiteral(req.StaticArgs[4])
+			for _, marker := range req.StaticArgs[5 : 5+count] {
+				if name, known := types.RawClassFQN(marker.Type()); known {
+					if inherited, _ := LambdaInterfaceSerializable(d.FunctionContext.InvocationMetadata, name, d.Work); inherited {
+						return unsupportedLambdaSource(req, "original factory disables serialization on a Serializable marker")
+					}
+				}
+			}
+		}
+	}
 	previousOrigin := d.lambdaFactoryOrigin
 	d.lambdaFactoryOrigin = &req.OriginPC
 	defer func() { d.lambdaFactoryOrigin = previousOrigin }()
@@ -90,7 +122,18 @@ func t19LambdaAdapter(req CallSiteRequest, d *Decompiler, sim StackSimulation, r
 	}
 
 	samN := t19SAMParamCount(static)
-	if t19ShouldInline(d, impl, len(capturedEval), samN) {
+	declaration := d.originalLambdaDeclaration(impl)
+	if declaration == LambdaDeclarationOrdinary && !t19OrdinaryMethodReferenceShape(impl, len(capturedEval), samN) {
+		return unsupportedDispatch(req, FamilyLambda, DiagBootstrapUnknown, "ordinary implementation partial application has no proven source representation", resultType)
+	}
+	inline := t19ShouldInline(d, impl, len(capturedEval), samN)
+	if inline && declaration != LambdaDeclarationSyntheticBody {
+		if declaration != LambdaDeclarationOrdinary {
+			return unsupportedDispatch(req, FamilyLambda, DiagBootstrapUnknown, "lambda source body requires original synthetic declaration metadata", resultType)
+		}
+		inline = false
+	}
+	if inline {
 		f := buildinBootstrapMethods["java.lang.invoke.LambdaMetafactory.metafactory"]
 		if strings.HasPrefix(impl.Member, "lambda$") {
 			if f == nil {
@@ -98,12 +141,24 @@ func t19LambdaAdapter(req CallSiteRequest, d *Decompiler, sim StackSimulation, r
 			}
 			val, err := f(static...)(d, sim, resultType, req.DynamicArgs...)
 			if err != nil {
+				if errors.Is(err, ErrLambdaSourceUnsupported) {
+					return unsupportedLambdaSource(req, err.Error())
+				}
+				if errors.Is(err, errFixedLambdaParameterTarget) {
+					return unsupportedDispatch(req, FamilyLambda, DiagBootstrapUnknown, err.Error(), resultType)
+				}
 				return invalidDispatch(req, FamilyLambda, DiagBootstrapArgMismatch, err.Error(), resultType)
 			}
 			return okDispatch(req, FamilyLambda, t19PreserveMarkers(req, val, resultType), values.EffectCall|values.EffectAllocate)
 		}
 		val, err := t19InlineLambda(req, d, static, impl, capturedEval, resultType)
 		if err != nil {
+			if errors.Is(err, ErrLambdaSourceUnsupported) {
+				return unsupportedLambdaSource(req, err.Error())
+			}
+			if errors.Is(err, errFixedLambdaParameterTarget) {
+				return unsupportedDispatch(req, FamilyLambda, DiagBootstrapUnknown, err.Error(), resultType)
+			}
 			return invalidDispatch(req, FamilyLambda, DiagBootstrapArgMismatch, err.Error(), resultType)
 		}
 		return okDispatch(req, FamilyLambda, t19PreserveMarkers(req, val, resultType), values.EffectCall|values.EffectAllocate)
@@ -170,8 +225,9 @@ func t19MethodTypeDesc(v values.JavaValue) string {
 	return ""
 }
 
-// t19ShouldInline decides lambda-body inlining from handle identity (kind, owner, name, desc)
-// plus capture/SAM arity. `lambda$` is only a hint for same-class synthetic bodies.
+// t19ShouldInline selects a candidate from handle identity and arity. The
+// adapter separately requires original synthetic-declaration evidence before
+// invoking a source-body renderer; this heuristic grants no such permission.
 func t19ShouldInline(d *Decompiler, impl *values.JavaClassMember, captured, samN int) bool {
 	if d == nil || d.FunctionContext == nil || impl == nil {
 		return false
@@ -250,10 +306,11 @@ func t19InlineLambda(req CallSiteRequest, d *Decompiler, static []values.JavaVal
 			}
 		}
 	}
-	methodStr, err := dumpLambdaWithReferenceAdapter(d, impl, captured, resultType, static, req.OriginPC)
+	source, err := dumpLambdaSourceWithReferenceAdapter(d, impl, captured, resultType, static, req.OriginPC)
 	if err != nil {
 		return nil, fmt.Errorf("dump lambda method `%s.%s` error: %w", impl.Name, impl.Member, err)
 	}
+	methodStr := source.Code
 	var retTypevarCast string
 	if d.getenv("JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF") == "" {
 		var instantiatedMT values.JavaValue
@@ -287,7 +344,8 @@ func t19InlineLambda(req CallSiteRequest, d *Decompiler, static []values.JavaVal
 	}
 	cv.CapturesKnown = true
 	cv.Captures = captured
-	return cv, nil
+	cv.BindLambdaSourceIdentity(source.Identity)
+	return retainOriginalLambdaParameterTarget(d, cv, source, resultType, impl, static, len(captured))
 }
 
 func t19LambdaReturnCastStrings(funcCtx *class_context.ClassContext, lambda *values.CustomValue, fallback string) (target, rawBridge string) {
@@ -349,6 +407,11 @@ func t19MethodRef(req CallSiteRequest, d *Decompiler, static []values.JavaValue,
 	if len(static) >= 3 {
 		if desc := t19MethodTypeDesc(static[2]); desc != "" {
 			refVal.InstantiatedMtdDesc = desc
+		}
+	}
+	if len(capturedArgs) == 0 && len(static) == 3 {
+		if source := values.NewUncapturedMethodReferenceSource(values.MethodReferenceSource{Kind: kind, Owner: owner, Member: member, Descriptor: impl.Description, CallName: req.CallSiteName, CallDescriptor: req.CallSiteDescriptor, ErasedSAM: t19MethodTypeDesc(static[0]), Instantiated: t19MethodTypeDesc(static[2])}, refType); source != nil {
+			refVal = source
 		}
 	}
 	return retainErasedFunctionalValue(refVal, resultType, declaredTarget)
@@ -446,6 +509,10 @@ func t19WriteLambdaBody(funcCtx *class_context.ClassContext, out *workbudget.Wri
 // for an invariant parameterized result it is the raw erasure inserted between
 // the expression and the full target (`(Future<V>) (Future) expr`).
 func t19WriteLambdaBodyWithBridge(funcCtx *class_context.ClassContext, out *workbudget.Writer, methodBody string, captured []values.JavaValue, returnTarget, rawBridge string) error {
+	return t19WriteLambdaBodyWithCaptureObserver(funcCtx, out, methodBody, captured, returnTarget, rawBridge, nil)
+}
+
+func t19WriteLambdaBodyWithCaptureObserver(funcCtx *class_context.ClassContext, out *workbudget.Writer, methodBody string, captured []values.JavaValue, returnTarget, rawBridge string, observed func(int, string)) error {
 	body := methodBody
 	if returnTarget != "" {
 		if projected, ok := lambdaReturnCastOutputLenWithBridge(body, returnTarget, rawBridge); ok {
@@ -488,8 +555,12 @@ func t19WriteLambdaBodyWithBridge(funcCtx *class_context.ClassContext, out *work
 			continue
 		}
 		if captured[captureIndex] != nil {
-			if err := out.WriteString(captured[captureIndex].String(funcCtx)); err != nil {
+			text := captured[captureIndex].String(funcCtx)
+			if err := out.WriteString(text); err != nil {
 				return err
+			}
+			if observed != nil {
+				observed(captureIndex, text)
 			}
 			if funcCtx != nil && funcCtx.Work != nil && funcCtx.Work.Err() != nil {
 				return funcCtx.Work.Err()
@@ -553,6 +624,10 @@ func t19OwnerSource(owner string, funcCtx *class_context.ClassContext) string {
 func t19PreserveMarkers(req CallSiteRequest, value values.JavaValue, resultType types.JavaType) values.JavaValue {
 	if cv, ok := values.UnpackSoltValue(value).(*values.CustomValue); ok && cv.Flag == "lambda" {
 		cv.OriginPC, cv.HasOriginPC = req.OriginPC, true
+		cv.MarkOriginalLambdaFactory(req.OriginPC)
+		if req.Identity.Name == "metafactory" && len(req.StaticArgs) == 3 {
+			cv.BindOriginalLambdaFactorySignature(req.CallSiteName, req.CallSiteDescriptor, t19MethodTypeDesc(req.StaticArgs[0]))
+		}
 	}
 	if req.Identity.Name != "altMetafactory" || len(req.StaticArgs) < 5 {
 		return value

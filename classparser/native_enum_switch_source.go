@@ -2,14 +2,69 @@ package javaclassparser
 
 import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
+	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/internal/workbudget"
 	"strings"
 )
 
 func (c *ClassObjectDumper) wireNativeEnumSwitchSource(p *nativeMemberFamily, ctx *class_context.ClassContext) {
+	if ctx == nil {
+		return
+	}
+	ctx.SourceParameterStore = nil
 	if p == nil || len(p.enumSwitchTables) == 0 {
 		return
+	}
+	// Registration itself is bounded. If it exhausts a resource or observes
+	// cancellation, retain a callable refusal projection rather than leaving
+	// a half-wired context with a nil callback.
+	ctx.SourceEnumSwitch = func(any, []int) (string, map[int]string, bool) { return "", nil, false }
+	stores := map[string]map[[2]int][]*nativeEnumParameterStorage{}
+	bindings := 0
+	for _, table := range p.enumSwitchTables {
+		for method, uses := range table.uses[c.obj.GetClassName()] {
+			for _, use := range uses {
+				if !nativeEnumSelectorStorages(use.selector, c.Work, 0, func(storage *nativeEnumParameterStorage) bool {
+					for pc := range storage.stores {
+						bindings++
+						if bindings > 4096 || !nativeProofWork(c.Work, 1) || c.Work != nil && c.Work.CheckAlloc(128) != nil {
+							return false
+						}
+						if stores[method] == nil {
+							stores[method] = map[[2]int][]*nativeEnumParameterStorage{}
+						}
+						key := [2]int{storage.slot, pc}
+						stores[method][key] = append(stores[method][key], storage)
+					}
+					return true
+				}) {
+					p.failed = true
+					return
+				}
+			}
+		}
+	}
+	if len(stores) > 0 {
+		ctx.SourceParameterStore = func(value any) (string, bool) {
+			a, known := value.(*statements.AssignStatement)
+			if !known {
+				return "", false
+			}
+			pc, slot, sealed := a.OriginalParameterStore()
+			if !sealed {
+				return "", false
+			}
+			marker := ""
+			for _, storage := range stores[ctx.FunctionName+ctx.CurrentMethodDesc][[2]int{slot, pc}] {
+				if _, valid := storage.assignment(a, ctx); !valid || !nativeProofWork(c.Work, 1) || storage.markers[pc] == "" || marker != "" && marker != storage.markers[pc] {
+					p.failed = true
+					return "", false
+				}
+				marker = storage.markers[pc]
+			}
+			return marker, marker != ""
+		}
 	}
 	ctx.SourceEnumSwitch = func(value any, labels []int) (string, map[int]string, bool) {
 		raw, ok := value.(values.JavaValue)
@@ -38,7 +93,7 @@ func (c *ClassObjectDumper) wireNativeEnumSwitchSource(p *nativeMemberFamily, ct
 		if !ok || call == nil || !call.HasOriginPC || call.OriginPC != use.ordinalPC || call.IsStatic || call.IsSpecialInvoke || call.Kind != values.InvokeVirtual || call.FunctionName != "ordinal" || call.Descriptor != "()I" || len(call.Arguments) != 0 || strings.ReplaceAll(call.ClassName, ".", "/") != arr.enum || call.Object == nil {
 			return fail()
 		}
-		if !nativeEnumSelectorSource(use.selector, call.Object, ctx, c.Work, 0) || !nativeProofWork(c.Work, int64(4+len(labels))) || c.Work != nil && c.Work.CheckAlloc(int64(len(labels))*96+int64(len(use.marker))) != nil {
+		if !nativeEnumSelectorStorages(use.selector, c.Work, 0, func(storage *nativeEnumParameterStorage) bool { return c.nativeEnumParameterStorageBody(storage, ctx) }) || !nativeEnumSelectorSource(use.selector, call.Object, ctx, c.Work, 0) || !nativeProofWork(c.Work, int64(4+len(labels))) || c.Work != nil && c.Work.CheckAlloc(int64(len(labels))*96+int64(len(use.marker))) != nil {
 			return fail()
 		}
 		typ, known := values.SourceTypeErasure(call.Object.Type(), ctx)
@@ -69,6 +124,11 @@ func nativeEnumSwitchSourceComplete(p *nativeMemberFamily, source string, work *
 		return false
 	}
 	expected := map[string]bool{}
+	storeMarkers, closed := nativeEnumSourceMarkers(source, "/*jdec-owned-parameter-store:", work)
+	if !closed {
+		return false
+	}
+	expectedStores := map[string]*values.JavaRef{}
 	for _, table := range p.enumSwitchTables {
 		count := 0
 		for _, methods := range table.uses {
@@ -79,6 +139,21 @@ func nativeEnumSwitchSourceComplete(p *nativeMemberFamily, source string, work *
 						return false
 					}
 					expected[use.marker] = true
+					if !nativeEnumSelectorStorages(use.selector, work, 0, func(storage *nativeEnumParameterStorage) bool {
+						if !storage.validated || storage.bound == nil || len(storage.markers) != len(storage.stores) {
+							return false
+						}
+						for pc := range storage.stores {
+							marker := storage.markers[pc]
+							if marker == "" || storeMarkers[marker] != 1 || expectedStores[marker] != nil && expectedStores[marker] != storage.bound {
+								return false
+							}
+							expectedStores[marker] = storage.bound
+						}
+						return true
+					}) {
+						return false
+					}
 				}
 			}
 		}
@@ -86,7 +161,7 @@ func nativeEnumSwitchSourceComplete(p *nativeMemberFamily, source string, work *
 			return false
 		}
 	}
-	return len(markers) == len(expected)
+	return len(markers) == len(expected) && len(storeMarkers) == len(expectedStores)
 }
 
 // javac lowers a switch's children before registering its own enum cases.
@@ -279,6 +354,10 @@ func nativeEnumSwitchSelectorClose(source string, open int, work *workbudget.Bud
 // Count proof registrations in actual block comments only. Quoted marker-like
 // data cannot stand in for a missing switch, and a repeated source use fails.
 func nativeEnumSwitchSourceMarkers(source string, work *workbudget.Budget) (map[string]int, bool) {
+	return nativeEnumSourceMarkers(source, "/*jdec-owned-enum-switch:", work)
+}
+
+func nativeEnumSourceMarkers(source, prefix string, work *workbudget.Budget) (map[string]int, bool) {
 	if !nativeProofWork(work, int64(len(source))) || work != nil && work.CheckAlloc(int64(len(source))+65536) != nil {
 		return nil, false
 	}
@@ -286,7 +365,7 @@ func nativeEnumSwitchSourceMarkers(source string, work *workbudget.Budget) (map[
 	state := scanNormal
 	depth := 0
 	for i := 0; i < len(source); i++ {
-		if state == scanNormal && strings.HasPrefix(source[i:], "/*jdec-owned-enum-switch:") {
+		if state == scanNormal && strings.HasPrefix(source[i:], prefix) {
 			end := strings.Index(source[i+2:], "*/")
 			if end < 0 {
 				return nil, false

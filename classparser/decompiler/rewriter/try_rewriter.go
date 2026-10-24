@@ -205,7 +205,13 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 			}
 		}
 		if stopAt == nil && !cleanupRegion && !next[i].IsCatchStart {
-			stopAt = typedTryNormalBoundary(node, next[i], next, manager.DominatorMap)
+			stopAt = typedEarlyReturnNormalFrontier(node, next[i], next, manager.DominatorMap)
+			if stopAt == nil {
+				stopAt = typedTryNormalBoundary(node, next[i], next, manager.DominatorMap)
+			}
+			if stopAt == nil {
+				stopAt = typedLoopTryNormalBoundary(manager, node, next[i])
+			}
 		}
 		body, err := getBody(next[i], stopAt)
 		if err != nil {
@@ -322,28 +328,38 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 	}
 	markEncodedJumps(tryNode, bodyNodes)
 	tryCatchSt.EntryInitializers = resourceEntryInitializers(tryNode)
-	declaration, tail := factorUnprotectedTryTail(node, tryCatchSt)
-	if declaration == nil {
+	tail := factorFinallyFallthroughTail(tryCatchSt)
+	declaration := prepareTypedResourceFinally(tryCatchSt)
+	if declaration == nil && len(tail) == 0 {
+		declaration, tail = factorUnprotectedTryTail(node, tryCatchSt)
+	}
+	if declaration == nil && len(tail) == 0 {
 		declaration, tail = factorResourceNormalTail(node, tryCatchSt)
 	}
-	if declaration != nil {
+	if declaration != nil || len(tail) > 0 {
 		// Preserve the result's method-local identity across the protected
 		// prefixes and the unprotected tail, without replaying slot names.
-		declNode := manager.NewNode(declaration)
-		tryNode.Replace(declNode)
-		declNode.RemoveAllNext()
-		declNode.AddNext(tryNode)
+		if declaration != nil {
+			declNode := manager.NewNode(declaration)
+			tryNode.Replace(declNode)
+			declNode.RemoveAllNext()
+			declNode.AddNext(tryNode)
+		}
 		continuations := slices.Clone(tryNode.Next)
 		tryNode.RemoveAllNext()
 		last := tryNode
 		for _, statement := range tail {
 			next := manager.NewNode(statement)
+			retargetFactoredStatementBoundary(manager.TryNodes, bodyNodes, next)
 			last.AddNext(next)
 			last = next
 		}
 		for _, next := range continuations {
 			last.AddNext(next)
 		}
+	}
+	if declaration == nil && len(tail) == 0 {
+		retargetProtectedTryBoundary(manager.TryNodes, node, tryNode)
 	}
 	return nil
 }

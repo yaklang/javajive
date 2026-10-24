@@ -7,17 +7,22 @@ import (
 )
 
 // Graph discovery and one source transaction have different resource domains.
+// Component capacity reserves two cache roles per owner and one transaction.
+// Retained original model bytes, shared work and source bytes remain bounded.
 // A wide acyclic dependency graph contains many independent commits; it must
 // not inherit the small bound for families committed atomically in one SCC.
 const (
 	nativeMemberDependencyNodeLimit      = nativeMemberLayoutNodeLimit
 	nativeMemberDependencyEdgeLimit      = 8192
-	nativeMemberDependencyComponentLimit = 64
+	nativeMemberDependencyComponentLimit = (nativeMemberCacheLimit - 1) / 2
 )
 
 // Original declaration dependency cycles are transactions, not permission to
 // share private access. Components identify the families whose source commits
 // must succeed together; an incomplete graph cannot establish a component.
+// Discover every component within the graph bounds. Admission applies the
+// transaction-size bound to the requested owner's component; a larger downstream
+// component must not erase an independent owner's complete dependency proof.
 func nativeMemberSourceComponents(graph map[string]map[string]bool, work *workbudget.Budget) (map[string][]string, bool) {
 	if len(graph) == 0 || len(graph) > nativeMemberDependencyNodeLimit || !nativeProofWork(work, int64(len(graph))) {
 		return nil, false
@@ -90,9 +95,6 @@ func nativeMemberSourceComponents(graph map[string]map[string]bool, work *workbu
 				if last == owner {
 					break
 				}
-			}
-			if len(component) > nativeMemberDependencyComponentLimit {
-				return false
 			}
 			sort.Strings(component)
 			for _, name := range component {

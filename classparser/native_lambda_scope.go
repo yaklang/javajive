@@ -115,20 +115,6 @@ func nativeLambdaImplementationScope(object *ClassObject, name, desc, lexical st
 		}
 		return object.ConstantPool[index-1]
 	}
-	member := func(index uint16) (string, string, string, bool) {
-		ref, ok := constant(index).(*ConstantMethodrefInfo)
-		if !ok || ref == nil {
-			return "", "", "", false
-		}
-		owner, ok := sourceBridgeClassName(object, ref.ClassIndex)
-		nt, valid := constant(ref.NameAndTypeIndex).(*ConstantNameAndTypeInfo)
-		if !ok || !valid || nt == nil {
-			return "", "", "", false
-		}
-		n, nk := sourceBridgeUTF8(object, nt.NameIndex)
-		d, dk := sourceBridgeUTF8(object, nt.DescriptorIndex)
-		return owner, n, d, nk && dk
-	}
 	handles := map[uint16]bool{}
 	for i, cp := range object.ConstantPool {
 		if !nativeProofWork(work, 1) {
@@ -141,9 +127,9 @@ func nativeLambdaImplementationScope(object *ClassObject, name, desc, lexical st
 		if h == nil {
 			return false
 		}
-		owner, n, d, valid := member(h.ReferenceIndex)
-		if valid && owner == object.GetClassName() && n == name && d == desc {
-			if impl.AccessFlags&StaticFlag != 0 && h.ReferenceKind != 6 || impl.AccessFlags&StaticFlag == 0 && h.ReferenceKind != 5 && h.ReferenceKind != 7 {
+		target, valid := nativeLambdaOriginalHandleTarget(object, h)
+		if valid && target.owner == object.GetClassName() && target.name == name && target.descriptor == desc {
+			if !nativeLambdaImplementationHandle(object, impl, h, target) {
 				return false
 			}
 			handles[uint16(i+1)] = true
@@ -180,8 +166,8 @@ func nativeLambdaImplementationScope(object *ClassObject, name, desc, lexical st
 		if !ok || h == nil || h.ReferenceKind != 6 {
 			return false
 		}
-		o, n, d, ok := member(h.ReferenceIndex)
-		if !ok || o != "java/lang/invoke/LambdaMetafactory" || n != "metafactory" || d != "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;" {
+		target, ok := nativeLambdaOriginalHandleTarget(object, h)
+		if !ok || target.interfaceRef || target.owner != "java/lang/invoke/LambdaMetafactory" || target.name != "metafactory" || target.descriptor != "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;" {
 			return false
 		}
 		sam, ok := constant(site.BootstrapArguments[0]).(*ConstantMethodTypeInfo)
@@ -286,24 +272,8 @@ func nativeLambdaImplementationScope(object *ClassObject, name, desc, lexical st
 				if op == nil || op.Instr == nil {
 					return false
 				}
-				if op.Instr.OpCode == core.OP_LDC || op.Instr.OpCode == core.OP_LDC_W || op.Instr.OpCode == core.OP_LDC2_W {
-					index := uint16(0)
-					if len(op.Data) == 1 {
-						index = uint16(op.Data[0])
-					} else if len(op.Data) == 2 {
-						index = core.Convert2bytesToInt(op.Data)
-					} else {
-						return false
-					}
-					if handles[index] {
-						return false
-					}
-				}
-				for _, kind := range []int{core.OP_INVOKESTATIC, core.OP_INVOKEVIRTUAL, core.OP_INVOKEINTERFACE, core.OP_INVOKESPECIAL} {
-					ref := constructorMotionMember(object, op, kind)
-					if ref != nil && ref.Name == object.GetClassName() && ref.Member == name && ref.Description == desc {
-						return false
-					}
+				if !nativeLambdaExclusiveOpcodeUse(object, object.GetClassName(), name, desc, handles, op) {
+					return false
 				}
 				if op.Instr.OpCode != core.OP_INVOKEDYNAMIC {
 					continue
@@ -364,6 +334,9 @@ func nativeLambdaImplementationScope(object *ClassObject, name, desc, lexical st
 				// without guessing from equal descriptors or variable spelling.
 				loads := make([]int, len(captures))
 				start := i
+				if load, known := nativeBoundAdapterCaptureLoad(object, m, impl, code, ops, i, captures, work); known {
+					start = load + 1
+				}
 				for j := len(captures) - 1; j >= 0; j-- {
 					if start == 0 {
 						return false

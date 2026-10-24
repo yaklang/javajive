@@ -114,6 +114,17 @@ func (n *NewExpression) Type() types.JavaType {
 }
 
 func (n *NewExpression) String(funcCtx *class_context.ClassContext) string {
+	if n == nil || n.IsArray() || funcCtx == nil || funcCtx.SourceAllocationRender == nil {
+		return n.sourceString(funcCtx)
+	}
+	observe := funcCtx.SourceAllocationRender
+	observe(class_context.AllocationRenderView{Value: n})
+	source := n.sourceString(funcCtx)
+	prefix, suffix := observe(class_context.AllocationRenderView{Value: n, End: true, Source: source})
+	return prefix + source + suffix
+}
+
+func (n *NewExpression) sourceString(funcCtx *class_context.ClassContext) string {
 	if n != nil && !n.IsArray() && n.ConstructorCall != nil && funcCtx != nil && funcCtx.SourceMethodLocalCandidate != nil && funcCtx.SourceMethodLocalAllocation != nil && funcCtx.SourceMethodLocalCandidate(n.ConstructorCall.ClassName) && n.HasOriginPC && n.ConstructorCall.HasOriginPC && n.ConstructorCall.Object == n && n.ConstructorCall.Kind == InvokeSpecial && n.ConstructorCall.IsSpecialInvoke && n.ConstructorCall.FunctionName == "<init>" {
 		call := n.ConstructorCall
 		if owner, known := types.RawClassFQN(n.Type()); !known || strings.ReplaceAll(owner, ".", "/") != strings.ReplaceAll(call.ClassName, ".", "/") {
@@ -152,7 +163,9 @@ func (n *NewExpression) String(funcCtx *class_context.ClassContext) string {
 		args := make([]class_context.SourceCaptureOperand, len(call.Arguments))
 		for i, a := range call.Arguments {
 			args[i].Value = a
-			args[i].Text = a.String(funcCtx)
+			if i != 0 || funcCtx.SourceMemberImplicitEnclosing == nil || !funcCtx.SourceMemberImplicitEnclosing(call.ClassName, call.Descriptor, n.OriginPC, call.OriginPC, a) {
+				args[i].Text = a.String(funcCtx)
+			}
 			if ref, ok := UnpackSoltValue(a).(*JavaRef); ok && ref != nil && ref.Id != nil && ref.CustomValue == nil && ref.StackVar == nil {
 				args[i].Receiver = ref.IsThis
 				args[i].Local = !ref.IsThis
@@ -194,14 +207,26 @@ func (n *NewExpression) String(funcCtx *class_context.ClassContext) string {
 		return s
 	}
 	var args string
-	if n.ArgumentsGetter != nil {
+	// A retained invocation is the structural constructor operand list. Render
+	// it in this consumer's context: the legacy getter may close over an older
+	// source scope, whose ownership callbacks are not valid for this query.
+	if n.ConstructorCall != nil {
+		args = n.ConstructorCall.ArgumentString(funcCtx)
+	} else if n.ArgumentsGetter != nil {
 		args = n.ArgumentsGetter()
 	}
 	name := n.JavaType.String(funcCtx)
+	diamond := ""
 	if !strings.Contains(name, "<") {
-		name += n.genericCtorDiamond(funcCtx)
+		diamond = n.genericCtorDiamond(funcCtx)
+		name += diamond
 	}
-	return fmt.Sprintf("new %s(%s)", name, args)
+	source := fmt.Sprintf("new %s(%s)", name, args)
+	if n.ConstructorCall != nil && funcCtx != nil && funcCtx.SourceConstructedInvocation != nil {
+		_, parameterized := types.AsParameterizedType(n.JavaType)
+		funcCtx.SourceConstructedInvocation(class_context.ConstructedInvocationView{Allocation: n, Invocation: n.ConstructorCall, Context: funcCtx, Owner: n.ConstructorCall.ClassName, PhysicalDescriptor: n.ConstructorCall.Descriptor, NewPC: n.OriginPC, InitPC: n.ConstructorCall.OriginPC, Parameterized: parameterized || diamond != ""})
+	}
+	return source
 }
 
 // SourceConstructorDiamond restores a parameterized SAM target for a lambda or
@@ -356,6 +381,12 @@ func (j *JavaExpression) String(funcCtx *class_context.ClassContext) string {
 		vs = append(vs, piece)
 	}
 	if len(vs) == 1 {
+		if j.Op == INC {
+			return finishExpressionRender(funcCtx, guard, fmt.Sprintf("++(%s)", vs[0]))
+		}
+		if j.Op == DEC {
+			return finishExpressionRender(funcCtx, guard, fmt.Sprintf("--(%s)", vs[0]))
+		}
 		return finishExpressionRender(funcCtx, guard, fmt.Sprintf("%s(%s)", j.Op, vs[0]))
 	}
 	switch j.Op {
@@ -1087,7 +1118,7 @@ func (f *FunctionCallExpression) receiverParamTypeArgsQuery(funcCtx *class_conte
 				if funcCtx.SiblingClassSig != nil && funcCtx.ClassName != "" && len(funcCtx.ClassTypeParams) > 0 {
 					recvArgs := make([]types.JavaType, len(funcCtx.ClassTypeParams))
 					for i, p := range funcCtx.ClassTypeParams {
-						recvArgs[i] = types.NewJavaClass(p)
+						recvArgs[i] = types.NewJavaTypeVariable(p)
 					}
 					_, ret, _ := types.ResolveInstantiatedSignatureExact(funcCtx, funcCtx.SiblingClassSig, funcCtx.ClassName, recvArgs, inner.FunctionName, inner.Descriptor, len(inner.Arguments))
 					if pt, ok := types.AsParameterizedType(ret); ok {
@@ -1194,7 +1225,7 @@ func RecoverThisFieldInstantiatedType(funcCtx *class_context.ClassContext, field
 		{
 			recvArgs := make([]types.JavaType, len(formals))
 			for i, n := range formals {
-				recvArgs[i] = types.NewJavaClass(n)
+				recvArgs[i] = types.NewJavaTypeVariable(n)
 			}
 			return types.ResolveInstantiatedFieldType(funcCtx, funcCtx.SiblingClassSig, funcCtx.SiblingFieldSig, funcCtx.ClassName, recvArgs, fieldName)
 		}
@@ -1303,7 +1334,7 @@ func (f *FunctionCallExpression) sameClassMethodParamType(i int, funcCtx *class_
 					}
 					if len(formals) == 1 {
 						return types.NewParameterizedType("java.lang.Class", []types.JavaType{
-							types.NewJavaClass(formals[0]),
+							types.NewJavaTypeVariable(formals[0]),
 						})
 					}
 				}
@@ -2070,7 +2101,7 @@ func (f *FunctionCallExpression) resolvedParamType(i int, funcCtx *class_context
 		recvRaw = funcCtx.ClassName
 		recvArgs = make([]types.JavaType, len(formals))
 		for idx, n := range formals {
-			recvArgs[idx] = types.NewJavaClass(n)
+			recvArgs[idx] = types.NewJavaTypeVariable(n)
 		}
 	} else {
 		// Non-`this` receiver: recover its raw class + actual type args from the receiver value's
@@ -2581,49 +2612,6 @@ func (f *FunctionCallExpression) typeVarArrayArgCast(ok1, resolvedGeneric bool, 
 // (a null or a checkcast), so the `(byte[])` cast is behaviour-preserving. Tightly gated: array parameter
 // + non-array reference argument whose erasure is Object (a concrete-class argument to an array parameter
 // would be a genuine type error we must not paper over). Kill-switch: JDEC_ARRAY_PARAM_REF_ARG_CAST_OFF=1.
-// identityArrayThroughCallCast returns the array type to wrap an argument in when a generic
-// identity call (`<T> T checkNotNull(T)`) erased to Object is passed to a varargs / Object[]
-// formal. Casting to Object[] makes Arrays.asList infer List<Object> and reject the
-// List<IpSubnetFilterRule> this(...) overload (netty IpSubnetFilter). The operand's own
-// array type (`IpSubnetFilterRule[]`) keeps inference. Kill-switch
-// JDEC_IDENTITY_ARRAY_CALL_CAST_OFF.
-func identityArrayThroughCallCast(argType types.JavaType, arg JavaValue, funcCtx *class_context.ClassContext) string {
-	if funcCtx.Getenv("JDEC_IDENTITY_ARRAY_CALL_CAST_OFF") != "" {
-		return ""
-	}
-	if argType == nil || arg == nil || !argType.IsArray() {
-		return ""
-	}
-	erased := argType.String(funcCtx)
-	if erased != "Object[]" && erased != "java.lang.Object[]" {
-		return ""
-	}
-	call, ok := UnpackSoltValue(arg).(*FunctionCallExpression)
-	if !ok || call == nil || len(call.Arguments) == 0 || call.Arguments[0] == nil {
-		return ""
-	}
-	a0t := call.Arguments[0].Type()
-	s := ""
-	if a0t != nil && a0t.IsArray() {
-		s = a0t.String(funcCtx)
-	} else if funcCtx != nil && funcCtx.IsVarArgs {
-		// A varargs formal `T... var1` may type the slot as T (the element) even
-		// though the JVM slot is T[]. Use the enclosing method's last parameter.
-		if ft, ok := funcCtx.FunctionType.(*types.JavaFuncType); ok && ft != nil && len(ft.ParamTypes) > 0 {
-			last := ft.ParamTypes[len(ft.ParamTypes)-1]
-			if last != nil && last.IsArray() {
-				if _, isRef := UnpackSoltValue(call.Arguments[0]).(*JavaRef); isRef {
-					s = last.String(funcCtx)
-				}
-			}
-		}
-	}
-	if s == "" || s == erased {
-		return ""
-	}
-	return s
-}
-
 func arrayParamRefArgCast(argType types.JavaType, arg JavaValue, funcCtx *class_context.ClassContext) bool {
 	if funcCtx.Getenv("JDEC_ARRAY_PARAM_REF_ARG_CAST_OFF") != "" {
 		return false
@@ -3727,7 +3715,7 @@ func (f *FunctionCallExpression) resolvedFunctionalFormalType(i int, funcCtx *cl
 		formals := types.ClassFormalTypeParamNames(funcCtx.ClassSig)
 		recvArgs = make([]types.JavaType, len(formals))
 		for i, name := range formals {
-			recvArgs[i] = types.NewJavaClass(name)
+			recvArgs[i] = types.NewJavaTypeVariable(name)
 		}
 	} else {
 		recvRaw, recvArgs = f.receiverParamTypeArgs(funcCtx)
@@ -3929,6 +3917,14 @@ func sameErasureClassName(a, b string) bool {
 // out of ArgumentStrings so the varargs-spread path can reuse it for the leading fixed arguments.
 func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.ClassContext) string {
 	arg := f.Arguments[i]
+	if funcCtx != nil && funcCtx.SourceGenericArgument != nil {
+		if source, known := funcCtx.SourceGenericArgument(f, i); known {
+			return source
+		}
+	}
+	if f.uniqueDelegationNullArgument(i, funcCtx) {
+		return arg.String(funcCtx)
+	}
 	// This view owns the complete original formal constraints. Rendering only
 	// its descriptor head would lose the source applicability proof.
 	if cast, ok := arg.(*CastExpression); ok && cast.Binding && len(cast.bindingIntersection) > 1 {
@@ -3942,6 +3938,9 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 			return booleanStackWord(condition).String(funcCtx)
 		}
 	}
+	if view := f.erasedClassArgumentResultView(funcCtx); view != nil {
+		return view.String(funcCtx)
+	}
 	if cast := f.parameterizedOverloadArgCast(i, funcCtx); cast != "" {
 		// The value model records the JVM erasure. A poly producer such as
 		// emptyList() may instead infer List<Object> in a Java cast context,
@@ -3952,6 +3951,9 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 		return fmt.Sprintf("(%s)(%s)(%s)", cast, raw, arg.String(funcCtx))
 	}
 	if target := f.instantiatedFieldOverloadCast(i, funcCtx); target != "" {
+		return f.renderProvenArgumentCast(i, target, arg, funcCtx)
+	}
+	if target := f.instantiatedMethodResultOverloadCast(i, funcCtx); target != "" {
 		return f.renderProvenArgumentCast(i, target, arg, funcCtx)
 	}
 	if target := f.covariantOverloadResultCast(i, funcCtx); target != "" {
@@ -3976,6 +3978,9 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 		if cast := f.enumSetNoneOfClassArgCast(funcCtx); cast != "" {
 			return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
 		}
+	}
+	if cast := f.delegationFactoryResultCast(i, arg, funcCtx); cast != "" {
+		return f.renderProvenArgumentCast(i, cast, arg, funcCtx)
 	}
 	if cast := f.thisCtorOverloadArgCast(i, funcCtx); cast != "" {
 		return f.renderProvenArgumentCast(i, cast, arg, funcCtx)
@@ -4075,6 +4080,16 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 	// Witness-based conversion: pin javac overload resolution to the bytecode
 	// descriptor (null vs String.valueOf(Object) vs valueOf(char[]); array vs Object).
 	// Specialized helpers above already returned if they fired.
+	if IsNullLiteral(UnpackSoltValue(arg)) && f.staticCallHasUniqueErasedBinding(funcCtx) {
+		// A complete unique non-generic static target also accepts untyped null.
+		// Its formal may be inaccessible to this source unit; naming that type
+		// would reject a valid original call. Competing/unknown families retain
+		// the descriptor pin below, including String.valueOf(Object).
+		return arg.String(funcCtx)
+	}
+	if cast := f.declaredArrayArgumentCast(i, funcCtx); cast != "" {
+		return f.renderProvenArgumentCast(i, cast, arg, funcCtx)
+	}
 	if cast := f.witnessDescriptorArgCast(i, arg, funcCtx); cast != "" {
 		return f.renderProvenArgumentCast(i, cast, arg, funcCtx)
 	}
@@ -4146,17 +4161,6 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 		argTypeStr := argType.String(funcCtx)
 		arg = NewCustomValue(func(funcCtx *class_context.ClassContext) string {
 			return fmt.Sprintf("(%s)(%s)", argTypeStr, argStr)
-		}, func() types.JavaType {
-			return argType
-		})
-	} else if cast := identityArrayThroughCallCast(argType, arg, funcCtx); cast != "" {
-		// `<T> T id(T)` returning Object (erased) into a varargs `Object[]` formal:
-		// wrapping as `(Object[])` makes Arrays.asList infer List<Object> (netty
-		// IpSubnetFilter `this(true, Arrays.asList(checkNotNull(rules)))`). Cast to
-		// the operand's array type instead. Kill-switch JDEC_IDENTITY_ARRAY_CALL_CAST_OFF.
-		argStr := arg.String(funcCtx)
-		arg = NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-			return fmt.Sprintf("(%s)(%s)", cast, argStr)
 		}, func() types.JavaType {
 			return argType
 		})
@@ -4957,7 +4961,12 @@ func (f *FunctionCallExpression) ProvedPrivateFieldAccess(funcCtx *class_context
 	return "", false
 }
 
-func (f *FunctionCallExpression) String(funcCtx *class_context.ClassContext) string {
+func (f *FunctionCallExpression) String(funcCtx *class_context.ClassContext) (source string) {
+	if funcCtx != nil && funcCtx.SourceGenericInvocation != nil {
+		observe := funcCtx.SourceGenericInvocation
+		observe(f, "", false)
+		defer func() { source = observe(f, source, true) }()
+	}
 	if source, known := f.ProvedPrivateFieldAccess(funcCtx, false); known {
 		return source
 	}
@@ -5010,7 +5019,11 @@ func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext)
 	if bridge, ok := f.privateNestBridgeCall(funcCtx); ok {
 		return bridge
 	}
-	if !f.bindingPlanned {
+	genericReceiver := ""
+	if funcCtx != nil && funcCtx.SourceGenericReceiver != nil {
+		genericReceiver, _ = funcCtx.SourceGenericReceiver(f)
+	}
+	if !f.bindingPlanned && genericReceiver == "" {
 		if planned, ok := f.planErasedMethodInput(funcCtx); ok {
 			return planned.renderCall(funcCtx)
 		}
@@ -5045,6 +5058,9 @@ func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext)
 	}
 	defer func() { source += registration }()
 	functionName := class_context.SafeIdentifier(f.FunctionName)
+	if genericReceiver != "" {
+		return fmt.Sprintf("((%s)(%s)).%s(%s)", genericReceiver, receiverSource(f.Object.String(funcCtx)), functionName, strings.Join(paramStrs, ","))
+	}
 	if view := f.optionalGenericThrowsReceiver(funcCtx); view != nil {
 		return fmt.Sprintf("((%s)(%s)).%s(%s)", view.String(funcCtx), receiverSource(f.Object.String(funcCtx)), functionName, strings.Join(paramStrs, ","))
 	}

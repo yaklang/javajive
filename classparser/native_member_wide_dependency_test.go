@@ -64,23 +64,8 @@ func TestNativeWideSourceComponentsAgainstIndependentReachability(t *testing.T) 
 				}
 			}
 			components, known := nativeMemberSourceComponents(graph, nil)
-			expected := true
-			for i := 0; i < n; i++ {
-				size := 0
-				for j := 0; j < n; j++ {
-					if reach[i][j] && reach[j][i] {
-						size++
-					}
-				}
-				if size > 64 {
-					expected = false
-				}
-			}
-			if known != expected {
-				t.Fatalf("complete SCC admission=%v want=%v", known, expected)
-			}
 			if !known {
-				return
+				t.Fatal("complete bounded source graph lost its component partition")
 			}
 			if len(components) != n {
 				t.Fatal("incomplete owner map")

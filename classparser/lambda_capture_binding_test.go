@@ -30,6 +30,15 @@ func TestAdversarialLambdaCaptureUsesLexicalDeclaration(t *testing.T) {
 	}
 }
 
+func TestAdversarialLambdaCaptureDoesNotRecopyFinalDeclarations(t *testing.T) {
+	for _, typ := range []string{"long", "Object", "String", "List<Object>"} {
+		input := "class C {\n\tvoid run() {\n\t\tfinal " + typ + " var1 = source();\n\t\tRunnable var2 = () -> {\n\t\t\tread(var1);\n\t\t};\n\t}\n}\n"
+		if got := fixLambdaLoopCapture(input); got != input {
+			t.Fatalf("a final capture binder acquired a different alias/type/name:\n%s", got)
+		}
+	}
+}
+
 func TestAdversarialLambdaCaptureRejectsInvisibleDeclarations(t *testing.T) {
 	for _, declaration := range []string{
 		"\t\tPayload var1 = later();\n",
@@ -72,6 +81,26 @@ func TestAdversarialLambdaCaptureBareGenericDeclaration(t *testing.T) {
 		out := fixLambdaLoopCapture(in)
 		if !regexp.MustCompile(`final T var1_f\d+ = var1;`).MatchString(out) {
 			t.Fatalf("bare generic declaration was not captured for %q:\n%s", header, out)
+		}
+	}
+}
+
+func TestAdversarialLambdaCaptureAliasNamesRespectSiblingScopesAndReservedTokens(t *testing.T) {
+	for _, reserved := range []bool{false, true} {
+		prefix := ""
+		want := "lv7_1_f1"
+		if reserved {
+			prefix = "\t\tObject lv7_1_f1 = null;\n"
+			want = "lv7_1_f2"
+		}
+		body := "\t\t\tString lv7_1 = source();\n\t\t\tRunnable lv7_2 = () -> {\n\t\t\t\tread(lv7_1);\n\t\t\t};\n"
+		input := "class C {\n\tvoid run(boolean flag) {\n" + prefix + "\t\tif (flag) {\n" + body + "\t\t} else {\n" + body + "\t\t}\n\t}\n}\n"
+		output := fixLambdaLoopCapture(input)
+		if strings.Count(output, "final String "+want+" = lv7_1;") != 2 || strings.Count(output, "read("+want+");") != 2 {
+			t.Fatalf("separate renders of one original body lost equal local structure, reserved=%v:\n%s", reserved, output)
+		}
+		if reserved && !strings.Contains(output, "Object lv7_1_f1 = null;") {
+			t.Fatal("original identifier was changed")
 		}
 	}
 }

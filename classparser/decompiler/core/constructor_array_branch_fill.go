@@ -141,7 +141,10 @@ func (d *Decompiler) inlinePrivateDelegationBranchArrayAt(root *Node, origins ma
 			!delegationArraySameRef(op.stackConsumed[2], ref) || values.UnpackSoltValue(op.stackConsumed[0]) != values.UnpackSoltValue(statement.JavaValue) || values.UnpackSoltValue(op.stackConsumed[1]) != values.UnpackSoltValue(statement.ArrayMember.Index) {
 			return false
 		}
-		if !delegationArrayElementAssignable(statement.JavaValue, component, d.FunctionContext.InvocationMetadata) {
+		// Array element assignment needs reference ancestry, not a complete
+		// method table. Keep declaration binding on its original provider.
+		assignmentMetadata := callbinding.WithReferenceAncestry(d.FunctionContext.InvocationMetadata, d.FunctionContext.SiblingSuperTypes, d.Work)
+		if !delegationArrayElementAssignable(statement.JavaValue, component, assignmentMetadata) {
 			return false
 		}
 		effect, uses := values.InspectValue(statement.JavaValue)

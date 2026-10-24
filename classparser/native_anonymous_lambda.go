@@ -14,6 +14,9 @@ func nativeAnonymousLambdaCaptureSource(original *nativeEnumSelectorProducer, va
 	v, known := nativeMemberEnclosingUnpack(value, work)
 	if snapshot, ok := v.(*values.JavaRef); ok && snapshot != nil {
 		position, ordinal, sealed := snapshot.OriginalDynamicOperandWitness(snapshot.Val)
+		if !sealed {
+			position, ordinal, sealed = snapshot.OriginalInlinedDynamicOperandWitness(snapshot.Val)
+		}
 		if !sealed || position != pc || ordinal != index {
 			return false
 		}

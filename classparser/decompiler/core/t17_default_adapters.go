@@ -166,6 +166,10 @@ func validateLambdaRequest(req CallSiteRequest) error {
 }
 
 func inspectAltMetafactoryFlags(req CallSiteRequest, resultType types.JavaType) (DispatchResult, bool) {
+	return inspectAltMetafactoryFlagsWithSerializableSource(req, resultType, false)
+}
+
+func inspectAltMetafactoryFlagsWithSerializableSource(req CallSiteRequest, resultType types.JavaType, serializableSource bool) (DispatchResult, bool) {
 	flags, ok := intFromLiteral(req.StaticArgs[3])
 	if !ok {
 		return invalidDispatch(req, FamilyLambda, DiagBootstrapArgMismatch, "altMetafactory flags is not an int", resultType), true
@@ -174,11 +178,6 @@ func inspectAltMetafactoryFlags(req CallSiteRequest, resultType types.JavaType) 
 	if unknown != 0 {
 		return unsupportedDispatch(req, FamilyLambda, DiagBootstrapUnknown,
 			fmt.Sprintf("altMetafactory unknown flags 0x%x", flags), resultType), true
-	}
-	if flags&lambdaFlagSerializable != 0 {
-		// T19 may later prove a supported serializable subset. Default: do not drop the flag.
-		return unsupportedDispatch(req, FamilyLambda, DiagBootstrapUnknown,
-			"altMetafactory FLAG_SERIALIZABLE is not silently ignored", resultType), true
 	}
 	idx := 4
 	if flags&lambdaFlagMarkers != 0 {
@@ -212,6 +211,10 @@ func inspectAltMetafactoryFlags(req CallSiteRequest, resultType types.JavaType) 
 	if idx != len(req.StaticArgs) {
 		return invalidDispatch(req, FamilyLambda, DiagBootstrapArgMismatch,
 			fmt.Sprintf("altMetafactory extra static args: consumed %d of %d", idx, len(req.StaticArgs)), resultType), true
+	}
+	if flags&lambdaFlagSerializable != 0 && !serializableSource {
+		return unsupportedDispatch(req, FamilyLambda, DiagBootstrapUnknown,
+			"altMetafactory FLAG_SERIALIZABLE requires an original deserializer/source certificate", resultType), true
 	}
 	return DispatchResult{}, false
 }

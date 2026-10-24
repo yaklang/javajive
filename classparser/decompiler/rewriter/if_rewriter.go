@@ -39,6 +39,9 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	if err != nil {
 		return err
 	}
+	// A dominated successor can already be outside an enclosing try. Keep
+	// its original boundary live before either arm consumes that successor.
+	protectedStops := typedProtectedIfCollectionStops(manager, ifNode)
 	trueNode, falseNode := ifBranchNodes(ifNode)
 	//ifNode.RemoveAllNext()
 	if trueNode == falseNode {
@@ -113,6 +116,10 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 			return sts, nil
 		}
 		err := core.WalkGraph[*core.Node](bodyStartNode, func(node *core.Node) ([]*core.Node, error) {
+			if protectedStops[node] && !protectedArmCanOwnReturn(node) {
+				endNodes = append(endNodes, node)
+				return nil, nil
+			}
 			err := manager.CheckVisitedNode(node)
 			if err != nil {
 				// Node was already visited (shared merge point). Skip it instead
@@ -180,13 +187,7 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	// a stub. The early-exit terminator is not a real continuation (it ends its path), so drop it -
 	// but only when at least one genuine fall-through remains, so an if that fully terminates the
 	// method (every exit is a return) is left with its terminal Next rather than no successor at all.
-	hasFallThrough := false
-	for _, n := range endNodes {
-		if !isMethodExitTerminator(n) {
-			hasFallThrough = true
-			break
-		}
-	}
+	hasFallThrough := ifHasNormalFallthrough(endNodes, ifBodyNodes)
 	if hasFallThrough {
 		endNodes = utils2.NodeFilter(endNodes, func(node *core.Node) bool {
 			return !isMethodExitTerminator(node)
@@ -201,8 +202,23 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	return nil
 }
 
-// A shared expression followed by the opposite successor is a conditional
-// edge block, not that condition's unconditional continuation. Its other
+// A loop edge already expressed by continue/break is an abrupt exit, just
+// like a method return. It must not cause the other arm's return continuation
+// to disappear. A target with even one ordinary incoming edge remains a
+// genuine fall-through; use the same edge classification as the final node.
+func ifHasNormalFallthrough(ends, body []*core.Node) bool {
+	view := &core.Node{Next: NodeDeduplication(ends)}
+	markEncodedJumps(view, body)
+	for _, end := range view.Next {
+		if !isMethodExitTerminator(end) && !view.EncodedJumps[end] {
+			return true
+		}
+	}
+	return false
+}
+
+// A shared expression with the same continuation as the opposite arm is a
+// conditional edge block. That arm may be a larger bypassing region. Its other
 // incoming edge prevents dominance-based body collection from owning it.
 // Split only this edge, retaining one execution on each original path. No
 // allocation, invocation or exception is moved across the condition.
@@ -215,7 +231,7 @@ func splitSharedFallthroughExpression(manager *RewriteManager, condition *core.N
 		target, continuation := pair[0], pair[1]
 		st, ok := target.Statement.(*statements.ExpressionStatement)
 		if !ok || st.Expression == nil || len(target.Source) < 2 || len(target.Next) != 1 ||
-			target.Next[0] != continuation || target.HideNext != nil || target.IsTryCatch ||
+			!sharedExpressionOtherArmBypassesTarget(continuation, target, target.Next[0]) || target.HideNext != nil || target.IsTryCatch ||
 			target.IsCatchStart || target.IsCircle || target.IsInCircle || target.LoopBreak ||
 			len(target.EncodedJumps) != 0 || encodedJumpTo(condition, target) ||
 			utils2.IsDominate(manager.DominatorMap, condition, target) ||
@@ -225,11 +241,46 @@ func splitSharedFallthroughExpression(manager *RewriteManager, condition *core.N
 		copy := *st
 		edge := manager.NewNode(&copy)
 		edge.OriginPC, edge.HasOriginPC = target.OriginPC, target.HasOriginPC
-		edge.AddNext(continuation)
+		edge.AddNext(target.Next[0])
 		replaceNextInPlace(condition, target, edge)
 		manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
 		return
 	}
+}
+
+// A shared one-statement edge block may precede a larger opposite arm.
+// Split only when every normal path through that arm reaches the same
+// continuation without entering the original shared block. This is edge
+// duplication, not hoisting: each original path still executes its effect once.
+func sharedExpressionOtherArmBypassesTarget(start, target, continuation *core.Node) bool {
+	if start == nil || target == nil || continuation == nil || start == target || continuation == target {
+		return false
+	}
+	states := map[*core.Node]uint8{}
+	var visit func(*core.Node, int) bool
+	visit = func(node *core.Node, depth int) bool {
+		if node == continuation {
+			return true
+		}
+		if node == nil || node == target || depth > 256 || len(states) >= 4096 {
+			return false
+		}
+		if state := states[node]; state != 0 {
+			return state == 2
+		}
+		if len(node.Next) == 0 || node.HideNext != nil || node.IsTryCatch || node.IsCatchStart || node.IsCircle || node.IsInCircle || len(node.EncodedJumps) != 0 || isMethodExitTerminator(node) {
+			return false
+		}
+		states[node] = 1
+		for _, next := range node.Next {
+			if !visit(next, depth+1) {
+				return false
+			}
+		}
+		states[node] = 2
+		return true
+	}
+	return visit(start, 0)
 }
 
 func sameProtectedMembership(root, a, b *core.Node) bool {

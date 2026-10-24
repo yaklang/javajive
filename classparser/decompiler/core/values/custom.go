@@ -9,9 +9,19 @@ import (
 )
 
 type CustomValue struct {
-	sourceCaught      bool
-	sourceCaughtPC    int
-	sourceCaughtTyped bool
+	lambdaParameterNamesRequired     bool
+	originalReferenceCaptureRequired bool
+	originalLambdaFactory            *originalLambdaFactory
+	lambdaSourceIdentity             *LambdaSourceIdentity
+	lambdaLexicalFieldCaptures       map[int]*LambdaLexicalFieldCapture
+	lambdaLexicalFieldIdentity       *LambdaSourceIdentity
+	serializableReferenceSource      *serializableReferenceSource
+	sourceMethodReference            *uncapturedMethodReferenceSource
+	sourcePrimitive                  *sourcePrimitiveConversion
+	sourceInstanceOf                 *originalInstanceOfSource
+	sourceCaught                     bool
+	sourceCaughtPC                   int
+	sourceCaughtTyped                bool
 	// Known captures describe lambda creation, without executing or inspecting
 	// the deferred lambda body. Other custom expressions remain opaque.
 	CapturesKnown  bool
@@ -58,6 +68,14 @@ type CustomValue struct {
 
 // ReplaceVar implements JavaValue.
 func (v *CustomValue) ReplaceVar(oldId *utils.VariableId, newId *utils.VariableId) {
+	if v.sourceInstanceOf != nil {
+		v.sourceInstanceOf.operand.ReplaceVar(oldId, newId)
+		return
+	}
+	if v.sourcePrimitive != nil {
+		v.sourcePrimitive.operand.ReplaceVar(oldId, newId)
+		return
+	}
 	if v.sourceCaught {
 		return // The handler-entry name is bound by its original PC, not a local ID.
 	}
@@ -67,6 +85,12 @@ func (v *CustomValue) ReplaceVar(oldId *utils.VariableId, newId *utils.VariableI
 }
 
 func (v *CustomValue) Type() types.JavaType {
+	if v.sourceInstanceOf != nil {
+		return types.NewJavaPrimer(types.JavaBoolean)
+	}
+	if v.sourcePrimitive != nil {
+		return types.NewJavaPrimer(v.sourcePrimitive.target)
+	}
 	return v.TypeFunc()
 }
 func (v *CustomValue) String(funcCtx *class_context.ClassContext) string {
@@ -95,7 +119,18 @@ func (v *CustomValue) String(funcCtx *class_context.ClassContext) string {
 		}
 		return name
 	}
-	if v.StringFunc == nil && v.WriteFunc == nil {
+	if v.sourcePrimitive != nil {
+		role := v.sourcePrimitive
+		return finishExpressionRender(funcCtx, guard, RenderPrimitiveConversion(role.operand, types.NewJavaPrimer(role.target), funcCtx))
+	}
+	write := v.WriteFunc
+	if v.sourceMethodReference != nil {
+		write = v.sourceMethodReference.write
+	}
+	if v.sourceInstanceOf != nil {
+		write = v.sourceInstanceOf.write
+	}
+	if v.StringFunc == nil && write == nil {
 		return ""
 	}
 	if guard {
@@ -103,17 +138,17 @@ func (v *CustomValue) String(funcCtx *class_context.ClassContext) string {
 			return ""
 		}
 	}
-	if guard && funcCtx.Work.HasOutputLimit() && v.WriteFunc == nil {
+	if guard && funcCtx.Work.HasOutputLimit() && write == nil {
 		funcCtx.Work.RejectUnboundedRender()
 		return ""
 	}
-	if v.WriteFunc != nil {
+	if write != nil {
 		out := workbudget.NewWriter(nil)
 		if guard {
 			out = workbudget.NewWriter(funcCtx.Work)
 			out.SetBase(funcCtx.OutputHeld)
 		}
-		if err := v.WriteFunc(funcCtx, out); err != nil {
+		if err := write(funcCtx, out); err != nil {
 			if funcCtx != nil && funcCtx.Work != nil && funcCtx.Work.Err() == nil {
 				funcCtx.Work.FailRender(err)
 			}
@@ -122,7 +157,11 @@ func (v *CustomValue) String(funcCtx *class_context.ClassContext) string {
 		if guard && renderRejected(funcCtx) {
 			return ""
 		}
-		return out.String()
+		text := out.String()
+		if v.sourceMethodReference != nil && funcCtx != nil && funcCtx.SourceMethodReference != nil {
+			funcCtx.SourceMethodReference(v, text)
+		}
+		return text
 	}
 	s := v.StringFunc(funcCtx)
 	if renderRejected(funcCtx) {

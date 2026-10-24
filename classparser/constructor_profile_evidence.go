@@ -20,6 +20,7 @@ type constructorProfileEvidence struct {
 	originals                       map[string][32]byte
 	transcript                      []constructorProfileObservation
 	eligible, bootstrapUsed, inBody bool
+	runtimeSpecific                 bool
 	inconsistent                    bool
 	rootName, rootSuper             string
 	rootFlags                       uint16
@@ -109,7 +110,7 @@ func (e *constructorProfileEvidence) metadata(provider callbinding.Provider) cal
 }
 
 func (e *constructorProfileEvidence) revalidates(c *ClassObjectDumper, previous *constructorProfileEvidence, remaining *int) bool {
-	if previous == nil || !previous.eligible || !previous.bootstrapUsed || !e.eligible || previous.rootName != e.rootName || previous.rootSuper != e.rootSuper || previous.rootFlags != e.rootFlags || previous.finalizerSilent != e.finalizerSilent {
+	if previous == nil || previous.runtimeSpecific || !previous.eligible || !previous.bootstrapUsed || !e.eligible || previous.rootName != e.rootName || previous.rootSuper != e.rootSuper || previous.rootFlags != e.rootFlags || previous.finalizerSilent != e.finalizerSilent {
 		return false
 	}
 	count := len(previous.transcript)

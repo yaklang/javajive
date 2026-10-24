@@ -47,7 +47,7 @@ func originalMethodLocalOwner(obj, enclosing *ClassObject, work *workbudget.Budg
 			name, named := sourceBridgeUTF8(obj, table.NameIndex)
 			descriptor, typed := sourceBridgeUTF8(obj, table.DescriptorIndex)
 			_, ret, err := callbinding.Descriptor(descriptor)
-			if !named || !typed || err != nil || ret == "" || name == "" || name == "<clinit>" || name != "<init>" && class_context.SafeIdentifier(name) != name || name == "<init>" && ret != "V" {
+			if !named || !typed || err != nil || ret == "" || name == "" || name == "<clinit>" || name != "<init>" && !class_context.PreservesJava8Identifier(name) || name == "<init>" && ret != "V" {
 				return nil, false
 			}
 			proof.owner, proof.method, proof.descriptor = owner, name, descriptor
@@ -69,7 +69,7 @@ func originalMethodLocalOwner(obj, enclosing *ClassObject, work *workbudget.Budg
 				}
 				selfRows++
 				name, known := sourceBridgeUTF8(obj, row.InnerNameIndex)
-				if selfRows != 1 || row.OuterClassInfoIndex != 0 || !known || name == "" || class_context.SafeIdentifier(name) != name || row.InnerClassAccessFlags&0x0608 != 0 {
+				if selfRows != 1 || row.OuterClassInfoIndex != 0 || !known || name == "" || !class_context.PreservesJava8Identifier(name) || row.InnerClassAccessFlags&0x0608 != 0 {
 					return nil, false
 				}
 				proof.name, proof.flags = name, row.InnerClassAccessFlags

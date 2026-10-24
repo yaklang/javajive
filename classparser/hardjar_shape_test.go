@@ -382,39 +382,39 @@ func TestCallSiteDupLocalsJarFS(t *testing.T) {
 		t.Skip(err)
 	}
 	entry := "org/springframework/beans/factory/groovy/GroovyDynamicElementReader.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if strings.Contains(on, "CallSite[] var5 = $getCallSiteArray()") {
-		t.Fatalf("ON still redeclares var5 as CallSite[]:\n%s", clipForTest(on, "var5"))
-	}
-	if !strings.Contains(on, "$getCallSiteArray()") {
-		t.Fatalf("ON missing CallSite bootstrap:\n%s", clipForTest(on, "CallSite"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if !strings.Contains(off, "CallSite[] var5 = $getCallSiteArray()") {
-		t.Fatalf("OFF missing unfixed CallSite[] var5:\n%s", clipForTest(off, "var5"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
+	// The allocation identity fix must survive disabling all old source
+	// rewrites. Requiring the OFF path to redeclare var5 would now reward a
+	// regression; the original-first operand-before-NEW matrix exercises the
+	// same identity rule with independently authored bytecode and JVM oracles.
+	for _, setting := range []string{"", "1"} {
+		t.Run("source-shapes="+setting, func(t *testing.T) {
+			t.Setenv("JDEC_HARDJAR_SHAPE_OFF", setting)
+			jfs, err := NewJarFSFromLocal(jar)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer jfs.Close()
+			source, err := jfs.ReadFile(entry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := reviewedSourceMethod(t, string(source), `invokeMethod\s*\(`)
+			refs := regexp.MustCompile(`Reference\s+(\w+)\s*=\s*new Reference\(`).FindAllStringSubmatch(body, -1)
+			bootstrap := requireReviewedPattern(t, body, `CallSite\[\]\s+(\w+)\s*=\s*\$getCallSiteArray\(\)`)[1]
+			if len(refs) < 2 {
+				t.Fatalf("missing original allocation declarations: %s", body)
+			}
+			seen := map[string]bool{bootstrap: true}
+			for _, ref := range refs {
+				if seen[ref[1]] {
+					t.Fatalf("independent allocation and bootstrap declarations collided: %s", body)
+				}
+				seen[ref[1]] = true
+			}
+			if !regexp.MustCompile(`\b` + regexp.QuoteMeta(bootstrap) + `\[`).MatchString(body) {
+				t.Fatalf("bootstrap declaration lost its uses: %s", body)
+			}
+		})
 	}
 }
 
@@ -2102,9 +2102,12 @@ func TestDropClassTCastOfForLoadedType(t *testing.T) {
 func TestFillHashCodeEmptyNullIf(t *testing.T) {
 	in := "class C {\n\tpublic int hashCode() {\n\t\tClassLoader var1 = this.classLoader;\n\t\tif ((var1) != (null)){\n\n\t\t}else{\n\t\t\treturn 1;\n\t\t}\n\t}\n}\n"
 	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	out := fillHashCodeEmptyNullIf(in)
-	if !strings.Contains(out, "return var1.hashCode();") {
-		t.Fatalf("missing hashCode fill:\n%s", out)
+	// The old assertion required fabrication of an early return. Its original
+	// bytecode instead keeps accumulating after the nonnull contribution; the
+	// original-first carried-primitive MVP checks that full algorithm.
+	out := fixHardjarShapes(in)
+	if out != in {
+		t.Fatalf("source syntax cannot prove a missing contribution:\n%s", out)
 	}
 }
 
@@ -2150,25 +2153,22 @@ func TestRewriteInstanceCastFromSiblingNoSibling(t *testing.T) {
 	}
 }
 
+// Keep the historical regression's distinct local lifetimes, but exercise the
+// real compiler/decompiler path instead of requiring a raw-type text rewrite.
 func TestRetypeMixedIteratorElemToRaw(t *testing.T) {
-	in := "class C {\n\tvoid m() {\n\t\tIterator<String> var6 = var1.iterator();\n\t\tvar7 = ((String)(var6.next()));\n\t\tvar6 = var0.iterator();\n\t\tvar7_1 = ((SegmentCommitInfo)(var6.next()));\n\t}\n}\n"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	out := retypeMixedIteratorElemToRaw(in)
-	if strings.Contains(out, "Iterator<String> var6") {
-		t.Fatalf("Iterator<String> still present:\n%s", out)
-	}
-	if !strings.Contains(out, "Iterator var6") {
-		t.Fatalf("missing raw Iterator:\n%s", out)
+	const source = `public class IteratorSlotOwner {public static long fold(java.util.List<String> a,java.util.List<Integer> b){long sum=0;{java.util.Iterator<String> it=a.iterator();while(it.hasNext()){sum+=it.next().length();}}{java.util.Iterator<Integer> it=b.iterator();while(it.hasNext()){sum=sum*31+it.next().intValue();}}return sum;}}
+ class IteratorSlotDriver {public static void main(String[]args){long actual=IteratorSlotOwner.fold(java.util.Arrays.asList("abc","x"),java.util.Arrays.asList(7,-11));if(actual!=((4L*31+7)*31-11))throw new AssertionError("slot lifetimes");System.out.println("iterator:slot:lifetimes");}}`
+	for _, debug := range []string{"none", "source,lines,vars"} {
+		t.Run(debug, func(t *testing.T) {
+			roundTripConstructorBridgeArtifact(t, source, "IteratorSlotOwner", "IteratorSlotDriver", "iterator:slot:lifetimes\n", debug, 8)
+		})
 	}
 }
 
 func TestRetypeMixedIteratorElemToRawKeepsClassWildcard(t *testing.T) {
-	in := "class C {\n\tvoid m() {\n\t\tIterator<Class<?>> var4 = var1.iterator();\n\t\tvar5 = ((Class)(var4.next()));\n\t}\n}\n"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	out := retypeMixedIteratorElemToRaw(in)
-	if !strings.Contains(out, "Iterator<Class<?>> var4") {
-		t.Fatalf("Class<?> iterator was stripped:\n%s", out)
-	}
+	const source = `public class IteratorClassOwner {public static String names(java.util.Iterator<Class<?>> it){String result="";while(it.hasNext()){Class<?> type=it.next();result+=type==null?"null;":type.getName()+";";}return result;}}
+ class IteratorClassDriver {public static void main(String[]args)throws Exception{java.lang.reflect.Type p=IteratorClassOwner.class.getDeclaredMethod("names",java.util.Iterator.class).getGenericParameterTypes()[0];if(!(p instanceof java.lang.reflect.ParameterizedType))throw new AssertionError("iterator generic declaration");java.lang.reflect.Type element=((java.lang.reflect.ParameterizedType)p).getActualTypeArguments()[0];if(!(element instanceof java.lang.reflect.ParameterizedType)||((java.lang.reflect.ParameterizedType)element).getRawType()!=Class.class||!(((java.lang.reflect.ParameterizedType)element).getActualTypeArguments()[0] instanceof java.lang.reflect.WildcardType))throw new AssertionError("nested wildcard");String actual=IteratorClassOwner.names(java.util.Arrays.<Class<?>>asList(null,Object.class,String[].class).iterator());if(!actual.equals("null;java.lang.Object;[Ljava.lang.String;;"))throw new AssertionError(actual);System.out.println("iterator:class:wildcard");}}`
+	roundTripConstructorBridgeArtifact(t, source, "IteratorClassOwner", "IteratorClassDriver", "iterator:class:wildcard\n", "none", 8)
 }
 
 func TestRetypeSelfWrapDollarNewFromCalleeParam(t *testing.T) {
@@ -2271,9 +2271,6 @@ func TestFillHashCodeEmptyNullIfJarFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	on := string(onb)
-	if !strings.Contains(on, "return var1.hashCode();") {
-		t.Fatalf("ON missing hashCode fill:\n%s", clipForTest(on, "hashCode()"))
-	}
 	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
 	jfs2, err := NewJarFSFromLocal(jar)
 	if err != nil {
@@ -2285,11 +2282,28 @@ func TestFillHashCodeEmptyNullIfJarFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	off := string(offb)
-	if strings.Contains(off, "return var1.hashCode();") {
-		t.Fatalf("OFF already has hashCode fill (switch inert):\n%s", clipForTest(off, "hashCode()"))
+	// Original bytecode has one return after every conditional contribution.
+	// The retired text rule fabricated early returns and made its own switch
+	// load-bearing. Both settings must now retain the same complete algorithm.
+	hashBody := func(source string) string {
+		t.Helper()
+		start := strings.Index(source, "public int hashCode()")
+		if start < 0 {
+			t.Fatal("missing original method")
+		}
+		open := strings.Index(source[start:], "{") + start
+		end := matchingCloseBrace(source, open)
+		if end <= open {
+			t.Fatal("missing method extent")
+		}
+		body := source[open+1 : end]
+		if strings.Count(body, "return ") != 1 || strings.Count(body, ".hashCode()") < 6 || strings.Contains(body, DecompileStubMarker) {
+			t.Fatal("lost common continuation or original contributions", body)
+		}
+		return body
 	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
+	if hashBody(on) != hashBody(off) {
+		t.Fatal("algorithm still depends on source text recovery")
 	}
 }
 
@@ -2892,16 +2906,17 @@ func TestInsertLockFactoryCopyCtorThis(t *testing.T) {
 	}
 }
 
-func TestWrapCatchBodyGetDeclaredMethod(t *testing.T) {
-	in := "class C {\n\tObject run() {\n\t\ttry{\n\t\t\treturn x;\n\t\t}catch(Exception var1){\n\t\t\treturn new Foo(ClassLoader.class.getDeclaredMethod(\"getClassLoadingLock\",new Class[]{String.class}));\n\t\t}\n\t}\n}\n"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	out := wrapCatchBodyGetDeclaredMethod(in)
-	if !strings.Contains(out, "catch(Exception varE)") {
-		t.Fatalf("missing nested try around getDeclaredMethod:\n%s", out)
-	}
-	ioe := "class C {\n\tObject run() {\n\t\ttry{\n\t\t\treturn x;\n\t\t}catch(IOException var1){\n\t\t\treturn new Foo(ClassLoader.class.getDeclaredMethod(\"getClassLoadingLock\",new Class[]{String.class}));\n\t\t}\n\t}\n}\n"
-	if strings.Contains(wrapCatchBodyGetDeclaredMethod(ioe), "catch(Exception varE)") {
-		t.Fatal("must not wrap catch(IOException) getDeclaredMethod")
+// The old text-repair test required a newly invented catch. The executable
+// nested-handler regression checks the opposite contract with the original
+// exception object; this source boundary must not add any unproved wrapper.
+func TestAdversarialCatchSourceCannotInventWrappingHandler(t *testing.T) {
+	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "")
+	for _, catchType := range []string{"Exception", "IOException", "ReflectiveOperationException"} {
+		in := "class C { Object run() throws Exception { try{return target.run();}catch(" + catchType + " failure){return new Foo(target.getDeclaredMethod(name,types));} } }"
+		out := fixHardjarShapes(in)
+		if strings.Contains(out, "varE") || strings.Contains(out, "new RuntimeException") {
+			t.Fatalf("source spelling invented exception flow:\n%s", out)
+		}
 	}
 }
 

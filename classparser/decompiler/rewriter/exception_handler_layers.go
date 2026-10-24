@@ -135,6 +135,14 @@ func handlerIntervalCovered(ranges [][2]int, interval [2]int) bool {
 type handlerLayerProof struct {
 	remaining int
 	active    map[statements.Statement]bool
+	// A boundary proof must inspect every nested effect and original handler
+	// range, even when a nested Throwable catch swallows its own failures.
+	// Propagation-only queries leave this nil and retain that narrower shortcut.
+	strictRanges func([][2]int) bool
+	// Ordinary exception-domain queries do not admit control transfers.
+	// A caller with a separate CFG target certificate may validate one exact
+	// sealed leaf; no string spelling or public Name grants this permission.
+	transfer func(*statements.CustomStatement) bool
 }
 
 func (p *handlerLayerProof) block(body []statements.Statement, covered func(int) bool, depth int) bool {
@@ -168,6 +176,9 @@ func (p *handlerLayerProof) statement(statement statements.Statement, covered fu
 			return finallyPureLocal(local) && (x.JavaValue == nil || finallyCoveredValue(x.JavaValue, covered))
 		}
 		return finallyCoveredAssignment(x, covered)
+	case *statements.SourceAssertionStatement:
+		condition, call, pc, known := x.SourceAssertionProtocol()
+		return known && covered(pc) && finallyCoveredValue(condition, covered) && finallyCoveredValue(call, covered)
 	case *statements.ExpressionStatement:
 		return x != nil && finallyCoveredValue(x.Expression, covered)
 	case *statements.IfStatement:
@@ -176,11 +187,23 @@ func (p *handlerLayerProof) statement(statement statements.Statement, covered fu
 		if x == nil || len(x.Exception) == 0 || len(x.Exception) != len(x.CatchBodies) || len(x.Exception) != len(x.Handlers) {
 			return false
 		}
+		if p.strictRanges != nil {
+			for _, initializer := range x.EntryInitializers {
+				if !p.block([]statements.Statement{initializer}, covered, depth+1) {
+					return false
+				}
+			}
+			for _, handler := range x.Handlers {
+				if !covered(handler.EntryPC) || !p.strictRanges(handler.ProtectedRanges) {
+					return false
+				}
+			}
+		}
 		// An internally handled cleanup call cannot propagate to this added
 		// outer layer. Require a real Throwable handler protecting every effect
 		// and a non-throwing handler body, rather than assuming a printed try is
 		// safe. This also preserves cleanup side effects and first-error aliases.
-		if len(x.Exception) == 1 && x.Exception[0] != nil && x.Exception[0].Type() != nil {
+		if p.strictRanges == nil && len(x.Exception) == 1 && x.Exception[0] != nil && x.Exception[0].Type() != nil {
 			name := x.Exception[0].Type().String(&class_context.ClassContext{})
 			if name == "Throwable" || name == "java.lang.Throwable" {
 				rows, valid := canonicalHandlerRanges(x.Handlers[0].ProtectedRanges)
@@ -201,6 +224,9 @@ func (p *handlerLayerProof) statement(statement statements.Statement, covered fu
 	case *statements.CustomStatement:
 		if x == nil {
 			return false
+		}
+		if x.HasSourceTransfer() {
+			return p.transfer != nil && x.SourceTransferOnly() && p.transfer(x)
 		}
 		if x.Name == "end" && x.ThrownValue == nil {
 			return true

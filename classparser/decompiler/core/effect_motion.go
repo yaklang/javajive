@@ -1125,6 +1125,9 @@ func (d *Decompiler) canInlineValue(value values.JavaValue, source, target *Node
 	if target == nil {
 		return false
 	}
+	if !d.lambdaCaptureInliningOrderClosed(value, source, target, foldedRef) {
+		return false
+	}
 	if d.canInlineDelegationValue(value, foldedRef, originHint) || isProvableNull(value) {
 		return true
 	}

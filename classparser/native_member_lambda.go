@@ -1,9 +1,7 @@
 package javaclassparser
 
 import (
-	"fmt"
 	"slices"
-	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/internal/workbudget"
@@ -27,12 +25,20 @@ func nativeMemberLambdaImplementation(child *nativeMemberClass, method *MemberIn
 	if found != 1 {
 		return false
 	}
+	parameters, known := nativeLambdaBodyDeclarationSchema(child.object, method, work)
+	if !known {
+		return false
+	}
 	for _, attr := range method.Attributes {
 		if !nativeProofWork(work, 1) {
 			return false
 		}
 		switch attr.(type) {
 		case *CodeAttribute, *ExceptionsAttribute:
+		case *UnparsedAttribute:
+			if parameters == nil || attr != parameters.table {
+				return false
+			}
 		default:
 			return false
 		}
@@ -140,7 +146,7 @@ func nativeMemberLambdaSourceClosed(child *nativeMemberClass, dumper *ClassObjec
 		return false
 	}
 	for method := range child.lambdaImplementations {
-		if !nativeProofWork(work, 1) {
+		if method == nil || !isSyntheticMethod(method.AccessFlags) || !nativeProofWork(work, 1) {
 			return false
 		}
 		name, nok := sourceBridgeUTF8(child.object, method.NameIndex)
@@ -152,8 +158,11 @@ func nativeMemberLambdaSourceClosed(child *nativeMemberClass, dumper *ClassObjec
 			}
 			continue
 		}
-		body := dumper.dumpedMethodsSet[fmt.Sprintf("name:%s,desc:%s", name, desc)]
-		if !nok || !dok || !slices.Contains(dumper.lambdaMethods[name], desc) || body == nil || body.member != method || body.bodyCode == "stub" || body.checkedEscape || strings.Contains(body.code, DecompileStubMarker) {
+		body := dumper.lambdaMethodSourceBody(method, work)
+		if !nok || !dok || !slices.Contains(dumper.lambdaMethods[name], desc) || body.sourceReconstructionFailed() || body.member != method || body.checkedEscape {
+			return false
+		}
+		if len(factories) == 1 && (factories[0] == nil || body.sourceRequest.captureCount != len(factories[0].operands)) {
 			return false
 		}
 		if site := child.lambdaContext.localCaptures[name+desc]; site != nil && !nativeLambdaLocalCaptureSourceClosed(site, dumper.nativeLambdaLocalSources[name+desc], work) {

@@ -40,10 +40,14 @@ func constructorEffectLoopJoin(prior *constructorEffectLoopFrame, locals, stack 
 		result := make([]constructorEffectValue, len(a))
 		for i, x := range a {
 			y := b[i]
-			if x.kind != y.kind || x.receiver != y.receiver || x.allocation != 0 || y.allocation != 0 || x.knownInt && x.kind != 'I' || y.knownInt && y.kind != 'I' || x.receiver && x.kind != 'L' {
+			if !constructorValidNullFact(x) || !constructorValidNullFact(y) || x.kind != y.kind || x.receiver != y.receiver || x.retainsReceiver != y.retainsReceiver || x.allocation != 0 || y.allocation != 0 || x.knownInt && x.kind != 'I' || y.knownInt && y.kind != 'I' || x.reachesReceiver() && x.kind != 'L' || y.reachesReceiver() && y.kind != 'L' {
 				return nil, false
 			}
 			result[i] = x
+			if x.knownNull && !y.knownNull {
+				result[i].knownNull = false
+				changed = true
+			}
 			if x.knownInt && (!y.knownInt || x.intWord != y.intWord) {
 				if x.kind != 'I' {
 					return nil, false

@@ -135,7 +135,10 @@ func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.Ja
 				}
 			}
 			if firstIsOk && firstDeep != -1 {
-				assignSts[firstDeep].IsFirst = true
+				// A bare source declaration introduces an identity, not a value
+				// definition. Naming must not turn it into a first store merely
+				// because later stores in its child scopes reuse that identity.
+				assignSts[firstDeep].IsFirst = !assignSts[firstDeep].IsDeclare
 				for _, statement := range assignSts[firstDeep+1:] {
 					statement.IsFirst = false
 				}
@@ -831,10 +834,10 @@ func rewriteVar(scope *Scope, className, methodName string) int {
 					oldId := v.Id
 					newId := utils.NewRootVariableId()
 					idReplaceMap[oldId] = newId
-					newRef := *v
+					newRef := v.CloneForSourceDeclaration()
 					newRef.Id = newId
 					newRef.Id.SetName(fmt.Sprintf("var%d", scope.nowId))
-					statement.LeftValue = &newRef
+					statement.LeftValue = newRef
 					if newRef.SolvedWebIdentity != nil {
 						scope.solvedWebNames[newRef.SolvedWebIdentity] = newId
 					}
@@ -1774,16 +1777,25 @@ func dropEmptySlotAssignments(sts *[]statements.Statement) {
 	*sts = out
 }
 
-func assignmentValueIsEmptySlot(value values.JavaValue) (ok bool) {
-	if value == nil {
-		return true
-	}
-	defer func() {
-		if recover() != nil {
-			ok = true
+// Only a forwarding chain with no underlying value is an empty stack slot.
+// Rendering is neither a structural predicate nor read-only: constructor
+// argument callbacks can query source ownership in their captured context.
+// A compound expression, unknown value or cycle must remain for the normal
+// completeness check; removing it could discard runtime effects.
+func assignmentValueIsEmptySlot(value values.JavaValue) bool {
+	seen := map[*values.SlotValue]bool{}
+	for depth := 0; depth < 64; depth++ {
+		if value == nil {
+			return true
 		}
-	}()
-	return strings.Contains(value.String(&class_context.ClassContext{}), values.EmptySlotValuePlaceholder)
+		slot, ok := value.(*values.SlotValue)
+		if !ok || slot == nil || seen[slot] {
+			return false
+		}
+		seen[slot] = true
+		value = slot.GetValue()
+	}
+	return false
 }
 
 // ifHoistDeclarations demotes declarations inside an if/else tree when the local is read after the

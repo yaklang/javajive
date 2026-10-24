@@ -12,10 +12,20 @@ import (
 // FinallyRegion is a rendering view. The original tree remains intact for
 // variable rebinding, declaration placement and all existing child visitors.
 type FinallyRegion struct {
-	TryBody     []statements.Statement
-	Exceptions  []*values.JavaRef
-	CatchBodies [][]statements.Statement
-	Cleanup     []statements.Statement
+	// SourcePrologue belongs only to RecoverCatchAllFinallyForSource. It
+	// initializes private pending-Throwable state or declares an existing
+	// local whose normal continuation has left the protected lexical scope.
+	SourcePrologue []statements.Statement
+	// SourceEpilogue is the original normal continuation exposed only after
+	// an enclosing finally view removed its own duplicated cleanup. It is
+	// rendered after this finally, without changing the canonical typed tree.
+	SourceEpilogue []statements.Statement
+	TryBody        []statements.Statement
+	Exceptions     []*values.JavaRef
+	CatchBodies    [][]statements.Statement
+	Cleanup        []statements.Statement
+	// Continuation is evaluated only after cleanup completes normally.
+	Continuation *statements.CustomStatement
 }
 
 // RecoverCatchAllFinally recognizes javac's duplicated cleanup using raw
@@ -26,6 +36,9 @@ type FinallyRegion struct {
 // incorrectly. Both changes must be proved together, before any tree changes.
 // Unknown control flow, opaque effects and region gaps fail closed.
 func RecoverCatchAllFinally(tr *statements.TryCatchStatement) (*FinallyRegion, bool) {
+	if resource, ok := recoverTypedResourceFinally(tr); ok {
+		return resource, true
+	}
 	if resource, ok := recoverPrimaryResourceFinally(tr); ok {
 		return resource, true
 	}
@@ -53,11 +66,11 @@ func RecoverCatchAllFinally(tr *statements.TryCatchStatement) (*FinallyRegion, b
 		}
 	}
 	body := finallyWithoutEnd(tr.CatchBodies[last])
-	if len(body) < 2 || len(body) > 9 || tr.Exception[last] == nil {
+	if len(body) == 0 || len(body) > 9 || tr.Exception[last] == nil {
 		return nil, false
 	}
 	cleanup, ok := finallyHandlerCleanup(body, tr.Exception[last], h.ProtectedRanges)
-	if !ok {
+	if !ok || len(cleanup) == 0 {
 		return nil, false
 	}
 	excluded := append([]*values.JavaRef{}, tr.Exception...)
@@ -65,6 +78,8 @@ func RecoverCatchAllFinally(tr *statements.TryCatchStatement) (*FinallyRegion, b
 	for _, b := range tr.CatchBodies[:last] {
 		queue = append(queue, b...)
 	}
+	scope := append([]statements.Statement(nil), queue...)
+	scope = append(scope, tr.CatchBodies[last]...)
 	seen := map[statements.Statement]bool{}
 	for len(queue) > 0 && len(seen) < 256 {
 		st := queue[len(queue)-1]
@@ -97,12 +112,10 @@ func RecoverCatchAllFinally(tr *statements.TryCatchStatement) (*FinallyRegion, b
 	if len(queue) != 0 {
 		return nil, false
 	}
-	for _, st := range cleanup {
-		if !sameFinallyCleanup(rows, st, st, excluded, 0) {
-			return nil, false
-		}
+	if !sameFinallyCleanupBlock(rows, cleanup, cleanup, excluded, scope) {
+		return nil, false
 	}
-	p := finallyProof{cleanup: cleanup, rows: rows, excluded: excluded, remaining: 256}
+	p := finallyProof{cleanup: cleanup, rows: rows, excluded: excluded, scope: scope, remaining: 256, allowContinuation: true}
 	// The try arm is protected by every typed catch, whereas catch bodies are
 	// protected only by the raw catch-all. Preserve that distinction for folded
 	// calls and casts, not just the PC of their enclosing statement.
@@ -125,6 +138,12 @@ func RecoverCatchAllFinally(tr *statements.TryCatchStatement) (*FinallyRegion, b
 			return nil, false
 		}
 		result.CatchBodies = append(result.CatchBodies, rewritten)
+	}
+	if p.continuation != nil {
+		if p.normalWithoutContinuation {
+			return nil, false
+		}
+		result.Continuation = p.continuation
 	}
 	return result, true
 }
@@ -149,25 +168,72 @@ func finallyWithoutEnd(body []statements.Statement) []statements.Statement {
 	return body
 }
 
+// A terminal void return is the normal copy's existing completion, rather
+// than part of the cleanup effect sequence. Both comparison paths use the
+// same original-PC rule; a protected or value-producing return stays intact.
+func finallyCleanupConditionalBody(rows []core.HandlerRange, body []statements.Statement) []statements.Statement {
+	body = finallyWithoutEnd(body)
+	if len(body) > 0 {
+		if ret, ok := body[len(body)-1].(*statements.ReturnStatement); ok && ret != nil && ret.JavaValue == nil && ret.HasOriginPC && ret.OriginPC >= 0 {
+			outside := true
+			for _, row := range rows {
+				outside = outside && (ret.OriginPC < int(row.StartPc) || ret.OriginPC >= int(row.EndPc))
+			}
+			if outside {
+				return body[:len(body)-1]
+			}
+		}
+	}
+	return body
+}
+
 type finallyProof struct {
 	cleanup      []statements.Statement
 	rows         []core.HandlerRange
 	excluded     []*values.JavaRef
+	scope        []statements.Statement
 	remaining    int
 	loopDepth    int
 	loopLabels   []string
 	cleanupMatch func(statements.Statement, statements.Statement) bool
+	// Only a caller that renders Continuation may remove it from a child.
+	// Resource-tail queries also use this proof and do not own that exit.
+	allowContinuation bool
+	continuation      *statements.CustomStatement
+	// Every normal completion must carry the same original continuation.
+	// A different arm falling through cannot acquire that arm's throw.
+	normalWithoutContinuation bool
 }
 
 func (p *finallyProof) block(input []statements.Statement, mustExit bool, covered func(int) bool) ([]statements.Statement, bool, bool) {
 	body := finallyWithoutEnd(input)
 	end := len(body)
 	var ret *statements.ReturnStatement
+	liftedContinuation := false
 	if end > 0 && len(p.cleanup) > 0 {
 		if normalized, lifted := finallyConditionalReturn(body[end-1], p.cleanup[len(p.cleanup)-1], p.rows, p.excluded); lifted != nil {
 			body = append([]statements.Statement{}, body...)
 			body[end-1] = normalized
 			ret = lifted
+		}
+	}
+
+	if p.allowContinuation && end > 0 && ret == nil && len(p.cleanup) > 0 {
+		normalized, after := finallyFlatThrowContinuation(body, p.cleanup, p.rows, p.excluded)
+		if after == nil {
+			if last, continuation := finallyConditionalThrowContinuation(body[end-1], p.cleanup[len(p.cleanup)-1], p.rows, p.excluded); continuation != nil {
+				normalized = append([]statements.Statement{}, body...)
+				normalized[end-1], after = last, continuation
+			}
+		}
+		if after != nil {
+			if p.continuation != nil && (p.continuation.OriginPC != after.OriginPC || p.continuation.ThrownValue != after.ThrownValue) {
+				return nil, false, false
+			}
+			p.continuation = after
+			liftedContinuation = true
+			body = normalized
+			end = len(body)
 		}
 	}
 	if end > 0 {
@@ -181,28 +247,34 @@ func (p *finallyProof) block(input []statements.Statement, mustExit bool, covere
 		}
 	}
 	if len(p.cleanup) > 0 && end >= len(p.cleanup) {
-		matched := true
-		for i, st := range p.cleanup {
-			candidate := body[end-len(p.cleanup)+i]
-			match := sameFinallyCleanup(p.rows, candidate, st, p.excluded, 0)
-			if p.cleanupMatch != nil {
-				match = p.cleanupMatch(candidate, st)
-			}
-			if !match {
-				matched = false
-				break
+		candidates := body[end-len(p.cleanup) : end]
+		matched := sameFinallyCleanupBlock(p.rows, candidates, p.cleanup, p.excluded, p.scope)
+		if p.cleanupMatch != nil {
+			matched = true
+			for i, st := range p.cleanup {
+				if !p.cleanupMatch(candidates[i], st) {
+					matched = false
+					break
+				}
 			}
 		}
 		if matched {
-			if !mustExit {
+			if !mustExit && ret == nil {
 				return nil, false, false // cleanup cannot precede a continuation
 			}
+			// A return exits this region even when nested in a loop whose
+			// other paths keep executing inside it. Its inert operand and
+			// original cleanup copy were proved above. A loop break/back edge
+			// alone cannot acquire this permission.
 			prefix, exits, ok := p.block(body[:end-len(p.cleanup)], false, covered)
 			if !ok || exits {
 				return nil, false, false
 			}
 			if ret != nil {
 				prefix = append(prefix, ret)
+			}
+			if ret == nil && !liftedContinuation {
+				p.normalWithoutContinuation = true
 			}
 			return prefix, ret != nil, true
 		}
@@ -223,6 +295,11 @@ func (p *finallyProof) block(input []statements.Statement, mustExit bool, covere
 			if x == nil || (x.Op != values.INC && x.Op != values.DEC) || !finallyCoveredValue(x, covered) {
 				return nil, false, false
 			}
+		case *statements.SourceAssertionStatement:
+			condition, call, pc, known := x.SourceAssertionProtocol()
+			if !known || !covered(pc) || !finallyCoveredValue(condition, covered) || !finallyCoveredValue(call, covered) {
+				return nil, false, false
+			}
 		case *statements.ExpressionStatement:
 			if x == nil || !finallyCoveredValue(x.Expression, covered) {
 				return nil, false, false
@@ -232,6 +309,11 @@ func (p *finallyProof) block(input []statements.Statement, mustExit bool, covere
 				return nil, false, false
 			}
 		case *statements.CustomStatement:
+			if kind, label, proved := x.SourceTransferProtocol(); proved && p.loopDepth > 0 && (kind == "break" || kind == "continue") && (label == "" || slices.Contains(p.loopLabels, label)) {
+				out = append(out, st)
+				exits = true
+				continue
+			}
 			if x != nil && p.loopDepth > 0 && ((x.Name == "break" || x.Name == "continue") || ((x.LoopTransferKind == "break" || x.LoopTransferKind == "continue") && x.LoopTargetLabel != "" && slices.Contains(p.loopLabels, x.LoopTargetLabel))) && x.ThrownValue == nil {
 				out = append(out, st)
 				exits = true
@@ -275,6 +357,22 @@ func (p *finallyProof) block(input []statements.Statement, mustExit bool, covere
 				p.loopLabels = p.loopLabels[:len(p.loopLabels)-1]
 			}
 			if !ok {
+				return nil, false, false
+			}
+			st = &clone
+		case *statements.SwitchStatement:
+			if !p.internalSwitchCovered(x, covered) {
+				return nil, false, false
+			}
+		case *statements.SynchronizedStatement:
+			pc, known := x.OriginalMonitorEnterPC()
+			if !known || !covered(pc) || !finallyCoveredValue(x.Argument, covered) {
+				return nil, false, false
+			}
+			clone := *x
+			var valid bool
+			clone.Body, exits, valid = p.block(x.Body, false, covered)
+			if !valid {
 				return nil, false, false
 			}
 			st = &clone
@@ -364,6 +462,11 @@ func finallyCoveredValue(root values.JavaValue, covered func(int) bool) bool {
 		switch x := v.(type) {
 		case *values.JavaRef, *values.JavaLiteral:
 			return finallyPureLocal(v)
+		case *values.JavaClassValue:
+			// An actual ldc Class can fail during resolution. A symbolic owner
+			// used only for invocation/type metadata has no evaluation PC and
+			// cannot serve as evidence for moving an evaluated class literal.
+			return x != nil && x.JavaType != nil && x.HasOriginPC && x.OriginPC >= 0 && covered(x.OriginPC)
 		case *values.SlotValue:
 			if x == nil {
 				return false
@@ -401,6 +504,18 @@ func finallyCoveredValue(root values.JavaValue, covered func(int) bool) bool {
 				if !x.HasOriginPC || !covered(x.OriginPC) || x.HasEvaluationEndPC && !covered(x.EvaluationEndPC) || len(x.Initializer) > 0 && !x.HasEvaluationEndPC {
 					return false
 				}
+				if x.HasEvaluationEndPC {
+					if x.OriginPC < 0 || x.EvaluationEndPC < x.OriginPC || x.EvaluationEndPC > 65535 {
+						return false
+					}
+					// Endpoints alone cannot prove the handler ownership of
+					// folded stores across a gap between protected intervals.
+					for pc := x.OriginPC; pc <= x.EvaluationEndPC; pc++ {
+						if !covered(pc) {
+							return false
+						}
+					}
+				}
 				children = append(append([]values.JavaValue{}, x.Length...), x.Initializer...)
 				break
 			}
@@ -417,6 +532,12 @@ func finallyCoveredValue(root values.JavaValue, covered func(int) bool) bool {
 		case *values.JavaExpression:
 			if x == nil {
 				return false
+			}
+			if x.Op == values.SUB && len(x.Values) == 1 {
+				// JVM numeric negation is total, including MIN_VALUE, signed
+				// zero and NaN. Its operand may still throw at its original PC.
+				// Do not import this fact into boxed/unboxing source views.
+				return visit(x.Values[0]) && finallyUnaryNumericNegationTypes(x)
 			}
 			if (x.Op == values.Not && len(x.Values) != 1) || (x.Op != values.Not && len(x.Values) != 2) {
 				return false
@@ -469,6 +590,33 @@ func finallyCoveredValue(root values.JavaValue, covered func(int) bool) bool {
 		case *values.JavaClassMember:
 			return x != nil && x.HasOriginPC && covered(x.OriginPC) && x.Name != "" && x.Member != "" && x.Description != ""
 		case *values.CustomValue:
+			if operand, _, pc, original := x.OriginalInstanceOfSource(); original {
+				if !covered(pc) || !finallyInstanceOfReferenceOperand(operand) {
+					return false
+				}
+				children = []values.JavaValue{operand}
+				break
+			}
+			if pc, captures, original := x.OriginalLambdaFactoryEvaluation(); original {
+				if !covered(pc) {
+					return false
+				}
+				for i, capture := range captures {
+					operand := finallyLambdaCaptureOperand(capture, pc, i)
+					if operand == nil {
+						return false
+					}
+					children = append(children, operand)
+				}
+				break
+			}
+			if operand, _, _, original := x.SourcePrimitiveConversion(); original {
+				if !totalPrimitiveConversionOperand(operand) {
+					return false
+				}
+				children = []values.JavaValue{operand}
+				break
+			}
 			if x == nil || x.Flag != "instanceof" || !x.CapturesKnown || len(x.Captures) != 1 || !x.HasOriginPC || !covered(x.OriginPC) {
 				return false
 			}
@@ -490,7 +638,17 @@ func finallyCoveredValue(root values.JavaValue, covered func(int) bool) bool {
 // outside every protected interval. Names are field/invoke identities from the
 // IR; rendered text and library-specific patterns never establish equivalence.
 func sameFinallyCleanup(rows []core.HandlerRange, a, b statements.Statement, excluded []*values.JavaRef, depth int) bool {
-	if depth > 16 || a == nil || b == nil {
+	p := finallyCleanupComparison{remaining: 2048}
+	return p.statement(rows, a, b, excluded, depth)
+}
+
+type finallyCleanupComparison struct {
+	remaining int
+}
+
+func (p *finallyCleanupComparison) statement(rows []core.HandlerRange, a, b statements.Statement, excluded []*values.JavaRef, depth int) bool {
+	p.remaining--
+	if p.remaining < 0 || depth > 16 || a == nil || b == nil {
 		return false
 	}
 	outside := func(pc int) bool {
@@ -526,26 +684,18 @@ func sameFinallyCleanup(rows []core.HandlerRange, a, b statements.Statement, exc
 		if !ok || x == nil || y == nil || !(sameFinallyStableValue(x.Condition, y.Condition, excluded, 0) || sameFinallyEffectValue(rows, x.Condition, y.Condition, excluded, depth)) {
 			return false
 		}
-		strip := func(body []statements.Statement) []statements.Statement {
-			body = finallyWithoutEnd(body)
-			if len(body) > 0 {
-				if ret, ok := body[len(body)-1].(*statements.ReturnStatement); ok && ret != nil && ret.JavaValue == nil && ret.HasOriginPC && outside(ret.OriginPC) {
-					return body[:len(body)-1]
-				}
-			}
-			return body
-		}
-		xa, xb, ya, yb := strip(x.IfBody), strip(x.ElseBody), strip(y.IfBody), strip(y.ElseBody)
+		xa, xb := finallyCleanupConditionalBody(rows, x.IfBody), finallyCleanupConditionalBody(rows, x.ElseBody)
+		ya, yb := finallyCleanupConditionalBody(rows, y.IfBody), finallyCleanupConditionalBody(rows, y.ElseBody)
 		if len(xa) != len(ya) || len(xb) != len(yb) || len(xa)+len(xb) > 16 {
 			return false
 		}
 		for i, st := range xa {
-			if !sameFinallyCleanup(rows, st, ya[i], excluded, depth+1) {
+			if !p.statement(rows, st, ya[i], excluded, depth+1) {
 				return false
 			}
 		}
 		for i, st := range xb {
-			if !sameFinallyCleanup(rows, st, yb[i], excluded, depth+1) {
+			if !p.statement(rows, st, yb[i], excluded, depth+1) {
 				return false
 			}
 		}
@@ -561,11 +711,14 @@ func sameFinallyCleanup(rows []core.HandlerRange, a, b statements.Statement, exc
 			return false
 		}
 		for i, st := range x.Body {
-			if !sameFinallyCleanup(rows, st, y.Body[i], excluded, depth+1) {
+			if !p.statement(rows, st, y.Body[i], excluded, depth+1) {
 				return false
 			}
 		}
 		return true
+	case *statements.TryCatchStatement:
+		y, ok := b.(*statements.TryCatchStatement)
+		return ok && p.nested(rows, x, y, excluded, depth+1)
 	case *statements.CustomStatement:
 		y, ok := b.(*statements.CustomStatement)
 		return ok && x != nil && y != nil && x.ThrownValue != nil && y.ThrownValue != nil && x.HasOriginPC && y.HasOriginPC && outside(x.OriginPC) && outside(y.OriginPC) && sameFinallyEffectValue(rows, x.ThrownValue, y.ThrownValue, excluded, depth)
@@ -637,4 +790,59 @@ func sameFinallyBooleanNotShape(x, y *values.JavaExpression) bool {
 		return ok && p != nil && p.Name == types.JavaBoolean
 	}
 	return boolean(x) && boolean(y) && boolean(x.Values[0]) && boolean(y.Values[0])
+}
+
+// JLS unary numeric promotion must match the emitted source type. The JVM's
+// total NEG instruction cannot justify an implicit reference unboxing, nor can
+// a source-only local type projection borrow the underlying word's proof.
+func finallyUnaryNumericNegationTypes(x *values.JavaExpression) bool {
+	if x == nil || x.Op != values.SUB || len(x.Values) != 1 || x.Values[0] == nil || x.Typ == nil {
+		return false
+	}
+	operand := plainTryValue(x.Values[0])
+	if operand == nil {
+		return false
+	}
+	var operandType types.JavaType
+	switch source := operand.(type) {
+	case *values.FunctionCallExpression:
+		// A primitive return uses its declared call type. Do not ask a
+		// generic receiver callback to infer it, or dereference missing
+		// metadata in an incomplete source packet.
+		if source.FuncType != nil && source.FuncType.ReturnType != nil {
+			declared, err := types.ParseMethodDescriptor(source.Descriptor)
+			if err == nil && declared != nil {
+				abi, known := declared.RawType().(*types.JavaFuncType)
+				if known && abi != nil && abi.ReturnType != nil && reflect.DeepEqual(abi.ReturnType.RawType(), source.FuncType.ReturnType.RawType()) {
+					operandType = source.FuncType.ReturnType
+				}
+			}
+		}
+	case *values.CustomValue:
+		if _, target, _, original := source.SourcePrimitiveConversion(); original {
+			operandType = types.NewJavaPrimer(target)
+		}
+	default:
+		operandType = operand.Type()
+	}
+	if operandType == nil {
+		return false
+	}
+	p, ok := operandType.RawType().(*types.JavaPrimer)
+	result, resultOK := x.Typ.RawType().(*types.JavaPrimer)
+	if !ok || p == nil || !resultOK || result == nil {
+		return false
+	}
+	if ref, local := operand.(*values.JavaRef); local && ref.WebDeclType != nil && !reflect.DeepEqual(ref.WebDeclType.RawType(), p) {
+		return false
+	}
+	promoted := p.Name
+	switch promoted {
+	case types.JavaByte, types.JavaShort, types.JavaChar:
+		promoted = types.JavaInteger
+	case types.JavaInteger, types.JavaLong, types.JavaFloat, types.JavaDouble:
+	default:
+		return false
+	}
+	return result.Name == promoted
 }

@@ -186,6 +186,88 @@ func TestDeclaredSamBoundRequiresKnownHierarchy(t *testing.T) {
 	}
 }
 
+// A lookup miss in the target-specific proof domain must not borrow a stale
+// ordinary-call declaration. Only an absent target provider uses the legacy
+// resolver; the exact SAM name and descriptor still constrain the equation.
+func TestDeclaredSamTargetLookupSeparatesDeclarationProofDomains(t *testing.T) {
+	const classSig = "<T:Ljava/lang/Object;>Ljava/lang/Object;"
+	const erased = "()Ljava/lang/Object;"
+	constant := func(desc string) values.JavaValue {
+		return values.NewCustomValue(func(*class_context.ClassContext) string { return desc }, func() types.JavaType {
+			t.Fatal("target lookup inspected a mutable operand type")
+			return nil
+		})
+	}
+	for _, change := range []string{"exact target", "legacy only", "pre-inferred target", "conflicting caller arguments", "variable target", "target missing", "wrong name", "wrong descriptor", "arity only", "conflicting erasure", "partial target", "array target", "missing context"} {
+		t.Run(change, func(t *testing.T) {
+			legacyCalls, targetCalls := 0, 0
+			ctx := &class_context.ClassContext{SiblingClassSig: func(string) (string, map[string]string, bool) {
+				legacyCalls++
+				return classSig, map[string]string{class_context.MethodDescKey("produce", erased): "()TT;"}, true
+			}}
+			ctx.LambdaTargetClassSig = func(owner string) (string, map[string]string, bool) {
+				targetCalls++
+				if owner != "example/DeclaredResult" {
+					t.Fatalf("borrowed another target owner %q", owner)
+				}
+				key, signature := class_context.MethodDescKey("produce", erased), "()TT;"
+				switch change {
+				case "wrong name":
+					key = class_context.MethodDescKey("other", erased)
+				case "wrong descriptor":
+					key = class_context.MethodDescKey("produce", "()Ljava/lang/String;")
+				case "arity only":
+					key = class_context.MethodSigKey("produce", 0)
+				case "conflicting erasure":
+					signature = "()I"
+				}
+				return classSig, map[string]string{key: signature}, change != "target missing"
+			}
+			d := &Decompiler{FunctionContext: ctx, InvokeDynamicName: "produce", blockPartialFunctionalTarget: change == "partial target"}
+			var raw types.JavaType = types.NewJavaClass("example.DeclaredResult")
+			switch change {
+			case "legacy only":
+				ctx.LambdaTargetClassSig = nil
+			case "pre-inferred target":
+				raw = types.NewParameterizedType("example.DeclaredResult", []types.JavaType{types.NewJavaClass("java.lang.String")})
+			case "conflicting caller arguments":
+				raw = types.NewParameterizedType("example.DeclaredResult", []types.JavaType{types.NewJavaClass("java.lang.Integer")})
+			case "variable target":
+				raw = types.NewJavaTypeVariable("example.DeclaredResult")
+			case "array target":
+				raw = types.NewJavaArrayType(types.NewJavaClass("example.DeclaredResult"))
+			case "missing context":
+				d.FunctionContext = nil
+			}
+			got := inferDeclaredLambdaTarget(d, raw, constant(erased), constant("()Ljava/lang/String;"))
+			want := change == "exact target" || change == "legacy only" || change == "pre-inferred target" || change == "conflicting caller arguments"
+			if (got != nil) != want {
+				t.Fatalf("target=%v want=%v", got, want)
+			}
+			wantLegacy, wantTarget := 0, 1
+			if change == "legacy only" {
+				wantLegacy, wantTarget = 1, 0
+			}
+			if change == "partial target" || change == "array target" || change == "missing context" || change == "variable target" {
+				wantTarget = 0
+			}
+			if want {
+				p, known := types.AsParameterizedType(got)
+				if !known || len(p.TypeArgs) != 1 {
+					t.Fatal("missing original target equation")
+				}
+				name, known := types.RawClassFQN(p.TypeArgs[0])
+				if !known || name != "java.lang.String" {
+					t.Fatal("borrowed stale caller type arguments", name)
+				}
+			}
+			if legacyCalls != wantLegacy || targetCalls != wantTarget {
+				t.Fatalf("proof domains mixed: ordinary=%d target=%d", legacyCalls, targetCalls)
+			}
+		})
+	}
+}
+
 func TestInstantiatedSAMSeparatesNestedErasureFromEntryChecks(t *testing.T) {
 	ctx := &class_context.ClassContext{InvocationMetadata: func(name string) (callbinding.Class, bool) {
 		if name == "fixture/Box" {
@@ -204,5 +286,42 @@ func TestInstantiatedSAMSeparatesNestedErasureFromEntryChecks(t *testing.T) {
 		if got := instantiatedSAMErasesGenericArguments(mt, ctx); got != tc.want {
 			t.Fatalf("%s: proof %v", tc.desc, got)
 		}
+	}
+}
+
+// Zero free variables requires no substitution. Missing or adapted signatures
+// cannot borrow this identity case, and the generic inference API retains its
+// separate nil-means-no-parameterization contract.
+func TestOriginalSamProjectionClosesEmptyTypeEnvironment(t *testing.T) {
+	for _, tc := range []struct {
+		name, class, sig, erased, actual string
+		want                             bool
+	}{
+		{"void", "", "", "()V", "()V", true},
+		{"primitive", "", "", "(I)J", "(I)J", true},
+		{"wide", "", "", "(JD)D", "(JD)D", true},
+		{"arrays", "", "", "([[Ljava/lang/Object;)[I", "([[Ljava/lang/Object;)[I", true},
+		{"concrete throws", "", "(I)V^Ljava/io/IOException;", "(I)V", "(I)V", true},
+		{"reference", "", "", "(Ljava/lang/String;)Ljava/lang/String;", "(Ljava/lang/String;)Ljava/lang/String;", true},
+		{"unproved input adaptation", "", "", "(Ljava/lang/Object;)V", "(Ljava/lang/String;)V", false},
+		{"unproved result adaptation", "", "", "()Ljava/lang/Object;", "()Ljava/lang/String;", false},
+		{"foreign variable", "", "(TT;)V", "(Ljava/lang/Object;)V", "(Ljava/lang/Object;)V", false},
+		{"method variable", "", "<T:Ljava/lang/Object;>(TT;)V", "(Ljava/lang/Object;)V", "(Ljava/lang/Object;)V", false},
+		{"throws variable", "", "()V^TE;", "()V", "()V", false},
+		{"unproved inherited environment", "Ljava/lang/Object;Lother/Parent<Ljava/lang/String;>;", "", "()V", "()V", false},
+		{"bad void input", "", "", "(V)V", "(V)V", false},
+		{"bad trailing descriptor", "", "", "()Vjunk", "()Vjunk", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ProjectOriginalSamTarget("fixture/Monomorphic", tc.class, tc.sig, tc.erased, tc.actual, nil)
+			if (got != nil) != tc.want {
+				t.Fatalf("original monomorphic target=%v want=%v", got, tc.want)
+			}
+			if got != nil {
+				if name, known := types.RawClassFQN(got); !known || name != "fixture.Monomorphic" {
+					t.Fatal("wrong original target identity", name, known)
+				}
+			}
+		})
 	}
 }

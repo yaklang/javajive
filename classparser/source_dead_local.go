@@ -21,6 +21,13 @@ func sourceWithoutDeadLocalStores(body []statements.Statement, params []values.J
 	activeStatements := map[statements.Statement]bool{}
 	remaining := 16384
 	valid := true
+	// These maps retain identities or the active recursion path, not every
+	// visited node. Sequential siblings reuse traversal storage. Work remains
+	// cumulative, but an allocation preflight must describe a live container.
+	storage := func(entries int) bool {
+		// Include a map's initial bucket as well as its pointer-key entries.
+		return work == nil || work.CheckAlloc(int64(max(entries, 2))*128) == nil
+	}
 	valueDepth := 0
 	var value func(values.JavaValue)
 	value = func(v values.JavaValue) {
@@ -34,7 +41,7 @@ func sourceWithoutDeadLocalStores(body []statements.Statement, params []values.J
 			return
 		}
 		remaining--
-		if remaining < 0 || (work != nil && work.CheckAlloc(int64(16384-remaining)*256) != nil) || !nativeProofWork(work, 1) || activeValues[v] {
+		if remaining < 0 || !storage(len(activeValues)+1) || !nativeProofWork(work, 1) || activeValues[v] {
 			valid = false
 			return
 		}
@@ -48,6 +55,10 @@ func sourceWithoutDeadLocalStores(body []statements.Statement, params []values.J
 		activeValues[v] = true
 		defer delete(activeValues, v)
 		if ref, ok := v.(*values.JavaRef); ok && ref.Id != nil && ref.CustomValue == nil && ref.StackVar == nil {
+			if !reads[ref.Id] && !storage(len(reads)+1) {
+				valid = false
+				return
+			}
 			reads[ref.Id] = true
 			return
 		}
@@ -106,7 +117,7 @@ func sourceWithoutDeadLocalStores(body []statements.Statement, params []values.J
 		}
 		for _, st := range list {
 			remaining--
-			if remaining < 0 || (work != nil && work.CheckAlloc(int64(16384-remaining)*256) != nil) || !nativeProofWork(work, 1) || sourceProofNil(st) || activeStatements[st] {
+			if remaining < 0 || !storage(len(activeStatements)+1) || !nativeProofWork(work, 1) || sourceProofNil(st) || activeStatements[st] {
 				valid = false
 				return
 			}
@@ -129,6 +140,10 @@ func sourceWithoutDeadLocalStores(body []statements.Statement, params []values.J
 					// Retain every call/cast/read/class-initialization effect. The narrow pure
 					// profile below consists only of inert local/literal/null loads.
 					if assign.HasOriginPC && assign.OriginPC >= 0 && pure(ref, assign.JavaValue) {
+						if stores[assign] == nil && !storage(len(stores)+1) {
+							valid = false
+							return
+						}
 						stores[assign] = ref.Id
 					}
 					roots = []values.JavaValue{assign.JavaValue}
@@ -155,19 +170,26 @@ func sourceWithoutDeadLocalStores(body []statements.Statement, params []values.J
 	dead := map[*statements.AssignStatement]bool{}
 	for st, id := range stores {
 		if !reads[id] {
+			if !storage(len(dead) + 1) {
+				return body
+			}
 			dead[st] = true
 		}
 	}
 	if len(dead) == 0 {
 		return body
 	}
-	if work != nil && work.CheckAlloc(int64(16384-remaining)*512) != nil {
-		return body
-	}
 	// Produce a private source view. CFG, original statement identities, and
 	// variable rebinding retain their complete original trees.
 	var filter func([]statements.Statement) []statements.Statement
 	filter = func(list []statements.Statement) []statements.Statement {
+		if !valid {
+			return nil
+		}
+		if work != nil && work.CheckAlloc(int64(len(list))*16) != nil {
+			valid = false
+			return nil
+		}
 		out := make([]statements.Statement, 0, len(list))
 		for _, st := range list {
 			if assign, ok := st.(*statements.AssignStatement); ok && dead[assign] {
@@ -175,11 +197,19 @@ func sourceWithoutDeadLocalStores(body []statements.Statement, params []values.J
 			}
 			switch x := st.(type) {
 			case *statements.IfStatement:
+				if !storage(1) {
+					valid = false
+					return nil
+				}
 				clone := *x
 				clone.IfBody = filter(x.IfBody)
 				clone.ElseBody = filter(x.ElseBody)
 				st = &clone
 			case *statements.TryCatchStatement:
+				if !storage(1) || work != nil && work.CheckAlloc(int64(len(x.CatchBodies))*24) != nil {
+					valid = false
+					return nil
+				}
 				clone := *x
 				clone.TryBody = filter(x.TryBody)
 				clone.CatchBodies = make([][]statements.Statement, len(x.CatchBodies))
@@ -188,23 +218,42 @@ func sourceWithoutDeadLocalStores(body []statements.Statement, params []values.J
 				}
 				st = &clone
 			case *statements.SynchronizedStatement:
+				if !storage(1) {
+					valid = false
+					return nil
+				}
 				clone := *x
 				clone.Body = filter(x.Body)
 				st = &clone
 			case *statements.DoWhileStatement:
+				if !storage(1) {
+					valid = false
+					return nil
+				}
 				clone := *x
 				clone.Body = filter(x.Body)
 				st = &clone
 			case *statements.WhileStatement:
+				if !storage(1) {
+					valid = false
+					return nil
+				}
 				clone := *x
 				clone.Body = filter(x.Body)
 				st = &clone
+			}
+			if !valid {
+				return nil
 			}
 			out = append(out, st)
 		}
 		return out
 	}
-	return filter(body)
+	out := filter(body)
+	if !valid {
+		return body
+	}
+	return out
 }
 
 // Slot wrappers are transparent loads, but malformed cyclic simulator operands

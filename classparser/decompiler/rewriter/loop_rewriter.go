@@ -628,6 +628,15 @@ func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*
 	// exception table's exclusive end; otherwise the first protected store is
 	// mistaken for the loop exit and moved outside the handler.
 	for _, tr := range finalSet.List() {
+		if closed := protectedRetryClosedRegion(tr, circleNode, finalSet); closed != nil {
+			for _, node := range closed.path {
+				finalSet.Add(node)
+			}
+			if closed.continuation != nil {
+				tr.ProtectedEnd = closed.continuation
+			}
+			continue
+		}
 
 		end := tr.ProtectedEnd
 		if end == nil {
@@ -642,6 +651,14 @@ func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*
 		}
 		if !hasPrivateRetryHandler(tr, finalSet) {
 			continue
+		}
+		if tr.SharedProtectedHandler {
+			if path, boundaries := splitRetryProtectedFrontiers(tr, circleNode); len(boundaries) > 1 {
+				for _, node := range path {
+					finalSet.Add(node)
+				}
+				continue
+			}
 		}
 		if path, boundary := protectedRetryBranchPrefix(tr, circleNode); boundary != nil {
 			tr.ProtectedEnd = boundary
@@ -873,6 +890,11 @@ func hasPrivateRetryHandler(tr *core.Node, body *utils2.Set[*core.Node]) bool {
 				return true
 			}
 			if len(next.Source) == 1 && next.Source[0] == tr {
+				if splitRetryHandlerOwnershipClosed(tr, next) {
+					if _, boundaries := splitRetryProtectedFrontiers(tr, nil); len(boundaries) > 1 {
+						return true
+					}
+				}
 				if _, boundary := protectedRetryBranchPrefix(tr, nil); boundary != nil {
 					return true
 				}
@@ -885,6 +907,10 @@ func hasPrivateRetryHandler(tr *core.Node, body *utils2.Set[*core.Node]) bool {
 func protectedRetryContinuations(body *utils2.Set[*core.Node], header *core.Node) map[*core.Node]bool {
 	exits := map[*core.Node]bool{}
 	for _, tr := range body.List() {
+		if closed := protectedRetryClosedRegion(tr, header, body); closed != nil && closed.continuation != nil && !body.Has(closed.continuation) {
+			exits[closed.continuation] = true
+			continue
+		}
 		if !hasPrivateRetryHandler(tr, body) {
 			continue
 		}
@@ -1066,6 +1092,12 @@ func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree ma
 	// LoopJmpRewriter. Gated on a reducible method (the header is well-defined) and only when there is
 	// genuine multi-exit ambiguity, so single-exit loops are byte-for-byte unchanged.
 	if reducible && jdecenv.Get("JDEC_NO_LOOP_HEADER_EXIT") == "" {
+		// Exit-specific effects precede a shared continuation. The
+		// header's first effect is not the loop boundary: lifting it after
+		// the loop imposes that effect on the other successful exit too.
+		if shared := ownedSharedLoopExit(outNodes, circleNode, domTree); shared != nil {
+			return shared
+		}
 		var headerOut []*core.Node
 		for _, n := range loopStart.Next {
 			if n.IsCatchStart && jdecenv.Get("JDEC_LOOP_KEEP_CATCH_EDGE_OFF") == "" {

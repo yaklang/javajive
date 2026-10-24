@@ -67,6 +67,10 @@ func TestNativeAnonymousArgumentSourceTypeKeepsOriginalThisBinder(t *testing.T) 
 				if arg != want {
 					t.Fatalf("argument=%s", arg)
 				}
+				name, variable := types.TypeVariableName(pt.TypeArgs[0].Copy())
+				if variable != (variant != "already parameterized") || variable && name != "V" {
+					t.Fatalf("class formal role=%v name=%q", variable, name)
+				}
 			}
 			if operand.Type() != nil {
 				if _, changed := types.AsParameterizedType(operand.Type()); changed != (variant == "already parameterized") {

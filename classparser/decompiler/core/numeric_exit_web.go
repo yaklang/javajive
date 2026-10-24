@@ -4,6 +4,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 // Join identity follows the immutable reaching-definition partition, including
@@ -15,7 +16,10 @@ import (
 // category needs a finite constant-domain proof excluding boolean values.
 // Entry parameters, incomplete definitions and mixed domains remain excluded.
 func (d *Decompiler) unifyNumericExitWebs() {
-	webs := d.slotWebs()
+	if d == nil || d.getenv("JDEC_LIVEINTERVAL_OFF") != "" || !d.hasMultipleNumericStores() {
+		return
+	}
+	webs := d.localUpdateSourceWebs()
 	if webs == nil {
 		return
 	}
@@ -143,10 +147,45 @@ func (d *Decompiler) unifyNumericExitWebs() {
 			}
 		}
 		if !needsRepair {
+			// The complete web can be simulated consistently yet cross
+			// sibling source scopes. Preserve that solved identity through
+			// declaration placement as well: otherwise an else-arm STORE
+			// can be renamed into a different local and the joined LOAD
+			// silently observes the default value. Keep the existing refs,
+			// producers and immutable reaching partition intact.
+			firstRef.SolvedWebIdentity = firstRef.Id
 			continue
 		}
 		d.bindProvedPrimitiveWeb(webs, web, stores, kind)
 	}
+}
+
+// A numeric join needs at least two original numeric definitions. Inspect
+// the existing store inventory first; reference-only methods have no such
+// candidate and need no source-update web construction. This is necessary
+// evidence only: matching web, entry, complete uses and domain are proved above.
+func (d *Decompiler) hasMultipleNumericStores() bool {
+	if d.Work != nil && (d.Work.Check() != nil || d.Work.Charge(workbudget.CounterGraphScans, int64(len(d.opcodeIdToRef))) != nil) {
+		return false
+	}
+	count := 0
+	for op, infos := range d.opcodeIdToRef {
+		if op == nil || op.Instr == nil || !isLocalStoreOpcode(op.Instr.OpCode) || len(infos) != 1 || len(op.stackConsumed) != 1 {
+			continue
+		}
+		rhs := values.UnpackSoltValue(op.stackConsumed[0])
+		if rhs == nil || rhs.Type() == nil {
+			continue
+		}
+		primitive, known := rhs.Type().RawType().(*types.JavaPrimer)
+		if known && primitive != nil && (primitive.Name == types.JavaInteger || primitive.Name == types.JavaLong || primitive.Name == types.JavaFloat || primitive.Name == types.JavaDouble) {
+			count++
+			if count == 2 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // bindProvedPrimitiveWeb changes source identity only after the caller proves

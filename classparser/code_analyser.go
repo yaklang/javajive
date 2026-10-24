@@ -202,14 +202,38 @@ type VarMap struct {
 }
 
 func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *utils.VariableId) ([]values.JavaValue, []statements.Statement, error) {
+	return parseBytesCodeWithLambdaCaptureOrder(dumper, codeAttr, id, nil, false)
+}
+
+func parseBytesCodeWithLambdaCaptureOrder(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *utils.VariableId, captures []string, receiver bool) ([]values.JavaValue, []statements.Statement, error) {
 	pool := dumper.ConstantPool
 	parser := core.NewDecompiler(codeAttr.Code, func(id int) values.JavaValue {
 		return GetValueFromCP(dumper.ConstantPool, id)
 	})
-	dumpLambda := func(name, desc string, id *utils.VariableId, captured []values.JavaValue, adapter *core.LambdaReferenceAdapter, pc int, hasPC bool) (string, error) {
+	parser.LambdaReceiverCapture = receiver
+	word := 0
+	if dumper.FuncCtx != nil && !dumper.FuncCtx.IsStatic {
+		word = 1
+	}
+	for _, descriptor := range captures {
+		parser.LambdaCaptureOrderSlots = append(parser.LambdaCaptureOrderSlots, word)
+		word++
+		if descriptor == "J" || descriptor == "D" {
+			word++
+		}
+	}
+	parser.OriginalLambdaDeclaration = dumper.originalLambdaDeclaration
+	originalMethod := dumper.CurrentMethod
+	parser.SerializableLambdaSource = func(request core.CallSiteRequest) (core.SerializableReferenceSource, bool) {
+		return dumper.serializableReferenceFactorySource(originalMethod, codeAttr, request)
+	}
+	dumpLambda := func(name, desc string, id *utils.VariableId, captured []values.JavaValue, adapter *core.LambdaReferenceAdapter, pc int, hasPC bool) (core.LambdaBodySource, error) {
+		if dumper.originalLambdaDeclaration(dumper.obj.GetClassName(), name, desc) != core.LambdaDeclarationSyntheticBody {
+			return core.LambdaBodySource{}, fmt.Errorf("lambda source body is not an eligible original synthetic declaration")
+		}
 		site, closed := dumper.recordNativeLambdaFactorySource(name, desc, codeAttr, captured, pc, hasPC)
 		if !closed {
-			return "", fmt.Errorf("original lambda local capture source is not closed")
+			return core.LambdaBodySource{}, fmt.Errorf("original lambda local capture source is not closed")
 		}
 		dumper.lambdaMethods[name] = append(dumper.lambdaMethods[name], desc)
 		dumper.lambdaCaptureCount[name+desc] = len(captured)
@@ -252,25 +276,94 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 				dumper.CurrentMethod = savedCurrentMethod
 			}()
 		}
+		previousCaptured := dumper.nativeLambdaBodyCapturedValues
+		dumper.nativeLambdaBodyCapturedValues = captured
+		defer func() { dumper.nativeLambdaBodyCapturedValues = previousCaptured }()
 		previousSite := dumper.nativeLambdaBodySite
 		dumper.nativeLambdaBodySite = site
 		defer func() { dumper.nativeLambdaBodySite = previousSite }()
-		dumped, err := dumper.dumpMethodWithInitialId(name, desc, id, adapter)
+		request, known := dumper.newLambdaMethodSourceRequest(len(captured))
+		if !known {
+			return core.LambdaBodySource{}, fmt.Errorf("lambda source request exceeds budget")
+		}
+		if hasPC {
+			request.factory = &lambdaSourceFactory{object: dumper.obj, method: dumper.CurrentMethod, code: codeAttr, pc: pc}
+			if !request.factory.seal(dumper.Work) {
+				return core.LambdaBodySource{}, fmt.Errorf("original lambda factory origin cannot be retained")
+			}
+			if name, known := sourceBridgeUTF8(dumper.obj, dumper.CurrentMethod.NameIndex); known && name == "<clinit>" {
+				dumper.lambdaInitializerFactorySeen = true
+			}
+		}
+		if source, closed := dumper.dumpCompilerVarargsReference(name, desc, captured, request); closed {
+			return source, nil
+		}
+		if hasPC && len(captured) == 0 && dumper.ordinaryArrowChangesStaticImplementationPorts(name, desc, request) {
+			request.checkedInput = dumper.proveLambdaCheckedInputAdapter(name, desc, request)
+			if request.checkedInput == nil {
+				return core.LambdaBodySource{}, fmt.Errorf("%w: ordinary arrow changes original static implementation input types", core.ErrLambdaSourceUnsupported)
+			}
+		}
+		dumped, err := dumper.dumpMethodWithSourceRequest(name, desc, id, adapter, request)
 		if err != nil {
-			return "", err
+			return core.LambdaBodySource{}, err
+		}
+		if !dumper.recordLambdaMethodSourceBody(name, desc, request, dumped) {
+			return core.LambdaBodySource{}, fmt.Errorf("successful lambda source body receipt is not closed")
 		}
 		if site != nil {
 			dumper.nativeLambdaFactorySources[site].implementationBody = dumped
 		}
-		return dumped.code, nil
+		receipt := dumper.lambdaMethodSourceBodies[dumped.member]
+		if receipt == nil || receipt.body != dumped || receipt.identity == nil {
+			return core.LambdaBodySource{}, fmt.Errorf("original lambda body identity is unavailable")
+		}
+		source := core.LambdaBodySource{Code: dumped.code, Identity: receipt.identity, FixedParameterTypes: dumped.lambdaParameterBinding != nil}
+		if ports, closed := dumper.lambdaParameterLexicalFieldCaptures(dumped.lambdaParameterBinding); closed {
+			source.LexicalFieldCaptures = ports
+		} else {
+			return core.LambdaBodySource{}, fmt.Errorf("original lambda lexical field capture is unavailable")
+		}
+		recordPacket := dumped.lambdaParameterBinding != nil && dumped.lambdaParameterBinding.metadata != nil && dumped.lambdaParameterBinding.metadata.factoryCaptureCount() != 0 || dumper.nativeAnonymousLambdaCurrent != nil && dumper.nativeMemberRoot != nil && len(dumper.nativeMemberRoot.getters) != 0
+		if dumper.options.SourceCompiler == NativeJavac8 || dumper.options.SourceCompiler == ModernJavac || recordPacket {
+			template := dumped.code
+			// A metadata-bound nested capture needs the same structured writer
+			// observations even when its final compiler metadata is restored
+			// by an explicit artifact. A plain packet loses the parent ports.
+			if (dumper.options.SourceCompiler == NativeJavac8 || dumper.artifactLambdaMetadataAllowed()) && dumper.lambdaCaptureCompositionRequired(dumped) {
+				source.RecordRenderedWithCaptures = func(observation core.LambdaSourceRender) {
+					if !dumper.selectLambdaWriterReceipt(dumped, receipt) {
+						return
+					}
+					dumper.recordLambdaCaptureProjection(dumped, template, observation, recordPacket)
+				}
+			} else {
+				source.RecordRendered = func(rendered string) {
+					if !dumper.selectLambdaWriterReceipt(dumped, receipt) {
+						return
+					}
+					if recordPacket {
+						dumper.recordNativeLambdaRenderedPacket(dumped, template, rendered)
+					}
+					dumper.recordLambdaMethodEmission(dumped, template, rendered)
+				}
+			}
+		}
+		return source, nil
 	}
 	parser.DumpClassLambdaMethod = func(name, desc string, id *utils.VariableId, captured []values.JavaValue) (string, error) {
-		return dumpLambda(name, desc, id, captured, nil, 0, false)
+		source, err := dumpLambda(name, desc, id, captured, nil, 0, false)
+		return source.Code, err
 	}
 	parser.DumpClassLambdaMethodWithAdapter = func(name, desc string, id *utils.VariableId, captured []values.JavaValue, adapter *core.LambdaReferenceAdapter) (string, error) {
-		return dumpLambda(name, desc, id, captured, adapter, 0, false)
+		source, err := dumpLambda(name, desc, id, captured, adapter, 0, false)
+		return source.Code, err
 	}
 	parser.DumpClassLambdaMethodAtOrigin = func(name, desc string, id *utils.VariableId, captured []values.JavaValue, adapter *core.LambdaReferenceAdapter, pc int) (string, error) {
+		source, err := dumpLambda(name, desc, id, captured, adapter, pc, true)
+		return source.Code, err
+	}
+	parser.DumpClassLambdaSourceAtOrigin = func(name, desc string, id *utils.VariableId, captured []values.JavaValue, adapter *core.LambdaReferenceAdapter, pc int) (core.LambdaBodySource, error) {
 		return dumpLambda(name, desc, id, captured, adapter, pc, true)
 	}
 	parser.BaseVarId = id
@@ -341,8 +434,34 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 			}
 		}
 		parser.InlineEnumLambdaArgumentTemps(&st, constants)
+		if failure := dumper.projectNativeEnumBacking(parser, codeAttr, originalMethod, &st); failure != nil {
+			return parser.Params, st, failure
+		}
 	}
-	dumper.bootstrapReports = append(dumper.bootstrapReports, parser.BootstrapReports...)
+	// One bounded original context per method; report count must not multiply
+	// copies of a long method name/descriptor. Failed parser reports still need
+	// the original method identity, never a generated source spelling.
+	methodIdentity := ""
+	if len(parser.BootstrapReports) != 0 && dumper.CurrentMethod != nil {
+		name, named := sourceBridgeUTF8(dumper.obj, dumper.CurrentMethod.NameIndex)
+		descriptor, typed := sourceBridgeUTF8(dumper.obj, dumper.CurrentMethod.DescriptorIndex)
+		if named && typed {
+			size := int64(len(name)) + int64(len(descriptor))
+			if dumper.Work != nil {
+				if failure := dumper.Work.CheckAlloc(size); failure != nil {
+					return parser.Params, st, failure
+				}
+				if !nativeProofWork(dumper.Work, size+1) {
+					return parser.Params, st, dumper.Work.Err()
+				}
+			}
+			methodIdentity = name + descriptor
+		}
+	}
+	for _, report := range parser.BootstrapReports {
+		report.Method = methodIdentity
+		dumper.bootstrapReports = append(dumper.bootstrapReports, report)
+	}
 	if dumper.options.EnableShadowIR && dumper.report != nil {
 		observation := parser.ShadowObservation
 		if observation.Status == "" {

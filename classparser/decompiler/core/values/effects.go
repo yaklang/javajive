@@ -91,6 +91,12 @@ func Children(value JavaValue) ([]JavaValue, bool) {
 		}
 		return []JavaValue{v.Inner}, true
 	case *CustomValue:
+		if operand, _, _, known := v.OriginalInstanceOfSource(); known {
+			return []JavaValue{operand}, true
+		}
+		if operand, _, _, known := v.SourcePrimitiveConversion(); known {
+			return []JavaValue{operand}, true
+		}
 		if _, known := v.SourceCaughtExceptionEntry(); known {
 			return nil, true
 		}
@@ -176,7 +182,7 @@ func InspectValue(value JavaValue) (effect Effects, refs map[*JavaRef]bool) {
 			}
 		case *JavaExpression:
 			switch v.Op {
-			case "++", "--", "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", ">>>=":
+			case INC, DEC, "++", "--", "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", ">>>=":
 				effect |= EffectWriteMemory
 			case "/", "%":
 				effect |= EffectThrow
@@ -189,6 +195,13 @@ func InspectValue(value JavaValue) (effect Effects, refs map[*JavaRef]bool) {
 			// Static field access is getstatic/putstatic: it may run <clinit>
 			// and cannot be moved across class-init boundaries.
 			effect |= EffectReadMemory | EffectThrow | EffectClassInit
+		case *JavaClassValue:
+			// A decoded ldc Class resolves at its original PC and may throw a
+			// linkage error. It does not initialize the referenced class.
+			// Symbolic invocation owners carry no evaluation PC.
+			if v != nil && v.HasOriginPC {
+				effect |= EffectThrow
+			}
 		case *FunctionCallExpression:
 			effect |= EffectCall | EffectReadMemory | EffectWriteMemory | EffectThrow
 			if v != nil && (v.FunctionName == "<clinit>" || v.FunctionName == "<init>") {
@@ -205,6 +218,11 @@ func InspectValue(value JavaValue) (effect Effects, refs map[*JavaRef]bool) {
 				effect |= v.Extra
 			}
 		case *CustomValue:
+			if _, _, _, known := v.OriginalInstanceOfSource(); known {
+				// Resolution may fail; a type test never licenses moving its
+				// original evaluation across handlers or other effects.
+				effect |= EffectThrow
+			}
 			if _, known := v.SourceCaughtExceptionEntry(); known {
 				// Dependency completeness does not license moving an implicit
 				// handler-entry word outside its original catch binding.

@@ -70,7 +70,7 @@ func nativeLambdaJoinedLocalSource(operand *nativeEnumSelectorProducer, captured
 	store := func(a *statements.AssignStatement) bool {
 		storePC, slot, sealed := a.OriginalLocalStore()
 		left, isRef := a.LeftValue.(*values.JavaRef)
-		if !sealed || !isRef || left != ref && !(read.referenceAssignable && ref.SameOriginalLocalWeb(left)) || slot != operand.local.slot || !expected[storePC] || seen[storePC] {
+		if !sealed || !isRef || left != ref && !left.SameOriginalLocalDeclaration(ref) && !(read.referenceAssignable && ref.SameOriginalLocalWeb(left)) || slot != operand.local.slot || !expected[storePC] || seen[storePC] {
 			return false
 		}
 		seed, known := nativeMemberEnclosingUnpack(a.JavaValue, work)

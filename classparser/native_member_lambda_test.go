@@ -2,7 +2,6 @@ package javaclassparser
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -201,9 +200,8 @@ func TestNativeMemberLambdaSourceCertificateRequiresConsumedOriginalBody(t *test
 			d, _ := sourceBridgeUTF8(child.object, method.DescriptorIndex)
 			dumper := NewClassObjectDumper(child.object)
 			body := &dumpedMethods{member: method, code: "return null;", bodyCode: "return null;"}
-			key := fmt.Sprintf("name:%s,desc:%s", n, d)
+			key := registerMethodSourceBodyFixture(t, dumper, n, d, 2, body)
 			dumper.lambdaMethods[n] = []string{d}
-			dumper.dumpedMethodsSet[key] = body
 			var work *workbudget.Budget
 			switch variant {
 			case "missing consumption":

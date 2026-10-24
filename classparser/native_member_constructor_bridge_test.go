@@ -154,6 +154,7 @@ func TestNativeMemberBridgeAllocationRequiresUnusedOriginalNull(t *testing.T) {
 				d.nativeMemberRoot = p
 				d.FuncCtx = &class_context.ClassContext{ClassName: root.GetClassName()}
 				d.wireNativeMemberSource()
+				d.nativeSourceNamesReady = true
 				d.FuncCtx.FunctionName = name
 				d.FuncCtx.CurrentMethodDesc = desc
 				for _, a := range d.nativeMemberCalls[name+desc] {

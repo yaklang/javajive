@@ -77,6 +77,12 @@ func methodRefCheckedInput(d *Decompiler, req CallSiteRequest, static []values.J
 	if !known || ownerDeclaration.Name != strings.ReplaceAll(owner, ".", "/") {
 		return nil
 	}
+	// Prefer the original reference when its exact creation target and source
+	// overload selection are proved independently. An adapter arrow would add
+	// a synthetic declaration, changing enclosing lambda ordinals/metadata.
+	if value := methodRefCheckedPolyTarget(d, req, static, impl, erasedInterface); value != nil {
+		return value
+	}
 	parameters := make([]types.JavaType, len(erased))
 	checked := make([]types.JavaType, len(actual))
 	views := make([]types.JavaType, len(inputs))

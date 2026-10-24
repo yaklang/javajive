@@ -9,8 +9,7 @@ import (
 	"strings"
 )
 
-// This is an original-code proof, not the older synthetic/numeric-name
-// heuristic used by ordinary flat source rendering. The trailing parameter is
+// This is an original-code proof, independent of marker spelling. The trailing parameter is
 // absent from the original target call; no source or runtime operation uses it.
 // A complete lexical family must separately prove its compiler-generated role.
 type nativeConstructorAccessBridge struct {
@@ -30,11 +29,25 @@ func (c *ClassObjectDumper) nativeConstructorAccessBridges() map[string]*nativeC
 // Original descriptor evidence is independent of the compiler used to emit
 // source. Callers must separately prove that compiler's regeneration behavior.
 func (c *ClassObjectDumper) originalNativeConstructorAccessBridges() map[string]*nativeConstructorAccessBridge {
+	return c.constructorAccessBridgePackets(0x1000)
+}
+
+// The same forwarding grammar can validate a fresh source declaration whose
+// only unspellable property is ACC_SYNTHETIC. Callers choose the exact flags;
+// the original ownership client always retains its synthetic-only contract.
+func (c *ClassObjectDumper) constructorAccessBridgePackets(requiredFlags uint16) map[string]*nativeConstructorAccessBridge {
+	if !nativeAccessorVersion(c.obj, c.Work) {
+		return map[string]*nativeConstructorAccessBridge{}
+	}
+	return c.constructorForwardingPackets(requiredFlags)
+}
+
+// The forwarding grammar is independent of the classfile's nest-access
+// protocol. The original ownership client above and the fresh declaration
+// metadata client each validate their own version domain before using it.
+func (c *ClassObjectDumper) constructorForwardingPackets(requiredFlags uint16) map[string]*nativeConstructorAccessBridge {
 	result := map[string]*nativeConstructorAccessBridge{}
 	obj := c.obj
-	if !nativeAccessorVersion(obj, c.Work) {
-		return result
-	}
 	constructors := map[string][]*MemberInfo{}
 	if len(obj.Methods) > 65535 {
 		return nil
@@ -58,7 +71,7 @@ func (c *ClassObjectDumper) originalNativeConstructorAccessBridges() map[string]
 		}
 		name, _ := obj.getUtf8(method.NameIndex)
 		desc, _ := obj.getUtf8(method.DescriptorIndex)
-		if name != "<init>" || method.AccessFlags != 0x1000 || len(constructors[desc]) != 1 {
+		if name != "<init>" || method.AccessFlags != requiredFlags || len(constructors[desc]) != 1 {
 			continue
 		}
 		params, ret, err := callbinding.Descriptor(desc)
@@ -79,6 +92,18 @@ func (c *ClassObjectDumper) originalNativeConstructorAccessBridges() map[string]
 				}
 				code = a
 			case *ExceptionsAttribute:
+			case *UnparsedAttribute:
+				// A fresh explicit inner constructor can receive MethodParameters
+				// for its hidden enclosing port. Those non-executable rows are
+				// restored separately after flags establish the method bijection.
+				// The original ownership grammar still admits no such extra role.
+				if requiredFlags != 0 || a == nil || a.Name != "MethodParameters" {
+					valid = false
+				} else {
+					textWork := int64(0)
+					_, present, err := sourceParameterRows(obj, method, c.Work, &textWork)
+					valid = valid && present && err == nil
+				}
 			default:
 				valid = false
 			}

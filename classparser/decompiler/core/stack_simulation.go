@@ -67,6 +67,7 @@ type StackSimulation interface {
 	PopN(n int) []values.JavaValue
 	Push(values.JavaValue)
 	Peek() values.JavaValue
+	ReplaceTop(values.JavaValue)
 	NewVar(val values.JavaValue) *values.JavaRef
 	GetVarId() *utils.VariableId
 	SetVarId(*utils.VariableId)
@@ -385,6 +386,14 @@ func (s *StackSimulationImpl) Size() int {
 
 func (s *StackSimulationImpl) Push(value values.JavaValue) {
 	s.stackEntry = newStackItem(s.stackEntry, value)
+}
+
+// Replace a surviving word without inventing decoded pushes/pops or mutating
+// the shared predecessor entry. The caller separately records its producer.
+func (s *StackSimulationImpl) ReplaceTop(value values.JavaValue) {
+	if s.stackEntry != nil && s.stackEntry.parent != nil {
+		s.stackEntry = newStackItem(s.stackEntry.parent, value)
+	}
 }
 
 func (s *StackSimulationImpl) Peek() values.JavaValue {

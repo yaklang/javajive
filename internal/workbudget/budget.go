@@ -183,6 +183,16 @@ func New(ctx context.Context, limits Limits) *Budget {
 	}
 }
 
+// Limit reports the immutable configured bound. Zero means unbounded, including
+// a nil budget. Adapters must inspect the actual Work instead of claiming a
+// tighter aggregate bound through their own descriptive metadata.
+func (b *Budget) Limit(counter Counter) int64 {
+	if b == nil {
+		return 0
+	}
+	return b.limits.limitFor(counter)
+}
+
 func (b *Budget) Context() context.Context {
 	if b == nil {
 		return nil

@@ -260,7 +260,7 @@ func TestJarRoundTripRepackage(t *testing.T) {
 			treeErr, raw := treeCompileToDirAt(t, files, cp, clsRoot, compileRelease(spec, jarPath))
 
 			repackaged := filepath.Join(t.TempDir(), name+"-recompiled.jar")
-			zipClassesToJar(t, clsRoot, repackaged)
+			zipRecompiledClassesToJar(t, clsRoot, repackaged, jarPath)
 			vok, vfail, vraw := verifyJarLoads(t, verifierDir, repackaged, cp)
 
 			t.Logf("[%s] units=%d decompileFail=%d treeErr=%d repackagedVerify(ok=%d fail=%d)",

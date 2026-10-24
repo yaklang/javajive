@@ -41,7 +41,7 @@ func (f *FunctionCallExpression) instantiatedFieldOverloadCast(i int, ctx *class
 			return ""
 		}
 		for _, formal := range types.ClassFormalTypeParamNames(ctx.ClassSig) {
-			args = append(args, types.NewJavaClass(formal))
+			args = append(args, types.NewJavaTypeVariable(formal))
 		}
 	} else if receiver, parameterized := types.AsParameterizedType(recoverParameterizedFieldReceiver(ctx, field.Object)); parameterized {
 		raw, args, known = receiver.RawClassName, receiver.TypeArgs, true
@@ -50,43 +50,13 @@ func (f *FunctionCallExpression) instantiatedFieldOverloadCast(i int, ctx *class
 		return ""
 	}
 	source := types.ResolveInstantiatedFieldTypeWithErasure(ctx, ctx.SiblingClassSig, ctx.SiblingFieldSig, raw, args, field.Member, w.descriptor)
-	actual := bindingType(source)
-	if source == nil || actual == ps[i] || !sourceDenotableJavaType(source, ctx) || !callbinding.Assignable(actual, ps[i], ctx.InvocationMetadata) {
+	actual, known := SourceTypeErasure(source, ctx)
+	if source == nil || !known || !sourceDenotableJavaType(source, ctx) || !callbinding.Assignable(actual, ps[i], ctx.InvocationMetadata) {
 		return ""
 	}
-	kind := callbinding.Virtual
-	if f.IsStatic {
-		kind = callbinding.Static
-	} else if f.Kind == InvokeInterface {
-		kind = callbinding.Interface
-	}
-	family, err := callbinding.FamilyOf(callbinding.Witness{Owner: strings.ReplaceAll(f.ClassName, ".", "/"), Name: f.FunctionName, Desc: f.Descriptor, Kind: kind}, ctx.InvocationMetadata)
-	if err != nil || family.Proof != callbinding.Compete || family.Target == nil || family.Target.Generic || family.Target.Varargs || family.Target.Bridge {
+	views, known := invocationSourceFormalViews(source, ctx)
+	if !known {
 		return ""
 	}
-	competing := false
-	for _, method := range family.Methods {
-		if method.Static != f.IsStatic || method.Desc == f.Descriptor {
-			continue
-		}
-		other, _, err := callbinding.Descriptor(method.Desc)
-		if err != nil || method.Generic || method.Varargs || method.Bridge || len(other) != len(ps) {
-			return ""
-		}
-		// This one restored slot must exclude each rival; unrelated argument
-		// differences and generic inference need the full invocation solver.
-		for j := range ps {
-			if j != i && ps[j] != other[j] {
-				return ""
-			}
-		}
-		if callbinding.Assignable(ps[i], other[i], ctx.InvocationMetadata) {
-			return ""
-		}
-		competing = competing || callbinding.Assignable(actual, other[i], ctx.InvocationMetadata)
-	}
-	if !competing {
-		return ""
-	}
-	return f.witnessDescriptorParamType(i).String(ctx)
+	return f.narrowSourceOverloadCast(i, actual, ctx, views...)
 }

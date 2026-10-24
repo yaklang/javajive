@@ -24,42 +24,42 @@ func TestSubstituteTypeVars(t *testing.T) {
 		sigma map[string]JavaType
 		want  string
 	}{
-		{"typevar_hit", NewJavaClass("K"), sigma, "String"},
-		{"typevar_other_hit", NewJavaClass("V"), sigma, "Integer"},
-		{"typevar_miss_unchanged", NewJavaClass("T"), sigma, "T"},
+		{"typevar_hit", NewJavaTypeVariable("K"), sigma, "String"},
+		{"typevar_other_hit", NewJavaTypeVariable("V"), sigma, "Integer"},
+		{"typevar_miss_unchanged", NewJavaTypeVariable("T"), sigma, "T"},
 		{"concrete_unchanged", NewJavaClass("java.lang.String"), sigma, "String"},
-		{"empty_sigma_unchanged", NewJavaClass("K"), map[string]JavaType{}, "K"},
+		{"empty_sigma_unchanged", NewJavaTypeVariable("K"), map[string]JavaType{}, "K"},
 		{
 			"parameterized_args_substituted",
-			NewParameterizedType("java.util.Map", []JavaType{NewJavaClass("K"), NewJavaClass("V")}),
+			NewParameterizedType("java.util.Map", []JavaType{NewJavaTypeVariable("K"), NewJavaTypeVariable("V")}),
 			sigma,
 			"Map<String, Integer>",
 		},
 		{
 			"nested_parameterized",
 			NewParameterizedType("java.util.List", []JavaType{
-				NewParameterizedType("java.util.Map", []JavaType{NewJavaClass("K"), NewJavaClass("V")}),
+				NewParameterizedType("java.util.Map", []JavaType{NewJavaTypeVariable("K"), NewJavaTypeVariable("V")}),
 			}),
 			sigma,
 			"List<Map<String, Integer>>",
 		},
 		{
 			"array_of_typevar",
-			NewJavaArrayType(NewJavaClass("K")),
+			NewJavaArrayType(NewJavaTypeVariable("K")),
 			sigma,
 			"String[]",
 		},
 		{
 			"wildcard_bound_substituted",
-			&JavaWildcardType{Variant: "super", Bound: NewJavaClass("K")},
+			&JavaWildcardType{Variant: "super", Bound: NewJavaTypeVariable("K")},
 			sigma,
 			"? super String",
 		},
 		{
 			"nested_wildcard_bound_substituted",
 			NewParameterizedType("java.util.function.Function", []JavaType{
-				&JavaWildcardType{Variant: "super", Bound: NewJavaClass("K")},
-				&JavaWildcardType{Variant: "extends", Bound: NewJavaClass("V")},
+				&JavaWildcardType{Variant: "super", Bound: NewJavaTypeVariable("K")},
+				&JavaWildcardType{Variant: "extends", Bound: NewJavaTypeVariable("V")},
 			}),
 			sigma,
 			"Function<? super String, ? extends Integer>",
@@ -98,8 +98,8 @@ func TestResolveInstantiatedSignatureRecoversJDKLeafFormal(t *testing.T) {
 		return "<K:Ljava/lang/Object;V:Ljava/lang/Object;>Ljava/lang/Object;Ljava/util/concurrent/ConcurrentMap<TK;TV;>;", nil, true
 	}
 	recvArgs := []JavaType{
-		NewJavaClass("K"),
-		NewParameterizedType("java.util.concurrent.CompletableFuture", []JavaType{NewJavaClass("V")}),
+		NewJavaTypeVariable("K"),
+		NewParameterizedType("java.util.concurrent.CompletableFuture", []JavaType{NewJavaTypeVariable("V")}),
 	}
 	params, ret := ResolveInstantiatedSignature(ctx, provider, "example.LocalMap", recvArgs, "computeIfPresent", 2)
 	if ret != nil {
@@ -138,7 +138,7 @@ func TestResolveInstantiatedSignatureExactSelectsOverloadThroughHierarchy(t *tes
 		}
 	}
 	params, _, methodFormals := ResolveInstantiatedSignatureExact(ctx, provider, "example.Child", []JavaType{
-		NewJavaClass("K"), NewJavaClass("V"),
+		NewJavaTypeVariable("K"), NewJavaTypeVariable("V"),
 	}, "get", wantedDesc, 2)
 	if len(methodFormals) != 0 || len(params) != 2 || params[1] == nil {
 		t.Fatalf("exact hierarchy resolution failed: params=%#v methodFormals=%v", params, methodFormals)
@@ -151,7 +151,7 @@ func TestResolveInstantiatedSignatureExactSelectsOverloadThroughHierarchy(t *tes
 	// The legacy arity-only index is intentionally absent when overloads
 	// collide. Exact resolution must never fall across to the other signature.
 	if params, _ := ResolveInstantiatedSignature(ctx, provider, "example.Child", []JavaType{
-		NewJavaClass("K"), NewJavaClass("V"),
+		NewJavaTypeVariable("K"), NewJavaTypeVariable("V"),
 	}, "get", 2); len(params) != 0 {
 		t.Fatalf("arity-only resolver guessed across overloads: %#v", params)
 	}
@@ -159,7 +159,7 @@ func TestResolveInstantiatedSignatureExactSelectsOverloadThroughHierarchy(t *tes
 
 func TestInstantiateJDKMethodReturnPreservesMapViewChain(t *testing.T) {
 	ctx := &class_context.ClassContext{}
-	mapArgs := []JavaType{NewJavaClass("K"), NewJavaClass("V")}
+	mapArgs := []JavaType{NewJavaTypeVariable("K"), NewJavaTypeVariable("V")}
 	entrySet := InstantiateJDKMethodReturn("java.util.Map", "entrySet", 0, mapArgs)
 	if entrySet == nil || entrySet.String(ctx) != "Set<Map.Entry<K, V>>" {
 		t.Fatalf("entrySet target = %v", entrySet)
@@ -186,9 +186,9 @@ func TestInstantiateJDKMethodReturnPreservesMapViewChain(t *testing.T) {
 
 func TestInstantiateJDKMethodReturnUsesOnlyProducerArgument(t *testing.T) {
 	ctx := &class_context.ClassContext{}
-	typeVar := NewJavaClass("V")
+	typeVar := NewJavaTypeVariable("V")
 	upperV := &JavaWildcardType{Variant: "extends", Bound: typeVar}
-	lowerK := &JavaWildcardType{Variant: "super", Bound: NewJavaClass("K")}
+	lowerK := &JavaWildcardType{Variant: "super", Bound: NewJavaTypeVariable("K")}
 
 	cases := []struct {
 		name, raw, method string
@@ -196,7 +196,7 @@ func TestInstantiateJDKMethodReturnUsesOnlyProducerArgument(t *testing.T) {
 		args              []JavaType
 		want              string
 	}{
-		{"map get", "java.util.Map", "get", 1, []JavaType{NewJavaClass("K"), typeVar}, "V"},
+		{"map get", "java.util.Map", "get", 1, []JavaType{NewJavaTypeVariable("K"), typeVar}, "V"},
 		{"function covariant result", "java.util.function.Function", "apply", 1, []JavaType{lowerK, upperV}, "V"},
 		{"bifunction covariant result", "java.util.function.BiFunction", "apply", 2, []JavaType{lowerK, lowerK, upperV}, "V"},
 		{"supplier result", "java.util.function.Supplier", "get", 0, []JavaType{typeVar}, "V"},
@@ -227,7 +227,7 @@ func TestInstantiateJDKMethodReturnUsesOnlyProducerArgument(t *testing.T) {
 }
 
 func TestNestedInvariantMapViewDoesNotInventCaptureType(t *testing.T) {
-	args := []JavaType{NewJavaClass("K"), &JavaWildcardType{Variant: "extends", Bound: NewJavaClass("V")}}
+	args := []JavaType{NewJavaTypeVariable("K"), &JavaWildcardType{Variant: "extends", Bound: NewJavaTypeVariable("V")}}
 	if got := InstantiateJDKMethodReturn("java.util.Map", "entrySet", 0, args); got != nil {
 		t.Fatalf("Set<Entry<K,CAP>> cannot be widened to Set<Entry<K,? extends V>>: %s", got.String(&class_context.ClassContext{}))
 	}
@@ -247,5 +247,45 @@ func TestExactMethodSignatureShadowsReceiverTypeVariable(t *testing.T) {
 	params, _, formals := ResolveInstantiatedSignatureExact(ctx, provider, "example.Owner", []JavaType{NewJavaClass("java.lang.String")}, "use", descriptor, 1)
 	if len(params) != 1 || params[0].String(ctx) != "Function<T, T>" || len(formals) != 1 || formals[0] != "T" {
 		t.Fatalf("method-local T was captured by the receiver substitution: %v/%v", params, formals)
+	}
+}
+
+func TestSubstitutionRequiresFormalRoleRatherThanMatchingClassSpelling(t *testing.T) {
+	ctx := &class_context.ClassContext{}
+	sigma := map[string]JavaType{"T": NewJavaClass("java.lang.String"), "Owner$Token": NewJavaClass("java.lang.String")}
+	for _, row := range []struct{ sig, want string }{{"TT;", "String"}, {"LT;", "T"}, {"[TT;", "String[]"}, {"[LT;", "T[]"}, {"Ljava/util/Map<LT;TT;>;", "Map<T, String>"}, {"Ljava/util/Map<LOwner$Token;TOwner$Token;>;", "Map<Owner$Token, String>"}, {"Ljava/util/List<+LT;>;", "List<? extends T>"}, {"Ljava/util/List<+TT;>;", "List<? extends String>"}} {
+		t.Run(row.sig, func(t *testing.T) {
+			original := ParseSignature(row.sig)
+			if original == nil {
+				t.Fatal("signature")
+			}
+			before := original.String(ctx)
+			substituted := SubstituteTypeVars(original, sigma)
+			if got := substituted.String(ctx); got != row.want {
+				t.Fatalf("substitution=%q want=%q", got, row.want)
+			}
+			if original.String(ctx) != before {
+				t.Fatal("substitution mutated original")
+			}
+		})
+	}
+	literal := NewJavaClass("T")
+	if SubstituteTypeVars(literal, sigma) != literal {
+		t.Fatal("a concrete class is not a variable reference")
+	}
+}
+
+func TestInstantiatedSignatureRetainsLiteralClassInsideParameterizedFormal(t *testing.T) {
+	ctx := &class_context.ClassContext{}
+	ctx.DeclarationSourceName = func(binary string) (string, bool) { return "Owner.Token", binary == "Owner$Token" }
+	provider := func(name string) (string, map[string]string, bool) {
+		if name != "Owner$Box" {
+			return "", nil, false
+		}
+		return "<Owner$Token:Ljava/lang/Object;>Ljava/lang/Object;", map[string]string{class_context.MethodDescKey("apply", "(Ljava/util/List;)Ljava/lang/Object;"): "(Ljava/util/List<LOwner$Token;>;)TOwner$Token;"}, true
+	}
+	params, result, formals := ResolveInstantiatedSignatureExact(ctx, provider, "Owner$Box", []JavaType{NewJavaClass("java.lang.String")}, "apply", "(Ljava/util/List;)Ljava/lang/Object;", 1)
+	if len(params) != 1 || params[0].String(ctx) != "List<Owner.Token>" || result == nil || result.String(ctx) != "String" || len(formals) != 0 {
+		t.Fatalf("literal/formal instantiation=%v/%v/%v", params, result, formals)
 	}
 }

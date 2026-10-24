@@ -20,9 +20,10 @@ type interfaceFieldWrite struct {
 	field            *values.JavaClassMember
 }
 type interfaceInitializerSegment struct {
-	write  interfaceFieldWrite
-	prefix []statements.Statement
-	value  values.JavaValue
+	write     interfaceFieldWrite
+	prefix    []statements.Statement
+	value     values.JavaValue
+	reference *interfaceInitializerMethodReference
 }
 
 func normalizedInitializerOwner(s string) string { return strings.ReplaceAll(s, ".", "/") }
@@ -129,7 +130,7 @@ func planInterfaceInitializers(body []statements.Statement, owner string, writes
 		if err := closedInterfacePrefix(prefix, assign.JavaValue, owner); err != nil {
 			return nil, err
 		}
-		plans = append(plans, interfaceInitializerSegment{w, append([]statements.Statement{}, prefix...), assign.JavaValue})
+		plans = append(plans, interfaceInitializerSegment{write: w, prefix: append([]statements.Statement{}, prefix...), value: assign.JavaValue})
 		prefix = nil
 	}
 	if len(prefix) != 0 || len(plans) != len(writes) {
@@ -375,6 +376,13 @@ func (c *ClassObjectDumper) renderInterfaceInitializers(body []statements.Statem
 	if err != nil {
 		return nil, err
 	}
+	if directExpressions {
+		for i := range plans {
+			if value, proved := c.interfaceInitializerLambdaExpression(&plans[i], code); proved {
+				plans[i].prefix, plans[i].value = nil, value
+			}
+		}
+	}
 	names := c.initializerHelperNames(len(plans))
 	helpers := make([]*dumpedMethods, 0, len(plans))
 	initializers := map[string]string{}
@@ -393,7 +401,7 @@ func (c *ClassObjectDumper) renderInterfaceInitializers(body []statements.Statem
 		// witness. A direct declaration preserves its ABI without a helper,
 		// provided it cannot create a new JLS constant variable or expose an
 		// unchecked declaration of a checked exception.
-		if directExpressions && len(plan.prefix) == 0 && interfaceInitializerNonconstant(plan.value, plan.write.descriptor) {
+		if directExpressions && len(plan.prefix) == 0 && (interfaceInitializerNonconstant(plan.value, plan.write.descriptor) || c.interfaceInitializerOwnNonconstantRead(plan.value, code, plan.write.pc, writes)) {
 			directContext := *ctx
 			directContext.QualifiedStaticFields = true
 			value := values.ErasedFactoryAssignmentView(plan.value, fieldType, &directContext)
@@ -419,6 +427,23 @@ func (c *ClassObjectDumper) renderInterfaceInitializers(body []statements.Statem
 	}
 	for name, value := range initializers {
 		c.fieldDefaultValue[name] = value
+	}
+	c.interfaceLambdaInitializer = nil
+	if frame := c.lambdaMethodRendering; len(helpers) == 0 && frame != nil && len(frame.children) != 0 && frame.body != nil && frame.body.member == c.CurrentMethod {
+		bytes := int64(len(code.Code)) + int64(len(order))*128
+		for _, expression := range initializers {
+			bytes += int64(len(expression))
+		}
+		if bytes > 8<<20 || !nativeProofWork(c.Work, bytes+1) || c.Work != nil && c.Work.CheckAlloc(bytes) != nil {
+			return nil, fmt.Errorf("interface initializer source receipt exceeds budget")
+		}
+		c.interfaceLambdaInitializer = newInterfaceLambdaInitializerReceipt(frame.body, code, order, initializers)
+		for _, plan := range plans {
+			if plan.reference != nil {
+				c.interfaceLambdaInitializer.references = append(c.interfaceLambdaInitializer.references, plan.reference)
+			}
+		}
+		c.interfaceLambdaInitializer.referenceSeal = slices.Clone(c.interfaceLambdaInitializer.references)
 	}
 	return helpers, nil
 }
@@ -530,9 +555,82 @@ func interfaceInitializerNonconstant(value values.JavaValue, descriptor string) 
 	if value == values.JavaNull {
 		return len(descriptor) > 1
 	}
+	// ACONST_NULL now retains its producer as a JavaLiteral. It is never a
+	// constant expression (including for String), so the original field store
+	// can stay a direct initializer without adding a public interface method.
+	// Do not infer this from rendered spelling: an actual string constant or
+	// a copied/changed producer must not gain this certificate.
+	if literal, ok := value.(*values.JavaLiteral); ok {
+		if _, original := literal.OriginalNullPC(); original {
+			return len(descriptor) > 1
+		}
+	}
 	switch value.(type) {
 	case *values.NewExpression, *values.FunctionCallExpression:
 		return true
+	}
+	return false
+}
+
+// A qualified read of another field in this complete initialization partition
+// is nonconstant when its original declaration has no ConstantValue. Every
+// such destination keeps that status: it gets a proved nonconstant expression
+// or a helper call, never a new constant expression. This also covers forward
+// references and cycles without folding away the original default-value read.
+func (c *ClassObjectDumper) interfaceInitializerOwnNonconstantRead(value values.JavaValue, code *CodeAttribute, storePC int, writes []interfaceFieldWrite) bool {
+	if c == nil || c.obj == nil || code == nil || len(writes) > 128 || !nativeProofWork(c.Work, int64(len(code.Code))) {
+		return false
+	}
+	field, ok := values.UnpackSoltValue(value).(*values.JavaClassMember)
+	if !ok || field == nil || !field.OriginalStaticFieldRead(field.OriginPC, c.obj.GetClassName(), field.Member, field.Description) || field.OriginPC >= storePC {
+		return false
+	}
+	partitioned := false
+	for _, write := range writes {
+		if write.name == field.Member && write.descriptor == field.Description {
+			partitioned = true
+		}
+	}
+	if !partitioned {
+		return false
+	}
+	var declaration *MemberInfo
+	for _, candidate := range c.obj.Fields {
+		if candidate == nil || !nativeProofWork(c.Work, 1) {
+			return false
+		}
+		name, knownName := sourceBridgeUTF8(c.obj, candidate.NameIndex)
+		descriptor, knownDescriptor := sourceBridgeUTF8(c.obj, candidate.DescriptorIndex)
+		if !knownName || !knownDescriptor {
+			return false
+		}
+		if name != field.Member || descriptor != field.Description {
+			continue
+		}
+		if declaration != nil || candidate.AccessFlags&0x18 != 0x18 {
+			return false
+		}
+		for _, attribute := range candidate.Attributes {
+			if _, constant := attribute.(*ConstantValueAttribute); constant {
+				return false
+			}
+		}
+		declaration = candidate
+	}
+	if declaration == nil {
+		return false
+	}
+	decoder := core.NewDecompiler(code.Code, func(index int) values.JavaValue { return GetValueFromCP(c.ConstantPool, index) })
+	decoder.Work = c.Work
+	if decoder.ParseOpcode() != nil {
+		return false
+	}
+	for _, op := range decoder.Opcodes() {
+		if op == nil || op.IsCustom || op.Instr == nil || op.Instr.OpCode != core.OP_GETSTATIC || int(op.CurrentOffset) != field.OriginPC {
+			continue
+		}
+		original := constructorMotionMember(c.obj, op, core.OP_GETSTATIC)
+		return original != nil && original.Name == c.obj.GetClassName() && original.Member == field.Member && original.Description == field.Description
 	}
 	return false
 }

@@ -14,14 +14,22 @@ import (
 // views: even with one overload, a raw Iterable cast can control inference
 // between Iterable<E> and Consumer<? super E>. Unknown is not Unique.
 func (f *FunctionCallExpression) unprovenWideningArgCast(actual, formal types.JavaType, ctx *class_context.ClassContext) bool {
-	if f == nil || ctx == nil || f.IsStatic || f.IsSpecialInvoke || f.FunctionName == "<init>" ||
-		(f.Kind != InvokeVirtual && f.Kind != InvokeInterface) || actual == nil || formal == nil ||
+	if f == nil || ctx == nil || f.IsSpecialInvoke || f.FunctionName == "<init>" ||
+		(f.Kind != InvokeVirtual && f.Kind != InvokeInterface && f.Kind != InvokeStatic) || actual == nil || formal == nil ||
 		!callbinding.Reference(bindingType(actual)) || !callbinding.Reference(bindingType(formal)) ||
 		!provenOverloadWidening(witnessRawClassName(actual), witnessRawClassName(formal), ctx) {
 		return false
 	}
 	if ctx.InvocationMetadata == nil {
 		return false
+	}
+	if f.IsStatic || f.Kind == InvokeStatic {
+		for _, arg := range f.Arguments {
+			if arg == nil || isWitnessLambdaArg(UnpackSoltValue(arg)) {
+				return false
+			}
+		}
+		return f.staticCallHasUniqueErasedBinding(ctx)
 	}
 	family, err := callbinding.FamilyOf(callbinding.Witness{Owner: strings.ReplaceAll(f.ClassName, ".", "/"), Name: f.FunctionName, Desc: f.Descriptor}, ctx.InvocationMetadata)
 	return err == nil && family.Complete && family.Proof == callbinding.Unique && family.Target != nil && !family.Target.Generic
@@ -113,6 +121,9 @@ func (f *FunctionCallExpression) planIncompleteErasedOwner(ctx *class_context.Cl
 // poly arguments. Those require separate target/inference/effect evidence. An
 // unchanged descriptor result cannot introduce a use-site narrowing check.
 func (f *FunctionCallExpression) planErasedInvocation(ctx *class_context.ClassContext) (*FunctionCallExpression, bool) {
+	if planned, known := f.planErasedFactoryReceiver(ctx); known {
+		return planned, true
+	}
 	return f.planErasedInvocationProof(ctx, false)
 }
 func (f *FunctionCallExpression) planErasedInvocationProof(ctx *class_context.ClassContext, erasedResultUse bool) (*FunctionCallExpression, bool) {
@@ -216,7 +227,7 @@ func (f *FunctionCallExpression) planErasedInvocationProof(ctx *class_context.Cl
 				if !known || !ctx.IsTypeParam(name) {
 					return nil, false
 				}
-				args = append(args, types.NewJavaClass(name))
+				args = append(args, types.NewJavaTypeVariable(name))
 			}
 		}
 	}
@@ -474,6 +485,9 @@ func (f *FunctionCallExpression) PlanErasedClassResultUse(ctx *class_context.Cla
 	if ctx != nil && ctx.Getenv("JDEC_ERASED_CLASS_RESULT_USE_OFF") != "" {
 		return nil, false
 	}
+	if planned, known := f.planErasedZeroArgumentResult(ctx); known {
+		return planned, true
+	}
 	return f.planErasedInvocationProof(ctx, true)
 }
 
@@ -504,8 +518,8 @@ func invocationSignatureEvidence(ctx *class_context.ClassContext, name string) (
 }
 
 // SourceTypeErasure requires a denotable caller type with an exact JVM erasure.
-// A lexical method formal shadows a class formal. Unknown/dependent bounds
-// remain unproved; they must never default to Object.
+// A lexical method formal shadows a class formal. Dependent bounds need the
+// complete original declaration environment; unknown binders never default to Object.
 func SourceTypeErasure(t types.JavaType, ctx *class_context.ClassContext) (string, bool) {
 	if t == nil || ctx == nil {
 		return "", false
@@ -531,7 +545,10 @@ func SourceTypeErasure(t types.JavaType, ctx *class_context.ClassContext) (strin
 			for _, formal := range types.ClassFormalTypeParamNames(sig) {
 				if formal == name {
 					descriptor := erasedInvocationBounds(sig)[name]
-					return descriptor, descriptor != ""
+					if descriptor != "" {
+						return descriptor, true
+					}
+					return sourceLexicalDependentTypeErasure(name, ctx)
 				}
 			}
 		}
@@ -539,4 +556,64 @@ func SourceTypeErasure(t types.JavaType, ctx *class_context.ClassContext) (strin
 	}
 	descriptor := bindingType(t)
 	return descriptor, descriptor != ""
+}
+
+// Reopen declaration environments for a dependent first bound. An unknown
+// binder or a cyclic dependency is not an Object-bound variable.
+func sourceLexicalDependentTypeErasure(name string, ctx *class_context.ClassContext) (string, bool) {
+	scopes := make([]types.LexicalTypeScope, 0, len(ctx.LexicalTypeParamSignatures)+2)
+	for i := len(ctx.LexicalTypeParamSignatures) - 1; i >= 0; i-- {
+		sig := ctx.LexicalTypeParamSignatures[i]
+		if sig != "" {
+			scopes = append(scopes, types.LexicalTypeScope{Signature: sig, Method: strings.Contains(sig, "(")})
+		}
+	}
+	if ctx.ClassSig != "" {
+		scopes = append(scopes, types.LexicalTypeScope{Signature: ctx.ClassSig})
+	}
+	if ctx.CurrentMethodSig != "" {
+		scopes = append(scopes, types.LexicalTypeScope{Signature: ctx.CurrentMethodSig, Method: true, Descriptor: ctx.CurrentMethodDesc})
+	}
+	retained := 0
+	for _, s := range scopes {
+		if len(s.Signature) > 65535 {
+			return "", false
+		}
+		retained += len(s.Signature)
+		if retained > 1<<20 {
+			return "", false
+		}
+	}
+	if ctx.Work != nil && (ctx.Work.CheckAlloc(int64(retained)*256+int64(len(scopes))*128) != nil || ctx.Work.Charge(workbudget.CounterGraphScans, int64(retained)*130+1) != nil) {
+		return "", false
+	}
+	erased, known := types.LexicalTypeParameterErasures(scopes, []string{name})
+	return erased[name], known && erased[name] != ""
+}
+
+// Project only the selected declaration. The sibling scope has the same
+// precedence and completeness requirements as the full evidence table.
+func invocationDeclarationSignature(ctx *class_context.ClassContext, name, method, descriptor string) (classSig, signature string, declared, known bool) {
+	if ctx == nil {
+		return "", "", false, false
+	}
+	if ctx.SiblingClassSig != nil {
+		if cs, methods, ok := ctx.SiblingClassSig(name); ok {
+			sig, exists := methods[class_context.MethodDescKey(method, descriptor)]
+			return cs, sig, exists, true
+		}
+	}
+	if ctx.InvocationMetadata == nil {
+		return "", "", false, false
+	}
+	meta, ok := ctx.InvocationMetadata(name)
+	if !ok || meta.Name != name || !meta.MembersComplete || !meta.ParentsComplete {
+		return "", "", false, false
+	}
+	for _, row := range meta.Methods {
+		if row.Name == method && row.Desc == descriptor {
+			signature, declared = row.Signature, true
+		}
+	}
+	return meta.Signature, signature, declared, true
 }

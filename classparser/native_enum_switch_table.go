@@ -14,6 +14,9 @@ type nativeEnumSwitchTable struct {
 	object *ClassObject
 	tables map[string]*nativeEnumSwitchArray
 	uses   map[string]map[string]map[int]*nativeEnumSwitchUse
+	// Assigned only after the complete original archive-user proof succeeds.
+	// Planning membership alone does not grant the helper a source scope.
+	usersClosedRoot *ClassObject
 	// Physical <clinit> order, rather than field declaration or map order.
 	initializationOrder []string
 }

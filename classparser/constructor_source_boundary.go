@@ -18,9 +18,12 @@ import (
 // Prefix effects are either kept behind a proved inert Object initialization or
 // evaluated in the first delegation argument, before any effect of the callee.
 type constructorSourceBoundary struct {
+	lowering       *sourceConstructorLoweringPlan
+	throwsReceipt  *constructorInvocationThrowsReceipt
 	pc             int
 	delegate       *values.FunctionCallExpression
 	prefix         []statements.Statement
+	prefixEffects  []statements.Statement
 	params         []values.JavaValue
 	carrier        string
 	carrierFormals []string
@@ -154,6 +157,11 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 		return p, nil
 	}
 	if p.pc < 0 {
+		if p.delegate == nil && c.obj.GetSupperClassName() != "java/lang/Object" {
+			if prelude := c.planImplicitConstructorPrelude(code, body, method, p, decoder); prelude != nil {
+				return prelude, nil
+			}
+		}
 		// No-arg super calls may be omitted by the simulator even when the
 		// superclass observes this via virtual dispatch. An earlier capture
 		// write cannot silently move behind that implicit Java source call.
@@ -178,7 +186,7 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 						}
 						p.pc = int(op.CurrentOffset)
 						p.delegate = &values.FunctionCallExpression{ClassName: member.Name, FunctionName: "<init>", Descriptor: "()V", Kind: values.InvokeSpecial, IsSpecialInvoke: true, Object: &values.JavaRef{IsThis: true}, OriginPC: p.pc, HasOriginPC: true}
-						if len(p.prefix) == count && c.constructorCapturesCommute(p, code, method, decoder) {
+						if len(p.prefix) == count && (c.planArtifactConstructorLowering(p, code, method, decoder) || c.constructorCapturesCommute(p, code, method, decoder)) {
 							return p, nil
 						}
 					}
@@ -200,6 +208,12 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 		if err := c.planConstructorArgumentBridges(p, code, method); err != nil {
 			return nil, err
 		}
+		return p, nil
+	}
+	// An explicit reconstruction artifact can instead owe a verified compiler
+	// lowering. Its postcompile stage restores these fresh stores to their
+	// original position; this does not assert that they commute with SUPER.
+	if c.planArtifactConstructorLowering(p, code, method, decoder) {
 		return p, nil
 	}
 	if c.constructorCapturesCommute(p, code, method, decoder) {
@@ -225,8 +239,12 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 	for _, st := range p.prefix {
 		expr, ok := st.(*statements.ExpressionStatement)
 		if !ok || expr == nil {
-			return nil, fmt.Errorf("constructor prefix has escaping local or control flow")
+			expr = c.constructorDiscardedPrefixEffect(st, decoder, method, p.pc)
+			if expr == nil {
+				return nil, fmt.Errorf("constructor prefix has escaping local or control flow")
+			}
 		}
+		p.prefixEffects = append(p.prefixEffects, expr)
 		call, ok := values.UnpackSoltValue(expr.Expression).(*values.FunctionCallExpression)
 		if !ok || call == nil || !call.HasOriginPC || call.OriginPC <= last || call.OriginPC >= p.pc || !constructorBoundaryValue(expr.Expression, allowed, map[values.JavaValue]bool{}, calls, &remaining) {
 			return nil, fmt.Errorf("unproved constructor prefix effect ordering")
@@ -281,7 +299,7 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 		declarations = append(declarations, paramType.String(c.FuncCtx)+" "+param.String(c.FuncCtx))
 	}
 	var prefix strings.Builder
-	for _, st := range p.prefix {
+	for _, st := range p.sourcePrefixEffects() {
 		prefix.WriteString(st.String(c.FuncCtx))
 		prefix.WriteString(";\n")
 	}
@@ -444,7 +462,7 @@ func (c *ClassObjectDumper) planConstructorArgumentBridges(p *constructorSourceB
 			return fmt.Errorf("unproved constructor argument effect graph")
 		}
 	}
-	for _, st := range p.prefix {
+	for _, st := range p.sourcePrefixEffects() {
 		if expr, ok := st.(*statements.ExpressionStatement); ok && expr != nil {
 			if !constructorBoundaryValue(expr.Expression, allowed, map[values.JavaValue]bool{}, calls, &remaining) {
 				return fmt.Errorf("unproved constructor prefix dependency graph")
@@ -554,12 +572,28 @@ func (c *ClassObjectDumper) planConstructorArgumentBridges(p *constructorSourceB
 	return nil
 }
 
-func (p *constructorSourceBoundary) renderDelegation(ctx *class_context.ClassContext) string {
+func (p *constructorSourceBoundary) renderDelegation(ctx *class_context.ClassContext) (string, error) {
 	if p == nil || p.delegate == nil {
-		return ""
+		return "", nil
+	}
+	if p.lowering != nil && p.lowering.qualified != nil {
+		if p.throwsReceipt != nil || p.carrier != "" {
+			return "", fmt.Errorf("qualified SUPER requires independent binding completion")
+		}
+		args := p.delegate.ArgumentStrings(ctx)
+		if len(args) != len(p.lowering.arguments) || len(args) == 0 {
+			return "", fmt.Errorf("qualified SUPER operand count changed")
+		}
+		return "(" + args[0] + ").super(" + strings.Join(args[1:], ",") + ")", nil
+	}
+	if p.throwsReceipt != nil {
+		if p.throwsReceipt.plan != p {
+			return "", fmt.Errorf("foreign constructor invocation throws source receipt")
+		}
+		return p.throwsReceipt.render(ctx)
 	}
 	if p.carrier == "" {
-		return p.delegate.String(ctx)
+		return p.delegate.String(ctx), nil
 	}
 	args := p.delegate.ArgumentStrings(ctx)
 	inputs := make([]string, len(p.params))
@@ -575,5 +609,5 @@ func (p *constructorSourceBoundary) renderDelegation(ctx *class_context.ClassCon
 	if strings.ReplaceAll(p.delegate.ClassName, ".", "/") == strings.ReplaceAll(ctx.ClassName, ".", "/") {
 		target = "this"
 	}
-	return target + "(" + strings.Join(args, ",") + ")"
+	return target + "(" + strings.Join(args, ",") + ")", nil
 }

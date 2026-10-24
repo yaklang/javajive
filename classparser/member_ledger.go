@@ -164,7 +164,8 @@ func (c *ClassObjectDumper) recordMembers(methods []*dumpedMethods, fields []dum
 		// cached body; a lambda$ prefix alone is not proof of consumption.
 		key := fmt.Sprintf("name:%s,desc:%s", row.Name, row.Descriptor)
 		cached := c.dumpedMethodsSet[key]
-		if isSyntheticMethod(member.AccessFlags) && slices.Contains(c.lambdaMethods[row.Name], row.Descriptor) && cached != nil && cached.bodyCode != "stub" {
+		lambdaBody := c.lambdaMethodSourceBody(member, c.Work)
+		if isSyntheticMethod(member.AccessFlags) && slices.Contains(c.lambdaMethods[row.Name], row.Descriptor) && !lambdaBody.sourceReconstructionFailed() && !lambdaBody.checkedEscape {
 			row.State = "regenerated"
 			row.Evidence = "synthetic lambda body consumed at bootstrap call site"
 			continue

@@ -19,20 +19,29 @@ import (
 )
 
 type JarFS struct {
+	jarReleaseMu        sync.Mutex
+	jarReleaseSelection *jarReleaseSelection
+	jarReleaseBinding   *filesys.ZipFS
+	jarReleaseRole      jarReleaseRole
+	jarPhysicalRelease  int
+
 	// Immutable compilation profile, distinct from Multi-Release lookup.
-	targetSourceVersion      int
-	sourceCompiler           SourceCompilerProfile
-	sourceOwnership          *sourceOwnershipCache
-	releaseViewsMu           sync.Mutex
-	releaseViews             map[int]*JarFS
-	nativeMembersMu          sync.Mutex
-	nativeMembersIndex       nativeMemberIndex
-	nativeMembersCache       map[string]*nativeMemberCacheEntry
-	nativeMemberTransactions map[string]*nativeMemberTransaction
-	nativeMembersBytes       int64
-	nativeAnonymousMu        sync.Mutex
-	nativeAnonymousCache     map[string]*nativeAnonymousCacheEntry
-	nativeAnonymousBytes     int64
+	targetSourceVersion       int
+	sourceCompiler            SourceCompilerProfile
+	sourceFieldMetadata       *sourceFieldMetadataAuthority
+	sourceConstructorLowering *sourceConstructorLoweringAuthority
+	sourceLambdaMetadata      *sourceLambdaMetadataAuthority
+	sourceOwnership           *sourceOwnershipCache
+	releaseViewsMu            sync.Mutex
+	releaseViews              map[int]*JarFS
+	nativeMembersMu           sync.Mutex
+	nativeMembersIndex        nativeMemberIndex
+	nativeMembersCache        map[string]*nativeMemberCacheEntry
+	nativeMemberTransactions  map[string]*nativeMemberTransaction
+	nativeMembersBytes        int64
+	nativeAnonymousMu         sync.Mutex
+	nativeAnonymousCache      map[string]*nativeAnonymousCacheEntry
+	nativeAnonymousBytes      int64
 	*filesys.ZipFS
 	jarCache            *utils.SafeMapWithKey[string, *filesys.UnifiedFS]
 	recursiveParse      bool // 是否递归解析嵌套的jar文件，默认为true
@@ -81,7 +90,7 @@ func NewJarFSFromLocalWithCompilerProfile(path string, target int, compiler Sour
 	}
 	z := NewJarFS(zipFS)
 	z.targetSourceVersion = target
-	z.sourceCompiler = compiler
+	z.sourceCompiler = compiler.effective()
 	z.declarationResolver = resolve
 	return z, nil
 }
@@ -102,6 +111,7 @@ func NewJarFS(zipFs *filesys.ZipFS) *JarFS {
 
 func NewJarFSWithOptions(zipFs *filesys.ZipFS, recursiveParse bool) *JarFS {
 	return &JarFS{
+		sourceCompiler:  ModernJavac,
 		ZipFS:           zipFs,
 		sourceOwnership: &sourceOwnershipCache{},
 		jarCache:        utils.NewSafeMapWithKey[string, *filesys.UnifiedFS](),
@@ -147,19 +157,23 @@ func (z *JarFS) decompileClassBytes(name string, data []byte) []byte {
 	}
 	if path.Clean(name) == cf.GetClassName()+".class" {
 		if source, owned := z.nativeMemberSource(cf); owned {
+			z.noteNativeConstructorSource(cf, source)
 			return source
 		}
 		if source, owned := z.nativeAnonymousSource(cf); owned {
+			z.noteNativeConstructorSource(cf, source)
 			return source
 		}
 	}
-	// Always supply the sibling resolver so cross-class folds can reach sibling bytes: enum
-	// constant-body folding (gated inside DumpClass by isEnum + JDEC_NO_ENUM_FOLD) and enum-switch
-	// $SwitchMap folding (gated by a `$SwitchMap$` presence check + JDEC_NO_ENUM_SWITCH_FOLD). A
-	// non-enum, non-switch class is rendered byte-for-byte identically to the bare Dump().
+	// Supply original sibling bytes for certified source ownership and enum
+	// constant-body reconstruction. Enum-switch syntax requires its original
+	// typed protocol; a mapping-looking source fragment grants no permission.
 	d := NewClassObjectDumper(cf)
 	d.options.TargetSourceVersion = z.targetSourceVersion
 	d.options.SourceCompiler = z.sourceCompiler
+	d.options.sourceFieldMetadata = z.sourceFieldMetadata
+	d.options.sourceConstructorLowering = z.sourceConstructorLowering
+	d.options.sourceLambdaMetadata = z.sourceLambdaMetadata
 	if path.Clean(name) == cf.GetClassName()+".class" {
 		d.nativeMemberLookup = z.nativeMemberLookup
 	}
@@ -181,7 +195,7 @@ func (z *JarFS) decompileClassBytes(name string, data []byte) []byte {
 // "com/google/common/math/LongMath$1") from the underlying zip, feeding enum constant-body folding.
 func (z *JarFS) enumSiblingResolver() func(internalName string) ([]byte, bool) {
 	return func(internalName string) ([]byte, bool) {
-		raw, err := z.ZipFS.ReadFile(internalName + ".class")
+		raw, err := z.readJarEntry(internalName + ".class")
 		if err != nil || len(raw) == 0 {
 			return nil, false
 		}
@@ -193,7 +207,7 @@ func (z *JarFS) ReadFile(name string) ([]byte, error) {
 	if isArchivePath(name) {
 		return z.readFileFromJar(name)
 	}
-	data, err := z.ZipFS.ReadFile(name)
+	data, err := z.readJarEntry(name)
 	if err != nil {
 		return nil, err
 	}
@@ -205,7 +219,7 @@ func (f *JarFS) OpenFile(name string, flag int, perm os.FileMode) (fs.File, erro
 }
 
 func (z *JarFS) Open(name string) (fs.File, error) {
-	raw, err := z.ZipFS.ReadFile(name)
+	raw, err := z.readJarEntry(name)
 	if err != nil {
 		return nil, err
 	}
@@ -332,6 +346,9 @@ func normalizeArchivePath(name string) string {
 }
 
 func (z *JarFS) getNestedJarFS(jarPath string) (*filesys.UnifiedFS, error) {
+	if _, err := z.boundJarReleaseSelection(); err != nil {
+		return nil, err
+	}
 	// 如果禁用了递归解析，返回错误
 	if !z.recursiveParse {
 		return nil, os.ErrNotExist
@@ -346,7 +363,7 @@ func (z *JarFS) getNestedJarFS(jarPath string) (*filesys.UnifiedFS, error) {
 		return nil, err
 	}
 
-	jarContent, err := z.ZipFS.ReadFile(jarPath)
+	jarContent, err := z.readJarEntry(jarPath)
 	if err != nil {
 		return nil, utils.Wrapf(err, "failed to read jar file: %s", jarPath)
 	}
@@ -450,6 +467,10 @@ func (z *JarFS) ReadDir(name string) ([]fs.DirEntry, error) {
 }
 
 type ExpandedZipFS struct {
+	jarReleaseMu        sync.Mutex
+	jarReleaseSelection *jarReleaseSelection
+	jarReleaseBinding   *filesys.ZipFS
+
 	underlying     fi.FileSystem
 	zipFS          *filesys.ZipFS // optional container (zip root); nil for local directories
 	recursiveParse bool
@@ -483,6 +504,14 @@ func (e *ExpandedZipFS) getArchiveFS(archivePath string) (fi.FileSystem, error) 
 }
 
 func (e *ExpandedZipFS) GetJarFS(jarPath string) (*filesys.UnifiedFS, error) {
+	if err := e.archive.checkJarSelectionWork(); err != nil {
+		return nil, err
+	}
+	if e.zipFS != nil {
+		if _, err := e.boundJarReleaseSelection(); err != nil {
+			return nil, err
+		}
+	}
 	key := e.archiveCacheKey(jarPath)
 	if jarFS, ok := e.jarCache.Get(key); ok {
 		return jarFS, nil
@@ -492,7 +521,7 @@ func (e *ExpandedZipFS) GetJarFS(jarPath string) (*filesys.UnifiedFS, error) {
 		return nil, err
 	}
 
-	jarContent, err := e.readArchiveBytes(jarPath)
+	jarContent, err := e.readSemanticArchiveBytes(jarPath)
 	if err != nil {
 		return nil, utils.Wrapf(err, "failed to read jar file: %s", jarPath)
 	}
@@ -514,6 +543,14 @@ func (e *ExpandedZipFS) GetJarFS(jarPath string) (*filesys.UnifiedFS, error) {
 }
 
 func (e *ExpandedZipFS) getZipFS(zipPath string) (*filesys.ZipFS, error) {
+	if err := e.archive.checkJarSelectionWork(); err != nil {
+		return nil, err
+	}
+	if e.zipFS != nil {
+		if _, err := e.boundJarReleaseSelection(); err != nil {
+			return nil, err
+		}
+	}
 	key := e.archiveCacheKey(zipPath)
 	if zipFS, ok := e.zipCache.Get(key); ok {
 		return zipFS, nil
@@ -523,7 +560,7 @@ func (e *ExpandedZipFS) getZipFS(zipPath string) (*filesys.ZipFS, error) {
 		return nil, err
 	}
 
-	zipContent, err := e.readArchiveBytes(zipPath)
+	zipContent, err := e.readSemanticArchiveBytes(zipPath)
 	if err != nil {
 		return nil, utils.Wrapf(err, "failed to read zip file: %s", zipPath)
 	}
@@ -648,7 +685,14 @@ func (e *ExpandedZipFS) ReadFile(name string) ([]byte, error) {
 	if isArchivePath(name) {
 		return e.readFileFromArchive(name)
 	}
-	return e.underlying.ReadFile(e.applyMultiRelease(name))
+	chosen, err := e.applyMultiRelease(name)
+	if err != nil {
+		return nil, err
+	}
+	if e.zipFS != nil {
+		return e.readSelectedJarEntry(chosen)
+	}
+	return e.underlying.ReadFile(chosen)
 }
 
 func (e *ExpandedZipFS) readFileFromArchive(name string) ([]byte, error) {
@@ -735,14 +779,28 @@ func (e *ExpandedZipFS) Open(name string) (fs.File, error) {
 		}
 		return memfile.New(data), nil
 	}
-	return e.underlying.Open(e.applyMultiRelease(name))
+	chosen, err := e.applyMultiRelease(name)
+	if err != nil {
+		return nil, err
+	}
+	if e.zipFS != nil {
+		if info, statErr := e.zipFS.Stat(chosen); statErr == nil && info.IsDir() {
+			return e.zipFS.Open(chosen)
+		}
+		raw, readErr := e.readSelectedJarEntry(chosen)
+		if readErr != nil {
+			return nil, readErr
+		}
+		return memfile.New(raw), nil
+	}
+	return e.underlying.Open(chosen)
 }
 
 func (e *ExpandedZipFS) OpenFile(name string, flag int, perm os.FileMode) (fs.File, error) {
-	if isArchivePath(name) {
-		return e.Open(name)
+	if e.zipFS == nil && !isArchivePath(name) {
+		return e.underlying.OpenFile(name, flag, perm)
 	}
-	return e.underlying.OpenFile(name, flag, perm)
+	return e.Open(name)
 }
 
 type ArchiveFileInfo struct {

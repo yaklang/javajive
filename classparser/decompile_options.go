@@ -25,6 +25,13 @@ const (
 	NativeJavac8 SourceCompilerProfile = "javac8"
 )
 
+func (p SourceCompilerProfile) effective() SourceCompilerProfile {
+	if p == "" {
+		return ModernJavac
+	}
+	return p
+}
+
 func (p SourceCompilerProfile) validate(sourceVersion int) error {
 	switch p {
 	case "", ModernJavac:
@@ -83,10 +90,23 @@ type DecompileOptions struct {
 	// Multi-Release namespace. Empty retains modern javac behavior. javac8
 	// requires TargetSourceVersion=8 and an actual javac8 rebuild oracle.
 	SourceCompiler SourceCompilerProfile
+	// Only a JarSourceArtifact can grant postcompile field metadata recovery.
+	// This capability is never constructed by a plain-source public request.
+	sourceFieldMetadata       *sourceFieldMetadataAuthority
+	sourceLambdaMetadata      *sourceLambdaMetadataAuthority
+	sourceConstructorLowering *sourceConstructorLoweringAuthority
+	// Header policy for one physical source root. Native ownership readers
+	// may retain this exact root's ClassFile access without borrowing any
+	// executable lowering authority. Copied lexical child options do not match.
+	reconstructionPhysicalRoot *ClassObject
 
 	// EnableShadowIR builds a read-only MethodIR snapshot after SemanticCFG.
 	// The old printer remains the default source path. Default false.
 	EnableShadowIR bool
+
+	// EnableRecoveryEvidence records bounded, request-local observations of
+	// existing recovery rules. It grants no additional rewrite permission.
+	EnableRecoveryEvidence bool
 }
 
 type DecompileDiagnostic struct {
@@ -102,19 +122,22 @@ type RewriteRecord struct {
 	AfterHash  string `json:"after_hash"`
 }
 type DecompileResult struct {
-	Members         []MemberRecord           `json:"members"`
-	Shadow          []core.ShadowObservation `json:"shadow"`
-	Syntax          ValidationObservation    `json:"syntax"`
-	Source          string                   `json:"source"`
-	Mode            DecompileMode            `json:"mode"`
-	InputHash       string                   `json:"input_hash"`
-	Status          string                   `json:"status"`
-	StubMethods     []string                 `json:"stub_methods"`
-	RulesApplied    []RewriteRecord          `json:"rules_applied"`
-	Diagnostics     []DecompileDiagnostic    `json:"diagnostics"`
-	EffectiveConfig *EffectiveConfig         `json:"effective_config,omitempty"`
-	ShadowIRHash    string                   `json:"shadow_ir_hash,omitempty"`
-	ShadowIRVersion uint64                   `json:"shadow_ir_version,omitempty"`
+	Members                   []MemberRecord                  `json:"members"`
+	Shadow                    []core.ShadowObservation        `json:"shadow"`
+	Syntax                    ValidationObservation           `json:"syntax"`
+	Source                    string                          `json:"source"`
+	Mode                      DecompileMode                   `json:"mode"`
+	InputHash                 string                          `json:"input_hash"`
+	Status                    string                          `json:"status"`
+	StubMethods               []string                        `json:"stub_methods"`
+	RulesApplied              []RewriteRecord                 `json:"rules_applied"`
+	Diagnostics               []DecompileDiagnostic           `json:"diagnostics"`
+	EffectiveConfig           *EffectiveConfig                `json:"effective_config,omitempty"`
+	ShadowIRHash              string                          `json:"shadow_ir_hash,omitempty"`
+	ShadowIRVersion           uint64                          `json:"shadow_ir_version,omitempty"`
+	RecoveryEvidence          []RecoveryObligationObservation `json:"recovery_evidence,omitempty"`
+	RecoveryEvidenceEnabled   bool                            `json:"recovery_evidence_enabled,omitempty"`
+	RecoveryEvidenceTruncated bool                            `json:"recovery_evidence_truncated,omitempty"`
 }
 
 // EffectiveConfig is the request-local snapshot of policy actually used.
@@ -143,9 +166,10 @@ func decompileWithBudget(data []byte, options DecompileOptions) (result Decompil
 		options.Mode = Precision
 	}
 	result = DecompileResult{
-		Mode:            options.Mode,
-		Status:          "invalid_input",
-		EffectiveConfig: effectiveConfigOf(options),
+		Mode:                    options.Mode,
+		Status:                  "invalid_input",
+		EffectiveConfig:         effectiveConfigOf(options),
+		RecoveryEvidenceEnabled: options.EnableRecoveryEvidence,
 	}
 	if options.Mode != Precision && options.Mode != Compatibility {
 		return result, nil, fmt.Errorf("unknown decompile mode %q", options.Mode)
@@ -267,20 +291,55 @@ func (c *ClassObjectDumper) sourceRewrite(id, phase, source string, rule func(st
 		rule = wrapped
 	}
 	changed := source
-	if phase == "method_source" && c.nativeAnonymousRoot != nil {
-		if nativeProofWork(c.Work, int64(len(source))) {
-			changed = nativeRewriteEnclosingMethod(source, rule)
+	// Inline anonymous members have already completed recovery under their
+	// original method context. Neither caller nor class recovery may borrow a
+	// different method's declarations to reinterpret that lexical scope.
+	lexicalPhase := phase == "method_source" || phase == "class_source"
+	declarations := []string{}
+	retained := int64(0)
+	if lexicalPhase && c.nativeMemberRoot != nil {
+		for _, local := range c.nativeMemberRoot.methodLocals {
+			if local == nil || local.owner == nil || !nativeProofWork(c.Work, 1) {
+				return source
+			}
+			if local.source == "" || local.object == c.obj {
+				continue
+			}
+			if phase == "method_source" && (c.obj == nil || c.FuncCtx == nil || local.owner.owner != c.obj.GetClassName() || local.executionOwner().method != c.FuncCtx.FunctionName || local.executionOwner().descriptor != c.FuncCtx.CurrentMethodDesc) {
+				continue
+			}
+			retained += int64(len(local.source))
+			if retained > 1<<20 || len(declarations) >= nativeMemberLayoutNodeLimit {
+				return source
+			}
+			declarations = append(declarations, local.source)
 		}
+	}
+	recoverScope := func(input string) string {
+		if lexicalPhase && (c.nativeAnonymousRoot != nil || c.nativeAnonymousForest != nil || len(declarations) > 0) {
+			// Bound the scan before formatting. Protection never licenses a rewrite.
+			scanWork, err := workbudget.CheckedProduct(int64(len(input)), int64(len(declarations)+1))
+			if err == nil && nativeProofWork(c.Work, scanWork+retained+1) && (c.Work == nil || c.Work.CheckAlloc(int64(len(input))*4+retained+int64(len(declarations))*128) == nil) {
+				return nativeRewriteEnclosingScope(input, rule, declarations...)
+			}
+			return input
+		}
+		return rule(input)
+	}
+	var ordinaryDraft *ordinaryConstructorClassSourceDraft
+	if phase == "class_source" && c.ordinaryConstructorClassSource != nil {
+		changed, ordinaryDraft = c.ordinaryConstructorClassSource.rewrite(source, recoverScope)
 	} else {
-		changed = rule(source)
+		changed = recoverScope(source)
 	}
 	if c.Work != nil {
 		if err := c.Work.CheckAlloc(int64(len(changed))); err != nil {
 			return source
 		}
 	}
+	var before, after string
 	if changed != source && c.report != nil {
-		before, after := fmt.Sprintf("%x", sha256.Sum256([]byte(source))), fmt.Sprintf("%x", sha256.Sum256([]byte(changed)))
+		before, after = fmt.Sprintf("%x", sha256.Sum256([]byte(source))), fmt.Sprintf("%x", sha256.Sum256([]byte(changed)))
 		// The class phase is one bounded sequence. Reject oscillation between
 		// rules; method phases have separate contexts and are not compared.
 		if phase == "class_source" {
@@ -294,7 +353,12 @@ func (c *ClassObjectDumper) sourceRewrite(id, phase, source string, rule func(st
 			}
 			c.rewriteSeen[after] = true
 		}
-		c.report.RulesApplied = append(c.report.RulesApplied, RewriteRecord{Rule: id, Phase: phase, BeforeHash: fmt.Sprintf("%x", sha256.Sum256([]byte(source))), AfterHash: fmt.Sprintf("%x", sha256.Sum256([]byte(changed)))})
+	}
+	if ordinaryDraft != nil && !c.ordinaryConstructorClassSource.commit(ordinaryDraft) {
+		return source
+	}
+	if changed != source && c.report != nil {
+		c.report.RulesApplied = append(c.report.RulesApplied, RewriteRecord{Rule: id, Phase: phase, BeforeHash: before, AfterHash: after})
 		c.appendDiagnostic(DecompileDiagnostic{Code: "compatibility_rewrite", Rule: id, Message: "Legacy source recovery changed output without bytecode-level proof; validate behavior separately."})
 	}
 	return changed

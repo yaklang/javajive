@@ -185,10 +185,33 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				if d.lambdaFactoryOrigin != nil {
 					factoryOrigin = []int{*d.lambdaFactoryOrigin}
 				}
-				methodStr, err := dumpLambdaWithReferenceAdapter(d, classMember, captured, typ, args1, factoryOrigin...)
+				source, err := dumpLambdaSourceWithReferenceAdapter(d, classMember, captured, typ, args1, factoryOrigin...)
 				if err != nil {
 					return nil, fmt.Errorf("dump lambda method `%s.%s` error: %w", classMember.Name, member, err)
 				}
+				if source.ReferenceTarget != nil {
+					// A typed reference keeps eager receiver evaluation. It does not
+					// enter arrow return/cast or parameter-namespace adaptation.
+					target := source.ReferenceTarget
+					cv := values.NewStreamingCustomValue(func(ctx *class_context.ClassContext, out *workbudget.Writer) error {
+						if source.ReferenceOwner != "" {
+							qualifier, known := ctx.StaticMethodReferenceTypeName(source.ReferenceOwner)
+							if !known || qualifier != source.ReferenceQualifier {
+								return fmt.Errorf("%w: static reference type name changed after binding", ErrLambdaSourceUnsupported)
+							}
+						}
+						template := "(" + target.String(ctx) + ") (" + source.Code + ")"
+						return writeObservedLambdaSource(ctx, out, source, template, captured, "", "")
+					}, func() types.JavaType { return target }, lambdaReplace)
+					cv.Flag, cv.IsMethodRef, cv.CapturesKnown = "lambda", true, true
+					cv.NoOuterCapture, cv.Captures = false, captured
+					cv.RequireOriginalReferenceCapture()
+					if len(args1) >= 3 {
+						cv.InstantiatedMtdDesc = t19MethodTypeDesc(args1[2])
+					}
+					return cv, nil
+				}
+				methodStr := source.Code
 				// A lambda body that returns a generic-erased Object while its functional-interface SAM
 				// returns a method type variable lost the source's unchecked `return (T) expr;` cast. The
 				// erased lambda impl method returns Object (its instantiatedMethodType return is Object),
@@ -212,7 +235,11 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				var cv *values.CustomValue
 				cv = values.NewStreamingCustomValue(func(funcCtx *class_context.ClassContext, out *workbudget.Writer) error {
 					target, rawBridge := t19LambdaReturnCastStrings(funcCtx, cv, retTypevarCast)
-					return t19WriteLambdaBodyWithBridge(funcCtx, out, methodStr, captured, target, rawBridge)
+					// Keep the original capture identities in cv.Captures and the
+					// source binder. Only final textual substitutions acquire
+					// descriptor casts after their source types have settled.
+					views := lambdaCaptureFinalDescriptorViews(classMember, captured)
+					return writeObservedLambdaSource(funcCtx, out, source, methodStr, views, target, rawBridge)
 				}, func() types.JavaType {
 					return typ
 				}, lambdaReplace)
@@ -240,7 +267,8 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				}
 				cv.CapturesKnown = true
 				cv.Captures = captured
-				return cv, nil
+				cv.BindLambdaSourceIdentity(source.Identity)
+				return retainOriginalLambdaParameterTarget(d, cv, source, typ, classMember, args1, len(captured))
 			}
 
 			// Method reference: constructor / static / (bound|unbound) instance method.

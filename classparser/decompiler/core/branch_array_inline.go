@@ -66,12 +66,12 @@ func (d *Decompiler) privateArrayFillUnobservable(first, last *Node, firstOp, la
 // visible. Registration alone permits no motion; both inlining passes still
 // require a private allocation/store/invocation path and complete use evidence.
 func (d *Decompiler) RegisterNestedBranchArrayCalls() {
-	if d == nil || d.Work != nil && (d.Work.CheckAlloc(int64(len(d.opcodeIdToRef)+len(d.opCodes)+len(d.branchArrayCalls)+len(d.valueTernaryMerges)+1)*128) != nil || d.Work.Charge(workbudget.CounterGraphScans, int64(len(d.opcodeIdToRef)+len(d.opCodes)+len(d.branchArrayCalls))) != nil) {
+	if d == nil || d.Work != nil && d.Work.Check() != nil || len(d.opcodeIdToRef) == 0 {
 		return
 	}
 	dupRefs := map[string]bool{}
 	for op, infos := range d.opcodeIdToRef {
-		if d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, int64(len(infos))) != nil {
+		if d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, int64(len(infos))+1) != nil {
 			return
 		}
 		if op == nil || op.Instr == nil {
@@ -81,10 +81,22 @@ func (d *Decompiler) RegisterNestedBranchArrayCalls() {
 		case OP_DUP, OP_DUP_X1, OP_DUP_X2, OP_DUP2, OP_DUP2_X1, OP_DUP2_X2:
 			for _, info := range infos {
 				if ref, ok := info[0].(*values.JavaRef); ok && ref != nil {
+					if !dupRefs[ref.VarUid] && d.Work != nil && d.Work.CheckAlloc(int64(len(dupRefs)+1)*128) != nil {
+						return
+					}
 					dupRefs[ref.VarUid] = true
 				}
 			}
 		}
+	}
+	// Every registered argument below must have a duplicated reference.
+	// Without one, no constructor or source-DAG discovery can add a call.
+	// Avoid allocating/traversing those structures for an inapplicable pass.
+	if len(dupRefs) == 0 {
+		return
+	}
+	if d.Work != nil && (d.Work.CheckAlloc(int64(len(d.opcodeIdToRef)+len(d.opCodes)+len(d.branchArrayCalls)+len(d.valueTernaryMerges)+1)*128) != nil || d.Work.Charge(workbudget.CounterGraphScans, int64(len(d.opCodes)+len(d.branchArrayCalls))) != nil) {
+		return
 	}
 	seenCalls := map[*values.FunctionCallExpression]bool{}
 	for _, candidate := range d.branchArrayCalls {
@@ -118,6 +130,10 @@ func (d *Decompiler) RegisterNestedBranchArrayCalls() {
 				if n, ok := values.UnpackSoltValue(call.Object).(*values.NewExpression); ok && n != nil && sameBranchArrayInvocation(n.ConstructorCall, call) {
 					call = n.ConstructorCall
 				}
+				pending = append(pending, discovery{call, true})
+			} else if call != nil && d.ordinaryInvocationArraySourceView(call, op) {
+				// Each ordinary call proves its own fixed source formals. This
+				// seed does not grant those formals to a nested invocation.
 				pending = append(pending, discovery{call, true})
 			}
 		}
@@ -166,7 +182,7 @@ func (d *Decompiler) RegisterNestedBranchArrayCalls() {
 		if n, ok := v.(*values.NewExpression); ok && n != nil && n.ConstructorCall != nil {
 			pending = append(pending, discovery{n.ConstructorCall, item.constructorOnly})
 		}
-		if call, ok := v.(*values.FunctionCallExpression); ok && call != nil && !seenCalls[call] && (!item.constructorOnly || call.IsSpecialInvoke && call.FunctionName == "<init>") {
+		if call, ok := v.(*values.FunctionCallExpression); ok && call != nil && !seenCalls[call] && (!item.constructorOnly || call.IsSpecialInvoke && call.FunctionName == "<init>" || d.ordinaryInvocationArraySourceView(call, d.opcodeAtOffset(call.OriginPC))) {
 			seenCalls[call] = true
 			original := d.opcodeAtOffset(call.OriginPC)
 			if original == nil || !sameBranchArrayInvocation(d.invokeFuncCall[original], call) {
@@ -182,7 +198,10 @@ func (d *Decompiler) RegisterNestedBranchArrayCalls() {
 				}
 				array := d.branchArrayReferenceOrigin(ref)
 				if array != nil {
-					d.branchArrayCalls = append(d.branchArrayCalls, branchArrayCall{call, i, ref, array})
+					d.branchArrayCalls = append(d.branchArrayCalls, branchArrayCall{
+						call: call, argIndex: i, ref: ref, array: array,
+						requiresInvocationSourceView: item.constructorOnly && !(call.IsSpecialInvoke && call.FunctionName == "<init>"),
+					})
 				}
 			}
 		}
@@ -199,7 +218,7 @@ func (d *Decompiler) RegisterNestedBranchArrayCalls() {
 // a constructor's source type/target context. Unknown/cyclic/excess work yields
 // no discovery rather than a partially inspected tree.
 func (d *Decompiler) branchArraySourceConstructors(root values.JavaValue) []values.JavaValue {
-	if d == nil || d.Work != nil && d.Work.CheckAlloc(512*128) != nil {
+	if d == nil || root == nil || d.Work != nil && d.Work.CheckAlloc(512*128) != nil {
 		return nil
 	}
 	remaining := 512
@@ -390,6 +409,9 @@ func (d *Decompiler) InlinePrivateBranchArrayDefinitions() int {
 		if !valid || allocation == nil || invocation == nil || !branchArraySinglePath(d, allocation, invocation) {
 			continue
 		}
+		if candidate.requiresInvocationSourceView && !d.ordinaryInvocationArrayPacket(call, ref, array) {
+			continue
+		}
 		valid = d.branchArrayReceiverPrecedes(call, allocation)
 		for _, earlier := range call.Arguments[:candidate.argIndex] {
 			valid = valid && d.branchOperandPrecedesArray(earlier, allocation)
@@ -454,6 +476,12 @@ func (d *Decompiler) InlinePrivateBranchArrayDefinitions() int {
 		}
 		for _, source := range slices.Clone(definition.Source) {
 			source.ReplaceNextSliceKeepOrder(definition, slices.Clone(definition.Next))
+			if source.JmpNode == definition {
+				source.JmpNode = definition.Next[0]
+			}
+		}
+		if definition == d.RootNode {
+			d.RootNode = definition.Next[0]
 		}
 		definition.RemoveAllNext()
 		definition.RemoveAllSource()
@@ -734,7 +762,7 @@ func (d *Decompiler) branchOperandPrecedesArray(value values.JavaValue, allocati
 		}
 		for _, produced := range producer.stackProduced {
 			if values.UnpackSoltValue(produced) == values.UnpackSoltValue(value) &&
-				singleLinearOpcodePathInHandlers(d, producer, allocation, d.handlersAt(allocation)) {
+				branchArraySinglePath(d, producer, allocation) {
 				matches++
 			}
 		}
@@ -891,8 +919,8 @@ func branchArrayInertElement(item values.JavaValue) bool {
 // expression. A live allocation in the final statement tree is never
 // duplicated. The bytecode checks also keep the allocation in its original arm,
 // after all earlier call operands and under the same exception handlers.
-func (d *Decompiler) InlineDroppedBranchArrayCalls(body []statements.Statement) int {
-	if d == nil || d.getenv("JDEC_BRANCH_ARRAY_INLINE_OFF") != "" {
+func (d *Decompiler) InlineDroppedBranchArrayCalls(body *[]statements.Statement) int {
+	if d == nil || body == nil || d.getenv("JDEC_BRANCH_ARRAY_INLINE_OFF") != "" {
 		return 0
 	}
 	changed := 0
@@ -907,6 +935,7 @@ func (d *Decompiler) InlineDroppedBranchArrayCalls(body []statements.Statement) 
 			!branchArrayKeepsArgumentView(array, ref, call.FuncType.ParamTypes[candidate.argIndex]) {
 			continue
 		}
+		allocation, invocation := d.opcodeAtOffset(array.OriginPC), d.opcodeAtOffset(call.OriginPC)
 		// The whole private allocation-to-call path preserves initializer
 		// order. Closed field/call operands can remain inside that expression;
 		// opaque captures cannot establish the complete evaluation tree.
@@ -921,15 +950,17 @@ func (d *Decompiler) InlineDroppedBranchArrayCalls(body []statements.Statement) 
 				}
 			}
 		}
-		if !call.IsStatic && call.Object != nil {
-			if effect, _ := values.InspectValue(call.Object); effect != 0 {
-				literal = false
-			}
+		// An earlier operand need not be pure: a class literal, for example,
+		// can fail resolution. Its unique original producer must precede the
+		// array on the same private handler path. Java evaluates that receiver
+		// and those arguments before the inlined array, preserving the order
+		// of failures without reclassifying a throwing operand as inert.
+		if !call.IsStatic && call.Object != nil && !d.branchArrayReceiverPrecedes(call, allocation) {
+			literal = false
 		}
 
 		for _, earlier := range call.Arguments[:candidate.argIndex] {
-			effect, _ := values.InspectValue(earlier)
-			if effect != 0 {
+			if !d.branchOperandPrecedesArray(earlier, allocation) {
 				literal = false
 				break
 			}
@@ -937,7 +968,6 @@ func (d *Decompiler) InlineDroppedBranchArrayCalls(body []statements.Statement) 
 		if !literal {
 			continue
 		}
-		allocation, invocation := d.opcodeAtOffset(array.OriginPC), d.opcodeAtOffset(call.OriginPC)
 		if allocation == nil || invocation == nil || allocation.Instr == nil || invocation.Instr == nil ||
 			allocation.Instr.OpCode != OP_ANEWARRAY ||
 			!branchArraySinglePath(d, allocation, invocation) {
@@ -979,17 +1009,22 @@ func (d *Decompiler) InlineDroppedBranchArrayCalls(body []statements.Statement) 
 		// the CFG builder placed it there when flattening the short-circuit arm.
 		// Remove exactly that dead definition as the call takes ownership of its
 		// allocation. An earlier, live definition blocks this rewrite.
-		location, ok := findBranchArrayReturn(&body, call, d.FunctionContext)
+		location, ok := findBranchArrayReturn(body, call, d.FunctionContext)
 		if !ok {
 			continue
 		}
 		var stranded *statements.AssignStatement
 		items := *location.list
-		if location.index+1 < len(items) {
-			assign, isAssign := items[location.index+1].(*statements.AssignStatement)
+		if last := len(items) - 1; last > location.index {
+			assign, isAssign := items[last].(*statements.AssignStatement)
 			if isAssign && assign.ArrayMember == nil && assign.JavaValue == array {
+				// CHECKCAST can materialize the conditional result into a local,
+				// followed by its return. The orphan still belongs after that
+				// unconditional terminal, not immediately after the consumer.
+				// A live, nonterminal definition may never be deleted here.
+				_, returned := items[last-1].(*statements.ReturnStatement)
 				left, isRef := values.UnpackSoltValue(assign.LeftValue).(*values.JavaRef)
-				if !isRef || !values.SameLocal(left, ref) || location.index+2 != len(items) {
+				if !returned || !isRef || !values.SameLocal(left, ref) {
 					continue
 				}
 				stranded = assign
@@ -999,7 +1034,7 @@ func (d *Decompiler) InlineDroppedBranchArrayCalls(body []statements.Statement) 
 		}
 		original := call.Arguments[candidate.argIndex]
 		call.Arguments[candidate.argIndex] = array
-		if statementTreeReferencesLocal(body, ref, stranded) {
+		if statementTreeReferencesLocal(*body, ref, stranded) {
 			call.Arguments[candidate.argIndex] = original
 			continue
 		}

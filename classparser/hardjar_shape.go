@@ -37,7 +37,8 @@ func fixHardjarCodeShapes(body string) string {
 	body = fixEnumAssignedStaticField(body)
 	// Monitor and numeric locals can have related generated names. Their
 	// types come from the IR; a source-name prefix cannot prove identity.
-	body = fixCallSiteDupLocals(body)
+	// Local declarations, including forwarded allocations, are named by IR
+	// identity. Bootstrap spelling cannot authorize a textual scope rewrite.
 	body = fixForNameAddAnnoClass(body)
 	body = fixCachedFieldReturn(body)
 	body = fixStringCastToClass(body)
@@ -102,10 +103,12 @@ func fixHardjarCodeShapes(body string) string {
 	body = dropClassTCastOfForLoadedType(body)
 	body = wrapComparingLongLambdaFromNextCast(body)
 	body = stripStaticAssertionsInEnumConstant(body)
-	body = fillHashCodeEmptyNullIf(body)
+	// Missing branch contributions require typed stack-phi reconstruction.
+	// A method name cannot justify inventing an early return.
 	body = rewriteInstanceCastFromSibling(body)
 	body = dropEmptyTargetOnRepeatable(body)
-	body = retypeMixedIteratorElemToRaw(body)
+	// Erased next() use-site casts do not constrain a generic declaration.
+	// Distinct iterator lifetimes are reconstructed by the typed local graph.
 	body = retypeSelfWrapDollarNewFromCalleeParam(body)
 	body = retypeFlatMapFunctionRawStream(body)
 	body = wrapGetClassAsRawClassArg(body)
@@ -131,12 +134,14 @@ func fixHardjarCodeShapes(body string) string {
 	body = insertLockFactoryCopyCtorThis(body)
 	body = dropUnusedSyntheticThisLocal(body)
 	body = retypeObjectArrayFromResolveClass(body)
-	body = wrapCatchBodyGetDeclaredMethod(body)
+	// Invocation declarations and original protected regions own exception flow.
+	// A reflective-looking return in a catch body does not authorize a wrapper.
 	body = swapRethrowThrowableBeforeSpecificCatch(body)
 	// Returns come from the bytecode CFG. A builder seen earlier in a method
 	// does not authorize inventing a return after another, nested loop.
 	body = fillEmptySynchronizedBlock(body)
-	body = wrapReflectiveCatchBody(body)
+	// Handler exception domains and payload identity come from the original
+	// typed CFG. Reflection text cannot authorize a new wrapping catch.
 	body = rewriteSelfInitDeclToPrevSameType(body)
 	body = dropEmptyNSMEStaticBlock(body)
 	if mockitoPackageRE.MatchString(body) {
@@ -866,46 +871,6 @@ func fixDupLocalDecls(body string) string {
 		}
 		mend := nextMemberStart(body, mstart+2)
 		chunk := body[mstart:mend]
-		neu := rewriteDupLocalsInMethod(chunk)
-		if neu != chunk {
-			body = body[:mstart] + neu + body[mend:]
-			from = mstart + len(neu)
-			continue
-		}
-		from = mend
-	}
-}
-
-// fixCallSiteDupLocals renames a later declaration of the same varN inside a
-// method that contains `$getCallSiteArray()` (Groovy invokedynamic bootstrap).
-// Those methods dump SSA-style re-decls (`Reference var5` then `CallSite[] var5`)
-// which javac rejects. Other methods are left alone — a global rename over-fired
-// on real Java (okhttp ExchangeFinder).
-func fixCallSiteDupLocals(body string) string {
-	if !strings.Contains(body, "$getCallSiteArray()") {
-		return body
-	}
-	from := 0
-	for {
-		rel := strings.Index(body[from:], "\n\t")
-		if rel < 0 {
-			return body
-		}
-		mstart := from + rel
-		if mstart+2 >= len(body) {
-			return body
-		}
-		c := body[mstart+2]
-		if c == '\t' || c == '\n' || c == ' ' || c == '/' {
-			from = mstart + 2
-			continue
-		}
-		mend := nextMemberStart(body, mstart+2)
-		chunk := body[mstart:mend]
-		if !strings.Contains(chunk, "$getCallSiteArray()") {
-			from = mend
-			continue
-		}
 		neu := rewriteDupLocalsInMethod(chunk)
 		if neu != chunk {
 			body = body[:mstart] + neu + body[mend:]
@@ -6995,65 +6960,6 @@ func minLen(s string, n int) int {
 	return n
 }
 
-func fillHashCodeEmptyNullIf(body string) string {
-	if !strings.Contains(body, "hashCode()") {
-		return body
-	}
-	needle := ") != (null)){"
-	from := 0
-	for {
-		rel := strings.Index(body[from:], needle)
-		if rel < 0 {
-			return body
-		}
-		i := from + rel
-		start := prevMemberStart(body, i)
-		head := body[start:i]
-		brace := strings.Index(head, "{")
-		if brace < 0 {
-			from = i + 1
-			continue
-		}
-		sig := head[:brace]
-		if !strings.Contains(sig, "hashCode()") || !strings.Contains(sig, "int") {
-			from = i + 1
-			continue
-		}
-		identEnd := i
-		for identEnd > 0 && (body[identEnd-1] == ' ' || body[identEnd-1] == '\t') {
-			identEnd--
-		}
-		identStart := identEnd
-		for identStart > 0 && isJavaIdentChar(body[identStart-1]) {
-			identStart--
-		}
-		ident := body[identStart:identEnd]
-		if ident == "" {
-			from = i + 1
-			continue
-		}
-		open := i + len(needle) - 1
-		close := matchingCloseBrace(body, open)
-		if close < 0 {
-			from = i + 1
-			continue
-		}
-		inner := strings.TrimSpace(body[open+1 : close])
-		if inner != "" {
-			from = close
-			continue
-		}
-		after := strings.TrimLeft(body[close+1:], " \t\n")
-		if !strings.HasPrefix(after, "else") {
-			from = close
-			continue
-		}
-		fill := "\n\t\t\treturn " + ident + ".hashCode();\n\t\t"
-		body = body[:open+1] + fill + body[close:]
-		from = open + 1 + len(fill)
-	}
-}
-
 func wrapComparingLongLambdaFromNextCast(body string) string {
 	needle := "Comparator.comparingLong(("
 	from := 0
@@ -7265,100 +7171,6 @@ func firstThisCallArg(member, ident string) (string, int) {
 			return name, idx
 		}
 		from = close
-	}
-}
-
-func nextCastTypesOfIdent(member, ident string) []string {
-	needle := ident + ".next()"
-	var out []string
-	seen := map[string]struct{}{}
-	from := 0
-	for {
-		rel := strings.Index(member[from:], needle)
-		if rel < 0 {
-			return out
-		}
-		i := from + rel
-		if i < 2 || member[i-1] != '(' || member[i-2] != ')' {
-			from = i + 1
-			continue
-		}
-		open := matchingOpenParen(member, i-2)
-		if open < 0 {
-			from = i + 1
-			continue
-		}
-		typ, ok, after := readJavaIdent(member[open+1:])
-		if !ok || !strings.HasPrefix(after, ")") {
-			from = i + 1
-			continue
-		}
-		if lastDottedIdent(typ) == "" || isStmtKeyword(typ) || isDecompilerLocal(typ) || isPrimitiveOrObjectName(typ) {
-			from = i + 1
-			continue
-		}
-		if _, ok := seen[typ]; !ok {
-			seen[typ] = struct{}{}
-			out = append(out, typ)
-		}
-		from = i + len(needle)
-	}
-}
-
-// retypeMixedIteratorElemToRaw retypes `Iterator<T> ident` to raw Iterator when
-// the same slot is next()-cast to more than one element type (IndexFileDeleter
-// reuses a local for Directory.listAll strings then SegmentInfos.iterator()).
-func retypeMixedIteratorElemToRaw(body string) string {
-	needle := "Iterator<"
-	from := 0
-	for {
-		rel := strings.Index(body[from:], needle)
-		if rel < 0 {
-			return body
-		}
-		i := from + rel
-		open := i + len("Iterator")
-		if open >= len(body) || body[open] != '<' {
-			from = i + 1
-			continue
-		}
-		close := matchingCloseAngle(body, open)
-		if close < 0 || close-open > 80 {
-			from = i + 1
-			continue
-		}
-		elem := body[open+1 : close]
-		if elem == "" || strings.ContainsAny(elem, "\n;") {
-			from = i + 1
-			continue
-		}
-		rest := strings.TrimLeft(body[close+1:], " \t")
-		ident, ok, _ := readJavaIdent(rest)
-		if !ok || !isDecompilerLocal(ident) {
-			from = i + 1
-			continue
-		}
-		start := prevMemberStart(body, i)
-		end := nextMemberStart(body, i)
-		member := body[start:end]
-		casts := nextCastTypesOfIdent(member, ident)
-		elemSimple := lastDottedIdent(rawTypeName(elem))
-		mixed := len(casts) > 1
-		if !mixed && len(casts) == 1 && lastDottedIdent(rawTypeName(casts[0])) != elemSimple {
-			mixed = true
-		}
-		if !mixed {
-			from = close
-			continue
-		}
-		old := "Iterator<" + elem + "> " + ident
-		if !strings.Contains(member, old) {
-			from = close
-			continue
-		}
-		neu := strings.Replace(member, old, "Iterator "+ident, 1)
-		body = body[:start] + neu + body[end:]
-		from = start + len(neu)
 	}
 }
 
@@ -8663,48 +8475,6 @@ func insertLockFactoryCopyCtorThis(body string) string {
 		return body
 	}
 	return insertDelegatingThisFromSibling(body)
-}
-
-func wrapCatchBodyGetDeclaredMethod(body string) string {
-	if !strings.Contains(body, ".getDeclaredMethod(") && !strings.Contains(body, ".getMethod(") {
-		return body
-	}
-	needle := "}catch(Exception "
-	from := 0
-	for {
-		rel := strings.Index(body[from:], needle)
-		if rel < 0 {
-			return body
-		}
-		i := from + rel
-		openRel := strings.Index(body[i:], "{")
-		if openRel < 0 || openRel > 80 {
-			from = i + 1
-			continue
-		}
-		open := i + openRel
-		close := matchingCloseBrace(body, open)
-		if close < 0 {
-			from = i + 1
-			continue
-		}
-		inner := strings.TrimSpace(body[open+1 : close])
-		if !strings.HasPrefix(inner, "return ") {
-			from = close
-			continue
-		}
-		if strings.Contains(inner, "try{") || strings.Contains(inner, "catch(Exception varE)") {
-			from = close
-			continue
-		}
-		if !strings.Contains(inner, ".getDeclaredMethod(") && !strings.Contains(inner, ".getMethod(") {
-			from = close
-			continue
-		}
-		fill := "try{\n\t\t\t" + inner + "\n\t\t}catch(Exception varE){\n\t\t\tthrow new RuntimeException(varE);\n\t\t}"
-		body = body[:open+1] + "\n\t\t" + fill + body[close:]
-		from = open + 1 + len(fill)
-	}
 }
 
 func swapRethrowThrowableBeforeSpecificCatch(body string) string {

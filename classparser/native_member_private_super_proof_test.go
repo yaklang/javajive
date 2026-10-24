@@ -27,7 +27,17 @@ func TestNativeMemberPrivateSuperBridgeRequiresOriginalOperands(t *testing.T) {
 			parent := p.children["SuperOwner$Parent"]
 			var ctor *nativeMemberConstructor
 			for _, c := range child.constructors {
-				ctor = c
+				// A THIS-forwarding access constructor is now represented too.
+				// Select the actual SUPER edge, not map iteration's last entry.
+				if c.delegateOwner == parent.object.GetClassName() {
+					if ctor != nil {
+						t.Fatal("ambiguous original SUPER constructor")
+					}
+					ctor = c
+				}
+			}
+			if ctor == nil {
+				t.Fatal("missing original SUPER constructor")
 			}
 			bridge := parent.accessBridges[ctor.delegateDescriptor]
 			if bridge == nil {
@@ -150,7 +160,15 @@ func TestNativeMemberPrivateSuperCallerRequiresProvedDelegation(t *testing.T) {
 			child := p.children["SuperOwner$Child"]
 			var ctor *nativeMemberConstructor
 			for _, c := range child.constructors {
-				ctor = c
+				if c.delegateOwner == child.object.GetSupperClassName() {
+					if ctor != nil {
+						t.Fatal("ambiguous original SUPER constructor")
+					}
+					ctor = c
+				}
+			}
+			if ctor == nil {
+				t.Fatal("missing original SUPER constructor")
 			}
 			var work *workbudget.Budget
 			switch variant {
@@ -180,7 +198,7 @@ func TestNativeMemberPrivateSuperCallerRequiresProvedDelegation(t *testing.T) {
 
 func TestNativeMemberPrivateSuperSourceRequiresOriginalPCAndPureDummy(t *testing.T) {
 	files := nativeCompileClasses(t, nativeMemberPrivateSuperBridgeFixture)
-	for _, variant := range []string{"original", "wrong PC", "foreign descriptor", "foreign owner", "effectful outer", "non-null dummy", "computed dummy", "missing dummy", "missing original parameter", "wrong physical slot", "changed original seed", "copied public identity"} {
+	for _, variant := range []string{"original", "provisional pending binding", "wrong PC", "foreign descriptor", "foreign owner", "effectful outer", "non-null dummy", "computed dummy", "missing dummy", "missing original parameter", "wrong physical slot", "changed original seed", "copied public identity"} {
 		t.Run(variant, func(t *testing.T) {
 			z := nativeArchive(t, files)
 			defer z.Close()
@@ -193,7 +211,15 @@ func TestNativeMemberPrivateSuperSourceRequiresOriginalPCAndPureDummy(t *testing
 			child := p.children["SuperOwner$Child"]
 			var ctor *nativeMemberConstructor
 			for _, c := range child.constructors {
-				ctor = c
+				if c.delegateOwner == child.object.GetSupperClassName() {
+					if ctor != nil {
+						t.Fatal("ambiguous original SUPER constructor")
+					}
+					ctor = c
+				}
+			}
+			if ctor == nil {
+				t.Fatal("missing original SUPER constructor")
 			}
 			id := &utils.VariableId{}
 			ctx := &class_context.ClassContext{ClassName: child.object.GetClassName(), LocalNames: map[*utils.VariableId]string{id: "SuperOwner.this"}}
@@ -213,12 +239,23 @@ func TestNativeMemberPrivateSuperSourceRequiresOriginalPCAndPureDummy(t *testing
 			reader.FuncCtx = ctx
 			reader.nativeMemberRoot = p
 			reader.nativeMemberCurrent = child
+			reader.nativeSourceNamesReady = true
 			reader.wireNativeMemberSource()
 			ctx.FunctionName = "<init>"
 			ctx.CurrentMethodDesc = ctor.descriptor
 			args := []any{outer, values.NewJavaLiteral("null", types.NewJavaClass("java.lang.Object")), values.NewJavaLiteral(int64(7), types.NewJavaPrimer(types.JavaLong)), values.NewJavaLiteral("null", types.NewJavaClass("SuperOwner$1"))}
 			owner, desc, pc := ctor.delegateOwner, ctor.delegateDescriptor, ctor.delegatePC
 			opaque := values.NewCustomValue(func(*class_context.ClassContext) string { panic("must never render removed operand") }, func() types.JavaType { return types.NewJavaClass("SuperOwner") })
+			if variant == "provisional pending binding" {
+				saved := ctx.LocalNames
+				ctx.LocalNames = nil
+				reader.nativeSourceNamesReady = false
+				if source, known := ctx.SourceMemberDelegation(ctor.delegateOwner, ctor.delegateDescriptor, ctor.delegatePC, args); known || p.failed {
+					t.Fatalf("provisional projection changed family state: %q known=%v", source, known)
+				}
+				ctx.LocalNames = saved
+				reader.nativeSourceNamesReady = true
+			}
 			switch variant {
 			case "wrong PC":
 				pc++
@@ -242,7 +279,7 @@ func TestNativeMemberPrivateSuperSourceRequiresOriginalPCAndPureDummy(t *testing
 				args[0] = other
 			}
 			source, known := ctx.SourceMemberDelegation(owner, desc, pc, args)
-			if known != (variant == "original") {
+			if known != (variant == "original" || variant == "provisional pending binding") {
 				t.Fatalf("source %q known %v", source, known)
 			}
 		})

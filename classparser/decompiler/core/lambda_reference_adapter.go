@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
@@ -16,7 +17,55 @@ type LambdaReferenceAdapter struct {
 	InstantiatedDescriptor string
 }
 
+// FixedParameterTypes is a constraint from a completed original body-source
+// receipt. It grants no factory, invocation, adaptation or ownership role.
+// A later generic consumer must not retarget explicit source SAM formals.
+type LambdaBodySource struct {
+	Identity *values.LambdaSourceIdentity
+	// ReferenceTarget marks a separately proved compiler-owned method reference.
+	// It is not an arrow body and must not borrow SAM parameter-name receipts.
+	ReferenceTarget types.JavaType
+	// Static references retain a checked TypeName from the source proof. The
+	// actual writer must reopen that namespace after final value-name binding.
+	ReferenceOwner      string
+	ReferenceQualifier  string
+	Code                string
+	FixedParameterTypes bool
+	// These are original hidden-field ports proved by the owning anonymous
+	// source renderer to denote enclosing lexical variables. Ordinary fields
+	// never receive this permission. The core still checks eager factory,
+	// operand, receiver, type and pending snapshot identities independently.
+	LexicalFieldCaptures []*values.LambdaLexicalFieldCapture
+	// RecordRendered observes this actual writer's completed packet after
+	// capture substitution and target adaptation. It grants no body/factory
+	// permission and must not render captured operands a second time.
+	RecordRendered func(string)
+	// Observes the same completed writer, including the exact bytes used for
+	// each physical capture. A consumer can compose nested substitutions
+	// without evaluating a captured operand or replaying its renderer.
+	RecordRenderedWithCaptures func(LambdaSourceRender)
+}
+
+type LambdaCaptureRender struct {
+	Index int
+	Text  string
+}
+
+type LambdaSourceRender struct {
+	Packet   string
+	Captures []LambdaCaptureRender
+	Complete bool
+}
+
 func dumpLambdaWithReferenceAdapter(d *Decompiler, impl *values.JavaClassMember, captured []values.JavaValue, raw types.JavaType, static []values.JavaValue, origin ...int) (string, error) {
+	source, err := dumpLambdaSourceWithReferenceAdapter(d, impl, captured, raw, static, origin...)
+	return source.Code, err
+}
+
+func dumpLambdaSourceWithReferenceAdapter(d *Decompiler, impl *values.JavaClassMember, captured []values.JavaValue, raw types.JavaType, static []values.JavaValue, origin ...int) (LambdaBodySource, error) {
+	if d.originalLambdaDeclaration(impl) != LambdaDeclarationSyntheticBody {
+		return LambdaBodySource{}, fmt.Errorf("lambda source body requires original synthetic declaration metadata")
+	}
 	var adapter *LambdaReferenceAdapter
 	if len(static) >= 3 && !d.blockPartialFunctionalTarget {
 		erased, actual := t19MethodTypeDesc(static[0]), t19MethodTypeDesc(static[2])
@@ -25,13 +74,19 @@ func dumpLambdaWithReferenceAdapter(d *Decompiler, impl *values.JavaClassMember,
 			adapter = &LambdaReferenceAdapter{ErasedDescriptor: erased, InstantiatedDescriptor: actual}
 		}
 	}
+	if len(origin) == 1 && d.DumpClassLambdaSourceAtOrigin != nil {
+		return d.DumpClassLambdaSourceAtOrigin(impl.Member, impl.Description, utils.NewRootVariableId(), captured, adapter, origin[0])
+	}
 	if len(origin) == 1 && d.DumpClassLambdaMethodAtOrigin != nil {
-		return d.DumpClassLambdaMethodAtOrigin(impl.Member, impl.Description, utils.NewRootVariableId(), captured, adapter, origin[0])
+		code, err := d.DumpClassLambdaMethodAtOrigin(impl.Member, impl.Description, utils.NewRootVariableId(), captured, adapter, origin[0])
+		return LambdaBodySource{Code: code}, err
 	}
 	if adapter != nil && d.DumpClassLambdaMethodWithAdapter != nil {
-		return d.DumpClassLambdaMethodWithAdapter(impl.Member, impl.Description, utils.NewRootVariableId(), captured, adapter)
+		code, err := d.DumpClassLambdaMethodWithAdapter(impl.Member, impl.Description, utils.NewRootVariableId(), captured, adapter)
+		return LambdaBodySource{Code: code}, err
 	}
-	return d.DumpClassLambdaMethod(impl.Member, impl.Description, utils.NewRootVariableId(), captured)
+	code, err := d.DumpClassLambdaMethod(impl.Member, impl.Description, utils.NewRootVariableId(), captured)
+	return LambdaBodySource{Code: code}, err
 }
 
 // Exact wrapper-to-primitive input adaptation belongs at SAM entry, before

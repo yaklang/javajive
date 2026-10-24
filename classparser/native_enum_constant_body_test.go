@@ -200,6 +200,11 @@ func TestNativeEnumConstantBodyRequiresCompleteOriginalPacket(t *testing.T) {
 				if (got != nil) != (variant == "original" || variant == "harmless nop" || variant == "missing parameters") {
 					t.Fatalf("constant constructor admission=%v", got != nil)
 				}
+				flat := flatEnumConstantBodyProof(parent, plan, ordinal, bridges, resolve, work)
+				if (flat != nil) != (variant == "original" || variant == "harmless nop" && debug == "none" || variant == "missing parameters" || variant == "named parameter") {
+					t.Fatalf("flat constructor forwarding proof=%v", flat != nil)
+				}
+
 			})
 		}
 	}

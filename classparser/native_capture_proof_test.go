@@ -136,14 +136,51 @@ return /*jdec-owned-anonymous-ordinal:1*/new Parent(new int[]{1,2}) {
 		s = hoistCastGuardedEscapedLocals(s)
 		return addMissingGeneratedLocalDecls(s, "Object var1, float var3", "Owner", nil, "Parent")
 	}
-	got := nativeRewriteEnclosingMethod(body, rule)
+	got := nativeRewriteEnclosingScope(body, rule)
 	if got != body {
 		t.Fatalf("caller rewrote member scope:\n%s", got)
 	}
-	if got := nativeRewriteEnclosingMethod(body, func(s string) string { return strings.ReplaceAll(s, "/*jdec lexical members 0*/", "") }); got != body {
+	if got := nativeRewriteEnclosingScope(body, func(s string) string { return strings.ReplaceAll(s, "/*jdec lexical members 0*/", "") }); got != body {
 		t.Fatal("accepted lost member fragment")
 	}
-	if got := nativeRewriteEnclosingMethod(body, func(s string) string { return s + s }); got != body {
+	if got := nativeRewriteEnclosingScope(body, func(s string) string { return s + s }); got != body {
 		t.Fatal("accepted duplicated member fragment")
+	}
+}
+
+func TestNativeEnclosingSourceRecoveryKeepsCallerArgumentsAndProofLimits(t *testing.T) {
+	source := `consume(/*jdec-owned-anonymous-ordinal:1*/new Parent(outerArg) { int read(){return outerArg;} });`
+	for _, phase := range []string{"method_source", "class_source"} {
+		for _, scenario := range []string{"owned", "unowned", "precision", "canceled", "work cap"} {
+			t.Run(phase+"/"+scenario, func(t *testing.T) {
+				d := &ClassObjectDumper{options: DecompileOptions{Mode: Compatibility}, nativeAnonymousRoot: &nativeAnonymousFamily{}}
+				want := strings.Replace(source, "Parent(outerArg)", "Parent(changedArg)", 1)
+				wantCalls := 1
+				switch scenario {
+				case "unowned":
+					d.nativeAnonymousRoot = nil
+					want = strings.ReplaceAll(source, "outerArg", "changedArg")
+				case "precision":
+					d.options.Mode, want = Precision, source
+					wantCalls = 0
+				case "canceled":
+					ctx, cancel := context.WithCancel(context.Background())
+					cancel()
+					d.Work, want = workbudget.New(ctx, workbudget.Limits{}), source
+					wantCalls = 0
+				case "work cap":
+					d.Work, want = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1}), source
+					wantCalls = 0
+				}
+				calls := 0
+				got := d.sourceRewrite("scope-control", phase, source, func(s string) string {
+					calls++
+					return strings.ReplaceAll(s, "outerArg", "changedArg")
+				})
+				if got != want || calls != wantCalls {
+					t.Fatalf("scope/permission result: calls=%d\n%s\nwant %s", calls, got, want)
+				}
+			})
+		}
 	}
 }

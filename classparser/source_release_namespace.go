@@ -26,6 +26,10 @@ func (z *JarFS) sourceReleaseView(release int) *JarFS {
 	if z == nil || release < 9 {
 		return nil
 	}
+	policy, policyErr := z.bindJarReleaseSelection()
+	if policyErr != nil {
+		return nil
+	}
 	z.releaseViewsMu.Lock()
 	defer z.releaseViewsMu.Unlock()
 	if view := z.releaseViews[release]; view != nil {
@@ -41,8 +45,21 @@ func (z *JarFS) sourceReleaseView(release int) *JarFS {
 		return nil
 	}
 	view := NewJarFSWithOptions(zip, z.recursiveParse)
+	view.jarReleaseSelection = policy
+	view.jarReleaseBinding = zip
+	view.jarReleaseRole = jarReleasePhysicalSource
+	view.jarPhysicalRelease = release
 	view.targetSourceVersion = z.targetSourceVersion
 	view.sourceCompiler = z.sourceCompiler
+	if z.sourceConstructorLowering != nil {
+		view.sourceConstructorLowering = &sourceConstructorLoweringAuthority{jar: view, parent: z.sourceConstructorLowering}
+	}
+	if z.sourceFieldMetadata != nil {
+		view.sourceFieldMetadata = &sourceFieldMetadataAuthority{jar: view, aliasParent: z.sourceFieldMetadata}
+	}
+	if z.sourceLambdaMetadata != nil {
+		view.sourceLambdaMetadata = &sourceLambdaMetadataAuthority{jar: view}
+	}
 	view.archive = z.archive.clone()
 	if view.archive != nil {
 		view.archive.targetRelease = release

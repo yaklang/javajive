@@ -71,7 +71,7 @@ func (z *JarFS) nativeMemberAccessRepresentable(p *nativeMemberFamily, index *na
 			if !nativeProofWork(work, 1) {
 				return false
 			}
-			if user == p.owner || p.children[user] != nil || nativeMemberJointAnonymousAccess(p, user, work) {
+			if user == p.owner || p.children[user] != nil || nativeMemberJointAnonymousAccess(p, user, work) || nativeMemberJointEnumArtifactTypeAccess(p, user, work) {
 				continue
 			}
 			if local := p.methodLocals[user]; local != nil {
@@ -107,6 +107,65 @@ func (z *JarFS) nativeMemberAccessRepresentable(p *nativeMemberFamily, index *na
 	return true
 }
 
+// A proved switch table is regenerated inside its original enclosing source
+// unit. Its references to a private member enum are compiler-owned accesses,
+// not references from an independently emitted foreign class. This grants only
+// type spelling in this atomic family; it grants no private field, method or
+// constructor permission, and final switch/STORE source closure is still needed.
+func nativeMemberJointEnumArtifactTypeAccess(p *nativeMemberFamily, user string, work *workbudget.Budget) bool {
+	if p == nil || p.failed || !nativeProofWork(work, 1) {
+		return false
+	}
+	table := p.enumSwitchTables[user]
+	if table == nil || table.object == nil || table.object.GetClassName() != user || table.usersClosedRoot == nil || table.usersClosedRoot.GetClassName() != p.owner || p.lexicalObjects[p.owner] != table.usersClosedRoot || len(table.uses) == 0 {
+		return false
+	}
+	owner, method, known := originalAnonymousOwner(table.object)
+	if !nativeMemberDeclarationMetadataBounded(table.object, work) || !known || owner != p.owner || method != "" || !nativeEnumSwitchOrdinalClosed(p, work) {
+		return false
+	}
+	count := 0
+	for _, methods := range table.uses {
+		if len(methods) == 0 {
+			return false
+		}
+		for _, uses := range methods {
+			if len(uses) == 0 {
+				return false
+			}
+			for pc, use := range uses {
+				count++
+				if count > 65535 || !nativeProofWork(work, 1) || use == nil || use.arrayPC != pc || use.marker == "" || use.selector == nil || len(use.keys) == 0 || table.tables[use.field] == nil {
+					return false
+				}
+			}
+		}
+	}
+	if count == 0 {
+		return false
+	}
+	// The admission witness must still describe the actual original packet.
+	fresh := nativeEnumSwitchTableProof(table.object, work)
+	if fresh == nil || len(fresh.tables) != len(table.tables) || len(fresh.initializationOrder) != len(table.initializationOrder) {
+		return false
+	}
+	for i, field := range fresh.initializationOrder {
+		if field != table.initializationOrder[i] {
+			return false
+		}
+		original, retained := fresh.tables[field], table.tables[field]
+		if retained == nil || original.enum != retained.enum || len(original.entries) != len(retained.entries) {
+			return false
+		}
+		for key, name := range original.entries {
+			if !nativeProofWork(work, 1) || retained.entries[key] != name {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // Access belongs to the lexical declaration being committed, not its old flat
 // binary source unit. Only a proved anonymous child of this very owner receives
 // that scope. The caller still requires the whole anonymous source/ordinal
@@ -123,7 +182,7 @@ func nativeMemberJointAnonymousAccess(p *nativeMemberFamily, user string, work *
 	if group == nil {
 		group = p.anonymous
 	}
-	if group == nil || group.failed || group.owner != p.owner && p.children[group.owner] == nil && !nativeMemberJointAnonymousForestOwner(p, group, work) {
+	if group == nil || group.failed || group.owner != p.owner && p.children[group.owner] == nil && !nativeMemberJointAnonymousForestOwner(p, group, work) && !nativeMethodLocalAnonymousOwner(p, group, work) {
 		return false
 	}
 	if group.forest != nil && (group.forest != p.anonymousForest || group.forest.members != p || group.forest.groups[group.owner] != group) {
@@ -156,6 +215,14 @@ func nativeMemberJointProtectedTypeAccess(user string, peers []map[string]*nativ
 	}
 	for owner, peer := range peers[0] {
 		if !nativeProofWork(work, 1) || peer == nil || peer.root == nil || peer.family == nil || peer.family.failed || peer.root.GetClassName() != owner || peer.family.owner != owner || peer.family.lexicalObjects[owner] != peer.root || peer.objects[owner] != peer.root {
+			return false
+		}
+	}
+	// Validate the complete transaction before granting a lexical permission.
+	// An early successful owner must not hide an invalid later peer according
+	// to map iteration order. The component bound applies to both passes.
+	for owner, peer := range peers[0] {
+		if !nativeProofWork(work, 1) {
 			return false
 		}
 		child := peer.family.children[user]

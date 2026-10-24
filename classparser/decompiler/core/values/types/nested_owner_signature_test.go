@@ -74,9 +74,13 @@ func TestNestedOwnerSubstitutionKeepsEveryLexicalSegment(t *testing.T) {
 
 func TestOrdinaryParameterizedSignaturesKeepCanonicalRepresentation(t *testing.T) {
 	original := ParseSignature("Lp/Box<TT;>;")
-	want := NewParameterizedType("p.Box", []JavaType{NewJavaClass("T")})
+	want := NewParameterizedType("p.Box", []JavaType{NewJavaTypeVariable("T")})
 	if !reflect.DeepEqual(original.RawType(), want.RawType()) {
 		t.Fatal("ordinary signature acquired lexical owner metadata")
+	}
+	literalClass := ParseSignature("Lp/Box<LT;>;")
+	if literalClass == nil || reflect.DeepEqual(original.RawType(), literalClass.RawType()) {
+		t.Fatal("a literal class cannot become a same-spelled formal reference")
 	}
 	substituted := SubstituteTypeVars(original, map[string]JavaType{"T": NewJavaClass("java.lang.String")})
 	expected := NewParameterizedType("p.Box", []JavaType{NewJavaClass("java.lang.String")})
@@ -158,5 +162,87 @@ func TestNestedSelfTypeRequiresOriginalLexicalDeclaration(t *testing.T) {
 				t.Fatal("unproved implicit enclosing scope")
 			}
 		})
+	}
+}
+
+func TestNestedParameterizedOwnerKeepsRegisteredLexicalSuffixArguments(t *testing.T) {
+	for _, row := range []struct{ name, signature, source, want string }{
+		{"owner only", "Lp/Outer<TK;>.Child;", "Child", "p.Outer<K>.Child"},
+		{"owner and child", "Lp/Outer<TK;>.Child<TV;>;", "Child", "p.Outer<K>.Child<V>"},
+		{"fully qualified", "Lp/Outer<TK;>.Child<TV;>;", "p.Outer.Child", "p.Outer<K>.Child<V>"},
+		{"three levels", "Lp/Outer<TK;>.Middle<TV;>.Child;", "Child", "p.Outer<K>.Middle<V>.Child"},
+		{"qualified suffix", "Lp/Outer<TK;>.Middle<TV;>.Child;", "Middle.Child", "p.Outer<K>.Middle<V>.Child"},
+		{"flat source retains owner formals", "Lp/Outer<TK;>.Child;", "p.Outer$Child", "p.Outer$Child<K>"},
+		{"unrelated source qualifier", "Lp/Outer<TK;>.Child;", "Other.Child", "Other.Child<K>"},
+		{"partial identifier is not a path", "Lp/Outer<TK;>.Child;", "ild", "ild<K>"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			value := ParseSignature(row.signature)
+			ctx := &class_context.ClassContext{ClassName: "p.Outer$1Local", LexicalClassName: "Local", TypeParams: []string{"K", "V"}, DeclarationSourceName: func(name string) (string, bool) {
+				if name == "p.Outer" {
+					return "p.Outer", true
+				}
+				if name == "p.Outer$Middle" {
+					return "Middle", true
+				}
+				if name == "p.Outer$Child" || name == "p.Outer$Middle$Child" {
+					return row.source, true
+				}
+				return "", false
+			}}
+			if got := value.String(ctx); got != row.want {
+				t.Fatalf("scoped owner path=%s want=%s", got, row.want)
+			}
+		})
+	}
+	for _, mode := range []string{"unknown root", "changing root"} {
+		t.Run(mode, func(t *testing.T) {
+			calls := 0
+			ctx := &class_context.ClassContext{TypeParams: []string{"K"}, DeclarationSourceName: func(name string) (string, bool) {
+				if name == "p.Outer$Child" {
+					return "Child", true
+				}
+				if name == "p.Outer" && mode == "changing root" {
+					calls++
+					if calls == 1 {
+						return "p.Outer", true
+					}
+					return "p.Other", true
+				}
+				return "", false
+			}}
+			got := ParseSignature("Lp/Outer<TK;>.Child;").String(ctx)
+			if got != "Child<K>" {
+				t.Fatalf("unregistered or changing root acquired owner qualification: %s", got)
+			}
+		})
+	}
+}
+
+func TestNestedAbbreviatedSelfNameDoesNotEraseDifferentOwnerInstantiation(t *testing.T) {
+	ctx := &class_context.ClassContext{ClassName: "p.Outer$Child", LexicalClassName: "Child", TypeParams: []string{"K", "V"}, DeclarationSourceName: func(name string) (string, bool) {
+		if name == "p.Outer" {
+			return "p.Outer", true
+		}
+		if name == "p.Outer$Child" {
+			return "Child", true
+		}
+		return "", false
+	}}
+	got := ParseSignature("Lp/Outer<Ljava/lang/String;>.Child<TV;>;").String(ctx)
+	if got != "p.Outer<String>.Child<V>" {
+		t.Fatalf("short source alias erased the explicit owner instantiation: %s", got)
+	}
+	ctx.DeclarationSourceName = func(name string) (string, bool) {
+		if name == "p.Outer" {
+			return "", true
+		}
+		if name == "p.Outer$Child" {
+			return "Child", true
+		}
+		return "", false
+	}
+	if got := ParseSignature("Lp/Outer<TK;>.Child;").String(ctx); got != "Child<K>" {
+		t.Fatal("empty root acquired source path permission", got)
 	}
 }

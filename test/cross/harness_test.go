@@ -204,14 +204,39 @@ func runJava(t *testing.T, dir, class string, args ...string) []byte {
 // preserving the relative directory layout (i.e. the package path).
 func zipClassesToJar(t *testing.T, dir, jarPath string) {
 	t.Helper()
+	if err := writeClassTreeJar(dir, jarPath, nil); err != nil {
+		t.Fatalf("build jar: %v", err)
+	}
+}
+
+// The caller supplies only authorized runtime metadata. Class bytes always
+// come from the rebuilt tree; resources and original class files are excluded.
+func writeClassTreeJar(dir, jarPath string, manifest []byte) (err error) {
 	f, err := os.Create(jarPath)
 	if err != nil {
-		t.Fatal(err)
+		return err
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); err == nil {
+			err = closeErr
+		}
+	}()
 
 	zw := zip.NewWriter(f)
-	defer zw.Close()
+	defer func() {
+		if closeErr := zw.Close(); err == nil {
+			err = closeErr
+		}
+	}()
+	if len(manifest) != 0 {
+		w, createErr := zw.Create("META-INF/MANIFEST.MF")
+		if createErr != nil {
+			return createErr
+		}
+		if _, err := w.Write(manifest); err != nil {
+			return err
+		}
+	}
 
 	err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -235,9 +260,7 @@ func zipClassesToJar(t *testing.T, dir, jarPath string) {
 		_, err = io.Copy(w, bytes.NewReader(data))
 		return err
 	})
-	if err != nil {
-		t.Fatalf("build jar: %v", err)
-	}
+	return err
 }
 
 // readClass reads the named .class file from dir.

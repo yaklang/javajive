@@ -9,6 +9,7 @@ type lambdaCaptureDeclaration struct {
 	name, typ string
 	line      int
 	scope     *lambdaCaptureScope
+	final     bool
 }
 
 type lambdaCaptureScope struct {
@@ -27,7 +28,11 @@ type lambdaCaptureBinding struct {
 	reads       []lambdaCaptureRead
 }
 
-var lambdaCaptureDeclarationRe = regexp.MustCompile(`^(\t+)([A-Za-z_$][\w$.<>\[\]?, ]*?)\s+((?:var|lv)\d+(?:_\d+)*)\s*(?:=[^;]*)?;(\s*)$`)
+// Whitespace is not a scope witness. Checked-escape wrapping and local
+// declaration lifting can place a declaration at column zero, while its
+// capturing lambda retains its original indentation. The brace tree below
+// supplies visibility and declaration identity in every layout.
+var lambdaCaptureDeclarationRe = regexp.MustCompile(`^([ \t]*)([A-Za-z_$][\w$.<>\[\]?, ]*?)\s+((?:var|lv)\d+(?:_\d+)*)\s*(?:=[^;]*)?;(\s*)$`)
 
 // lambdaCaptureCodeLines preserves source offsets while hiding literals and
 // comments. They are neither lexical scopes nor variable reads. Block comments
@@ -121,9 +126,10 @@ func lambdaCaptureBindings(lines []string) []*lambdaCaptureBinding {
 			name := ln[start:i]
 			if match != nil && start == match[6] {
 				typ := strings.TrimSpace(ln[match[4]:match[5]])
+				final := strings.HasPrefix(typ, "final ")
 				typ = strings.TrimPrefix(typ, "final ")
 				if !prevTokenIsControlKeyword(typ) {
-					scope.declarations[name] = &lambdaCaptureDeclaration{name: name, typ: typ, line: line, scope: scope}
+					scope.declarations[name] = &lambdaCaptureDeclaration{name: name, typ: typ, line: line, scope: scope, final: final}
 					continue
 				}
 				// `return varN;` / `throw varN;` also match the declaration
@@ -138,7 +144,7 @@ func lambdaCaptureBindings(lines []string) []*lambdaCaptureBinding {
 					break
 				}
 			}
-			if declaration == nil {
+			if declaration == nil || declaration.final {
 				continue
 			}
 			// The first lambda that crosses this declaration's scope owns the

@@ -3,10 +3,30 @@
 import math
 import unittest
 
-from tools.ci_scheduler.shard import ShardError, source_parent_shards
+from tools.ci_scheduler.shard import ShardError, source_parent_batches, source_parent_shards
 
 
 class SourceDurationSharding(unittest.TestCase):
+    def test_more_runners_conserve_every_parent_and_nested_scope(self):
+        names = [f"Test{i:04d}" for i in range(1930)]
+        hints = {name: (120 if i % 7 == 0 else 10) for i, name in enumerate(names)}
+        scopes = [f"scope{i}" for i in range(35)]
+        for count in (6, 8, 10, 12):
+            with self.subTest(runners=count):
+                lanes = source_parent_shards(names, hints, count * 4)
+                parents, selected_scopes = [], []
+                for shard in range(count):
+                    ordinary = [name for lane in lanes[shard*4:(shard+1)*4] for name in lane.items]
+                    batches = source_parent_batches(ordinary, hints)
+                    parents.extend(name for batch in batches for name in batch.items)
+                    selected_scopes.extend(scopes[shard::count])
+                    self.assertTrue(ordinary)
+                    self.assertTrue(scopes[shard::count])
+                self.assertCountEqual(parents, names)
+                self.assertCountEqual(selected_scopes, scopes)
+                self.assertEqual(len(set(parents)), len(parents))
+                self.assertEqual(len(set(selected_scopes)), len(selected_scopes))
+
     def test_expensive_parents_do_not_accumulate_in_alphabetical_shards(self):
         names = [f"Test{i:03d}" for i in range(128)]
         hints = {name: (120 if i % 4 == 1 else 1) for i, name in enumerate(names)}
@@ -35,6 +55,45 @@ class SourceDurationSharding(unittest.TestCase):
         for names, count in [([], 1), (["TestA"], 0), (["TestA"], 2)]:
             with self.subTest(names=names, count=count), self.assertRaises(ShardError):
                 source_parent_shards(names, {}, count)
+
+    def test_batches_conserve_inventory_and_bound_cost_and_parent_count(self):
+        names = [f"Test{i:03d}" for i in range(100)] + ["TestOversized", "TestUnknown"]
+        hints = {name: (i % 9) for i, name in enumerate(names[:100])}
+        hints.update(TestOversized=201, TestStale=9999)
+        batches = source_parent_batches(names, hints, max_seconds=30, max_parents=7)
+        self.assertEqual(batches, source_parent_batches(reversed(names), hints, max_seconds=30, max_parents=7))
+        self.assertCountEqual([name for batch in batches for name in batch.items], names)
+        self.assertTrue(all(0 < len(batch.items) <= 7 for batch in batches))
+        for batch in batches:
+            if batch.duration_ns > 30_000_000_000:
+                self.assertEqual(batch.items, ["TestOversized"])
+        self.assertEqual(batches[0].items, ["TestOversized"])
+
+    def test_cost_drift_does_not_pin_the_rest_of_a_large_lane(self):
+        names = [f"Test{i:02d}" for i in range(16)]
+        hints = dict.fromkeys(names, 30)
+        actual = hints | {names[0]: 150}
+        def finish(groups):
+            workers = [0] * 4
+            for group in groups:
+                index = min(range(4), key=lambda i: (workers[i], i))
+                workers[index] += sum(actual[name] for name in group.items)
+            return max(workers)
+        lanes = source_parent_shards(names, hints, 4)
+        batches = source_parent_batches(names, hints, max_seconds=30)
+        self.assertEqual(finish(lanes), 240)
+        self.assertEqual(finish(batches), 150)
+
+    def test_batch_inputs_fail_closed(self):
+        for names, hints in [([], {}), (["TestA", "TestA"], {}), (["TestA"], {"TestA": math.nan})]:
+            with self.subTest(names=names), self.assertRaises(ShardError):
+                source_parent_batches(names, hints)
+        for limit in [0, -1, math.inf, math.nan, True, "3"]:
+            with self.subTest(limit=limit), self.assertRaises(ShardError):
+                source_parent_batches(["TestA"], {}, max_seconds=limit)
+        for count in [0, -1, True, 1.5]:
+            with self.subTest(count=count), self.assertRaises(ShardError):
+                source_parent_batches(["TestA"], {}, max_parents=count)
 
 
 if __name__ == "__main__":

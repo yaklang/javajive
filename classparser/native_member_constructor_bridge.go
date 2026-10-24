@@ -34,6 +34,21 @@ func nativeMemberJointBridgeNameTypes(p *nativeMemberFamily, obj *ClassObject, w
 	}
 	return nativeConstructorBridgeNameTypes(obj, p.bridgeOwners(), work)
 }
+
+// Explicit forwarding declarations require a nameable source parameter type.
+// Compiler-regenerated anonymous classes and enum tables do not have a Java
+// type name, even though their binary names exist. Those roles retain their
+// existing projection; they are not covered by modern bridge completion.
+func (p *nativeMemberFamily) retainsConstructorBridge(b *nativeConstructorAccessBridge) bool {
+	if p == nil || !p.usesNestAccess || b == nil {
+		return false
+	}
+	if p.emptyMarkers[b.marker] != nil {
+		return true
+	}
+	return p.anonymous != nil && p.anonymous.owner == p.owner && p.anonymous.standalone[b.marker] != nil
+}
+
 func nativeMemberJointBridgeMarkersClosed(p *nativeMemberFamily, work *workbudget.Budget) bool {
 	if p == nil {
 		return false
@@ -55,6 +70,16 @@ func nativeMemberJointBridgeMarkersClosed(p *nativeMemberFamily, work *workbudge
 			}
 			if p.anonymous == nil {
 				return false
+			}
+			if p.retainsConstructorBridge(bridge) {
+				// A retained port is an ordinary, nameable binary type. Its
+				// independently proved standalone source stays outside the nest;
+				// no anonymous ordinal or private permission is regenerated.
+				marker := p.anonymous.standalone[bridge.marker]
+				if marker == nil || marker.GetClassName() != bridge.marker || p.anonymous.owner != p.owner {
+					return false
+				}
+				continue
 			}
 			marker := p.anonymous.children[bridge.marker]
 			if marker == nil || marker.object == nil || marker.ordinal != 1 || p.anonymous.owner != p.owner || marker.object.GetClassName() != bridge.marker {
@@ -244,15 +269,19 @@ func nativeMemberStaticBridgeSource(plan *nativeMemberAllocation, args []class_c
 	if !nativeMemberBridgeSourceDummy(args[len(args)-1].Value) {
 		return fail()
 	}
-	invoke := &values.FunctionCallExpression{ClassName: strings.ReplaceAll(plan.child.object.GetClassName(), "/", "."), FunctionName: "<init>", Descriptor: bridge.target, Kind: values.InvokeSpecial, IsSpecialInvoke: true, HasOriginPC: true, OriginPC: plan.invokePC}
-	for _, arg := range args[:len(args)-1] {
+	descriptor, sourceArgs := bridge.target, args[:len(args)-1]
+	if p.retainsConstructorBridge(bridge) {
+		descriptor, sourceArgs = bridge.descriptor, args
+	}
+	invoke := &values.FunctionCallExpression{ClassName: strings.ReplaceAll(plan.child.object.GetClassName(), "/", "."), FunctionName: "<init>", Descriptor: descriptor, Kind: values.InvokeSpecial, IsSpecialInvoke: true, HasOriginPC: true, OriginPC: plan.invokePC}
+	for _, arg := range sourceArgs {
 		v, ok := arg.Value.(values.JavaValue)
 		if !ok {
 			return fail()
 		}
 		invoke.Arguments = append(invoke.Arguments, v)
 	}
-	mt, e := types.ParseMethodDescriptor(bridge.target)
+	mt, e := types.ParseMethodDescriptor(descriptor)
 	if e != nil || len(mt.FunctionType().ParamTypes) != len(invoke.Arguments) {
 		return fail()
 	}
@@ -275,10 +304,17 @@ func nativeMemberStaticBridgeSource(plan *nativeMemberAllocation, args []class_c
 // lexical family. Method handles and source-spellable marker declarations are
 // not unused compiler arguments, even when their erasures happen to match.
 func (z *JarFS) nativeMemberJointBridgeReferencesClosed(p *nativeMemberFamily, index *nativeMemberIndex, work *workbudget.Budget) bool {
+	if p == nil || index == nil || !index.valid || !nativeProofWork(work, 1) {
+		return false
+	}
 	markers := map[string]bool{}
 	for _, bridges := range p.bridgeOwners() {
 		for _, bridge := range bridges {
-			markers[bridge.marker] = true
+			// Retained source types keep their original descriptor and call
+			// edges. Projected compiler-owned types still need archive closure.
+			if !p.retainsConstructorBridge(bridge) {
+				markers[bridge.marker] = true
+			}
 		}
 	}
 	users := map[string]bool{}
@@ -347,7 +383,8 @@ func (z *JarFS) nativeMemberJointBridgeReferencesClosed(p *nativeMemberFamily, i
 						!(forest != nil && forest.units[marker] != nil &&
 							(nativeAnonymousForestConstructorNameType(obj, i+1, forest, work) ||
 								nativeAnonymousForestEnclosingNameType(obj, i+1, forest, work) ||
-								nativeAnonymousForestCaptureNameType(forest, obj, i+1, work))) {
+								nativeAnonymousForestCaptureNameType(forest, obj, i+1, work) ||
+								nativeAnonymousForestLambdaNameType(forest, obj, i+1, work))) {
 						return false
 					}
 				}
@@ -464,10 +501,16 @@ func nativeMemberConstructorForAllocation(child *nativeMemberClass, desc string)
 	if child == nil {
 		return nil
 	}
+	constructor := child.constructors[desc]
+	if constructor != nil && constructor.accessBridge != nil && child.accessBridges[desc] != constructor.accessBridge {
+		// Keeping a physical declaration does not turn a revoked synthetic
+		// bridge certificate into an ordinary constructor permission.
+		return nil
+	}
 	if bridge := child.accessBridges[desc]; bridge != nil {
 		return child.constructors[bridge.target]
 	}
-	return child.constructors[desc]
+	return constructor
 }
 func nativeMemberBridgeSourceDummy(value any) bool {
 	v, ok := value.(values.JavaValue)

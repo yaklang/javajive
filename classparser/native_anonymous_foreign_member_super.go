@@ -73,7 +73,7 @@ func (c *ClassObjectDumper) prepareNativeAnonymousForeignMemberSuper(object *Cla
 	if len(bridges) != 0 {
 		return false
 	}
-	packet := nativeMemberProofWithDeclarations(parent, enclosing, c.Work, bridges, lexical, resolve, reader.buildInvocationMetadata())
+	packet := reader.proveNativeMemberDeclaration(parent, enclosing, bridges, lexical, resolve)
 	if packet == nil || packet.static || packet.owner != declaring || len(packet.accessBridges) != 0 || len(p.pendingAnonymousSuperDependencies) >= nativeMemberDependencyNodeLimit || c.Work != nil && c.Work.CheckAlloc(int64(len(p.pendingAnonymousSuperDependencies)+1)*512) != nil {
 		return false
 	}

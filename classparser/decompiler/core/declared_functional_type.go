@@ -43,7 +43,7 @@ func inferDeclaredFunctionalType(ctx *class_context.ClassContext, fi types.JavaT
 	args := make([]types.JavaType, len(formals))
 	variables := map[string]bool{}
 	for i, variable := range formals {
-		args[i] = types.NewJavaClass(variable)
+		args[i] = types.NewJavaTypeVariable(variable)
 		variables[variable] = true
 	}
 	params, ret, methodFormals := types.ResolveInstantiatedSignatureExact(ctx, ctx.SiblingClassSig, raw.Name, args, name, samDescriptor, len(sam.FunctionType().ParamTypes))

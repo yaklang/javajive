@@ -1,0 +1,422 @@
+package javaclassparser
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
+	"fmt"
+	"slices"
+	"strings"
+
+	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/workbudget"
+)
+
+type inheritedBridgePacket struct {
+	name, descriptor, targetOwner, targetDescriptor string
+	throws                                          []string
+}
+
+// Only a pure typed forwarding program can be regenerated through a temporary
+// narrow source override. Receiver/argument identity, category-two local slots,
+// invocation kind and exception declarations are part of the proof.
+func inheritedBridgeForwardPacket(object *ClassObject, method *MemberInfo, opcode int, work *workbudget.Budget) *inheritedBridgePacket {
+	if object == nil || method == nil || object.MajorVersion < 49 || object.MajorVersion > 65 || object.MinorVersion != 0 || len(object.Methods) > 4096 {
+		return nil
+	}
+	name, nk := sourceBridgeUTF8(object, method.NameIndex)
+	desc, dk := sourceBridgeUTF8(object, method.DescriptorIndex)
+	params, result, err := callbinding.Descriptor(desc)
+	if !nk || !dk || !class_context.PreservesJava8Identifier(name) || err != nil || !(strings.HasPrefix(result, "L") || strings.HasPrefix(result, "[")) {
+		return nil
+	}
+	code := constructorLoweringCode(method)
+	if code == nil || len(code.Code) > 512 || len(code.ExceptionTable) != 0 || !nativeProofWork(work, int64(len(code.Code))+1) {
+		return nil
+	}
+	p := &inheritedBridgePacket{name: name, descriptor: desc}
+	exceptionCount, codeCount := 0, 0
+	// Modern javac emits MethodParameters on synthetic bridges even without
+	// -parameters. Validate its descriptor-position table independently of Code;
+	// the existing parameter restorer later preserves the exact original table.
+	textWork := int64(0)
+	if _, _, err := sourceParameterRows(object, method, work, &textWork); err != nil {
+		return nil
+	}
+	for _, a := range method.Attributes {
+		switch a := a.(type) {
+		case *CodeAttribute:
+			codeCount++
+			if a == nil || codeCount != 1 {
+				return nil
+			}
+		case *UnparsedAttribute:
+			if a == nil || a.Name != "MethodParameters" {
+				return nil
+			}
+		case *ExceptionsAttribute:
+			exceptionCount++
+			if a == nil || exceptionCount > 1 {
+				return nil
+			}
+			for _, index := range a.ExceptionIndexTable {
+				n, ok := sourceBridgeClassName(object, index)
+				if !ok || !nativeSourceBinaryName(n) {
+					return nil
+				}
+				p.throws = append(p.throws, n)
+			}
+		default:
+			return nil
+		}
+	}
+	d := core.NewDecompiler(code.Code, func(i int) values.JavaValue { return GetValueFromCP(object.ConstantPool, i) })
+	d.Work = work
+	if d.ParseOpcode() != nil {
+		return nil
+	}
+	ops := constructorMotionOps(d)
+	if len(ops) != len(params)+3 || !enumArrayInstructionSpans(code.Code, ops) || core.GetRetrieveIdx(ops[0]) != 0 || !constructorMotionLoad(ops[0], "Ljava/lang/Object;") {
+		return nil
+	}
+	slot := 1
+	for i, param := range params {
+		if core.GetRetrieveIdx(ops[i+1]) != slot || !constructorMotionLoad(ops[i+1], param) {
+			return nil
+		}
+		slot += constructorEffectType(param).width()
+	}
+	call := constructorMotionMember(object, ops[len(ops)-2], opcode)
+	if call == nil || call.Member != name || !nativeSourceBinaryName(call.Name) || !nativeEnumOpcode(ops[len(ops)-1], core.OP_ARETURN) || int(code.MaxStack) < slot || int(code.MaxLocals) < slot {
+		return nil
+	}
+	args, ret, err := callbinding.Descriptor(call.Description)
+	if err != nil || !slices.Equal(args, params) || !(strings.HasPrefix(ret, "L") || strings.HasPrefix(ret, "[")) {
+		return nil
+	}
+	p.targetOwner, p.targetDescriptor = call.Name, call.Description
+	return p
+}
+
+func (c *ClassObjectDumper) inheritedBridgeOriginal(method *MemberInfo) *inheritedBridgePacket {
+	if c.obj.MajorVersion != 52 || method.AccessFlags != 0x1041 {
+		return nil
+	}
+	p := inheritedBridgeForwardPacket(c.obj, method, core.OP_INVOKESPECIAL, c.Work)
+	if p == nil || p.targetOwner != c.obj.GetSupperClassName() || p.descriptor == p.targetDescriptor {
+		return nil
+	}
+	// A real declaration already supplies its own bridge; a second narrow
+	// override would change its dispatch or collide with an existing overload.
+	originalMatches := 0
+	for _, m := range c.obj.Methods {
+		if !nativeProofWork(c.Work, 1) {
+			return nil
+		}
+		n, _ := sourceBridgeUTF8(c.obj, m.NameIndex)
+		d, _ := sourceBridgeUTF8(c.obj, m.DescriptorIndex)
+		if n == p.name && d == p.targetDescriptor {
+			return nil
+		}
+		if n == p.name && d == p.descriptor {
+			originalMatches++
+		}
+	}
+	if originalMatches != 1 {
+		return nil
+	}
+	// External original dependencies establish method declarations without
+	// granting source ownership of those classes to this independent unit.
+	parent, ok := c.nativeAnnotationDeclarationResolver()(p.targetOwner)
+	if !ok || parent == nil || parent.GetClassName() != p.targetOwner {
+		return nil
+	}
+	_, target := nativeMemberCallTarget(parent, p.name, p.targetDescriptor, false, nil, c.Work)
+	if target == nil || target.AccessFlags != 1 {
+		return nil
+	}
+	for _, a := range target.Attributes {
+		if _, ok := a.(*SignatureAttribute); ok {
+			return nil
+		}
+	}
+	return p
+}
+
+func (c *ClassObjectDumper) inheritedBridgeSource(method *MemberInfo) *dumpedMethods {
+	if !c.reconstructionPhysicalHeader() {
+		return nil
+	}
+	p := c.inheritedBridgeOriginal(method)
+	if p == nil {
+		return nil
+	}
+	typ, err := types.ParseMethodDescriptor(p.targetDescriptor)
+	if err != nil {
+		return nil
+	}
+	ft := typ.FunctionType()
+	params, args := []string{}, []string{}
+	for i, t := range ft.ParamTypes {
+		name := fmt.Sprintf("bridgeArgument%d", i)
+		params = append(params, t.String(c.FuncCtx)+" "+name)
+		args = append(args, name)
+	}
+	throws := []string{}
+	for _, n := range p.throws {
+		t, err := types.ParseDescriptor("L" + n + ";")
+		if err != nil {
+			return nil
+		}
+		throws = append(throws, t.String(c.FuncCtx))
+	}
+	tail := ""
+	if len(throws) != 0 {
+		tail = " throws " + strings.Join(throws, ", ")
+	}
+	source := "public " + ft.ReturnType.String(c.FuncCtx) + " " + p.name + "(" + strings.Join(params, ", ") + ")" + tail + " {\n\treturn super." + p.name + "(" + strings.Join(args, ", ") + ");\n}"
+	return &dumpedMethods{methodName: p.name, descriptor: p.targetDescriptor, code: source, bodyCode: source, inheritedBridge: p, inheritedBridgeCode: source}
+}
+
+func (c *ClassObjectDumper) publishInheritedBridgeLowering(source string, methods []*dumpedMethods) bool {
+	a := c.options.sourceConstructorLowering
+	if a == nil {
+		return true
+	}
+	found := c.reconstructionPhysicalHeader() && legacyAbstractInterfaceDomain(c.obj, c.Work)
+	for _, m := range methods {
+		if m == nil || m.inheritedBridge == nil {
+			continue
+		}
+		found = true
+		if m.isStub || m.code != m.inheritedBridgeCode || strings.Count(source, m.code) != 1 {
+			return false
+		}
+	}
+	if !found {
+		return true
+	}
+	origin := constructorNativeSourceOrigin{}
+	if !c.sourceDegraded && !legacySourceHasFailureMarker(source) {
+		raw, err := a.jar.readJarEntry(c.obj.GetClassName() + ".class")
+		if err != nil || !nativeProofWork(c.Work, int64(len(raw)+len(source))+1) || !bytes.Equal(raw, c.obj.Bytes()) {
+			return false
+		}
+		origin = constructorNativeSourceOrigin{sha256.Sum256(raw), sha256.Sum256([]byte(source))}
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.bridgePending == nil {
+		a.bridgePending = map[string]constructorNativeSourceOrigin{}
+	}
+	a.bridgePending[c.obj.GetClassName()] = origin
+	return true
+}
+
+func (a *sourceConstructorLoweringAuthority) bridgeSourceReturned(owner string, original []byte, work *workbudget.Budget) bool {
+	if a == nil || !nativeProofWork(work, 1) {
+		return false
+	}
+	a.mu.Lock()
+	origin, active := a.bridgeActive[owner]
+	_, pending := a.bridgePending[owner]
+	// A completed native source can itself be the physical independent root.
+	// Only its exact public return grants this receipt, never a child comment.
+	if !active && !pending {
+		origin, active = a.nativeActive[owner]
+	}
+	a.mu.Unlock()
+	if !active && !pending && a.parent != nil && a.jar != nil && a.parent.jar != nil && a.jar.sourceCompiler.effective() == a.parent.jar.sourceCompiler.effective() && a.jar.targetSourceVersion == a.parent.jar.targetSourceVersion {
+		a.parent.mu.Lock()
+		origin, active = a.parent.bridgeActive[owner]
+		a.parent.mu.Unlock()
+	}
+	return active && origin.sourceHash != ([32]byte{}) && origin.originalHash == sha256.Sum256(original)
+}
+
+// The compiler generates a real wide bridge through the temporary narrow
+// override. Inline that fresh override only after proving the complete original
+// super-binding and its unique fresh consumer. No original Code is imported.
+func (a *sourceConstructorLoweringAuthority) lowerInheritedBridges(owner string, original, compiled []byte, work *workbudget.Budget) ([]byte, error) {
+	decline := func() ([]byte, error) {
+		if err := work.Check(); err != nil {
+			return nil, err
+		}
+		return compiled, nil
+	}
+	if !a.bridgeSourceReturned(owner, original, work) {
+		return decline()
+	}
+	if len(original) > 32<<20 || len(compiled) > 32<<20 || !nativeProofWork(work, int64(len(original)+len(compiled))+1) {
+		return nil, sourceLambdaMetadataFailure(work, "inherited bridge input budget")
+	}
+	want, err := ParseWithBudget(original, work)
+	if err != nil {
+		return nil, err
+	}
+	reader, err := NewClassReaderWithBudget(compiled, work)
+	if err != nil {
+		return nil, err
+	}
+	layout := &compiledMetadataLayout{methods: map[*MemberInfo]compiledMetadataSpan{}}
+	got, err := parseWithMetadataLayout(reader, nil, layout)
+	if err != nil {
+		return nil, err
+	}
+	if !sourceParameterClassIdentityClosed(want, got) || len(want.Methods) >= len(got.Methods) || len(got.Methods) > 4096 {
+		return decline()
+	}
+	if work.CheckAlloc(int64(len(got.Methods))*512) != nil {
+		return nil, work.Err()
+	}
+	d := NewClassObjectDumper(want)
+	d.Work = work
+	d.foldSiblingResolver = a.jar.enumSiblingResolver()
+	d.declarationResolver = a.jar.declarationResolver
+	key := func(o *ClassObject, m *MemberInfo) string {
+		n, _ := sourceBridgeUTF8(o, m.NameIndex)
+		s, _ := sourceBridgeUTF8(o, m.DescriptorIndex)
+		return n + "\x00" + s
+	}
+	before, after := map[string]*MemberInfo{}, map[string]*MemberInfo{}
+	for _, pair := range []struct {
+		o     *ClassObject
+		index map[string]*MemberInfo
+	}{{want, before}, {got, after}} {
+		for _, m := range pair.o.Methods {
+			k := key(pair.o, m)
+			if pair.index[k] != nil || !nativeProofWork(work, 1) {
+				return decline()
+			}
+			pair.index[k] = m
+		}
+	}
+	for k := range before {
+		if after[k] == nil {
+			return decline()
+		}
+	}
+	var edits []compiledMetadataEdit
+	consumers := map[*MemberInfo]map[*MemberInfo]bool{}
+	packets := map[*MemberInfo]*inheritedBridgePacket{}
+	for k, m := range before {
+		p := d.inheritedBridgeOriginal(m)
+		if p == nil {
+			continue
+		}
+		bridge := after[k]
+		helper := after[p.name+"\x00"+p.targetDescriptor]
+		if helper == nil || before[key(got, helper)] != nil || helper.AccessFlags != 1 || bridge.AccessFlags != m.AccessFlags {
+			return decline()
+		}
+		fresh := inheritedBridgeForwardPacket(got, helper, core.OP_INVOKESPECIAL, work)
+		forward := inheritedBridgeForwardPacket(got, bridge, core.OP_INVOKEVIRTUAL, work)
+		if fresh == nil || forward == nil || fresh.targetOwner != p.targetOwner || fresh.targetDescriptor != p.targetDescriptor || forward.targetOwner != owner || forward.targetDescriptor != p.targetDescriptor || !slices.Equal(p.throws, fresh.throws) || !slices.Equal(p.throws, forward.throws) {
+			return decline()
+		}
+		freshCode, err := enumArrayCodePayload(compiled, got, layout.methods[helper], work)
+		if err != nil {
+			return nil, err
+		}
+		bridgeCode, err := enumArrayCodePayload(compiled, got, layout.methods[bridge], work)
+		if err != nil {
+			return nil, err
+		}
+		data := bytes.Clone(compiled[freshCode.span.start:freshCode.span.end])
+		binary.BigEndian.PutUint16(data, bridgeCode.name)
+		edits = append(edits, compiledMetadataEdit{bridgeCode.span, data})
+		if consumers[helper] == nil {
+			consumers[helper] = map[*MemberInfo]bool{}
+			packets[helper] = p
+			edits = append(edits, compiledMetadataEdit{layout.methods[helper], nil})
+		}
+		consumers[helper][bridge] = true
+	}
+	if len(consumers) == 0 || len(after)-len(consumers) != len(before) {
+		return decline()
+	}
+	for helper, bridges := range consumers {
+		if !inheritedBridgeConsumersClosed(got, bridges, packets[helper], work) {
+			return decline()
+		}
+	}
+	first := len(compiled)
+	for _, span := range layout.methods {
+		if span.start < first {
+			first = span.start
+		}
+	}
+	if first < layout.poolEnd+2 || first > len(compiled) || binary.BigEndian.Uint16(compiled[first-2:]) != uint16(len(got.Methods)) {
+		return nil, sourceLambdaMetadataFailure(work, "inherited bridge method span")
+	}
+	count := make([]byte, 2)
+	binary.BigEndian.PutUint16(count, uint16(len(before)))
+	edits = append(edits, compiledMetadataEdit{compiledMetadataSpan{first - 2, first}, count})
+	return applyCompiledMetadataEdits(compiled, edits, work)
+}
+
+func inheritedBridgeConsumersClosed(object *ClassObject, bridges map[*MemberInfo]bool, p *inheritedBridgePacket, work *workbudget.Budget) bool {
+	refs := map[uint16]bool{}
+	for i, c := range object.ConstantPool {
+		if !nativeProofWork(work, 1) {
+			return false
+		}
+		r := nativeConstantMember(c)
+		if r == nil {
+			continue
+		}
+		owner, ok := sourceBridgeClassName(object, r.ClassIndex)
+		if !ok || r.NameAndTypeIndex == 0 || int(r.NameAndTypeIndex) > len(object.ConstantPool) {
+			return false
+		}
+		nt, ok := object.ConstantPool[r.NameAndTypeIndex-1].(*ConstantNameAndTypeInfo)
+		if !ok || nt == nil {
+			return false
+		}
+		n, _ := sourceBridgeUTF8(object, nt.NameIndex)
+		d, _ := sourceBridgeUTF8(object, nt.DescriptorIndex)
+		if owner == object.GetClassName() && n == p.name && d == p.targetDescriptor {
+			refs[uint16(i+1)] = true
+		}
+	}
+	for _, c := range object.ConstantPool {
+		if h, ok := c.(*ConstantMethodHandleInfo); ok && h != nil && refs[h.ReferenceIndex] {
+			return false
+		}
+	}
+	calls := 0
+	for _, m := range object.Methods {
+		code := constructorLoweringCode(m)
+		if code == nil {
+			continue
+		}
+		if !nativeProofWork(work, int64(len(code.Code))+1) {
+			return false
+		}
+		d := core.NewDecompiler(code.Code, nil)
+		d.Work = work
+		if d.ParseOpcode() != nil {
+			return false
+		}
+		for _, op := range constructorMotionOps(d) {
+			switch op.Instr.OpCode {
+			case core.OP_INVOKEVIRTUAL, core.OP_INVOKESPECIAL, core.OP_INVOKESTATIC, core.OP_INVOKEINTERFACE:
+				index, ok := nativeEnumCPIndex(op)
+				if !ok {
+					return false
+				}
+				if refs[index] {
+					if !bridges[m] || op.Instr.OpCode != core.OP_INVOKEVIRTUAL {
+						return false
+					}
+					calls++
+				}
+			}
+		}
+	}
+	return len(bridges) > 0 && calls == len(bridges)
+}

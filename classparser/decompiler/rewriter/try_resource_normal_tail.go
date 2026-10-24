@@ -17,7 +17,10 @@ import (
 // PCs and the exceptional cleanup's identical invoke tuple, then factor that
 // tail across every successful arm. Abrupt arms retain their original effects.
 func factorResourceNormalTail(region *core.Node, tr *statements.TryCatchStatement) (*statements.AssignStatement, []statements.Statement) {
-	if region == nil || tr == nil || len(tr.Exception) != 1 || len(tr.Handlers) != 1 || len(tr.CatchBodies) != 1 || tr.Handlers[0].CatchAll || region.SharedProtectedHandler {
+	if region == nil || tr == nil || len(tr.Exception) != 1 || len(tr.Handlers) != 1 || len(tr.CatchBodies) != 1 || tr.Handlers[0].CatchAll {
+		return nil, nil
+	}
+	if region.SharedProtectedHandler && !resourceSharedNestedHandlerRanges(region, tr) {
 		return nil, nil
 	}
 	outer := tr.Exception[0]
@@ -37,7 +40,7 @@ func factorResourceNormalTail(region *core.Node, tr *statements.TryCatchStatemen
 	if !ok || rethrow == nil || !sameTryLocal(rethrow.ThrownValue, outer) {
 		return nil, nil
 	}
-	resource, exceptionalClose, ok := resourceExceptionalClose(handler[0], outer)
+	resource, exceptionalClose, ok := resourceTailExceptionalClose(handler[0], outer)
 	if !ok {
 		return nil, nil
 	}
@@ -50,6 +53,9 @@ func factorResourceNormalTail(region *core.Node, tr *statements.TryCatchStatemen
 	}
 	var result *values.JavaRef
 	var normalClose statements.Statement
+	var normalGuarded bool
+	returnMode := 0 // unknown, void, value
+	var checkedPrefix func([]statements.Statement) ([]statements.Statement, bool)
 	remaining := 128
 	var walk func([]statements.Statement) ([]statements.Statement, bool)
 	walk = func(input []statements.Statement) ([]statements.Statement, bool) {
@@ -64,26 +70,43 @@ func factorResourceNormalTail(region *core.Node, tr *statements.TryCatchStatemen
 		end := body[len(body)-1]
 		switch last := end.(type) {
 		case *statements.ReturnStatement:
-			if last == nil || !last.HasOriginPC || covered(last.OriginPC) || !finallyPureLocal(last.JavaValue) || last.JavaValue.Type() == nil || len(body) < 2 {
+			if last == nil || !last.HasOriginPC || covered(last.OriginPC) || (last.JavaValue != nil && (!finallyPureLocal(last.JavaValue) || last.JavaValue.Type() == nil)) || len(body) < 2 {
 				return nil, false
 			}
 			closeStatement := body[len(body)-2]
-			closeResource, normalCall, ok := resourceNormalClose(closeStatement)
+			closeResource, normalCall, guarded, ok := resourceTailNormalClose(closeStatement)
 			if !ok || !sameTryLocal(closeResource, resource) || !sameUnprotectedTryCall(rawRows, normalCall, exceptionalClose) {
 				return nil, false
 			}
-			if result == nil {
+			if normalClose != nil && normalGuarded != guarded {
+				return nil, false
+			}
+			mode := 1
+			if last.JavaValue != nil {
+				mode = 2
+			}
+			if returnMode != 0 && returnMode != mode {
+				return nil, false
+			}
+			returnMode = mode
+			if normalClose == nil {
+				normalClose = closeStatement
+				normalGuarded = guarded
+			}
+			if mode == 2 && result == nil {
 				result = values.NewJavaRef(utils.NewRootVariableId(), nil, last.JavaValue.Type().Copy())
 				normalClose = closeStatement
 			}
-			if !reflect.DeepEqual(last.JavaValue.Type().RawType(), result.Type().RawType()) {
+			if mode == 2 && !reflect.DeepEqual(last.JavaValue.Type().RawType(), result.Type().RawType()) {
 				return nil, false
 			}
 			prefix := body[:len(body)-2]
-			proof := finallyProof{remaining: 256}
-			checked, exits, ok := proof.block(prefix, false, covered)
-			if !ok || exits {
+			checked, ok := checkedPrefix(prefix)
+			if !ok {
 				return nil, false
+			}
+			if mode == 1 {
+				return checked, true
 			}
 			return append(checked, statements.NewAssignStatement(result, last.JavaValue, false)), true
 		case *statements.CustomStatement:
@@ -104,23 +127,134 @@ func factorResourceNormalTail(region *core.Node, tr *statements.TryCatchStatemen
 			if !a || !b {
 				return nil, false
 			}
-			proof := finallyProof{remaining: 256}
-			checked, exits, ok := proof.block(body[:len(body)-1], false, covered)
-			if !ok || exits {
+			checked, ok := checkedPrefix(body[:len(body)-1])
+			if !ok {
 				return nil, false
+			}
+			return append(checked, &clone), true
+		case *statements.TryCatchStatement:
+			// A guarded close can leave the complete normal exit inside a
+			// structured inner try. Since this is the final source statement,
+			// every normal/caught arm may share the outer unprotected tail,
+			// but only after each arm proves its own close+return or throw.
+			if !resourceNestedHandlersCovered(last, rows) {
+				return nil, false
+			}
+			checked, ok := checkedPrefix(body[:len(body)-1])
+			if !ok {
+				return nil, false
+			}
+			clone := *last
+			clone.TryBody, ok = walk(last.TryBody)
+			if !ok {
+				return nil, false
+			}
+			clone.CatchBodies = make([][]statements.Statement, len(last.CatchBodies))
+			for i, caught := range last.CatchBodies {
+				clone.CatchBodies[i], ok = walk(caught)
+				if !ok {
+					return nil, false
+				}
 			}
 			return append(checked, &clone), true
 		default:
 			return nil, false
 		}
 	}
+	// A terminal nested try may return from one caught arm while its normal
+	// arm falls through to this region's close+return. All captured prefixes
+	// remain protected; stripping those early void exits is safe only with no
+	// protected continuation after the nested try.
+	checkedPrefix = func(prefix []statements.Statement) ([]statements.Statement, bool) {
+		remaining--
+		if remaining < 0 {
+			return nil, false
+		}
+		proof := finallyProof{remaining: 256}
+		checked, exits, ok := proof.block(prefix, false, covered)
+		if ok && !exits {
+			return checked, true
+		}
+		if len(prefix) == 0 {
+			return nil, false
+		}
+		nested, ok := prefix[len(prefix)-1].(*statements.TryCatchStatement)
+		if !ok || !resourceNestedHandlersCovered(nested, rows) {
+			return nil, false
+		}
+		before := finallyProof{remaining: 256}
+		head, ends, valid := before.block(prefix[:len(prefix)-1], false, covered)
+		if !valid || ends {
+			return nil, false
+		}
+		inner := finallyProof{remaining: 256}
+		normal, ends, valid := inner.block(nested.TryBody, false, covered)
+		if !valid || ends {
+			return nil, false
+		}
+		clone := *nested
+		clone.TryBody = normal
+		clone.CatchBodies = make([][]statements.Statement, len(nested.CatchBodies))
+		for i := range nested.Handlers {
+			clone.CatchBodies[i], valid = walk(nested.CatchBodies[i])
+			if !valid || returnMode != 1 {
+				return nil, false
+			}
+		}
+		return append(head, &clone), true
+	}
 	body, ok := walk(tr.TryBody)
-	if !ok || result == nil || normalClose == nil {
+	if !ok || returnMode == 0 || normalClose == nil {
 		return nil, nil
 	}
 	// The only mutations occur after every successful / abrupt arm was proved.
 	tr.TryBody = body
+	if returnMode == 1 {
+		return nil, []statements.Statement{normalClose, statements.NewReturnStatement(nil)}
+	}
 	return &statements.AssignStatement{LeftValue: result, IsDeclare: true}, []statements.Statement{normalClose, statements.NewReturnStatement(result)}
+}
+
+func resourceNestedHandlersCovered(nested *statements.TryCatchStatement, rows [][2]int) bool {
+	if nested == nil || len(nested.Exception) == 0 || len(nested.Exception) > 16 || len(nested.Exception) != len(nested.Handlers) || len(nested.Exception) != len(nested.CatchBodies) {
+		return false
+	}
+	for i, h := range nested.Handlers {
+		ranges, valid := canonicalHandlerRanges(h.ProtectedRanges)
+		if nested.Exception[i] == nil || !finallyContains(rows, h.EntryPC) || !valid {
+			return false
+		}
+		for _, r := range ranges {
+			if !handlerIntervalCovered(rows, r) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// Direct compiler cleanup stays direct: this proof never invents a null guard.
+// Guard parity is checked across every successful exit before coalescing them.
+// Keep the older nullable-finally matcher's guard-only helpers unchanged.
+func resourceTailNormalClose(st statements.Statement) (*values.JavaRef, *values.FunctionCallExpression, bool, bool) {
+	if call, ok := resourceVoidCall(st); ok {
+		resource, known := plainTryValue(call.Object).(*values.JavaRef)
+		return resource, call, false, known && resource != nil
+	}
+	resource, call, ok := resourceNormalClose(st)
+	return resource, call, true, ok
+}
+
+func resourceTailExceptionalClose(st statements.Statement, primary *values.JavaRef) (*values.JavaRef, *values.FunctionCallExpression, bool) {
+	if inner, ok := st.(*statements.TryCatchStatement); ok {
+		call, known := resourceSuppressedClose(inner, primary)
+		if !known {
+			return nil, nil, false
+		}
+		resource, known := plainTryValue(call.Object).(*values.JavaRef)
+		return resource, call, known && resource != nil
+	}
+	return resourceExceptionalClose(st, primary)
 }
 
 func resourceThrowableType(t types.JavaType) bool {

@@ -27,12 +27,7 @@ func nativeMemberOriginalDeclarationPath(root, member *ClassObject, resolve func
 	if root == nil || member == nil || resolve == nil || !nativeMemberDeclarationMetadataBounded(root, work) || !nativeMemberDeclarationMetadataBounded(member, work) || !nativeMemberTopLevelEvidence(root, work) {
 		return false
 	}
-	pkg := func(name string) string {
-		if i := strings.LastIndexByte(name, '/'); i >= 0 {
-			return name[:i]
-		}
-		return ""
-	}
+	pkg := sourceBinaryPackage
 	rootPackage := pkg(root.GetClassName())
 	seen := map[string]bool{}
 	for node := member; node != nil; {
@@ -49,7 +44,7 @@ func nativeMemberOriginalDeclarationPath(root, member *ClassObject, resolve func
 		if !nativeMemberDeclarationMetadataBounded(node, work) {
 			return false
 		}
-		parent, local, access, named := originalMemberOwner(node)
+		parent, _, access, named := originalMemberOwner(node)
 		if !named {
 			return nativeMemberTopLevelEvidence(node, work) && (pkg(name) == rootPackage || node.AccessFlags&1 != 0)
 		}
@@ -62,35 +57,7 @@ func nativeMemberOriginalDeclarationPath(root, member *ClassObject, resolve func
 		if !known || original == nil || original.GetClassName() != parent || len(original.Attributes) > 65535 || !nativeProofWork(work, int64(len(original.Attributes))) {
 			return false
 		}
-		// Both original declarations must agree on this very edge. A forged
-		// self row or a same-spelled foreign object grants no source spelling.
-		matches := 0
-		for _, attribute := range original.Attributes {
-			if table, ok := attribute.(*InnerClassesAttribute); ok {
-				if table == nil || len(table.Classes) > 65535 || !nativeProofWork(work, int64(len(table.Classes))) {
-					return false
-				}
-				for _, row := range table.Classes {
-					if row == nil {
-						return false
-					}
-					child, known := sourceBridgeClassName(original, row.InnerClassInfoIndex)
-					if !known {
-						return false
-					}
-					if child != name {
-						continue
-					}
-					outer, ok := sourceBridgeClassName(original, row.OuterClassInfoIndex)
-					inner, valid := sourceBridgeUTF8(original, row.InnerNameIndex)
-					if !ok || !valid || outer != parent || inner != local || row.InnerClassAccessFlags != access {
-						return false
-					}
-					matches++
-				}
-			}
-		}
-		if matches != 1 {
+		if !nativeOriginalDeclarationEdge(original, node, work) {
 			return false
 		}
 		node = original
@@ -110,4 +77,13 @@ func nativeMemberDeclarationMetadataBounded(obj *ClassObject, work *workbudget.B
 		}
 	}
 	return true
+}
+
+// sourceBinaryPackage uses the original internal class name, never a shortened
+// source spelling, when applying physical or lexical package access rules.
+func sourceBinaryPackage(name string) string {
+	if i := strings.LastIndexByte(name, '/'); i >= 0 {
+		return name[:i]
+	}
+	return ""
 }

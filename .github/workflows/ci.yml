@@ -25,7 +25,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -61,24 +61,29 @@ jobs:
           test -s "$RUNNER_TEMP/fixture-java/javac.jsa"
           printf '#!/bin/sh\nexec "%s" -J-XX:-UsePerfData -J-XX:TieredStopAtLevel=1 -J-XX:+UseSerialGC -J-XX:ActiveProcessorCount=1 "-J-XX:SharedArchiveFile=%s" "$@"\n' "$(command -v javac)" "$RUNNER_TEMP/fixture-java/javac.jsa" > "$RUNNER_TEMP/fixture-java/javac"
           printf '#!/bin/sh\nexec "%s" -XX:-UsePerfData -XX:TieredStopAtLevel=1 -XX:+UseSerialGC -XX:ActiveProcessorCount=1 "$@"\n' "$(command -v java)" > "$RUNNER_TEMP/fixture-java/java"
-          chmod +x "$RUNNER_TEMP/fixture-java/javac" "$RUNNER_TEMP/fixture-java/java"
+          # Apply the same startup budget to the retained javac8 compiler.
+          # This changes JVM scheduling only, not source targets or class bytes.
+          printf '#!/bin/sh\nexec "%s" -J-XX:-UsePerfData -J-XX:TieredStopAtLevel=1 -J-XX:+UseSerialGC -J-XX:ActiveProcessorCount=1 "$@"\n' "$JAVA8_JAVAC" > "$RUNNER_TEMP/fixture-java/javac8"
+          chmod +x "$RUNNER_TEMP/fixture-java/javac" "$RUNNER_TEMP/fixture-java/java" "$RUNNER_TEMP/fixture-java/javac8"
+          echo "JAVA8_JAVAC=$RUNNER_TEMP/fixture-java/javac8" >> "$GITHUB_ENV"
           echo "$RUNNER_TEMP/fixture-java" >> "$GITHUB_PATH"
       - name: Source algorithm regression tests
         env:
           SOURCE_SHARD: ${{ matrix.shard }}
-          SOURCE_SHARDS: "6"
-          EDGE_TEST_PATTERN: '^Test(Native|ConstructorFinalizerSeal|ScopedClassNameBinding|CheckedEscape|CheckedConstructor|BindingPlan|CtorArrayThisSpillsRoundTrip|CtorArrayThisSpillPreservesEarlierArgumentOrder|CtorDelegationNestedArrayTempRoundTrip|CtorDelegationArgumentSpills|SuperDelegationTrailingArgumentSpills|SuperDelegationSpillAcrossSafePostSuperPrelude|ConditionalThisCtorCheckcastRoundTrip|TernaryCheckcastInvocationReceiverRoundTrip|CtorNPECheckBeforeThis|EnumArrayConstructorArgsRoundTrip|EnumClinit|ZxingEnum|GenericNull|GenericFieldElementOpsRoundTrip|GenericFunctionalValueKeepsErasedCallDescriptor|MaterializedBiFunctionErasureRoundTrip|SameClassBiFunctionTypeVariablesRoundTrip|SameClassFunctionAndSupplierErasureRoundTrip|SiblingClassFunctionalErasureRoundTrip|ChainedSiblingReturnFunctionalErasureRoundTrip|LowerBoundedFunctionalArgumentsRoundTrip|CapturedLowerBoundedFunctionalArgumentsRoundTrip|CapturedParameterizedLowerBoundRoundTrip|LambdaCaptureCopiesStayInsideGenericMethod|ClassCacheTernaryStoreRoundTrip|MapCacheTernaryLocalRoundTrip|ImmediateZeroArgCheckcastInvoke|NonConditionalForkDiamond|InheritedJDK|InvocationMetadata|JDKListNull|MemberLedger|MethodReferenceKeepsPolyTargetTypeRoundTrip|DirectoryStreamFilterKeepsInstantiatedMethodRefTypeRoundTrip|T04ExternalOverloadBindingRoundTrip|LogbackPutUninterruptibly|ProtobufRemainingReconstructs|ProtobufLazyStringArrayListThis|PublicSuffixDatabase|ThisCtorOverloadCast|GenericVarargsConstructorArrayRoundTrip|ShiftedThisCtorGenericArrayRoundTrip|ConditionalArrayCloneStoreRoundTrip|ToListSingleCallableCast|JacksonRemainingMapEntryDeserializerCast|JoinStreamCtorCast|RawGenericReceiver|SyntaxObservation|RetryRollback|ShadowBuilder|ShadowIRRunsFrameSSAAndLowering|T11_C01|Sentinels|Request|R06|T04|T05|T06|T07|T08|T18|T19|T27|TaskT20|TernaryCheckcastMergeRoundTrip|SelfCastNullMergeRoundTrip|ShortCircuitVarargsArraysRoundTrip|SharedFalseTargetFallthroughRoundTrip)'
+          SOURCE_SHARDS: "12"
+          EDGE_TEST_PATTERN: '^Test(Native|ConstructorFinalizerSeal|ScopedClassNameBinding|CheckedEscape|CheckedConstructor|BindingPlan|CtorArrayThisSpillsRoundTrip|CtorArrayThisSpillPreservesEarlierArgumentOrder|CtorDelegationNestedArrayTempRoundTrip|CtorDelegationArgumentSpills|SuperDelegationTrailingArgumentSpills|SuperDelegationSpillAcrossSafePostSuperPrelude|ConditionalThisCtorCheckcastRoundTrip|TernaryCheckcastInvocationReceiverRoundTrip|CtorNPECheckBeforeThis|EnumArrayConstructorArgsRoundTrip|EnumClinit|ZxingEnum|GenericNull|GenericFieldElementOpsRoundTrip|GenericFunctionalThrows|GenericFunctionalValueKeepsErasedCallDescriptor|MaterializedBiFunctionErasureRoundTrip|SameClassBiFunctionTypeVariablesRoundTrip|SameClassFunctionAndSupplierErasureRoundTrip|SiblingClassFunctionalErasureRoundTrip|ChainedSiblingReturnFunctionalErasureRoundTrip|LowerBoundedFunctionalArgumentsRoundTrip|CapturedLowerBoundedFunctionalArgumentsRoundTrip|CapturedParameterizedLowerBoundRoundTrip|LambdaCaptureCopiesStayInsideGenericMethod|ClassCacheTernaryStoreRoundTrip|MapCacheTernaryLocalRoundTrip|ImmediateZeroArgCheckcastInvoke|NonConditionalForkDiamond|InheritedJDK|InvocationMetadata|JDKListNull|MemberLedger|MethodReferenceKeepsPolyTargetTypeRoundTrip|DirectoryStreamFilterKeepsInstantiatedMethodRefTypeRoundTrip|T04ExternalOverloadBindingRoundTrip|LogbackPutUninterruptibly|ProtobufRemainingReconstructs|ProtobufLazyStringArrayListThis|PublicSuffixDatabase|ThisCtorOverloadCast|GenericVarargsConstructorArrayRoundTrip|ShiftedThisCtorGenericArrayRoundTrip|ConditionalArrayCloneStoreRoundTrip|ToListSingleCallableCast|JacksonRemainingMapEntryDeserializerCast|JoinStreamCtorCast|RawGenericReceiver|SyntaxObservation|RetryRollback|ShadowBuilder|ShadowIRRunsFrameSSAAndLowering|T11_C01|Sentinels|Request|R06|T04|T05|T06|T07|T08|T18|T19|T27|TaskT20|TernaryCheckcastMergeRoundTrip|SelfCastNullMergeRoundTrip|ShortCircuitVarargsArraysRoundTrip|SharedFalseTargetFallthroughRoundTrip)'
         run: |
           set -o pipefail
           mkdir -p artifacts
           go test ./classparser -c -o "$RUNNER_TEMP/adversarial.test"
-          # Disjoint parent groups run concurrently on the same pinned JDK. Four
+          # Twelve disjoint shards leave headroom for slower runners under the fixed deadline.
+          # Parent groups run concurrently on the same pinned JDK. Four
           # serial processes per shard isolate environment-changing tests.
           # Exact original parent and nested-policy inventories remain checked;
           # the required summary waits for every shard and the40trusted fixtures.
           python3 - <<'PYTHON'
           import concurrent.futures, json, os, pathlib, re, shutil, signal, subprocess, sys, time
-          from tools.ci_scheduler.shard import source_parent_shards
+          from tools.ci_scheduler.shard import source_parent_batches, source_parent_shards
           binary = str(pathlib.Path(os.environ["RUNNER_TEMP"]) / "adversarial.test")
           names = sorted(set(line for line in subprocess.check_output(
               [binary, "-test.list", "^TestAdversarial|" + os.environ["EDGE_TEST_PATTERN"]], text=True, cwd="classparser").splitlines()
@@ -93,7 +98,7 @@ jobs:
           if heavy not in names or not scopes or len(scopes) != len(set(scopes)):
               raise SystemExit("incomplete nested-capture scope inventory")
           shard, count = int(os.environ["SOURCE_SHARD"]), int(os.environ["SOURCE_SHARDS"])
-          if count != 6 or not 0 <= shard < count:
+          if count != 12 or not 0 <= shard < count:
               raise SystemExit("invalid source regression shard")
           all_ordinary = [name for name in names if name != heavy]
           # Measured costs affect placement only. The binary's complete test
@@ -106,7 +111,9 @@ jobs:
           if not ordinary or not selected_scopes:
               raise SystemExit("empty source regression shard")
           groups = [{"scopes": selected_scopes[index:index+5]} for index in range(0, len(selected_scopes), 5)]
-          groups += [{"parents": lane.items} for lane in selected_lanes]
+          # Keep each parent atomic, but let idle workers take another bounded
+          # batch instead of waiting on one underestimated, fixed lane.
+          groups += [{"parents": batch.items} for batch in source_parent_batches(ordinary, hints)]
           if sorted(name for group in groups for name in group.get("parents", [])) != sorted(ordinary):
               raise SystemExit("source parent inventory mismatch")
           # Concurrent evidence must not mutate the source fingerprint checked
@@ -145,6 +152,11 @@ jobs:
                       except ProcessLookupError:
                           pass
                       process.wait()
+                      output.write("SOURCE_PHASE_DEADLINE_EXPIRED: " +
+                                   json.dumps({"batch": index + 1,
+                                               "parents": (group or {}).get("parents", [heavy]),
+                                               "scopes": (group or {}).get("scopes", [])}) + "\n")
+                      output.flush()
                       result = 1
               return path, result
           failed = False
@@ -163,6 +175,9 @@ jobs:
                   if row.get("Test") and row.get("Action") in ("pass", "fail", "skip"):
                       terminal.append(row)
           parents = [row for row in terminal if "/" not in row["Test"]]
+          for row in terminal:
+              if row["Action"] == "fail":
+                  print("SOURCE_TEST_FAILED: " + row["Test"])
           leaves = [row for row in terminal if row["Test"].startswith(heavy+"/") and row["Test"].count("/") == 3]
           expected = {heavy+"/"+scope+"/"+debug+"/"+policy for scope in selected_scopes
                       for debug in ("none", "source,lines,vars")
@@ -227,12 +242,23 @@ jobs:
           test -s "$RUNNER_TEMP/fixture-java/javac.jsa"
           printf '#!/bin/sh\nexec "%s" -J-XX:-UsePerfData -J-XX:TieredStopAtLevel=1 -J-XX:+UseSerialGC -J-XX:ActiveProcessorCount=1 "-J-XX:SharedArchiveFile=%s" "$@"\n' "$(command -v javac)" "$RUNNER_TEMP/fixture-java/javac.jsa" > "$RUNNER_TEMP/fixture-java/javac"
           printf '#!/bin/sh\nexec "%s" -XX:-UsePerfData -XX:TieredStopAtLevel=1 -XX:+UseSerialGC -XX:ActiveProcessorCount=1 "$@"\n' "$(command -v java)" > "$RUNNER_TEMP/fixture-java/java"
-          chmod +x "$RUNNER_TEMP/fixture-java/javac" "$RUNNER_TEMP/fixture-java/java"
+          # Apply the same startup budget to the retained javac8 compiler.
+          # This changes JVM scheduling only, not source targets or class bytes.
+          printf '#!/bin/sh\nexec "%s" -J-XX:-UsePerfData -J-XX:TieredStopAtLevel=1 -J-XX:+UseSerialGC -J-XX:ActiveProcessorCount=1 "$@"\n' "$JAVA8_JAVAC" > "$RUNNER_TEMP/fixture-java/javac8"
+          chmod +x "$RUNNER_TEMP/fixture-java/javac" "$RUNNER_TEMP/fixture-java/java" "$RUNNER_TEMP/fixture-java/javac8"
+          echo "JAVA8_JAVAC=$RUNNER_TEMP/fixture-java/javac8" >> "$GITHUB_ENV"
           echo "$RUNNER_TEMP/fixture-java" >> "$GITHUB_PATH"
       - name: Build
         run: go build ./...
       - name: Core algorithm and resource-guard tests (race)
-        run: go test ./classparser/decompiler/core/... ./classparser/decompiler/rewriter/... ./internal/workbudget ./internal/jdecenv -race -count=1 -timeout=3m
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          go test -json ./classparser/decompiler/core/... ./classparser/decompiler/rewriter/... ./internal/workbudget ./internal/jdecenv ./internal/filesys -race -count=1 -timeout=3m | tee artifacts/core-algorithm-tests.jsonl
+      - name: Rebuilt JAR runtime selection regression
+        run: |
+          set -o pipefail
+          go test -json ./test/cross -run '^(TestRebuiltJarRuntimeSelectionPreservesOriginalAuthority|TestRebuiltJarRejectsUnknownMetadataAndKeepsPlainPacking)$' -count=1 -timeout=2m | tee artifacts/rebuilt-jar-runtime-tests.jsonl
       - name: Trusted original and rebuilt algorithm round trips
         run: |
           evidence="$RUNNER_TEMP/algorithm-regression-evidence"
@@ -250,8 +276,8 @@ jobs:
         run: python3 -m unittest discover -s ci/task_t29
       - name: Historical diagnostic-key regression
         run: python3 -m unittest ci.task_t30.test_t30_historical_diagnostics
-      - name: Declaration metadata reader regression
-        run: python3 -m unittest discover -s classparser -p test_jdk_metadata_catalog_generate.py
+      - name: Platform declaration and original-code generator regression
+        run: python3 -m unittest discover -s classparser -p 'test_jdk*generate.py'
       - name: Roundtrip evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

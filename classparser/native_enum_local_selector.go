@@ -258,7 +258,7 @@ func (c *ClassObjectDumper) nativeTypedLocalReads(method *MemberInfo, code *Code
 		}
 		width := word.Width()
 		referenceAssignable := false
-		if len(domains) == 1 && word.Kind == frametransfer.Ref && callbinding.Reference(domains[0].descriptors[int(record.PC)]) {
+		if len(domains) == 1 && (word.Kind == frametransfer.Ref || word.Kind == frametransfer.Null) && callbinding.Reference(domains[0].descriptors[int(record.PC)]) {
 			descriptor = domains[0].descriptors[int(record.PC)]
 			referenceAssignable = true
 		}
@@ -292,7 +292,7 @@ func (c *ClassObjectDumper) nativeTypedLocalReads(method *MemberInfo, code *Code
 			value := stored.Before.Stack[stackIndex]
 			originIndex := len(stored.Before.Locals) + stackIndex
 			storedOrigin := stored.Uses[0]
-			typedNull := primitiveWords && word.Kind == frametransfer.Ref && value.Kind == frametransfer.Null && width == 1
+			typedNull := primitiveWords && (word.Kind == frametransfer.Ref || word.Kind == frametransfer.Null) && value.Kind == frametransfer.Null && width == 1
 			if !typedNull && (value.Kind != word.Kind || !referenceAssignable && value.Class != word.Class) || core.LocalAccessOf(store.Opcode).Width != width || stored.BeforeOrigins[originIndex] != storedOrigin || storedOrigin.Kind != ssabuild.OriginInstr && storedOrigin.Kind != ssabuild.OriginParam && storedOrigin.Kind != ssabuild.OriginPhi {
 				valid = false
 				break

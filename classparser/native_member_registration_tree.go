@@ -1,6 +1,7 @@
 package javaclassparser
 
 import (
+	"crypto/sha256"
 	"sort"
 	"strings"
 
@@ -19,6 +20,7 @@ type nativeMemberRegistrationScope struct {
 }
 
 type nativeMemberRegistrationTreeNode struct {
+	owner  string
 	source string
 	events []nativeAccessorSourceEvent
 	child  *nativeMemberRegistrationTree
@@ -31,7 +33,11 @@ type nativeMemberRegistrationTree struct {
 }
 
 func nativeMemberRegistrationTreeLayout(p *nativeMemberFamily, source string, members []string, work *workbudget.Budget, memberOwners []string) (string, bool) {
-	if p == nil || p.failed {
+	if p == nil {
+		return "", false
+	}
+	p.registrationPublication = nil
+	if p.failed {
 		return "", false
 	}
 	constructors, known := nativeMemberConstructorRegistrations(p, work)
@@ -73,7 +79,11 @@ func nativeMemberRegistrationTreeLayout(p *nativeMemberFamily, source string, me
 			if !ok {
 				return nil, false
 			}
-			tree.fixed = append(tree.fixed, n)
+			if scope.owner == p.owner && len(n.events) != 0 && p.registrationMethods[strings.TrimSpace(text)] {
+				tree.members = append(tree.members, n)
+			} else {
+				tree.fixed = append(tree.fixed, n)
+			}
 		}
 		seen := map[string]bool{}
 		for i, text := range scope.members {
@@ -91,6 +101,7 @@ func nativeMemberRegistrationTreeLayout(p *nativeMemberFamily, source string, me
 			if !ok {
 				return nil, false
 			}
+			n.owner = name
 			if child := p.registrationLayouts[name]; child != nil {
 				if child.owner != name || child.declaration != text {
 					return nil, false
@@ -159,6 +170,8 @@ func nativeMemberRegistrationTreeLayout(p *nativeMemberFamily, source string, me
 	attempts := 0
 	exhausted := false
 	type continuation func(string, *nativeAccessorOrderState) bool
+	pending := map[string]nativeMemberRegistrationReceipt{}
+	var committed map[string]nativeMemberRegistrationReceipt
 	var visit func(*nativeMemberRegistrationTree, *nativeAccessorOrderState, continuation) bool
 	visit = func(tree *nativeMemberRegistrationTree, initial *nativeAccessorOrderState, done continuation) bool {
 		var path []string
@@ -185,6 +198,13 @@ func nativeMemberRegistrationTreeLayout(p *nativeMemberFamily, source string, me
 			}
 			try := func(n nativeMemberRegistrationTreeNode, next int, bits string, count int) bool {
 				resume := func(text string, updated *nativeAccessorOrderState) bool {
+					if n.owner != "" {
+						if _, duplicate := pending[n.owner]; duplicate {
+							return false
+						}
+						pending[n.owner] = nativeMemberRegistrationReceipt{object: p.children[n.owner].object, before: n.source, after: text}
+						defer delete(pending, n.owner)
+					}
 					at := len(path)
 					path = append(path, text)
 					passed := search(next, bits, count, updated)
@@ -225,10 +245,21 @@ func nativeMemberRegistrationTreeLayout(p *nativeMemberFamily, source string, me
 		if len(order.getters) != len(p.getters) || len(order.constructors) != len(constructors) {
 			return false
 		}
+		if work != nil && work.CheckAlloc(int64(len(pending))*128+128) != nil {
+			return false
+		}
+		committed = make(map[string]nativeMemberRegistrationReceipt, len(pending))
+		for name, receipt := range pending {
+			committed[name] = receipt
+		}
 		result = text
 		return true
 	}) {
 		return "", false
 	}
-	return result, nativeMemberPrivateGetterSourceClosed(p, result, work)
+	if !nativeMemberPrivateGetterSourceClosed(p, result, work) || !nativeProofWork(work, int64(len(result))+1) {
+		return "", false
+	}
+	p.registrationPublication = &nativeMemberRegistrationPublication{sourceHash: sha256.Sum256([]byte(result)), members: committed}
+	return result, true
 }

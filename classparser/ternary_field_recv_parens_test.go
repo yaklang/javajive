@@ -627,23 +627,11 @@ func TestFixSyncHelperCasReturnIsLoadBearing(t *testing.T) {
 	}
 }
 
+// Retain the regression entry point, but validate original JVM behavior rather
+// than requiring the former fabricated throw and swallowing catch. A source
+// name never grants permission to replace the original exception handler.
 func TestFixMonitorInterruptedTryIsLoadBearing(t *testing.T) {
-	in := " class Monitor {\n" +
-		"\t\t\t\tdo{\n\t\t\t\t\ttry{\n\t\t\t\t\t\tbreak;\n\t\t\t\t\t}catch(InterruptedException var8){\n\t\t\t\t\t\tvar5 = true;\n\t\t\t\t\t}\n\t\t\t\t} while (true);\n" +
-		"\t\t\t\tboolean var8 = var4.tryLock(var7,TimeUnit.NANOSECONDS);\n"
-	os.Unsetenv("JDEC_MONITOR_IE_TRY_OFF")
-	on := fixMonitorInterruptedTry(in)
-	if !strings.Contains(on, "if(false)throw new InterruptedException()") {
-		t.Errorf("fix ON: expected IE inject, got:\n%s", on)
-	}
-	if !strings.Contains(on, "catch(InterruptedException var8_ie)") {
-		t.Errorf("fix ON: expected wrapped tryLock, got:\n%s", on)
-	}
-	t.Setenv("JDEC_MONITOR_IE_TRY_OFF", "1")
-	off := fixMonitorInterruptedTry(in)
-	if strings.Contains(off, "if(false)throw new InterruptedException()") {
-		t.Errorf("fix OFF: expected no rewrite, got:\n%s", off)
-	}
+	testInterruptRetryOwnership(t, "Monitor", "await")
 }
 
 func TestFixAbstractServiceFinallyIsLoadBearing(t *testing.T) {

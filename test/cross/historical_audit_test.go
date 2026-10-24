@@ -41,6 +41,20 @@ type historicalJarObservation struct {
 	RebuiltClasses                                                           []string
 	Seconds                                                                  float64
 	Completed                                                                bool
+	CompilerMetadata                                                         *historicalArtifactMetadata `json:",omitempty"`
+}
+
+func historicalRebuiltClassInventory(jar *zip.Reader) []string {
+	// An inspected archive has a known inventory, even when no class was
+	// rebuilt. Encode that as [] rather than null; success stays independent.
+	names := make([]string, 0)
+	for _, entry := range jar.File {
+		if strings.HasSuffix(entry.Name, ".class") {
+			names = append(names, entry.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 func historicalWrite(t *testing.T, path string, value any) {
@@ -154,7 +168,22 @@ func TestHistoricalJarAudit(t *testing.T) {
 			}
 			cp := withEnvShims(t, strings.Join(input.Deps, string(os.PathListSeparator)))
 			srcRoot := filepath.Join(dir, "sources")
-			files, units, fail := decompileAllWithResolverAtSourceVersion(t, input.Path, srcRoot, 0, historicalDeclarationResolver(t, input.Deps), compileRelease(jarSpecs[name], input.Path))
+			target := compileRelease(jarSpecs[name], input.Path)
+			resolve := historicalDeclarationResolver(t, input.Deps)
+			policy := "plain"
+			if os.Getenv("HISTORICAL_JAR_RECONSTRUCTION_ARTIFACT") == "1" {
+				if os.Getenv("HISTORICAL_JAR_SOURCE_ARTIFACT") == "1" {
+					t.Fatal("select exactly one artifact contract")
+				}
+				policy = "reconstruction"
+			} else if os.Getenv("HISTORICAL_JAR_SOURCE_ARTIFACT") == "1" {
+				policy = "source"
+			}
+			plan := historicalRenderAtCompilerTarget(t, input.Path, srcRoot, target, policy, resolve)
+			defer plan.close()
+			files, units, fail := plan.files, plan.units, plan.failures
+			artifact, reconstruction := plan.artifact, plan.reconstruction
+			target = plan.target
 			o.SourceUnits = units
 			o.DecompileFailures = fail
 			for _, f := range files {
@@ -172,7 +201,7 @@ func TestHistoricalJarAudit(t *testing.T) {
 			}
 			clsRoot := filepath.Join(dir, "classes")
 			var raw string
-			o.CompilerErrors, raw, o.CompilePasses = historicalTreeCompile(t, files, cp, clsRoot, compileRelease(jarSpecs[name], input.Path))
+			o.CompilerErrors, raw, o.CompilePasses = historicalTreeCompile(t, files, cp, clsRoot, target)
 			if err := os.WriteFile(filepath.Join(dir, "javac.log"), []byte(raw), 0644); err != nil {
 				t.Fatal(err)
 			}
@@ -185,19 +214,28 @@ func TestHistoricalJarAudit(t *testing.T) {
 			if err := os.MkdirAll(clsRoot, 0755); err != nil {
 				t.Fatal(err)
 			}
+			if artifact != nil || reconstruction != nil {
+				var err error
+				if reconstruction != nil {
+					o.CompilerMetadata, err = historicalFinishArtifactClasses("explicit-reconstruction-artifact-v1", reconstruction.FinishClass, clsRoot, filepath.Join(dir, "rejected-classes"))
+				} else {
+					o.CompilerMetadata, err = historicalRestoreArtifactMetadata(artifact, clsRoot, filepath.Join(dir, "rejected-classes"))
+				}
+				if err != nil {
+					t.Fatal("compiled metadata tree", err)
+				}
+				if len(o.CompilerMetadata.Failures) != 0 {
+					o.CompileSucceeded = false
+				}
+			}
 			repackaged := filepath.Join(dir, "rebuilt.jar")
-			zipClassesToJar(t, clsRoot, repackaged)
+			zipRecompiledClassesToJar(t, clsRoot, repackaged, input.Path)
 			zr, err := zip.OpenReader(repackaged)
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, f := range zr.File {
-				if strings.HasSuffix(f.Name, ".class") {
-					o.RebuiltClasses = append(o.RebuiltClasses, f.Name)
-				}
-			}
+			o.RebuiltClasses = historicalRebuiltClassInventory(&zr.Reader)
 			zr.Close()
-			sort.Strings(o.RebuiltClasses)
 			if len(o.RebuiltClasses) == 0 {
 				o.CompileSucceeded = false
 			}
@@ -224,14 +262,7 @@ func historicalTreeCompile(t *testing.T, files []string, classpath, outDir strin
 		minRelease = 8
 	}
 	base, versioned, releases := splitMRFiles(files)
-	var base8, j9 []string
-	for _, f := range base {
-		if isJava9SslAlpnFile(f) {
-			j9 = append(j9, f)
-		} else {
-			base8 = append(base8, f)
-		}
-	}
+
 	run := func(fs []string, release int, dst, cp, sourcepath string) string {
 		if len(fs) == 0 {
 			return ""
@@ -267,24 +298,14 @@ func historicalTreeCompile(t *testing.T, files []string, classpath, outDir strin
 		passes = append(passes, historicalCompilePass{Release: release, Sources: len(fs), ExitCode: exitCode})
 		return string(out)
 	}
-	// okhttp Android10Platform calls Java 9 SSL ALPN methods directly (Android SDK 29 /
-	// @IgnoreJRERequirement). It is referenced by Platform.findAndroidPlatform in the BASE
-	// tree, so it cannot be a second pass (Platform.java would then fail with "cannot find
-	// symbol: class Android10Platform"). Compile the whole base tree at --release 9 instead.
-	baseRelease := minRelease
-	if len(j9) > 0 {
-		if baseRelease < 9 {
-			baseRelease = 9
-		}
-		base8 = append(base8, j9...)
-	}
-	if len(base8) > 0 {
-		raw = run(base8, baseRelease, outDir, classpath, "")
+	baseRelease := historicalBaseCompileTarget(files, minRelease)
+	if len(base) > 0 {
+		raw = run(base, baseRelease, outDir, classpath, "")
 	}
 	mrSrc := ""
 	if len(releases) > 0 {
 		srcRoot := ""
-		for _, f := range base8 {
+		for _, f := range base {
 			slash := filepath.ToSlash(f)
 			if strings.Contains(slash, "/META-INF/") {
 				continue

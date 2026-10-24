@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/yaklang/javajive/internal/utils"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 type ClassParser struct {
@@ -11,6 +12,10 @@ type ClassParser struct {
 	classObj  *ClassObject
 	attrCtx   attrContext
 	annoDepth int
+	// Optional offsets for metadata-only edits of an already compiled class.
+	// Ordinary parsing retains no byte positions or additional member map.
+	fieldFlagOffsets map[*MemberInfo]int
+	metadataLayout   *compiledMetadataLayout
 }
 
 func NewClassParser(data []byte) *ClassParser {
@@ -95,6 +100,9 @@ func (this *ClassParser) Parse() (*ClassObject, error) {
 	this.classObj.Methods = methods
 	this.reader.SetStage("class_attributes", "count")
 	this.attrCtx = attrCtxClass
+	if this.metadataLayout != nil {
+		this.metadataLayout.classAttributesStart = this.reader.Offset()
+	}
 	this.classObj.Attributes = this.readAttributes()
 	if err := this.reader.Err(); err != nil {
 		return nil, err
@@ -116,6 +124,16 @@ func (this *ClassParser) readMembers() ([]*MemberInfo, error) {
 	if !this.reader.reserve(int64(memberCount), 8) {
 		return nil, this.reader.Err()
 	}
+	if this.fieldFlagOffsets != nil && this.attrCtx == attrCtxField {
+		// Map storage is an allocation, not a larger on-disk field_info.
+		// A valid field can contain only its eight-byte fixed header.
+		if !this.reader.failWork(this.reader.work.CheckAlloc(int64(memberCount)*32)) || !this.reader.failWork(this.reader.work.Charge(workbudget.CounterParseItems, int64(memberCount))) {
+			return nil, this.reader.Err()
+		}
+	}
+	if this.metadataLayout != nil && !this.reader.failWork(this.reader.work.CheckAlloc(int64(memberCount)*48)) {
+		return nil, this.reader.Err()
+	}
 	members := make([]*MemberInfo, memberCount)
 	for i := range members {
 		members[i] = this.readMember()
@@ -126,12 +144,20 @@ func (this *ClassParser) readMembers() ([]*MemberInfo, error) {
 	return members, nil
 }
 func (this *ClassParser) readMember() *MemberInfo {
-	return &MemberInfo{
+	offset := this.reader.Offset()
+	member := &MemberInfo{
 		AccessFlags:     this.reader.readUint16(),
 		NameIndex:       this.reader.readUint16(),
 		DescriptorIndex: this.reader.readUint16(),
 		Attributes:      this.readAttributes(),
 	}
+	if this.fieldFlagOffsets != nil && this.attrCtx == attrCtxField {
+		this.fieldFlagOffsets[member] = offset
+	}
+	if this.metadataLayout != nil && this.attrCtx == attrCtxMethod {
+		this.metadataLayout.methods[member] = compiledMetadataSpan{offset, this.reader.Offset()}
+	}
+	return member
 }
 func (this *ClassParser) readAttributes() []AttributeInfo {
 	attributesCount := this.reader.readUint16()
@@ -152,6 +178,7 @@ func (this *ClassParser) readAttributes() []AttributeInfo {
 	return attributes
 }
 func (this *ClassParser) readAttribute(seen map[string]int) AttributeInfo {
+	start, context := this.reader.Offset(), this.attrCtx
 	this.reader.SetStage("attribute", "name_index")
 	attributeNameIndex := this.reader.readUint16()
 	if err := this.reader.Err(); err != nil {
@@ -187,6 +214,12 @@ func (this *ClassParser) readAttribute(seen map[string]int) AttributeInfo {
 	attrInfo.readInfo(this)
 	this.reader = parent
 	requireKnownAttrExactEnd(sub, attrInfo, attrName)
+	if this.metadataLayout != nil && context == attrCtxClass {
+		if inner, ok := attrInfo.(*InnerClassesAttribute); ok {
+			this.metadataLayout.innerClasses = inner
+			this.metadataLayout.innerClassSpan = compiledMetadataSpan{start, parent.Offset()}
+		}
+	}
 	return attrInfo
 }
 
@@ -230,9 +263,16 @@ func (this *ClassParser) readConstantPool() error {
 		return this.reader.Err()
 	}
 	cp := make([]ConstantInfo, cpCount-1)
+	if this.metadataLayout != nil {
+		if !this.reader.failWork(this.reader.work.CheckAlloc(int64(cpCount-1) * 16)) {
+			return this.reader.Err()
+		}
+		this.metadataLayout.constants = make([]compiledMetadataSpan, cpCount-1)
+	}
 
 	//索引从1开始，这里用了 <cpCount 说明index是从1到cpCount-1 及上文的1 ~ n-1
 	for i := 0; i < cpCount-1; i++ {
+		start := this.reader.Offset()
 		constantInfo, err := this.readConstantInfo()
 		if err != nil {
 			return err
@@ -241,6 +281,9 @@ func (this *ClassParser) readConstantPool() error {
 			return err
 		}
 		cp[i] = constantInfo
+		if this.metadataLayout != nil {
+			this.metadataLayout.constants[i] = compiledMetadataSpan{start, this.reader.Offset()}
+		}
 		switch cp[i].(type) {
 		case *ConstantLongInfo, *ConstantDoubleInfo:
 			//占两个位置
@@ -251,6 +294,9 @@ func (this *ClassParser) readConstantPool() error {
 		return err
 	}
 	this.classObj.ConstantPool = cp
+	if this.metadataLayout != nil {
+		this.metadataLayout.poolEnd = this.reader.Offset()
+	}
 	return nil
 }
 func (this *ClassParser) readConstantInfo() (ConstantInfo, error) {

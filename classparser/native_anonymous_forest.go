@@ -12,6 +12,7 @@ import (
 // Anonymous THIS stays unnameable. A read can only end at a proved lexical
 // capture whose complete original dereference chain javac regenerates.
 type nativeAnonymousForest struct {
+	locals            map[string]*nativeMethodLocalClass
 	root              string
 	groups            map[string]*nativeAnonymousFamily
 	units             map[string]*nativeAnonymousClass
@@ -23,6 +24,7 @@ type nativeAnonymousForest struct {
 	members           *nativeMemberFamily
 	lexicalThis       map[string]map[string]map[int]bool
 	consumers         map[string]map[string]map[int]*nativeAnonymousLexicalConsumer
+	memberEnclosing   map[string]map[string]map[int]*nativeAnonymousMemberEnclosing
 	resolve           func(string) (*ClassObject, bool)
 }
 
@@ -35,7 +37,12 @@ func (c *ClassObjectDumper) planNativeAnonymousForest() *nativeAnonymousFamily {
 }
 
 func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemberFamily) *nativeAnonymousForest {
-	if c.foldSiblingResolver == nil || !nativeAnonymousForestVersion(c.obj, c.Work) || !nativeMemberTopLevelEvidence(c.obj, c.Work) {
+	if c.foldSiblingResolver == nil || !nativeAnonymousForestVersion(c.obj, c.Work) {
+		return nil
+	}
+	// A certified static cut is a source boundary with its own lexical scope.
+	// Its physical outer supplies original metadata, never this forest's members.
+	if !nativeMemberTopLevelEvidence(c.obj, c.Work) && (members == nil || members.owner != c.obj.GetClassName() || members.independentRoot == nil || !members.independentRoot.validFor(c) || !members.independentRoot.familyClosed(members, c.Work)) {
 		return nil
 	}
 	if _, _, anon := originalAnonymousOwner(c.obj); anon {
@@ -45,7 +52,7 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 	if !nestKnown {
 		return nil
 	}
-	forest := &nativeAnonymousForest{root: c.obj.GetClassName(), groups: map[string]*nativeAnonymousFamily{}, units: map[string]*nativeAnonymousClass{}, objects: map[string]*ClassObject{c.obj.GetClassName(): c.obj}, reads: map[string]map[string]map[int]*nativeMemberLexicalRead{}, readPCs: map[string]map[string]map[int]bool{}, anonymousTypes: map[string]bool{}, captureReferences: map[string]map[int]*nativeMemberLexicalRead{}, members: members, resolve: c.nativeAnnotationDeclarationResolver(), consumers: map[string]map[string]map[int]*nativeAnonymousLexicalConsumer{}, lexicalThis: map[string]map[string]map[int]bool{}}
+	forest := &nativeAnonymousForest{locals: map[string]*nativeMethodLocalClass{}, root: c.obj.GetClassName(), groups: map[string]*nativeAnonymousFamily{}, units: map[string]*nativeAnonymousClass{}, objects: map[string]*ClassObject{c.obj.GetClassName(): c.obj}, reads: map[string]map[string]map[int]*nativeMemberLexicalRead{}, readPCs: map[string]map[string]map[int]bool{}, anonymousTypes: map[string]bool{}, captureReferences: map[string]map[int]*nativeMemberLexicalRead{}, members: members, resolve: c.nativeAnnotationDeclarationResolver(), consumers: map[string]map[string]map[int]*nativeAnonymousLexicalConsumer{}, lexicalThis: map[string]map[string]map[int]bool{}}
 	committed := false
 	if members != nil {
 		originalChildren, originalObjects := members.children, members.lexicalObjects
@@ -99,6 +106,22 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 			}
 			forest.objects[name] = child.object
 			queue = append(queue, child.object)
+		}
+		// Retain the original method-local identity,
+		// with no member-class or anonymous capability for the local itself.
+		for name, local := range members.methodLocals {
+			if local == nil || local.object == nil || members.lexicalObjects[name] != local.object || local.object.GetClassName() != name || !nativeAnonymousForestVersion(local.object, c.Work) || !nativeProofWork(c.Work, 1) || c.Work != nil && c.Work.CheckAlloc(int64(len(forest.objects)+1)*512) != nil {
+				return nil
+			}
+			if _, valid := nativeMemberJointMethodLocalOwner(members, local.object, c.Work); !valid {
+				return nil
+			}
+			if forest.objects[name] != nil {
+				return nil
+			}
+			forest.locals[name] = local
+			forest.objects[name] = local.object
+			queue = append(queue, local.object)
 		}
 		// Enum bodies participate in the same source closure (including
 		// private-constructor marker descriptors). Their allocations already
@@ -184,7 +207,7 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 	if members != nil {
 		for name, child := range members.children {
 			source, known := members.sourceName(name)
-			if !known || !nativeMemberSiblingSuperClosed(child, members, c.Work, c.buildInvocationMetadata()) {
+			if !known || !nativeMemberSiblingSuperClosed(child, members, c.Work, c.nativeConstructorOperandMetadata(c.buildInvocationMetadata())) {
 				return nil
 			}
 			child.sourceName = source
@@ -216,7 +239,12 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 			return nil
 		}
 	}
-	if !nativeAnonymousForestCaptureReads(forest, c.Work, c.buildInvocationMetadata()) || !nativeAnonymousForestSymbolClosure(forest, c.Work) {
+	if !nativeAnonymousForestCaptureReads(forest, c.Work, c.buildInvocationMetadata()) {
+
+		return nil
+	}
+	if !nativeAnonymousForestSymbolClosure(forest, c.Work) {
+
 		return nil
 	}
 	for owner, group := range forest.groups {
@@ -226,13 +254,20 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 		reader.foldSiblingResolver = c.foldSiblingResolver
 		reader.declarationResolver = c.declarationResolver
 		if reader.validateNativeAnonymousGroup(group, members, forest) == nil {
+
 			return nil
 		}
 	}
 	if !nativeAnonymousForestOpcodeClosure(forest, c.Work, c.nativeAnnotationDeclarationResolver()) {
+
 		return nil
 	}
 	if !nativeModernNestSourceScopeClosed(modernNest, forest.objects, c.Work) {
+
+		return nil
+	}
+	if !nativeMemberPrivatePermissionClosed(&nativeMemberFamily{owner: forest.root, lexicalObjects: forest.objects, modernNestObjects: modernNest}, forest.resolve, c.Work, c.nativePrivatePermissionPlatformParents()) {
+
 		return nil
 	}
 	committed = true
@@ -276,6 +311,14 @@ func (c *ClassObjectDumper) nativeAnonymousForestHasChildren(members *nativeMemb
 					if members != nil && members.emptyMarkers[name] != nil && nativeMemberEmptyAccessMarker(object, members.owner, c.Work) {
 						continue
 					}
+					if members != nil {
+						if _, table := members.enumSwitchTables[name]; table {
+							if !c.nativeMemberEnumSwitchAnonymousRole(members, object) {
+								return false, false
+							}
+							continue
+						}
+					}
 					// Constant-specific enum classes also have unnamed rows and
 					// EnclosingMethod metadata. Their source role belongs to the
 					// independently proved enum allocation, not to an anonymous
@@ -294,6 +337,9 @@ func (c *ClassObjectDumper) nativeAnonymousForestHasChildren(members *nativeMemb
 // Only an exact owned child constructor can license its anonymous-parent type
 // in a CP descriptor. Handles/dynamic/interface reuse of the same NT is refused.
 func nativeAnonymousForestConstructorNameType(object *ClassObject, index int, forest *nativeAnonymousForest, work *workbudget.Budget) bool {
+	if nativeAnonymousForestSharedConstructorNameType(object, index, forest, work) {
+		return true
+	}
 	if nativeAnonymousForestNamedEnclosingNameType(forest, object, index, work) {
 		return true
 	}

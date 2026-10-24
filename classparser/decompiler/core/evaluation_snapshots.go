@@ -16,8 +16,9 @@ type EvaluationSnapshot struct {
 	Value    values.JavaValue
 	OriginPC int
 	Operand  bool
-	// Call-site descriptor type, used only for a proved constant-null copy.
-	ExpectedType types.JavaType
+	// Original call-site descriptor type, separate from a solved source web.
+	ExpectedType  types.JavaType
+	lambdaCapture bool
 }
 
 func (d *Decompiler) snapshotDynamicOperands(op *OpCode, sim StackSimulation, args []values.JavaValue, parameters []types.JavaType) ([]values.JavaValue, error) {
@@ -61,6 +62,13 @@ func (d *Decompiler) refreshReferenceOperandSnapshotTypes() bool {
 			if !snapshot.Operand || snapshot.Ref == nil {
 				continue
 			}
+			if _, target, known := snapshot.Ref.OriginalDynamicOperandSourceView(snapshot.Value); known {
+				if !reflect.DeepEqual(snapshot.Ref.Type().RawType(), target.RawType()) {
+					snapshot.Ref.ResetVarType(target.Copy())
+					changed = true
+				}
+				continue
+			}
 			// Constant propagation has proved this operand to be null; the
 			// snapshot may adopt its call-site reference descriptor without a
 			// CHECKCAST. Preserve that capture type in the inlined lambda body
@@ -83,6 +91,9 @@ func (d *Decompiler) refreshReferenceOperandSnapshotTypes() bool {
 			if _, primitive := typ.RawType().(*types.JavaPrimer); primitive {
 				continue
 			}
+			if target, proved := d.lambdaCaptureSnapshotType(snapshot, typ); proved {
+				typ = target
+			}
 			if !reflect.DeepEqual(snapshot.Ref.Type().RawType(), typ.RawType()) {
 				snapshot.Ref.ResetVarType(typ.Copy())
 				changed = true
@@ -93,6 +104,8 @@ func (d *Decompiler) refreshReferenceOperandSnapshotTypes() bool {
 }
 
 func (d *Decompiler) snapshotDynamicResult(op *OpCode, sim StackSimulation, value values.JavaValue) values.JavaValue {
+	d.markLambdaCaptureDescriptorSnapshots(op, value)
+	d.inlineUnchangedLambdaParameterOperands(op, value)
 	if d.canInlineImmediateMethodRef(op, value) {
 		// An explicit target preserves the bootstrap's existing SAM adaptation
 		// even when the consuming declaration is outside this compilation unit.
@@ -107,13 +120,20 @@ func (d *Decompiler) snapshotDynamicResult(op *OpCode, sim StackSimulation, valu
 			// dependency. A forwarding text closure hides its scoped local
 			// binding from namespace and effect visitors.
 			ref.StackVar = source
+			ref.MarkOriginalDynamicOperandInline(int(op.CurrentOffset), source)
 		}
 		delete(d.evaluationSnapshots, op)
 		typed := &values.CastExpression{Value: value, TargetType: value.Type().Copy(), Binding: true, OriginPC: int(op.CurrentOffset)}
 		name, _ := types.RawClassFQN(value.Type())
 		return &values.CastExpression{Value: typed, TargetType: types.NewJavaClass(name), Binding: true, OriginPC: int(op.CurrentOffset)}
 	}
+	d.preserveEarlierLambdaCaptureOperands(op, sim, value)
 	ref := sim.NewVar(value)
+	// This source temporary is the actual eager factory result, not a JVM
+	// local-slot definition. Retain its producer for scoped cleanup matching.
+	if lambda, known := value.(*values.CustomValue); known {
+		ref.MarkOriginalLambdaResult(int(op.CurrentOffset), lambda)
+	}
 	ref.ResetVarType(ref.Type().Copy())
 	d.disFoldRef = append(d.disFoldRef, ref)
 	d.evaluationSnapshots[op] = append(d.evaluationSnapshots[op], EvaluationSnapshot{Ref: ref, Value: value, OriginPC: int(op.CurrentOffset)})
@@ -196,24 +216,58 @@ func (d *Decompiler) canInlineImmediateMethodRef(op *OpCode, value values.JavaVa
 // retains the closure after this call. A parameter with no writes anywhere in
 // the complete opcode stream is stable; arbitrary locals remain snapshots.
 func (d *Decompiler) immutableCaptureParameter(ref *values.JavaRef) bool {
-	if ref.IsThis {
+	if ref != nil && ref.IsThis {
 		return true
 	}
-	if !ref.IsParam || len(d.opCodes) == 0 {
-		return false
+	_, stable := d.unchangedCaptureParameterSlot(ref)
+	return stable
+}
+
+// Read a complete physical parameter layout and every overlapping store. The
+// general metadata-driven elision also compares this slot with its private
+// entry witness; the existing adjacent-consumer domain keeps its own protocol.
+func (d *Decompiler) unchangedCaptureParameterSlot(ref *values.JavaRef) (int, bool) {
+	if d == nil || ref == nil || !ref.IsParam || ref.IsThis || ref.CustomValue != nil || ref.StackVar != nil || len(d.opCodes) == 0 {
+		return -1, false
+	}
+	return d.unchangedCaptureEntrySlot(ref)
+}
+
+func (d *Decompiler) unchangedCaptureReceiverSlot(ref *values.JavaRef) (int, bool) {
+	if d == nil || d.FunctionContext == nil || d.FunctionContext.IsStatic || d.FunctionContext.FunctionName == "<init>" && !d.constructorInitialized {
+		return -1, false
+	}
+	slot, known := ref.OriginalReceiverSlot()
+	if !known || slot != 0 {
+		return -1, false
+	}
+	typ, typed := values.SourceTypeErasure(ref.Type(), d.FunctionContext)
+	if !typed || typ != "L"+normalizeJavaClassName(d.FunctionContext.ClassName)+";" {
+		return -1, false
+	}
+	return d.unchangedCaptureEntrySlot(ref)
+}
+
+func (d *Decompiler) unchangedCaptureEntrySlot(ref *values.JavaRef) (int, bool) {
+	if d == nil || ref == nil || len(d.opCodes) == 0 {
+		return -1, false
 	}
 	slot := -1
+	width := 1
 	index := 0
 	for _, value := range d.Params {
-		param, ok := values.UnpackSoltValue(value).(*values.JavaRef)
+		param, ok := dynamicCaptureSeed(value).(*values.JavaRef)
 		if !ok || param == nil || param.Type() == nil {
-			return false
+			return -1, false
 		}
 		if values.SameLocal(ref, param) {
 			if slot >= 0 {
-				return false
+				return -1, false
 			}
 			slot = index
+			if primitive, ok := param.Type().RawType().(*types.JavaPrimer); ok && (primitive.Name == types.JavaLong || primitive.Name == types.JavaDouble) {
+				width = 2
+			}
 		}
 		index++
 		if primitive, ok := param.Type().RawType().(*types.JavaPrimer); ok && (primitive.Name == types.JavaLong || primitive.Name == types.JavaDouble) {
@@ -221,17 +275,21 @@ func (d *Decompiler) immutableCaptureParameter(ref *values.JavaRef) bool {
 		}
 	}
 	if slot < 0 {
-		return false
+		return -1, false
 	}
 	for _, op := range d.opCodes {
 		if op == nil || op.Instr == nil {
-			return false
+			return -1, false
 		}
-		if LocalAccessOf(op.Instr.OpCode).Write && GetStoreIdx(op) == slot {
-			return false
+		access := LocalAccessOf(op.Instr.OpCode)
+		if access.Write {
+			written := GetStoreIdx(op)
+			if written < 0 || written < slot+width && slot < written+access.Width {
+				return -1, false
+			}
 		}
 	}
-	return true
+	return slot, true
 }
 
 func normalizeJavaClassName(name string) string {

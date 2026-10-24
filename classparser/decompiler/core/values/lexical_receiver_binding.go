@@ -92,7 +92,7 @@ func (f *FunctionCallExpression) lexicalThisReceiver(ctx *class_context.ClassCon
 			if shadowed[name] || !ctx.IsTypeParam(name) {
 				return nil
 			}
-			segments[i].TypeArgs = append(segments[i].TypeArgs, types.NewJavaClass(name))
+			segments[i].TypeArgs = append(segments[i].TypeArgs, types.NewJavaTypeVariable(name))
 			shadowed[name] = true
 		}
 	}

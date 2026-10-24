@@ -2,9 +2,7 @@ package rewriter
 
 import (
 	"github.com/yaklang/javajive/classparser/decompiler/core"
-	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
-	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 )
 
@@ -133,8 +131,7 @@ func recoverPrimaryResourceFinally(tr *statements.TryCatchStatement) (*FinallyRe
 	// javac precise rethrow requires the unchanged catch parameter. The removed
 	// alias has exactly one assignment and one abrupt use, both in this handler.
 	caught := tr.Exception[0]
-	sameThrow := statements.NewCustomStatement(func(ctx *class_context.ClassContext) string { return "throw " + caught.String(ctx) }, func(old, new *utils.VariableId) { caught.ReplaceVar(old, new) })
-	sameThrow.ThrownValue = caught
+	sameThrow := statements.NewThrowStatement(caught)
 	sameThrow.HasOriginPC = true
 	sameThrow.OriginPC = thrown.OriginPC
 	return &FinallyRegion{TryBody: tryBody, Exceptions: tr.Exception[:1], CatchBodies: [][]statements.Statement{{capture, sameThrow}}, Cleanup: []statements.Statement{cleanup}}, true
@@ -157,6 +154,11 @@ func resourceWritesLocal(input []statements.Statement, ref *values.JavaRef) bool
 		seen[st] = true
 		switch x := st.(type) {
 		case *statements.AssignStatement:
+			// A bare source binder has no initializer and performs no JVM write.
+			// Nested return factoring may introduce it before a resource body.
+			if x.IsDeclare && x.JavaValue == nil && finallyCoveredAssignment(x, func(int) bool { return false }) && !sameTryLocal(x.LeftValue, ref) {
+				continue
+			}
 			if sameTryLocal(x.LeftValue, ref) || resourceWritesValue(x.JavaValue, ref) {
 				return true
 			}
@@ -170,6 +172,11 @@ func resourceWritesLocal(input []statements.Statement, ref *values.JavaRef) bool
 			}
 		case *statements.CustomStatement:
 			if x.ThrownValue != nil && resourceWritesValue(x.ThrownValue, ref) {
+				return true
+			}
+		case *statements.SourceAssertionStatement:
+			condition, call, _, known := x.SourceAssertionProtocol()
+			if !known || resourceWritesValue(condition, ref) || resourceWritesValue(call, ref) {
 				return true
 			}
 		case *statements.IfStatement:
@@ -230,6 +237,11 @@ func resourceWritesValue(root values.JavaValue, ref *values.JavaRef) bool {
 			if x.ConstructorCall != nil {
 				queue = append(queue, x.ConstructorCall.Arguments...)
 			}
+		case *values.TernaryExpression:
+			if x == nil {
+				return true
+			}
+			queue = append(queue, x.Condition, x.TrueValue, x.FalseValue)
 		case *values.CastExpression:
 			queue = append(queue, x.Value)
 		case *values.JavaExpression:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Retain original interface declarations from the catalog's pinned primary archives.
+"""Retain indexed original declarations from the catalog's pinned primary archives.
 
 Reads ZIP/classfile data only. Existing constructor entries retain exact bytes.
 The archive map is a JSON object from catalog release to local rt.jar/base.jmod.
@@ -26,8 +26,12 @@ def extend(catalog_path, bundle_path, archives):
         archive = Path(archives[str(release)])
         assert hashlib.sha256(archive.read_bytes()).hexdigest() == p['archive_sha256']
         with zipfile.ZipFile(archive) as source:
-            queue = sorted(n for n, c in p['classes'].items()
-                           if c['IsInterface'] and p['provenance'][n]['archive'] == archive.name)
+            # A declaration-only entry cannot prove its constructor or
+            # finalizer effects. Preserve the same original namespace and
+            # ancestry for classes as for interfaces; membership never grants
+            # a receiver-effect permission in the runtime analyzer.
+            queue = sorted(n for n in p['classes']
+                           if p['provenance'][n]['archive'] == archive.name)
             seen = set()
             while queue:
                 name = queue.pop(0)

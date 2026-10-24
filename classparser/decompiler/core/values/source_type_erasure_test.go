@@ -20,7 +20,7 @@ func TestSourceTypeErasureRequiresExactLexicalBounds(t *testing.T) {
 		{"bound array", "[[TT;", "[[Ljava/lang/CharSequence;", true},
 		{"primitive array", "[[[I", "[[[I", true},
 		{"interface first bound", "TU;", "Ljava/lang/Runnable;", true},
-		{"dependent bound", "TE;", "", false}, {"missing bound", "TUnknown;", "", false},
+		{"dependent bound", "TE;", "Ljava/lang/Number;", true}, {"missing bound", "TUnknown;", "", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			testCtx := *ctx

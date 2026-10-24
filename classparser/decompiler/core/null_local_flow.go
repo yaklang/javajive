@@ -17,6 +17,7 @@ func (d *Decompiler) propagateNullOnlyLocalLoads() {
 	if len(d.ExceptionTable) != 0 {
 		return
 	}
+	protected := d.nullCaptureSourceLoads()
 	webs := d.slotWebs()
 	if webs == nil {
 		return
@@ -120,7 +121,7 @@ func (d *Decompiler) propagateNullOnlyLocalLoads() {
 	}
 	literal := func() values.JavaValue { return values.NewJavaLiteral("null", types.NewJavaClass("java.lang.Object")) }
 	for op, w := range webs.webOf {
-		if !proved[w] || op == nil || op.Instr == nil || !isReferenceLoadOpcode(op.Instr.OpCode) {
+		if !proved[w] || op == nil || op.Instr == nil || !isReferenceLoadOpcode(op.Instr.OpCode) || protected[op] {
 			continue
 		}
 		for _, v := range op.stackProduced {
@@ -132,6 +133,9 @@ func (d *Decompiler) propagateNullOnlyLocalLoads() {
 	for op, snapshots := range d.evaluationSnapshots {
 		for i := range snapshots {
 			if snapshots[i].Operand {
+				if _, _, known := snapshots[i].Ref.OriginalDynamicOperandSourceView(snapshots[i].Value); known {
+					continue
+				}
 				w, known := referenceWeb(snapshots[i].Value)
 				if (known && proved[w]) || values.IsNullLiteral(values.UnpackSoltValue(snapshots[i].Value)) {
 					snapshots[i].Value = literal()
@@ -148,7 +152,7 @@ func (d *Decompiler) propagateNullOnlyLocalLoads() {
 				}
 				op := p.CurrentOpcode
 				w, known := webs.webOf[op]
-				if known && proved[w] && op.Instr != nil && isReferenceLoadOpcode(op.Instr.OpCode) {
+				if known && proved[w] && op.Instr != nil && isReferenceLoadOpcode(op.Instr.OpCode) && !protected[op] {
 					p.Replace(literal())
 				}
 			}

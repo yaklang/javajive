@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// Authored originals, compiled by two real toolchains at Java7/8 source levels.
+// Authored originals, compiled by two real toolchains at Java5 through Java8 source levels.
 // No bytecode metadata is patched or normalized. Candidate classpath excludes
 // every original target.
 func TestAdversarialAnonymousCompilerProfilesRetainOriginalMetadata(t *testing.T) {
@@ -24,7 +24,7 @@ func TestAdversarialAnonymousCompilerProfilesRetainOriginalMetadata(t *testing.T
 			t.Fatalf("native javac8 oracle required: %v %s", err, version)
 		}
 	}
-	for _, compiler := range []string{"modern_release8", "native8", "native7"} {
+	for _, compiler := range []string{"modern_release8", "native8", "native7", "native6", "native5"} {
 		for _, debug := range []string{"none", "source,lines,vars"} {
 			for _, static := range []bool{false, true} {
 				for _, checked := range []bool{false, true} {
@@ -63,9 +63,7 @@ public static void main(String[] args)throws Exception{ProfileTarget owner=new P
 						if native {
 							javac = legacy
 							sourceLevel := "8"
-							if compiler == "native7" {
-								sourceLevel = "7"
-							}
+							sourceLevel = strings.TrimPrefix(compiler, "native")
 							args = []string{"-proc:none", "-source", sourceLevel, "-target", sourceLevel}
 						}
 						args = append(args, "-g:"+debug, "-d", original, filepath.Join(original, "ProfileParent.java"), filepath.Join(original, "ProfileTarget.java"), filepath.Join(original, "ProfileDriver.java"))
@@ -95,7 +93,7 @@ public static void main(String[] args)throws Exception{ProfileTarget owner=new P
 						if native {
 							compilerProfile = NativeJavac8
 						}
-						// Independently compiled Java7 inputs use major51. The selected
+						// Independently compiled Java5/6/7 inputs use major49/50/51. The selected
 						// rebuild still uses Java8; metadata and observations, rather
 						// than equal class-file versions, form the source contract.
 						for _, name := range []string{"ProfileTarget.class", "ProfileTarget$1.class"} {
@@ -104,8 +102,8 @@ public static void main(String[] args)throws Exception{ProfileTarget owner=new P
 								t.Fatal(err)
 							}
 							major := uint16(52)
-							if compiler == "native7" {
-								major = 51
+							if native {
+								major = map[string]uint16{"native5": 49, "native6": 50, "native7": 51, "native8": 52}[compiler]
 							}
 							if cf.MajorVersion != major || cf.MinorVersion != 0 {
 								t.Fatalf("actual original compiler profile %s: %d.%d", name, cf.MajorVersion, cf.MinorVersion)

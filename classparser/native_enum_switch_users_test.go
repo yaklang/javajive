@@ -21,7 +21,8 @@ func TestNativeEnumSwitchUserClosureRejectsEscapesAndChangedOriginalPackets(t *t
 				t.Fatal("original plan")
 			}
 			originalIndex := z.originalMemberIndex()
-			index := *originalIndex
+			// Copy only the immutable evidence used by this query; sync.Once is not evidence.
+			index := nativeMemberIndex{valid: originalIndex.valid, typeUsers: originalIndex.typeUsers, handles: originalIndex.handles}
 			child := p.anonymousUnits["SwitchFamilyOwner$1"].children["SwitchFamilyOwner$1"].object
 			var method *MemberInfo
 			var code *CodeAttribute

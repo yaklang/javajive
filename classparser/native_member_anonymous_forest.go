@@ -43,13 +43,44 @@ func (c *ClassObjectDumper) planNativeMemberAnonymousScopes(p *nativeMemberFamil
 		}
 		p.memberAnonymous[name] = group
 	}
+	for name, local := range p.methodLocals {
+		if len(local.declaredAnonymous) == 0 {
+			continue
+		}
+		reader := NewClassObjectDumper(local.object)
+		reader.Work = c.Work
+		reader.options = c.options
+		reader.foldSiblingResolver = c.foldSiblingResolver
+		reader.declarationResolver = c.declarationResolver
+		group := reader.planNativeAnonymousFamilyWithinMembers(p)
+		if group == nil || !nativeJointAnonymousAllocationsClosed(local.object, group, c.Work, p) || !add(group) {
+			direct = false
+			continue
+		}
+		for child := range local.declaredAnonymous {
+			if group.children[child] == nil {
+				return false
+			}
+		}
+		p.memberAnonymous[name] = group
+	}
 	allocationForest, allocationKnown := c.nativeMemberAnonymousAllocationsRequireLexicalForest(p)
 	if !allocationKnown {
 		return false
 	}
-	if direct && !allocationForest && nativeMemberDirectAnonymousCapturesClosed(p, c.Work) &&
+	// Independent boundaries commit their entire anonymous source forest. A
+	// direct group alone cannot route subsequent child reads to that boundary.
+	if direct && !allocationForest && (p.independentRoot == nil || len(p.anonymousUnits) == 0) && nativeMemberDirectAnonymousCapturesClosed(p, c.Work) &&
 		(len(p.getters) == 0 || len(p.anonymousUnits) == 0) {
 		return true
+	}
+	for _, local := range p.methodLocals {
+		if local == nil || local.object == nil {
+			return false
+		}
+		if _, valid := nativeMemberJointMethodLocalOwner(p, local.object, c.Work); !valid {
+			return false
+		}
 	}
 	reset()
 	forest := c.planNativeAnonymousLexicalForest(p)
@@ -59,6 +90,9 @@ func (c *ClassObjectDumper) planNativeMemberAnonymousScopes(p *nativeMemberFamil
 	p.anonymousForest = forest
 	p.anonymous = forest.groups[p.owner]
 	for name := range p.children {
+		p.memberAnonymous[name] = forest.groups[name]
+	}
+	for name := range p.methodLocals {
 		p.memberAnonymous[name] = forest.groups[name]
 	}
 	for _, group := range forest.groups {
@@ -146,6 +180,10 @@ func nativeMemberJointAnonymousForestOwner(p *nativeMemberFamily, group *nativeA
 			return false
 		}
 		seen[owner] = true
+		if local := p.methodLocals[owner]; local != nil {
+			_, valid := nativeMemberJointMethodLocalOwner(p, local.object, work)
+			return valid
+		}
 		if owner == p.owner || p.children[owner] != nil {
 			return true
 		}

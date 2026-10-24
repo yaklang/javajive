@@ -14,18 +14,14 @@ func fixAssertjRemainingReconstructs(body string) string {
 	if !strings.Contains(body, "assertj") {
 		return body
 	}
-	body = unwrapJavaCast(body, "Number")
+	// A Number view can own an original receiver CHECKCAST or a selected
+	// overload. Core binding retains that evidence; a class-source keyword
+	// cannot authorize removing it (including from application string data).
 	if strings.Contains(body, "ELEMENT[][]") || strings.Contains(body, "ELEMENT extends") {
 		body = strings.ReplaceAll(body, "((Object[][])(", "((ELEMENT[][])(")
 		body = strings.ReplaceAll(body, "(Object[][])(", "(ELEMENT[][])(")
 	}
 	if strings.Contains(body, "ELEMENT extends") {
-		body = strings.ReplaceAll(body,
-			"IterableUtil.toArray((Iterable)(var1))",
-			"(ELEMENT[])(IterableUtil.toArray((Iterable)(var1)))")
-		body = strings.ReplaceAll(body,
-			"(ELEMENT[])((ELEMENT[])(IterableUtil.toArray((Iterable)(var1))))",
-			"(ELEMENT[])(IterableUtil.toArray((Iterable)(var1)))")
 		body = strings.ReplaceAll(body,
 			"this.newObjectArrayAssert(Filters.filter(((Object[])(this.actual))).with(var1,var2).get())",
 			"this.newObjectArrayAssert((List)(Filters.filter(((Object[])(this.actual))).with(var1,var2).get()))")
@@ -44,29 +40,15 @@ func fixAssertjRemainingReconstructs(body string) string {
 	// wrapped in (String)/(String[]).
 	body = strings.ReplaceAll(body, "(String)(this.parse(var1))", "this.parse(var1)")
 	body = strings.ReplaceAll(body, "(String)(new BigDecimal(var1))", "new BigDecimal(var1)")
-	body = unwrapJavaCastIfInnerPrefix(body, "String[]", "convertTo")
+	// A producer's argument type or name does not prove its result array type.
+	// Keep original CHECKCAST and selected-descriptor views in the typed IR.
 
-	if strings.Contains(body, "isCloseTo") {
-		body = unwrapJavaCast(body, "Temporal")
-		body = unwrapJavaCast(body, "TemporalOffset")
-	}
+	// Interface receivers and wider overload views retain their original
+	// CHECKCAST/descriptor evidence. Unrelated method words cannot erase them.
 
-	for _, m := range []string{"assertAre", "assertAreNot", "assertHave", "assertDoNotHave"} {
-		body = strings.ReplaceAll(body,
-			"this.arrays."+m+"((AssertionInfo)(this.info),((Object[])(this.actual)),var1)",
-			"this.arrays."+m+"((AssertionInfo)(this.info),this.actual,var1)")
-	}
-	for _, m := range []string{
-		"assertAreAtLeast", "assertAreAtMost", "assertAreExactly",
-		"assertHaveAtLeast", "assertHaveAtMost", "assertHaveExactly",
-	} {
-		body = strings.ReplaceAll(body,
-			"this.arrays."+m+"((AssertionInfo)(this.info),((Object[])(this.actual)),var1,var2)",
-			"this.arrays."+m+"((AssertionInfo)(this.info),this.actual,var1,var2)")
-	}
-	body = strings.ReplaceAll(body,
-		"this.arrays.assertIsSortedAccordingToComparator((AssertionInfo)(this.info),((Object[])(this.actual)),var1)",
-		"this.arrays.assertIsSortedAccordingToComparator((AssertionInfo)(this.info),this.actual,var1)")
+	// An array field can require both a physical CHECKCAST and an Object[]
+	// view of the selected overload. Typed binding owns these operations;
+	// method words cannot remove them or change application string data.
 
 	body = strings.ReplaceAll(body,
 		".flatMap(Collection::stream)",
@@ -81,18 +63,11 @@ func fixAssertjRemainingReconstructs(body string) string {
 
 	body = wrapReturnCallWithCast(body, "CACHE.findOrInsert", "Class")
 
-	body = strings.ReplaceAll(body,
-		"this(Arrays.stream(((Condition[])(checkNotNullConditions(var1)))))",
-		"this((Stream)(Arrays.stream(((Condition[])(checkNotNullConditions(var1))))))")
-	body = strings.ReplaceAll(body,
-		"return Comparator.naturalOrder().compare(var1,var2)",
-		"return var1.compareTo(var2)")
-	body = strings.ReplaceAll(body,
-		"this.compareElementsOf(((Object[])(var1)),((Object[])(var2)))",
-		"this.compareElementsOf((T[])((Object[])(var1)),(T[])((Object[])(var2)))")
-	body = strings.ReplaceAll(body,
-		"this.compareElementsOf(((AtomicReferenceArray)(var1)),((Object[])(var2)))",
-		"this.compareElementsOf(((AtomicReferenceArray)(var1)),(T[])((Object[])(var2)))")
+	// Constructor overload selection is proved against original declaration
+	// tables. A program/method/parameter spelling cannot select a Stream view.
+	// Factory invocations and receiver dispatch belong to original declaration
+	// evidence. A short source name cannot authorize replacing either call with
+	// a different operation, or changing application data containing that text.
 
 	body = strings.ReplaceAll(body,
 		"public static List<DeepDifference$Difference> determineDifferences(Object var0, Object var1, TreeMap var2, TypeComparators var3)",
@@ -100,9 +75,6 @@ func fixAssertjRemainingReconstructs(body string) string {
 	body = strings.ReplaceAll(body,
 		"ArrayList var7 = ((var6) != (0)) ? (new ArrayList()) : (var2);",
 		"List var7 = ((var6) != (0)) ? ((List)(new ArrayList())) : (var2);")
-	body = strings.ReplaceAll(body,
-		"Math.round((var0).doubleValue())",
-		"Math.round(((Number)(var0)).doubleValue())")
 	body = strings.ReplaceAll(body,
 		"DiffNode var17 = new DiffNode(var14,var16,var15);",
 		"PathNode var17 = new DiffNode(var14,var16,var15);")
@@ -159,54 +131,6 @@ func fixAssertjRemainingReconstructs(body string) string {
 		"((String[])(java.util.Arrays.stream(var0).map((l0) -> new StringBuilder().append(l0).append(\"ForProxy\").toString()).toArray()))")
 
 	return body
-}
-
-func unwrapJavaCast(body, typ string) string {
-	needle := "(" + typ + ")("
-	from := 0
-	for {
-		rel := strings.Index(body[from:], needle)
-		if rel < 0 {
-			return body
-		}
-		start := from + rel
-		inner := start + len(needle) - 1
-		n := skipBalanced(body[inner:], '(', ')')
-		if n < 2 {
-			from = start + 1
-			continue
-		}
-		end := inner + n
-		expr := body[inner+1 : end-1]
-		body = body[:start] + expr + body[end:]
-		from = start + len(expr)
-	}
-}
-
-func unwrapJavaCastIfInnerPrefix(body, typ, prefix string) string {
-	needle := "(" + typ + ")("
-	from := 0
-	for {
-		rel := strings.Index(body[from:], needle)
-		if rel < 0 {
-			return body
-		}
-		start := from + rel
-		inner := start + len(needle) - 1
-		n := skipBalanced(body[inner:], '(', ')')
-		if n < 2 {
-			from = start + 1
-			continue
-		}
-		end := inner + n
-		expr := body[inner+1 : end-1]
-		if !strings.HasPrefix(strings.TrimSpace(expr), prefix) {
-			from = start + 1
-			continue
-		}
-		body = body[:start] + expr + body[end:]
-		from = start + len(expr)
-	}
 }
 
 func replaceAssertjOptionalStreamFlatMap(body string) string {

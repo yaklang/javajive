@@ -10,6 +10,29 @@ import (
 
 func testNativeIndependentCompilerFamilyFixture(t *testing.T, compile func(string) map[string][]byte, profile SourceCompilerProfile, javac string, owners []string, driver, want string, mutate func(*testing.T, map[string][]byte), verify ...func(*testing.T, string, []byte, []byte)) {
 	t.Helper()
+	testNativeIndependentCompilerFamilyWithArchive(t, compile, profile, javac, owners, driver, want, mutate, nil, verify...)
+}
+
+// A separate original archive boundary lets binary callers exercise linkage
+// without requiring their own bodies to be reconstructed as source. Existing
+// fixtures retain their entire original archive when the factory is nil.
+func testNativeIndependentCompilerFamilyWithArchive(t *testing.T, compile func(string) map[string][]byte, profile SourceCompilerProfile, javac string, owners []string, driver, want string, mutate func(*testing.T, map[string][]byte), archive func(*testing.T, map[string][]byte) *JarFS, verify ...func(*testing.T, string, []byte, []byte)) {
+	t.Helper()
+	testNativeIndependentCompilerFamilyWithPolicies(t, compile, profile, javac, owners, driver, want, mutate, archive, []string{"normal", "no-source-rewrites", "no-core-cleanups"}, verify...)
+}
+
+// New regressions can select actual active policies without repeating legacy
+// alias labels. Existing fixture contracts retain their exact invocation set.
+func testNativeIndependentCompilerFamilyWithPolicies(t *testing.T, compile func(string) map[string][]byte, profile SourceCompilerProfile, javac string, owners []string, driver, want string, mutate func(*testing.T, map[string][]byte), archive func(*testing.T, map[string][]byte) *JarFS, policies []string, verify ...func(*testing.T, string, []byte, []byte)) {
+	t.Helper()
+	testNativeIndependentCompilerFamilyWithParameterFlag(t, compile, profile, javac, owners, driver, want, mutate, archive, policies, false, verify...)
+}
+
+// Parameter-table presence is a compiler input of the entire original family.
+// The rebuild must use the same flag; an original binary overlay cannot stand
+// in for an owned member whose source packet failed to regenerate.
+func testNativeIndependentCompilerFamilyWithParameterFlag(t *testing.T, compile func(string) map[string][]byte, profile SourceCompilerProfile, javac string, owners []string, driver, want string, mutate func(*testing.T, map[string][]byte), archive func(*testing.T, map[string][]byte) *JarFS, policies []string, parameters bool, verify ...func(*testing.T, string, []byte, []byte)) {
+	t.Helper()
 	_, java := t04Tools(t)
 	owned := func(name string) bool {
 		for _, owner := range owners {
@@ -43,7 +66,7 @@ func testNativeIndependentCompilerFamilyFixture(t *testing.T, compile func(strin
 			if oracle != want {
 				t.Fatalf("original oracle=%q", oracle)
 			}
-			for _, policy := range []string{"normal", "no-source-rewrites", "no-core-cleanups"} {
+			for _, policy := range policies {
 				t.Run(policy, func(t *testing.T) {
 					if policy == "no-source-rewrites" {
 						t.Setenv("JDEC_NO_SOURCE_REWRITES", "1")
@@ -52,7 +75,9 @@ func testNativeIndependentCompilerFamilyFixture(t *testing.T, compile func(strin
 						t.Setenv("JDEC_NO_CORE_CLEANUPS", "1")
 					}
 					var z *JarFS
-					if profile == ModernJavac {
+					if archive != nil {
+						z = archive(t, files)
+					} else if profile == ModernJavac {
 						z = nativeArchive(t, files)
 					} else {
 						jar := filepath.Join(t.TempDir(), "authored.jar")
@@ -84,6 +109,9 @@ func testNativeIndependentCompilerFamilyFixture(t *testing.T, compile func(strin
 					args := []string{"-proc:none", "--release", "8"}
 					if profile == NativeJavac8 {
 						args = []string{"-proc:none", "-source", "8", "-target", "8"}
+					}
+					if parameters {
+						args = append(args, "-parameters")
 					}
 					args = append(args, "-cp", out, "-d", out)
 					if raw, err := exec.Command(javac, append(args, paths...)...).CombinedOutput(); err != nil {

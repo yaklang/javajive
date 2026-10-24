@@ -19,6 +19,9 @@ type nativeMemberEnumSynthesis struct {
 	valuesField *MemberInfo
 	constants   map[string]nativeEnumConstantAllocation
 	bodies      map[string]*nativeEnumConstantBody
+	// The original compiler-generated names require -parameters for the
+	// entire owning source unit, not just this enum's generated factories.
+	requiresParameterNames bool
 }
 
 // javac reserves a generated helper name by adding '$' until no source method
@@ -318,6 +321,9 @@ func nativeEnumClassOperand(obj *ClassObject, op *core.OpCode, name string) bool
 	return known && closed && actual == name
 }
 func nativeEnumMemberOperand(obj *ClassObject, op *core.OpCode, code int, owner, name, descriptor string) bool {
+	if !nativeEnumOpcode(op, code) {
+		return false
+	}
 	index, known := nativeEnumCPIndex(op)
 	if !known || index == 0 || int(index) > len(obj.ConstantPool) {
 		return false
@@ -368,9 +374,26 @@ func nativeMemberEnumSynthesisProof(obj *ClassObject, flags uint16, work *workbu
 }
 
 func nativeMemberEnumSynthesisWithDeclarations(obj *ClassObject, flags uint16, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) *nativeMemberEnumSynthesis {
+	return nativeMemberEnumSynthesisWithParameterNames(obj, flags, resolve, work, false)
+}
+
+func nativeMemberEnumSynthesisWithParameterNames(obj *ClassObject, flags uint16, resolve func(string) (*ClassObject, bool), work *workbudget.Budget, named bool) *nativeMemberEnumSynthesis {
 	canonical := obj != nil && flags&0x4018 == 0x4018 && flags & ^uint16(0x401f) == 0 && obj.AccessFlags&0x4030 == 0x4030 && obj.AccessFlags & ^uint16(0x4031) == 0
 	constantBodies := obj != nil && resolve != nil && flags&0x4008 == 0x4008 && flags & ^uint16(0x441f) == 0 && obj.AccessFlags&0x4020 == 0x4020 && obj.AccessFlags & ^uint16(0x4431) == 0 && flags&0x410 == obj.AccessFlags&0x410 && flags&0x10 == 0
 	if obj == nil || (!canonical && !constantBodies) || obj.GetSupperClassName() != "java/lang/Enum" || !nativeProofWork(work, 1) {
+		return nil
+	}
+	return nativeEnumDeclarationSynthesis(obj, resolve, work, named, constantBodies)
+}
+
+// The executable enum protocol is independent of lexical membership. Member
+// admission checks its original InnerClasses flags above; a standalone source
+// ledger may reuse the same Code/constructor/array proof without manufacturing
+// a static member declaration or borrowing an owning family's permissions.
+func nativeEnumDeclarationSynthesis(obj *ClassObject, resolve func(string) (*ClassObject, bool), work *workbudget.Budget, named, constantBodies bool) *nativeMemberEnumSynthesis {
+	finalEnum := obj != nil && obj.AccessFlags&0x4030 == 0x4030 && obj.AccessFlags & ^uint16(0x4031) == 0
+	bodyEnum := obj != nil && constantBodies && resolve != nil && obj.AccessFlags&0x4020 == 0x4020 && obj.AccessFlags & ^uint16(0x4431) == 0 && obj.AccessFlags&0x10 == 0
+	if obj == nil || (!finalEnum && !bodyEnum) || obj.GetSupperClassName() != "java/lang/Enum" || !nativeProofWork(work, 1) {
 		return nil
 	}
 	assertions, valid := nativeEnumAssertionInitialization(obj, resolve, work)
@@ -484,7 +507,7 @@ func nativeMemberEnumSynthesisWithDeclarations(obj *ClassObject, flags uint16, r
 	if !nativeEnumOriginalFrameCapacity(valuesMethod, 1, 0) || !nativeEnumOriginalFrameCapacity(valueOf, 2, 1) || !nativeEnumOriginalFrameCapacity(initializer, initializerStack, 0) || helper != nil && !nativeEnumOriginalFrameCapacity(helper, arrayStack, 0) {
 		return nil
 	}
-	if nativeEnumValuesFactoryBacking(obj, valuesMethod, work) != backing || !nativeEnumValueOfFactoryProof(obj, valueOf, work) {
+	if nativeEnumValuesFactoryBackingWithParameterNames(obj, valuesMethod, work, named) != backing || !nativeEnumValueOfFactoryProofWithParameterNames(obj, valueOf, work, named) {
 		return nil
 	}
 	var ops []*core.OpCode
@@ -500,24 +523,11 @@ func nativeMemberEnumSynthesisWithDeclarations(obj *ClassObject, flags uint16, r
 			return nil
 		}
 	}
-	// The hidden name/ordinal belong only to the initial Enum super call. Any
-	// later use or overwrite would have no corresponding source-level parameter.
-	for _, original := range constructorOrder {
-		physical, _ := sourceBridgeUTF8(obj, original.DescriptorIndex)
-		params, _, _ := callbinding.Descriptor(physical)
-		if !nativeEnumOriginalFrameCapacity(original, 3, uint16(nativeMemberParameterWidth(params)+1)) {
-			return nil
-		}
-		ops, known = nativeEnumMethodOps(obj, original, work)
-		if !known || len(ops) < 5 || !constructorMotionLoad(ops[0], descriptor) || core.GetRetrieveIdx(ops[0]) != 0 || !constructorMotionLoad(ops[1], "Ljava/lang/String;") || core.GetRetrieveIdx(ops[1]) != 1 || !constructorMotionLoad(ops[2], "I") || core.GetRetrieveIdx(ops[2]) != 2 || !nativeEnumMemberOperand(obj, ops[3], core.OP_INVOKESPECIAL, "java/lang/Enum", "<init>", "(Ljava/lang/String;I)V") {
-			return nil
-		}
-		for _, op := range ops[4:] {
-			load, store := core.GetRetrieveIdx(op), core.GetStoreIdx(op)
-			if load == 1 || load == 2 || store == 1 || store == 2 {
-				return nil
-			}
-		}
+	originalOps := func(obj *ClassObject, method *MemberInfo, work *workbudget.Budget) ([]*core.OpCode, bool) {
+		return nativeEnumMethodOpsWithParameterNames(obj, method, work, named)
+	}
+	if !nativeEnumConstructorHiddenGraphWithOps(obj, constructorOrder, constructors, work, originalOps) {
+		return nil
 	}
 	// Enum constants precede the backing array and all ordinary source static
 	// initialization. Their hidden operands are original literal name and ordinal.
@@ -630,7 +640,7 @@ func nativeMemberEnumSynthesisWithDeclarations(obj *ClassObject, flags uint16, r
 	if constantBodies && len(bodies) == 0 {
 		return nil
 	}
-	return &nativeMemberEnumSynthesis{assertions: assertions, valuesField: backing, constants: allocations, bodies: bodies}
+	return &nativeMemberEnumSynthesis{assertions: assertions, valuesField: backing, constants: allocations, bodies: bodies, requiresParameterNames: named}
 }
 
 // Parameter names are reflection-visible metadata, unlike Code debug tables.
@@ -638,6 +648,10 @@ func nativeMemberEnumSynthesisWithDeclarations(obj *ClassObject, flags uint16, r
 // its generated parameter declaration. Keep that limitation explicit; lexical
 // ownership admission continues to require the stronger unnamed profile.
 func (c *ClassObjectDumper) noteEnumRegeneratedParameterMetadata(method *MemberInfo, name, descriptor string) {
+	compiler := nativeEnumParameterCompiler{profile: c.options.SourceCompiler, source: c.options.TargetSourceVersion}
+	if nativeEnumGeneratedParameterNames(c.obj, compiler, c.Work) && nativeMemberEnumParameterUnitClosed(c.nativeMemberRoot, c.obj, c.Work) {
+		return
+	}
 	for _, attribute := range method.Attributes {
 		parameters, ok := attribute.(*UnparsedAttribute)
 		if !ok || parameters == nil || parameters.Name != "MethodParameters" {

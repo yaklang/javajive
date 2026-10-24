@@ -331,31 +331,10 @@ func (g *SemanticCFG) GetOrCompute(kind AnalysisKind, domain GraphAnalysisDomain
 
 // Dominates reports whether dominator dominates node in this snapshot.
 func (a *GraphAnalysis) Dominates(dominator, node int) bool {
-	if a == nil || node < 0 || node >= len(a.IDom) || dominator < 0 {
+	if a == nil {
 		return false
 	}
-	if a.IDom[node] < 0 {
-		return false
-	}
-	if dominator == node {
-		return true
-	}
-	seen := map[int]struct{}{}
-	for cur := node; cur >= 0 && cur < len(a.IDom); {
-		if _, loop := seen[cur]; loop {
-			return false
-		}
-		seen[cur] = struct{}{}
-		d := a.IDom[cur]
-		if d == dominator {
-			return true
-		}
-		if d < 0 || d == cur {
-			return d == dominator
-		}
-		cur = d
-	}
-	return false
+	return idomDominates(a.IDom, dominator, node)
 }
 
 // PostDominates reports whether p postdominates n. The virtual exit is never a
@@ -374,12 +353,11 @@ func (a *GraphAnalysis) PostDominates(p, n int) bool {
 	if p == n {
 		return true
 	}
-	seen := map[int]struct{}{}
-	for cur := n; cur >= 0 && cur < len(a.IPDom); {
-		if _, loop := seen[cur]; loop {
-			return false
-		}
-		seen[cur] = struct{}{}
+	// A parent relation has one successor per node. After len(parents)
+	// steps, a nonterminating walk must have revisited a node; a per-query
+	// visited map cannot discover another ancestor.
+	cur := n
+	for steps := 0; steps < len(a.IPDom) && cur >= 0 && cur < len(a.IPDom); steps++ {
 		d := a.IPDom[cur]
 		if d == p {
 			return true
@@ -702,12 +680,11 @@ func idomDominates(idom []int, dominator, node int) bool {
 	if dominator == node {
 		return true
 	}
-	seen := map[int]struct{}{}
-	for cur := node; cur >= 0 && cur < len(idom); {
-		if _, loop := seen[cur]; loop {
-			return false
-		}
-		seen[cur] = struct{}{}
+	// A parent relation has one successor per node. After len(parents)
+	// steps, a nonterminating walk must have revisited a node; a per-query
+	// visited map cannot discover another ancestor.
+	cur := node
+	for steps := 0; steps < len(idom) && cur >= 0 && cur < len(idom); steps++ {
 		d := idom[cur]
 		if d == dominator {
 			return true

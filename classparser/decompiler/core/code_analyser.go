@@ -40,27 +40,37 @@ type branchArrayCall struct {
 	argIndex int
 	ref      *values.JavaRef
 	array    *values.NewExpression
+	// Ordinary call discovery cannot inherit constructor/ternary source
+	// permissions. Reopen its own fixed declaration and complete packet at use.
+	requiresInvocationSourceView bool
 }
 
 type Decompiler struct {
-	stackValueProducers    map[values.JavaValue]*OpCode
-	stackLifetimeUseViews  map[values.JavaValue][]*values.SlotValue
-	stackLifetimeCopies    map[values.JavaValue]*values.JavaRef
-	comparisonWordInputs   map[*OpCode][]*statements.AssignStatement
-	effectfulStackPhiEdges map[*OpCode]*statements.AssignStatement
-	stackPhiSources        map[*values.SlotValue]*OpCode
-	stackPhiTypes          map[*values.SlotValue]types.JavaType
-	stackPhiDefinitions    map[*values.JavaRef]*values.SlotValue
-	evaluationSnapshots    map[*OpCode][]EvaluationSnapshot
-	constructorInitialized bool
-	FunctionType           *types.JavaFuncType
-	opcodeToSimulateStack  map[*OpCode]*StackSimulationImpl
-	FunctionContext        *class_context.ClassContext
-	varTable               map[int]*values.JavaRef
-	opcodeIdToRef          map[*OpCode][][2]any
-	branchArrayCalls       []branchArrayCall
-	branchArrayLeaves      []branchArrayLeaf
-	valueTernaryMerges     map[*values.TernaryExpression]*OpCode
+	stackValueProducers      map[values.JavaValue]*OpCode
+	stackLifetimeUseViews    map[values.JavaValue][]*values.SlotValue
+	stackLifetimeCopies      map[values.JavaValue]*values.JavaRef
+	comparisonWordInputs     map[*OpCode][]*statements.AssignStatement
+	effectfulStackPhiEdges   map[*OpCode]*statements.AssignStatement
+	carriedPrimitivePhiSeeds map[*OpCode]*statements.AssignStatement
+	stackPhiSources          map[*values.SlotValue]*OpCode
+	stackPhiTypes            map[*values.SlotValue]types.JavaType
+	stackPhiDefinitions      map[*values.JavaRef]*values.SlotValue
+	evaluationSnapshots      map[*OpCode][]EvaluationSnapshot
+	constructorInitialized   bool
+	FunctionType             *types.JavaFuncType
+	// Physical lambda capture parameters, in their original descriptor
+	// order. This restricts source motion; it grants no factory/binding role.
+	LambdaCaptureOrderSlots []int
+	// A bound implementation receiver is outside the physical capture prefix.
+	// This constrains source preservation, without granting a factory role.
+	LambdaReceiverCapture bool
+	opcodeToSimulateStack map[*OpCode]*StackSimulationImpl
+	FunctionContext       *class_context.ClassContext
+	varTable              map[int]*values.JavaRef
+	opcodeIdToRef         map[*OpCode][][2]any
+	branchArrayCalls      []branchArrayCall
+	branchArrayLeaves     []branchArrayLeaf
+	valueTernaryMerges    map[*values.TernaryExpression]*OpCode
 	// refToCreatingStore records, per *JavaRef pointer, the FIRST local-store opcode whose simulation
 	// created that ref (isFirst=true). It lets the boolean-copy merge deterministically recover the
 	// store that defined a slot's current ref without scanning opcodeIdToRef (a map whose iteration
@@ -89,24 +99,29 @@ type Decompiler struct {
 	// receiver and arguments were bound at phase-1 time when opcodeIdToRef was incomplete). The
 	// phase-1-post pass rebindIncompatibleInvokeArgs walks this map to rebind incompatible
 	// receivers/arguments using the now-complete opcodeIdToRef. Populated in the phase-1 invoke handler.
-	invokeFuncCall                   map[*OpCode]*values.FunctionCallExpression
-	bytecodes                        []byte
-	opcodeCodeLength                 int // PC space of the current opcode list, including jsr expansion
-	opCodes                          []*OpCode
-	RootOpCode                       *OpCode
-	RootNode                         *Node
-	constantPoolGetter               func(id int) values.JavaValue
-	ConstantPoolLiteralGetter        func(constantPoolGetterid int) values.JavaValue
-	ConstantPoolInvokeDynamicInfo    func(id int) (uint16, string, string)
-	offsetToOpcodeIndex              map[uint16]int
-	opcodeIndexToOffset              map[int]uint16
-	ExceptionTable                   []*ExceptionTableEntry
-	BootstrapMethods                 []*BootstrapMethod
+	invokeFuncCall                map[*OpCode]*values.FunctionCallExpression
+	bytecodes                     []byte
+	opcodeCodeLength              int // PC space of the current opcode list, including jsr expansion
+	opCodes                       []*OpCode
+	RootOpCode                    *OpCode
+	RootNode                      *Node
+	constantPoolGetter            func(id int) values.JavaValue
+	ConstantPoolLiteralGetter     func(constantPoolGetterid int) values.JavaValue
+	ConstantPoolInvokeDynamicInfo func(id int) (uint16, string, string)
+	offsetToOpcodeIndex           map[uint16]int
+	opcodeIndexToOffset           map[int]uint16
+	ExceptionTable                []*ExceptionTableEntry
+	BootstrapMethods              []*BootstrapMethod
+	// Original declaration metadata qualifies source-body rendering. A source
+	// request or a method-name convention cannot provide that permission.
+	OriginalLambdaDeclaration        func(owner, name, descriptor string) LambdaOriginalDeclaration
+	SerializableLambdaSource         func(CallSiteRequest) (SerializableReferenceSource, bool)
 	DumpClassLambdaMethod            func(name, desc string, id *utils2.VariableId, captured []values.JavaValue) (string, error)
 	DumpClassLambdaMethodWithAdapter func(name, desc string, id *utils2.VariableId, captured []values.JavaValue, adapter *LambdaReferenceAdapter) (string, error)
 	// The PC is supplied by the original invokedynamic request, never inferred
 	// from captured value names, types, or the implementation descriptor.
 	DumpClassLambdaMethodAtOrigin func(name, desc string, id *utils2.VariableId, captured []values.JavaValue, adapter *LambdaReferenceAdapter, pc int) (string, error)
+	DumpClassLambdaSourceAtOrigin func(name, desc string, id *utils2.VariableId, captured []values.JavaValue, adapter *LambdaReferenceAdapter, pc int) (LambdaBodySource, error)
 	// Scoped only while dispatching an actual original lambda call site. A
 	// direct legacy bootstrap invocation has no physical factory certificate.
 	lambdaFactoryOrigin *int
@@ -267,6 +282,9 @@ func (d *Decompiler) observeCondyLoad(v values.JavaValue) error {
 			ExecutedBootstrap: false,
 			Value:             v,
 		})
+		// A typed diagnostic constant is not a reconstructed source value.
+		// Refuse before LDC can replace lazy linkage with a fabricated value.
+		return fmt.Errorf("unsupported_source: legal ConstantDynamic not reconstructed")
 	}
 	return nil
 }
@@ -716,96 +734,10 @@ func (d *Decompiler) tryFoldPostIncDec(stack StackSimulation, storedValue values
 	return values.NewBinaryExpression(target, expr.Values[1], op, target.Type()), true
 }
 
-// collectAssignedLocalsInText scans rendered Java text for plain assignments to a generated local
-// (`varN = ` / `varN_M = `, excluding `==`, `<=`, `>=`, `!=`, `+=`, ... compound forms) and returns
-// the set of assigned local names. Used to detect a side effect baked into a folded value (the
-// embedded assignment is rendered through an opaque CustomValue, so only its text is inspectable).
-func collectAssignedLocalsInText(s string) map[string]struct{} {
-	out := map[string]struct{}{}
-	n := len(s)
-	for i := 0; i+3 < n; i++ {
-		if s[i] != 'v' || s[i+1] != 'a' || s[i+2] != 'r' {
-			continue
-		}
-		// must start a token
-		if i > 0 && isIdentByte(s[i-1]) {
-			continue
-		}
-		j := i + 3
-		start := j
-		for j < n && s[j] >= '0' && s[j] <= '9' {
-			j++
-		}
-		if j == start {
-			continue
-		}
-		// optional _<digits> collision suffix
-		if j < n && s[j] == '_' {
-			k := j + 1
-			for k < n && s[k] >= '0' && s[k] <= '9' {
-				k++
-			}
-			if k > j+1 {
-				j = k
-			}
-		}
-		name := s[i:j]
-		// skip spaces
-		p := j
-		for p < n && (s[p] == ' ' || s[p] == '\t') {
-			p++
-		}
-		if p >= n || s[p] != '=' {
-			continue
-		}
-		// exclude operators ending in '=' (==, <=, >=, !=, +=, -=, *=, /=, %=, &=, |=, ^=) and the
-		// arrow-ish ">=" already covered: require the char before '=' (after the name) to be space or
-		// the name itself (handled), and the char after '=' must NOT be '='.
-		if p+1 < n && s[p+1] == '=' {
-			continue
-		}
-		out[name] = struct{}{}
-	}
-	return out
-}
-
-func isIdentByte(b byte) bool {
-	return b == '_' || b == '$' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
-}
-
-// textReferencesLocal reports whether rendered Java text references the given generated local name as
-// a whole token (so var2 does not match var20 or var2_1).
-func textReferencesLocal(s, name string) bool {
-	from := 0
-	for {
-		idx := indexFrom(s, name, from)
-		if idx < 0 {
-			return false
-		}
-		before := idx == 0 || !isIdentByte(s[idx-1])
-		afterPos := idx + len(name)
-		after := afterPos >= len(s) || !isIdentByte(s[afterPos])
-		if before && after {
-			return true
-		}
-		from = idx + 1
-	}
-}
-
-func indexFrom(s, sub string, from int) int {
-	if from >= len(s) {
-		return -1
-	}
-	idx := strings.Index(s[from:], sub)
-	if idx < 0 {
-		return -1
-	}
-	return from + idx
-}
-
-// foldReordersSideEffect reports whether single-use-folding val into the use site at node would
-// reorder an embedded local-assignment side effect relative to a read of that same local already
-// present in the use statement. See the call site (Bug T) for the canonical reorder it prevents.
+// foldReordersSideEffect checks local interference before single-use folding.
+// This is an IR analysis, not a source consumer: rendering here could execute
+// deferred lexical/constructor callbacks before their source scope is wired.
+// Unknown dependencies retain the temporary instead of guessing from Java text.
 // Kill-switch: JDEC_SIDEEFFECT_FOLD_OFF=1.
 func (d *Decompiler) foldReordersSideEffect(val values.JavaValue, node *Node, foldedRef *values.JavaRef) bool {
 	if d.getenv("JDEC_SIDEEFFECT_FOLD_OFF") == "1" {
@@ -814,22 +746,26 @@ func (d *Decompiler) foldReordersSideEffect(val values.JavaValue, node *Node, fo
 	if val == nil || node == nil || node.Statement == nil {
 		return false
 	}
-	assigned := collectAssignedLocalsInText(val.String(d.FunctionContext))
-	if len(assigned) == 0 {
+	operation := values.InspectAccess(val)
+	if operation.Effects&values.EffectOpaque != 0 {
+		return true
+	}
+	if len(operation.Writes) == 0 {
 		return false
 	}
-	// The folded variable's own name is being replaced by val, so a reference to it is not a hazard.
-	foldedName := ""
-	if foldedRef != nil {
-		foldedName = foldedRef.String(d.FunctionContext)
+	use := statementAccess(node.Statement)
+	if use.Effects&values.EffectOpaque != 0 {
+		return true
 	}
-	stmtText := node.Statement.String(d.FunctionContext)
-	for name := range assigned {
-		if name == foldedName {
+	for written := range operation.Writes {
+		// The folded reference is replaced by the producer at this site.
+		if values.SameLocal(written, foldedRef) {
 			continue
 		}
-		if textReferencesLocal(stmtText, name) {
-			return true
+		for read := range use.Reads {
+			if values.SameLocal(written, read) {
+				return true
+			}
 		}
 	}
 	return false
@@ -3509,7 +3445,34 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			slot = GetRetrieveIdx(opcode)
 		}
 
-		runtimeStackSimulation.Push(loadVarBySlot(slot))
+		loaded := loadVarBySlot(slot)
+		if len(opcode.Source) == 1 {
+			update := opcode.Source[0]
+			if delta, closed := d.immediateLocalPreUpdate(update, opcode, loaded); closed {
+				if delta == 1 || delta == -1 {
+					op := INC
+					if delta == -1 {
+						op = values.DEC
+					}
+					loaded = values.NewUnaryExpression(loaded, op, loaded.Type())
+				} else {
+					// IINC reads and writes this exact int binding and yields the
+					// updated word to its private successor. Keep an enumerable
+					// assignment, including delta zero, in the consumer's domain.
+					// Only a local is admitted, so repeating its source spelling
+					// as the assignment target introduces no receiver evaluation.
+					rhs := values.NewBinaryExpression(loaded, values.NewJavaLiteral(delta, loaded.Type()), ADD, loaded.Type())
+					loaded = values.NewAssignmentExpression(loaded, rhs, int(update.CurrentOffset), nil)
+				}
+				update.IincFoldedToPreOp = true
+			} else if op, proved := d.immediateLocalTypedReloadUpdate(opcode, loaded); proved {
+				ref := values.UnpackSoltValue(loaded).(*values.JavaRef)
+				loaded = values.NewUnaryExpression(loaded, op, loaded.Type())
+				d.disFoldRef = append(d.disFoldRef, ref)
+				update.LocalStoreFoldedToTypedPreOp = true
+			}
+		}
+		runtimeStackSimulation.Push(loaded)
 		////return mkRetrieve(variableFactory);
 	case OP_ACONST_NULL:
 		runtimeStackSimulation.Push(values.NewOriginalNullLiteral(int(opcode.CurrentOffset)))
@@ -3551,6 +3514,8 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// would become 65526; sign-extend through int16 before widening to int.
 		runtimeStackSimulation.Push(values.NewJavaLiteral(int(int16(Convert2bytesToInt(opcode.Data))), types.NewJavaPrimer(types.JavaInteger)))
 	case OP_ISTORE, OP_ASTORE, OP_LSTORE, OP_DSTORE, OP_FSTORE, OP_ISTORE_0, OP_ASTORE_0, OP_LSTORE_0, OP_DSTORE_0, OP_FSTORE_0, OP_ISTORE_1, OP_ASTORE_1, OP_LSTORE_1, OP_DSTORE_1, OP_FSTORE_1, OP_ISTORE_2, OP_ASTORE_2, OP_LSTORE_2, OP_DSTORE_2, OP_FSTORE_2, OP_ISTORE_3, OP_ASTORE_3, OP_LSTORE_3, OP_DSTORE_3, OP_FSTORE_3:
+		opcode.LocalStoreFoldedToPostOp = false
+		opcode.LocalStoreFoldedToTypedPreOp = false
 		slot := GetStoreIdx(opcode)
 		value := runtimeStackSimulation.Pop().(values.JavaValue)
 		d.slotStoreValue[opcode] = value
@@ -3872,6 +3837,26 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		d.slotStoreTrace[slot] = slotStoreTraceInfo{offset: opcode.CurrentOffset, ref: ref}
 		statements.NewAssignStatement(ref, value, isFirst)
 		d.opcodeIdToRef[opcode] = append(d.opcodeIdToRef[opcode], [2]any{ref, isFirst})
+		if !isFirst && runtimeStackSimulation.Size() > 0 {
+			if op, proved := d.immediateLocalPostUpdate(opcode, ref, runtimeStackSimulation.Peek()); proved {
+				// Keep the original load's enumerable target: later source binding
+				// reconciliation must update this write as well as ordinary reads.
+				post := values.NewBinaryExpression(runtimeStackSimulation.Peek(), values.NewJavaLiteral(1, ref.Type()), op, ref.Type())
+				d.disFoldRef = append(d.disFoldRef, ref)
+				runtimeStackSimulation.ReplaceTop(post)
+				// This is the semantic replacement's producer. STORE still
+				// has no decoded push in stackProduced or extra consumed word.
+				d.stackValueProducers[post] = opcode
+				opcode.LocalStoreFoldedToPostOp = true
+			} else if duplicate, target, op, proved := d.immediateLocalTypedPreUpdate(opcode, ref, runtimeStackSimulation.Peek(), value); proved {
+				pre := values.NewUnaryExpression(target, op, ref.Type())
+				d.disFoldRef = append(d.disFoldRef, ref)
+				runtimeStackSimulation.ReplaceTop(pre)
+				d.stackValueProducers[pre] = opcode
+				opcode.LocalStoreFoldedToTypedPreOp = true
+				duplicate.LocalUpdateDupFolded = true
+			}
+		}
 		// Record the creator of each freshly-minted ref so the boolean-copy merge can recover it
 		// deterministically (opcodeIdToRef iteration is unordered and several stores can reuse a ref).
 		if isFirst && ref != nil {
@@ -4073,54 +4058,31 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			typ = types.NewJavaPrimer(types.JavaLong)
 		}
 		arg := runtimeStackSimulation.Pop().(values.JavaValue)
-		cast := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-			// Parenthesize the operand so the (unary) cast keeps the right precedence
-			// when the operand is a lower-precedence expression: without it,
-			// `(long)a * b` parses as `((long)a) * b` instead of `(long)(a * b)`,
-			// causing "possible lossy conversion" recompile failures. The extra parens
-			// are always valid Java.
-			return values.RenderPrimitiveConversion(arg, typ, funcCtx)
-		}, func() types.JavaType {
-			return typ
-		}, func(oldId *utils2.VariableId, newId *utils2.VariableId) {
-			// Propagate variable renames into the cast operand. Without this, a later rewriteVar
-			// rename (e.g. a depth-collision rename of the operand's variable) updates the operand's
-			// other occurrences but not this primitive-cast expression, so a `(int)(varN)` cast keeps
-			// a stale name and references an undeclared variable (guava UnsignedLongs.toString:
-			// `(int) rem` printed the old name `var5` after rem was renamed `var4_1`). CHECKCAST
-			// already does this; the numeric conversions must too.
-			arg.ReplaceVar(oldId, newId)
-		})
-		cast.Flag = "primitive_cast"
-		cast.CapturesKnown = true
-		cast.Captures = []values.JavaValue{arg}
+		cast := values.NewOriginalPrimitiveConversion(arg, typ, int(opcode.CurrentOffset))
+		if cast == nil {
+			return fmt.Errorf("invalid primitive conversion at PC %d", opcode.CurrentOffset)
+		}
 		runtimeStackSimulation.Push(cast)
 	case OP_INSTANCEOF:
 		classInfo := d.constantPoolGetter(int(Convert2bytesToInt(opcode.Data))).(*values.JavaClassValue).Type()
 		value := runtimeStackSimulation.Pop().(values.JavaValue)
-		instanceOf := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-			return fmt.Sprintf("%s instanceof %s", values.AssignmentOperand(value, funcCtx), classInfo.String(funcCtx))
-		}, func() types.JavaType {
-			return types.NewJavaPrimer(types.JavaBoolean)
-		}, func(oldId *utils2.VariableId, newId *utils2.VariableId) {
-			// The instanceof operand is captured in this CustomValue's String closure. Like
-			// OP_CHECKCAST and the numeric-conversion CustomValues, it MUST forward ReplaceVar to the
-			// captured operand: otherwise a later identity rebind of the operand's variable (e.g.
-			// rewriteVar minting a fresh id for a slot's disjoint reuse and ReplaceVar-ing every use)
-			// never reaches the operand, so the rendered `varN instanceof T` keeps a stale id that
-			// collides with a DIFFERENT same-slot variable. fastjson2 JSONSchema.of:
-			// `exclusiveMaximum instanceof Integer` rendered against the unrelated int-typed `var6`
-			// ("unexpected type, required: reference, found: int"). Kill-switch:
-			// JDEC_INSTANCEOF_REPLACEVAR_OFF=1.
-			if d.getenv("JDEC_INSTANCEOF_REPLACEVAR_OFF") == "1" {
-				return
-			}
-			value.ReplaceVar(oldId, newId)
-		})
-		instanceOf.Flag = "instanceof"
-		instanceOf.CapturesKnown = true
-		instanceOf.Captures = []values.JavaValue{value}
-		instanceOf.OriginPC, instanceOf.HasOriginPC = int(opcode.CurrentOffset), true
+		instanceOf := values.NewOriginalInstanceOf(value, classInfo, int(opcode.CurrentOffset))
+		if instanceOf == nil {
+			return fmt.Errorf("invalid original instanceof at PC %d", opcode.CurrentOffset)
+		}
+		if d.getenv("JDEC_INSTANCEOF_REPLACEVAR_OFF") == "1" {
+			instanceOf = values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+				return fmt.Sprintf("%s instanceof %s", values.AssignmentOperand(value, funcCtx), classInfo.String(funcCtx))
+			}, func() types.JavaType {
+				return types.NewJavaPrimer(types.JavaBoolean)
+			})
+			// Diagnostic control: keep the legacy operand without forwarding
+			// rebinding. It has no original-type-test proof capability.
+			instanceOf.Flag = "instanceof"
+			instanceOf.CapturesKnown = true
+			instanceOf.Captures = []values.JavaValue{value}
+			instanceOf.OriginPC, instanceOf.HasOriginPC = int(opcode.CurrentOffset), true
+		}
 		runtimeStackSimulation.Push(instanceOf)
 	case OP_CHECKCAST:
 		classInfo := d.constantPoolGetter(int(Convert2bytesToInt(opcode.Data))).(*values.JavaClassValue).Type()
@@ -4156,6 +4118,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			funcCallValue.Arguments = append(funcCallValue.Arguments, runtimeStackSimulation.Pop().(values.JavaValue))
 		}
 		funcCallValue.Arguments = funk.Reverse(funcCallValue.Arguments).([]values.JavaValue)
+		d.retainLambdaStaticQualifier(opcode, funcCallValue)
 		funcCallValue.RetainFunctionalReturnSignature(funcCtx)
 		d.invokeFuncCall[opcode] = funcCallValue
 		if funcCallValue.FuncType.ReturnType.String(funcCtx) != types.NewJavaPrimer(types.JavaVoid).String(funcCtx) {
@@ -4250,6 +4213,14 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		}
 		rep := DispatchInvokeDynamic(req, d, runtimeStackSimulation, resultType)
 		d.BootstrapReports = append(d.BootstrapReports, rep)
+		// Source capability is decided by status, not by the presence of a
+		// diagnostic value. Unknown/unsupported adapters may retain a typed
+		// opaque value for analysis; emitting it would invent a return value
+		// or discard a void call's linkage and effects. Keep the report and
+		// refuse this body before consuming any such value.
+		if rep.Status == "unsupported" {
+			return fmt.Errorf("unsupported_source: %s", rep.Reason)
+		}
 		if rep.Status == "invalid_input" {
 			if resultType.String(funcCtx) != types.NewJavaPrimer(types.JavaVoid).String(funcCtx) {
 				runtimeStackSimulation.Push(rep.Value)
@@ -4429,6 +4400,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		runtimeStackSimulation.Push(v1)
 		runtimeStackSimulation.Push(v2)
 	case OP_DUP:
+		opcode.LocalUpdateDupFolded = false
 		// The uninitialized reference in NEW; DUP; invokespecial belongs to
 		// one constructor expression. A DUP AFTER that constructor instead
 		// shares the initialized object's identity (e.g. (x = new T()).mutate()).
@@ -4476,6 +4448,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		runtimeStackSimulation.Push(v1)
 		adduser(1)
 	case OP_DUP2:
+		opcode.LocalUpdateDupFolded = false
 		// dup2 duplicates the top two category-1 slots (or one category-2 value). Each duplicated
 		// value must carry its OWN ref-fold callback. The previous code kept a single shared addUser
 		// (overwritten to the LAST converted value), so when both pushes reused it, the deeper value's
@@ -4605,6 +4578,9 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		runtimeStackSimulation.Push(v)
 	case OP_LDC2_W:
 		v := d.ConstantPoolLiteralGetter(int(Convert2bytesToInt(opcode.Data)))
+		if err := d.observeCondyLoad(v); err != nil {
+			return err
+		}
 		runtimeStackSimulation.Push(v)
 	case OP_MONITORENTER:
 		runtimeStackSimulation.Pop()
@@ -4678,8 +4654,8 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// REPLACES the live value, suppressing the standalone statement. Without this the
 		// standalone `i++` is emitted BEFORE the consuming statement and the consumer then reads
 		// the incremented value (`i++; a[i] = v` instead of `a[i++] = v`), silently changing
-		// semantics. Pre-increment compiles to `iinc X; iload X` (no live load at iinc time), so it
-		// is intentionally left alone and correctly stays `i = i + 1; ... use i`.
+		// semantics. A prefix update with no live old value is handled at its
+		// private adjacent ILOAD, after that load resolves its original binding.
 		if (inc == 1 || inc == -1) && ref != nil && runtimeStackSimulation.Size() > 0 {
 			if topRef, ok := UnpackSoltValue(runtimeStackSimulation.Peek()).(*values.JavaRef); ok && topRef.VarUid == ref.VarUid {
 				runtimeStackSimulation.Pop()
@@ -4754,6 +4730,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	ternaryExpMergeNode := []*OpCode{}
 	ternaryExpMergeNodeSlot := map[*OpCode]*values.SlotValue{}
 	retainedReferenceJoins := map[*OpCode]*OpCode{}
+	carriedPrimitiveJoins := map[*OpCode]*OpCode{}
 	if !d.FunctionContext.IsStatic {
 		d.FunctionType.ParamTypes = append([]types.JavaType{types.NewJavaClass(d.FunctionContext.ClassName)}, d.FunctionType.ParamTypes...)
 	}
@@ -5053,6 +5030,10 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 				if ifSize != -1 && !ifSizeMismatch {
 					isIfMergeNode = ifSize < size
 					if ifSize == 1 && size == 1 {
+						if root := d.carriedPrimitiveRoutingRoot(code, ifNodes); root != nil {
+							isIfMergeNode = true
+							carriedPrimitiveJoins[code] = root
+						}
 						if root := d.retainedReferenceRoutingRoot(code, ifNodes); root != nil {
 							isIfMergeNode = true
 							retainedReferenceJoins[code] = root
@@ -5719,6 +5700,13 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	d.refineClosedStackPhiDefinitions()
 	defer func() { d.stackPhiSources, d.stackPhiTypes, d.stackPhiDefinitions = nil, nil, nil }()
 	for _, merge := range ternaryExpMergeNode {
+		if root := carriedPrimitiveJoins[merge]; root != nil {
+			if !d.lowerCarriedPrimitiveJoin(merge, root, ternaryExpMergeNodeSlot[merge]) {
+				return fmt.Errorf("unsupported carried primitive stack join at pc %d", merge.CurrentOffset)
+			}
+			loweredStackPhis[merge] = true
+			continue
+		}
 		if root := retainedReferenceJoins[merge]; root != nil {
 			if d.retainedReferenceJoinRoot(merge, []*OpCode{root}) == nil || !d.lowerClosedStackPhi(merge, []*OpCode{root}, ternaryExpMergeNodeSlot[merge], false) {
 				return fmt.Errorf("unsupported retained-reference stack join at pc %d", merge.CurrentOffset)
@@ -5786,7 +5774,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 						}
 						array, isArray := GetRealValue(ref).(*values.NewExpression)
 						if isArray && array != nil && array.HasOriginPC && array.OriginPC > firstIfPC {
-							d.branchArrayCalls = append(d.branchArrayCalls, branchArrayCall{call, i, ref, array})
+							d.branchArrayCalls = append(d.branchArrayCalls, branchArrayCall{call: call, argIndex: i, ref: ref, array: array})
 						}
 					}
 				}
@@ -5811,7 +5799,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 							}
 							array, isArray := GetRealValue(ref).(*values.NewExpression)
 							if isArray && array != nil && array.HasOriginPC && array.OriginPC > firstIfPC {
-								d.branchArrayCalls = append(d.branchArrayCalls, branchArrayCall{call, i, ref, array})
+								d.branchArrayCalls = append(d.branchArrayCalls, branchArrayCall{call: call, argIndex: i, ref: ref, array: array})
 							}
 						}
 					}
@@ -6402,6 +6390,7 @@ func (d *Decompiler) ParseStatement() error {
 			if v1, ok := v.LeftValue.(*values.JavaRef); ok {
 				if node.HasOriginPC && v.ArrayMember == nil && LocalAccessOf(opcode.Instr.OpCode).Write {
 					v.MarkOriginalLocalStore(node.OriginPC, GetStoreIdx(opcode))
+					v.MarkOriginalParameterStore(node.OriginPC, GetStoreIdx(opcode))
 				}
 				if node.HasOriginPC && v.ArrayMember == nil && (v.IsDeclare || v.IsFirst) && opcode.Instr.OpCode == OP_INVOKEDYNAMIC {
 					v1.MarkOriginalDynamicOperandDeclaration(node.OriginPC, v.JavaValue)
@@ -6438,10 +6427,12 @@ func (d *Decompiler) ParseStatement() error {
 	d.rebindIncompatibleInvokeArgs()
 	d.unifyReferenceWebs()
 	d.restoreScopedReferenceWebs()
+	d.refineNullLambdaCaptureOperands()
 	d.propagateNullOnlyLocalLoads()
 	d.refreshReferenceOperandSnapshotTypes()
 	d.partitionSharedDynamicCaptureWebs()
 	d.unifyNumericExitWebs()
+	d.restoreNumericConditionalWebs()
 	d.restoreNormalizedBooleanWebs()
 	d.restoreExceptionDeclarationSeeds()
 	d.restoreOptionalSupplierDefinitionViews()
@@ -6480,12 +6471,27 @@ func (d *Decompiler) ParseStatement() error {
 		if assign := d.effectfulStackPhiEdges[opcode]; assign != nil {
 			defer func() { appendNode(assign) }()
 		}
+		if initial := d.carriedPrimitivePhiSeeds[opcode]; initial != nil {
+			appendNode(initial)
+		}
 		for _, snap := range d.evaluationSnapshots[opcode] {
-			appendNode(statements.NewAssignStatement(snap.Ref, snap.Value, true))
+			if !snap.Operand {
+				d.inlineUnchangedLambdaLocalOperands(opcode, snap.Value)
+			}
+		}
+		for _, snap := range d.evaluationSnapshots[opcode] {
+			if view, target, known := snap.Ref.OriginalDynamicOperandSourceView(snap.Value); known {
+				// Null's bottom type is separate from the declared capture type. Do not
+				// let NewAssignStatement reset it to String and quote the null keyword.
+				snap.Ref.ResetVarType(target)
+				appendNode(&statements.AssignStatement{LeftValue: snap.Ref, JavaValue: view, IsFirst: true})
+			} else {
+				appendNode(statements.NewAssignStatement(snap.Ref, snap.Value, true))
+			}
 		}
 		switch opcode.Instr.OpCode {
 		case OP_ISTORE, OP_ASTORE, OP_LSTORE, OP_DSTORE, OP_FSTORE, OP_ISTORE_0, OP_ASTORE_0, OP_LSTORE_0, OP_DSTORE_0, OP_FSTORE_0, OP_ISTORE_1, OP_ASTORE_1, OP_LSTORE_1, OP_DSTORE_1, OP_FSTORE_1, OP_ISTORE_2, OP_ASTORE_2, OP_LSTORE_2, OP_DSTORE_2, OP_FSTORE_2, OP_ISTORE_3, OP_ASTORE_3, OP_LSTORE_3, OP_DSTORE_3, OP_FSTORE_3:
-			if protectedStores[opcode] {
+			if protectedStores[opcode] || opcode.LocalStoreFoldedToPostOp || opcode.LocalStoreFoldedToTypedPreOp {
 				break
 			}
 			refInfos := d.opcodeIdToRef[opcode]
@@ -6563,6 +6569,7 @@ func (d *Decompiler) ParseStatement() error {
 					n++
 				}
 				funcCallValue.Arguments = funk.Reverse(funcCallValue.Arguments).([]values.JavaValue)
+				d.retainLambdaStaticQualifier(opcode, funcCallValue)
 				appendNode(statements.NewExpressionStatement(funcCallValue))
 			}
 		case OP_INVOKESPECIAL:
@@ -6630,11 +6637,7 @@ func (d *Decompiler) ParseStatement() error {
 								}
 								user.CurrentOpcode = opcode
 							}
-							appendNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-								return assignSt.String(funcCtx)
-							}, func(oldId *utils2.VariableId, newId *utils2.VariableId) {
-								assignSt.ReplaceVar(oldId, newId)
-							}))
+							appendNode(statements.NewSourceAssignmentForward(assignSt.(*statements.AssignStatement)))
 						}
 					}
 				} else {
@@ -6778,6 +6781,9 @@ func (d *Decompiler) ParseStatement() error {
 				appendNode(assignSt)
 			}
 		case OP_DUP, OP_DUP_X1, OP_DUP_X2, OP_DUP2, OP_DUP2_X1, OP_DUP2_X2:
+			if opcode.LocalUpdateDupFolded {
+				break
+			}
 			refInfos := d.opcodeIdToRef[opcode]
 			convertedVals := d.dupConvertedRefValue[opcode]
 			for i, refInfo := range refInfos {
@@ -6854,7 +6860,7 @@ func (d *Decompiler) ParseStatement() error {
 			// (`a[i++] = v`, `int j = i++`, `return i++`): the side effect now rides inside the
 			// consuming expression, so emitting the standalone statement here would double-apply
 			// and mis-order the increment (the historical `i++; a[i] = v` semantic bug).
-			if opcode.IincFoldedToPostOp {
+			if opcode.IincFoldedToPostOp || opcode.IincFoldedToPreOp {
 				return nil
 			}
 			// The iinc increment is a SIGNED constant. Reading it unsigned turns `i--`
@@ -7055,7 +7061,7 @@ func (d *Decompiler) ParseStatement() error {
 				// An edge-materialized phi is emitted after this opcode's
 				// own statement. Preserve both in their original order, e.g.
 				// CHECKCAST's definition followed by the incoming assignment.
-				if d.effectfulStackPhiEdges[op] == nil && monitorSnapshots[op].Ref == nil {
+				if d.effectfulStackPhiEdges[op] == nil && d.carriedPrimitivePhiSeeds[op] == nil && monitorSnapshots[op].Ref == nil {
 					continue
 				}
 			}
@@ -7080,7 +7086,7 @@ func (d *Decompiler) ParseStatement() error {
 					break
 				}
 			}
-			if !allAssign && !originalMonitorSnapshotChain(chain, primary, idToOpcode[primary.Id], monitorOwners, monitorSnapshots) {
+			if !allAssign && !d.carriedPrimitiveSourceChain(chain, primary, op) && !originalMonitorSnapshotChain(chain, primary, idToOpcode[primary.Id], monitorOwners, monitorSnapshots) {
 				continue
 			}
 			// Detach the orphan nodes from whatever the wiring loop hooked them to.
@@ -7391,13 +7397,13 @@ func (d *Decompiler) ParseStatement() error {
 			}
 			// Bug T (side-effect reorder): val may carry an embedded assignment to a local, e.g. a
 			// ternary whose arms store to a slot (`(cond) ? (x = a) : (x = b)`), baked into a
-			// CustomValue by the dup-collapse above. Folding such a value into a use site that ALSO
+			// typed assignment expression. Folding such a value into a use site that ALSO
 			// references the assigned local reorders the store relative to that read: the canonical
 			// `int y = (cond)?(x=a):(x=b); return x + y;` becomes `return x + ((cond)?(x=a):(x=b))`,
 			// which evaluates the left `x` BEFORE the store and yields the pre-store value. Keep y as
 			// an explicit local in that case so the store still happens first. Conservative (may keep
 			// a temp where the read is actually after the use, which is harmless) and rare (only fires
-			// when a folded value embeds a local assignment). Kill-switch: JDEC_SIDEEFFECT_FOLD_OFF=1.
+			// when a folded value embeds a local update, or its dependencies are opaque).
 			if node != nil && d.foldReordersSideEffect(val, node, ref) {
 				d.tracef("var-fold", "skip single-use-fold (side-effect reorder) ref=%s val=%s",
 					traceRef(ref, d.FunctionContext), traceValue(val, d.FunctionContext))
@@ -7444,6 +7450,14 @@ func (d *Decompiler) ParseStatement() error {
 						beforeNode.ReplaceSwitchTarget(assignNode, node)
 						beforeNode.RemoveNext(assignNode)
 						beforeNode.AddNext(node)
+					}
+				}
+				// canInlineValue above owns evaluation/exception safety. Preserve
+				// the consumer's separate original STORE receipt when its entire
+				// RHS is this exact temporary, before replacing that operand.
+				if target, ok := node.Statement.(*statements.AssignStatement); ok {
+					if definition, ok := assignNode.Statement.(*statements.AssignStatement); ok {
+						target.ProjectOriginalLocalStoreInline(definition, ref, val)
 					}
 				}
 				ref.Id.Delete()

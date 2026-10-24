@@ -6,13 +6,14 @@ import (
 )
 
 type constructorClosedBodyKey struct {
-	leaf     bool
-	object   *ClassObject
-	target   *MemberInfo
-	code     *CodeAttribute
-	operands string
-	context  string
-	depth    int
+	leaf          bool
+	freshReceiver bool
+	object        *ClassObject
+	target        *MemberInfo
+	code          *CodeAttribute
+	operands      string
+	context       string
+	depth         int
 }
 type constructorClosedBodyMemo struct {
 	providerEpoch             uint64

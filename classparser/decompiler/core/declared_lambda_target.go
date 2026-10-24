@@ -9,24 +9,70 @@ import (
 	"strings"
 )
 
+// ProjectOriginalSamTarget projects a generic declaration onto the two original
+// metafactory descriptors. It supplies a type only: the caller must separately
+// prove the declaration's identity, source member binding, eager operands and
+// complete bootstrap protocol. It never evaluates a JavaValue/source callback.
+func ProjectOriginalSamTarget(owner, classSignature, samSignature, erased, instantiated string, provider callbinding.Provider) types.JavaType {
+	name := strings.ReplaceAll(owner, "/", ".")
+	// A monomorphic declaration has an empty substitution environment. Its
+	// projection is identity, not a failed generic inference. Do not apply this
+	// rule to a nonempty class Signature whose inherited variables are unknown.
+	if classSignature == "" {
+		declared := erased
+		if samSignature != "" {
+			body, variables, known := directSamThrows(samSignature)
+			if !known || len(variables) != 0 {
+				return nil
+			}
+			declared = body
+		}
+		if name == "" || declared != erased || erased != instantiated {
+			return nil
+		}
+		if _, known := directSamTokens(declared, false); !known {
+			return nil
+		}
+		return types.NewJavaClass(name)
+	}
+	return inferDeclaredSamInstantiation(name, classSignature, samSignature, erased, instantiated, provider)
+}
+
 func inferDeclaredLambdaTarget(d *Decompiler, raw types.JavaType, erased, instantiated values.JavaValue) types.JavaType {
 	if known := inferLambdaTypeFromInstantiated(raw, instantiated); known != nil {
 		return known
 	}
-	if d == nil || d.blockPartialFunctionalTarget || d.FunctionContext == nil || d.FunctionContext.SiblingClassSig == nil || raw == nil || raw.IsArray() {
+	if d == nil || d.blockPartialFunctionalTarget || d.FunctionContext == nil || raw == nil || raw.IsArray() {
 		return nil
 	}
-	jc, ok := raw.RawType().(*types.JavaClass)
-	if !ok || jc == nil {
+	declarations := d.FunctionContext.LambdaTargetClassSig
+	if declarations == nil {
+		declarations = d.FunctionContext.SiblingClassSig
+	}
+	if declarations == nil {
 		return nil
 	}
-	classSig, methods, ok := d.FunctionContext.SiblingClassSig(strings.ReplaceAll(jc.Name, ".", "/"))
+	name, known := types.RawClassFQN(raw)
+	_, variable := types.TypeVariableName(raw)
+	if !known || name == "" || variable {
+		return nil
+	}
+	if parameterized, known := types.AsParameterizedType(raw); known && (len(parameterized.OwnerSegments) > 1 || len(parameterized.TypeArgs) > 255) {
+		return nil
+	}
+	// Earlier call inference may already carry a parameterized view. Its
+	// arguments are not the SAM proof: recover only its physical owner here,
+	// then solve again from the original declaration and bootstrap descriptors.
+	classSig, methods, ok := declarations(strings.ReplaceAll(name, ".", "/"))
 	if !ok {
 		return nil
 	}
 	erasedDesc, actualDesc := t19MethodTypeDesc(erased), t19MethodTypeDesc(instantiated)
-	sig := methods[class_context.MethodDescKey(d.InvokeDynamicName, erasedDesc)]
-	return inferDeclaredSamInstantiation(jc.Name, classSig, sig, erasedDesc, actualDesc, d.FunctionContext.InvocationMetadata)
+	sig, declared := methods[class_context.MethodDescKey(d.InvokeDynamicName, erasedDesc)]
+	if !declared {
+		sig = inheritedDeclaredSamSignature(d.FunctionContext, declarations, strings.ReplaceAll(name, ".", "/"), d.InvokeDynamicName, erasedDesc)
+	}
+	return inferDeclaredSamInstantiation(name, classSig, sig, erasedDesc, actualDesc, d.FunctionContext.InvocationMetadata)
 }
 
 // Bind declaration variables by their Signature identity, not SAM parameter order.
@@ -220,15 +266,22 @@ func directSamTokens(desc string, variables bool) ([]string, bool) {
 // expression at that proven SAM without claiming those erased arguments are a
 // complete invariant local type. A raw local retains legal unchecked conversion
 // to a later, declaration-proved Foo<Collection<String>> consumer.
-func retainErasedFunctionalValue(v *values.CustomValue, raw, target types.JavaType) *values.CustomValue {
+func retainErasedFunctionalValue(v *values.CustomValue, raw, target types.JavaType, markers ...types.JavaType) *values.CustomValue {
 	if v == nil || target == nil {
 		return v
+	}
+	if retained, known := v.RetainMethodReferenceTarget(raw, target, markers...); known {
+		return retained
 	}
 	copy := *v
 	copy.TypeFunc = func() types.JavaType { return raw }
 	if write := v.WriteFunc; write != nil {
 		copy.WriteFunc = func(ctx *class_context.ClassContext, out *workbudget.Writer) error {
-			if err := out.WriteString("(" + raw.String(ctx) + ") ((" + target.String(ctx) + ") ("); err != nil {
+			creation := target.String(ctx)
+			for _, marker := range markers {
+				creation += " & " + marker.String(ctx)
+			}
+			if err := out.WriteString("(" + raw.String(ctx) + ") ((" + creation + ") ("); err != nil {
 				return err
 			}
 			if err := write(ctx, out); err != nil {

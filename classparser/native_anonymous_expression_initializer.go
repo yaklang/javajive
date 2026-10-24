@@ -24,7 +24,7 @@ type nativeAnonymousExpressionInitializer struct {
 	stores    map[int]string
 	signature string
 	byPC      map[int]*core.OpCode
-	branches  map[int]*core.OpCode // exact reference producer PC -> null branch
+	branches  map[int]*core.OpCode // exact one-word producer PC -> tested branch
 	armValues map[int][2]int       // original fallthrough / target result producer
 	events    []int                // structured original event stream
 }
@@ -120,7 +120,7 @@ func nativeAnonymousExpressionInitializerProof(obj *ClassObject, code *CodeAttri
 		case core.OP_ISTORE, core.OP_ISTORE_0, core.OP_ISTORE_1, core.OP_ISTORE_2, core.OP_ISTORE_3, core.OP_LSTORE, core.OP_LSTORE_0, core.OP_LSTORE_1, core.OP_LSTORE_2, core.OP_LSTORE_3, core.OP_FSTORE, core.OP_FSTORE_0, core.OP_FSTORE_1, core.OP_FSTORE_2, core.OP_FSTORE_3, core.OP_DSTORE, core.OP_DSTORE_0, core.OP_DSTORE_1, core.OP_DSTORE_2, core.OP_DSTORE_3, core.OP_ASTORE, core.OP_ASTORE_0, core.OP_ASTORE_1, core.OP_ASTORE_2, core.OP_ASTORE_3, core.OP_IINC, core.OP_WIDE, core.OP_GOTO_W, core.OP_JSR, core.OP_JSR_W, core.OP_RET, core.OP_TABLESWITCH, core.OP_LOOKUPSWITCH, core.OP_ATHROW, core.OP_MONITORENTER, core.OP_MONITOREXIT, core.OP_PUTSTATIC, core.OP_INVOKEDYNAMIC, core.OP_IASTORE, core.OP_LASTORE, core.OP_FASTORE, core.OP_DASTORE, core.OP_AASTORE, core.OP_BASTORE, core.OP_CASTORE, core.OP_SASTORE:
 			return nil
 		}
-		if kind >= core.OP_IFEQ && kind <= core.OP_IF_ACMPNE || kind >= core.OP_IRETURN && kind <= core.OP_ARETURN {
+		if kind >= core.OP_IF_ICMPEQ && kind <= core.OP_IF_ACMPNE || kind >= core.OP_IRETURN && kind <= core.OP_ARETURN {
 			return nil
 		}
 		if kind == core.OP_LDC || kind == core.OP_LDC_W || kind == core.OP_LDC2_W {
@@ -143,7 +143,7 @@ func nativeAnonymousExpressionInitializerProof(obj *ClassObject, code *CodeAttri
 		}
 		if kind == core.OP_GETFIELD {
 			f := constructorMotionMember(obj, op, kind)
-			if f == nil || class_context.SafeIdentifier(f.Member) != f.Member {
+			if f == nil || !class_context.PreservesJava8Identifier(f.Member) {
 				return nil
 			}
 			if f.Name != obj.GetClassName() {
@@ -158,7 +158,7 @@ func nativeAnonymousExpressionInitializerProof(obj *ClassObject, code *CodeAttri
 				// proof to the retained source receiver, like a foreign read.
 				continue
 			}
-			if field.AccessFlags&8 != 0 || class_context.SafeIdentifier(f.Member) != f.Member {
+			if field.AccessFlags&8 != 0 || !class_context.PreservesJava8Identifier(f.Member) {
 				return nil
 			}
 			descriptor, known := sourceBridgeUTF8(obj, field.DescriptorIndex)
@@ -177,7 +177,7 @@ func nativeAnonymousExpressionInitializerProof(obj *ClassObject, code *CodeAttri
 			return nil
 		}
 		if f.Name != obj.GetClassName() {
-			if len(f.Description) != 1 || !strings.Contains("ZBCSIJFD", f.Description) || class_context.SafeIdentifier(f.Member) != f.Member {
+			if len(f.Description) != 1 || !strings.Contains("ZBCSIJFD", f.Description) || !class_context.PreservesJava8Identifier(f.Member) {
 				return nil
 			}
 			// The original foreign write is a separate ordered statement.
@@ -189,7 +189,7 @@ func nativeAnonymousExpressionInitializerProof(obj *ClassObject, code *CodeAttri
 			return nil
 		}
 		field := fields[f.Member]
-		if field == nil || field.AccessFlags&(8|0x1000) != 0 || used[f.Member] && field.AccessFlags&0x10 != 0 || class_context.SafeIdentifier(f.Member) != f.Member {
+		if field == nil || field.AccessFlags&(8|0x1000) != 0 || used[f.Member] && field.AccessFlags&0x10 != 0 || !class_context.PreservesJava8Identifier(f.Member) {
 			return nil
 		}
 		d, ok := sourceBridgeUTF8(obj, field.DescriptorIndex)
@@ -238,6 +238,9 @@ func (c *ClassObjectDumper) nativeAnonymousExpressionInitializerSource(child *na
 	if err != nil {
 		return "", false
 	}
+	priorReady := c.nativeSourceNamesReady
+	c.nativeSourceNamesReady = false
+	defer func() { c.nativeSourceNamesReady = priorReady }()
 	originalCtx, originalMethod, originalType := c.FuncCtx, c.CurrentMethod, c.MethodType
 	copy := *originalCtx
 	copy.LocalNames = map[*u.VariableId]string{}
@@ -257,6 +260,10 @@ func (c *ClassObjectDumper) nativeAnonymousExpressionInitializerSource(child *na
 	copy.IsStatic = false
 	copy.QualifiedStaticFields = true
 	copy.RetainImplicitConstructorCalls = true
+	// A copied callback still closes over the previous method context. Do
+	// not let its PC map lend evidence to this constructor; both anonymous
+	// and named capture queries are reopened below in the new scope.
+	copy.SourceLexicalCapturedFieldType = nil
 	c.wireNativeAnonymousSource()
 	// These callbacks close over their context pointer. Copying the ordinary
 	// method's callbacks keeps its identity even after the initializer's method
@@ -267,6 +274,7 @@ func (c *ClassObjectDumper) nativeAnonymousExpressionInitializerSource(child *na
 	if err != nil {
 		return "", false
 	}
+	c.nativeSourceNamesReady = !c.nativeCaptureFailed
 	post := false
 	stores := map[int]bool{}
 	materialized := map[string]*values.JavaRef{}
@@ -610,7 +618,7 @@ func nativeAnonymousInitializerExpressionEventsWithMaterialized(child *nativeAno
 				if !declared && !nativeAnonymousInitializerInheritedField(child, f, x, resolve, work) {
 					return false
 				}
-			} else if !nativeAnonymousInitializerForeignField(f, x.Object, resolve, work) {
+			} else if !nativeAnonymousInitializerForeignField(f, x.Object, resolve, work) && !nativeAnonymousInitializerLexicalCaptureField(f, x, ctx) {
 				return false
 			}
 			*events = append(*events, x.OriginPC)
@@ -655,7 +663,7 @@ func nativeAnonymousInitializerExpressionEventsWithMaterialized(child *nativeAno
 // original declaration. A direct THIS is necessary for the protected receiver
 // rule; an arbitrary alias or a cast cannot borrow this source permission.
 func nativeAnonymousInitializerInheritedField(child *nativeAnonymousClass, field *values.JavaClassMember, value *values.RefMember, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) bool {
-	if child == nil || child.object == nil || field == nil || value == nil || resolve == nil || field.Name != child.object.GetClassName() || field.Member != value.Member || class_context.SafeIdentifier(field.Member) != field.Member || !nativeProofWork(work, 1) {
+	if child == nil || child.object == nil || field == nil || value == nil || resolve == nil || field.Name != child.object.GetClassName() || field.Member != value.Member || !class_context.PreservesJava8Identifier(field.Member) || !nativeProofWork(work, 1) {
 		return false
 	}
 	if !value.OriginalInstanceFieldRead(value.OriginPC, field.Name, field.Member, field.Description) {
@@ -717,7 +725,7 @@ func nativeAnonymousInitializerForeignField(field *values.JavaClassMember, recei
 // constant variables, which javac can inline and thereby skip initialization,
 // and require each original read PC to remain in the expression event stream.
 func nativeAnonymousInitializerFieldDeclaration(field *values.JavaClassMember, static bool, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) bool {
-	if field == nil || resolve == nil || class_context.SafeIdentifier(field.Member) != field.Member || !nativeProofWork(work, 1) {
+	if field == nil || resolve == nil || !class_context.PreservesJava8Identifier(field.Member) || !nativeProofWork(work, 1) {
 		return false
 	}
 	object, known := resolve(field.Name)
@@ -1265,4 +1273,14 @@ func nativeAnonymousInitializerConcreteClassSubject(typ types.JavaType, work *wo
 	default:
 		return false
 	}
+}
+
+// A sealed lexical capture is rendered as its original stable local/enclosing
+// binding, not as a foreign synthetic field access. Keep the original read PC
+// in the event certificate and require the same read-only operand-path proof
+// as rendering; a name or raw owner is insufficient.
+func nativeAnonymousInitializerLexicalCaptureField(original *values.JavaClassMember, field *values.RefMember, ctx *class_context.ClassContext) bool {
+	return original != nil && field != nil && ctx != nil && ctx.SourceLexicalCapturedField != nil && ctx.SourceLexicalCapturedFieldType != nil && field.HasOriginPC &&
+		field.OriginalInstanceFieldRead(field.OriginPC, original.Name, original.Member, original.Description) &&
+		ctx.SourceLexicalCapturedFieldType(field, field.OriginPC, field.Member)
 }

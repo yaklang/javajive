@@ -5,14 +5,28 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
-// Physical slots can be reused by earlier disjoint lifetimes. Admit a branch
+// Physical slots can be reused by earlier disjoint lifetimes. Admit a captured
 // definition web only if every original overlapping read has a closed frontier
 // and none joins a captured definition with another lifetime. IINC's input and
-// new definition participate together; wide interiors cannot borrow this proof.
+// new definition participate together. Reuse may have a different width, but
+// every read requires whole matching writers; a wide interior is not a value.
 // Final source publication still checks every retained captured STORE and its
 // snapshot. This is not permission to treat equal types as equal values.
 func nativeLambdaLocalDefinitionWebClosed(flow *nativeEnumParameterFlow, ops []*core.OpCode, read *nativeEnumLocalRead, work *workbudget.Budget) bool {
-	if flow == nil || read == nil || read.storePC != -1 || len(read.storePCs) < 2 || len(read.storePCs) > 64 || len(ops) > 8192 || work != nil && work.CheckAlloc(int64(len(ops))*256+8192) != nil {
+	if flow == nil || read == nil || read.slot < 0 || len(read.storePCs) > 64 || len(ops) > 8192 || work != nil && work.CheckAlloc(int64(len(ops))*256+8192) != nil {
+		return false
+	}
+	at := flow.byPC[read.pc]
+	if at == nil || at.Instr == nil || at.Instr.OpCode != read.opcode || core.GetRetrieveIdx(at) != read.slot || !constructorMotionLoad(at, read.descriptor) {
+		return false
+	}
+	frontier := read.storePCs
+	if len(frontier) == 0 {
+		if read.storePC < 0 {
+			return false
+		}
+		frontier = []int{read.storePC}
+	} else if read.storePC != -1 || len(frontier) < 2 {
 		return false
 	}
 	width := 1
@@ -20,7 +34,7 @@ func nativeLambdaLocalDefinitionWebClosed(flow *nativeEnumParameterFlow, ops []*
 		width = 2
 	}
 	expected, found := map[int]bool{}, map[int]bool{}
-	for _, pc := range read.storePCs {
+	for _, pc := range frontier {
 		if pc < 0 || pc > 65535 || expected[pc] {
 			return false
 		}
@@ -44,12 +58,9 @@ func nativeLambdaLocalDefinitionWebClosed(flow *nativeEnumParameterFlow, ops []*
 		if slot >= read.slot+width || read.slot >= slot+access.Width {
 			continue
 		}
-		if slot != read.slot || access.Width != width {
-			return false
-		}
 		pc := int(op.CurrentOffset)
 		if access.Write && expected[pc] {
-			if access.Read || found[pc] {
+			if access.Read || found[pc] || slot != read.slot || access.Width != width || !nativeLambdaStoreMatchesDescriptor(op, read.descriptor) {
 				return false
 			}
 			found[pc] = true
@@ -77,12 +88,44 @@ func nativeLambdaLocalDefinitionWebClosed(flow *nativeEnumParameterFlow, ops []*
 		}
 		inside, outside := false, access.Write && !expected[pc]
 		for _, writer := range frontier {
+			definition := flow.byPC[writer]
+			if definition == nil || definition.Instr == nil || !nativeProofWork(work, 1) || core.GetStoreIdx(definition) != slot || core.LocalAccessOf(definition.Instr.OpCode).Width != access.Width || !nativeLambdaStoreMatchesDescriptor(definition, descriptor) {
+				return false
+			}
 			inside = inside || expected[writer]
 			outside = outside || !expected[writer]
 		}
 		if inside && outside {
 			return false
 		}
+		if pc == read.pc && (op.Instr.OpCode != read.opcode || slot != read.slot || access.Width != width || !inside || outside || len(frontier) != len(expected)) {
+			return false
+		}
 	}
 	return len(found) == len(expected)
+}
+
+func nativeLambdaStoreMatchesDescriptor(op *core.OpCode, descriptor string) bool {
+	if op == nil || op.Instr == nil || descriptor == "" {
+		return false
+	}
+	if op.Instr.OpCode == core.OP_IINC {
+		return descriptor == "I"
+	}
+	category := 0
+	switch descriptor[0] {
+	case 'I', 'Z', 'B', 'C', 'S':
+	case 'J':
+		category = 1
+	case 'F':
+		category = 2
+	case 'D':
+		category = 3
+	case 'L', '[':
+		category = 4
+	default:
+		return false
+	}
+	opcode := op.Instr.OpCode
+	return opcode == core.OP_ISTORE+category || opcode >= core.OP_ISTORE_0+category*4 && opcode < core.OP_ISTORE_0+category*4+4
 }

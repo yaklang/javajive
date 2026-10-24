@@ -9,9 +9,9 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 )
 
-// &class_context.ClassContext{} is a throwaway rendering context used only to inspect the textual form of
-// the opaque CustomStatement break/continue/throw markers. It carries no state.
-// Render probes own their import state.
+// Builtin control leaves and deferred assignments expose sealed structural
+// roles. Only legacy opaque CustomStatements retain the textual compatibility
+// fallback; querying known roles must not render their value operands.
 
 // PruneUnreachableStatements removes statements that follow a statement which cannot
 // complete normally (a "terminal" statement) within the same block. javac rejects
@@ -72,6 +72,15 @@ func statementIsTerminal(st statements.Statement) bool {
 	case *statements.ReturnStatement:
 		return true
 	case *statements.CustomStatement:
+		if _, known := s.SourceAssignmentForward(); known {
+			return false
+		}
+		if _, known := s.SourceThrowOperand(); known {
+			return true
+		}
+		if _, _, known := s.SourceTransferProtocol(); known {
+			return true
+		}
 		txt := strings.TrimSpace(s.String(&class_context.ClassContext{}))
 		return txt == "break" || strings.HasPrefix(txt, "break ") ||
 			txt == "continue" || strings.HasPrefix(txt, "continue ") ||
@@ -135,6 +144,15 @@ func subtreeHasBreak(sts []statements.Statement) bool {
 func statementSubtreeHasBreak(st statements.Statement) bool {
 	switch s := st.(type) {
 	case *statements.CustomStatement:
+		if _, known := s.SourceAssignmentForward(); known {
+			return false
+		}
+		if _, known := s.SourceThrowOperand(); known {
+			return false
+		}
+		if kind, _, known := s.SourceTransferProtocol(); known {
+			return kind == "break"
+		}
 		txt := strings.TrimSpace(s.String(&class_context.ClassContext{}))
 		return txt == "break" || strings.HasPrefix(txt, "break ")
 	case *statements.IfStatement:

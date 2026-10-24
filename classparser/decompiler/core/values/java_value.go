@@ -14,11 +14,14 @@ import (
 )
 
 type JavaRef struct {
+	originalLambdaResult               *originalLambdaResult
 	originalDynamicOperand             *originalDynamicOperand
 	originalLocalWeb                   *originalLocalWeb
 	originalLocalDeclaration           bool
 	originalLocalPC, originalLocalSlot int
 	originalLocalSeed                  JavaValue
+	originalDeclarationAliases         *originalDeclarationAliases
+	sourceDeclarationAliases           *sourceDeclarationAliases
 	originalParameter                  bool
 	originalReceiver                   bool
 	originalParameterSlot              int
@@ -94,6 +97,7 @@ func (j *JavaRef) MarkOriginalLocalDeclaration(pc, slot int, seed JavaValue) {
 	}
 	j.originalLocalDeclaration = true
 	j.originalLocalPC, j.originalLocalSlot, j.originalLocalSeed = pc, slot, seed
+	j.originalDeclarationAliases = &originalDeclarationAliases{members: map[*JavaRef]string{j: j.VarUid}}
 }
 
 func (j *JavaRef) OriginalLocalDeclaration(seed JavaValue) (pc, slot int, known bool) {
@@ -462,12 +466,13 @@ func NewJavaClassMember(typeName, member string, desc string, typ types.JavaType
 }
 
 type RefMember struct {
-	originalFieldRead *originalFieldRead
-	OriginPC          int
-	HasOriginPC       bool
-	Member            string
-	Object            JavaValue
-	JavaType          types.JavaType
+	originalFieldRead  *originalFieldRead
+	originalFieldWrite *originalFieldRead
+	OriginPC           int
+	HasOriginPC        bool
+	Member             string
+	Object             JavaValue
+	JavaType           types.JavaType
 }
 
 // ReplaceVar implements JavaValue.
@@ -575,13 +580,20 @@ func (j *RefMember) String(funcCtx *class_context.ClassContext) string {
 			return source
 		}
 	}
-	if funcCtx != nil && funcCtx.SourceCapturedField != nil {
+	if funcCtx != nil && (funcCtx.SourceCapturedFieldAt != nil || funcCtx.SourceCapturedField != nil) {
 		pc := -1
 		if j.HasOriginPC {
 			pc = j.OriginPC
 		}
 		ref, direct := UnpackSoltValue(j.Object).(*JavaRef)
-		if text, known := funcCtx.SourceCapturedField(pc, j.Member, direct && ref != nil && ref.IsThis); known {
+		var text string
+		var known bool
+		if funcCtx.SourceCapturedFieldAt != nil {
+			text, known = funcCtx.SourceCapturedFieldAt(funcCtx, pc, j.Member, direct && ref != nil && ref.IsThis)
+		} else {
+			text, known = funcCtx.SourceCapturedField(pc, j.Member, direct && ref != nil && ref.IsThis)
+		}
+		if known {
 			return text
 		}
 	}
@@ -589,6 +601,9 @@ func (j *RefMember) String(funcCtx *class_context.ClassContext) string {
 	//if j.Id == 0 {
 	//	return j.Member
 	//}
+	if receiver := j.sourceFieldReceiver(funcCtx); receiver != nil {
+		return fmt.Sprintf("%s.%s", receiver.String(funcCtx), class_context.SafeIdentifier(j.Member))
+	}
 	obj := AssignmentOperand(j.Object, funcCtx)
 	// A ternary used as a field receiver MUST be parenthesized: `?:` binds looser than `.`,
 	// so `(cond) ? (a) : (b).field` parses as `(cond) ? (a) : ((b).field)` (Range vs Cut →
@@ -650,11 +665,17 @@ func (j *TernaryExpression) Type() (typ types.JavaType) {
 	if j == nil || j.TrueValue == nil || j.FalseValue == nil {
 		return nil
 	}
-	if j.cachedType != nil {
-		return j.cachedType
-	}
 	if j.computingType {
 		return nil
+	}
+	// Only numeric conditional domains need the fresh promotion query below.
+	// Preserve cached Boolean/reference inference, including its constant-time
+	// behavior on large shared predicate graphs.
+	if j.cachedType != nil {
+		p, primitive := j.cachedType.RawType().(*types.JavaPrimer)
+		if !primitive || p == nil || conditionalPrimitiveKind(p.Name) == "" {
+			return j.cachedType
+		}
 	}
 	j.computingType = true
 	defer func() {
@@ -666,6 +687,14 @@ func (j *TernaryExpression) Type() (typ types.JavaType) {
 			j.cachedType = typ
 		}
 	}()
+	// Numeric conditional typing is symmetric and depends on both resolved arms.
+	// A cached first-arm type from phi assembly is not a numeric type proof.
+	if numeric, ok := NumericConditionalType(j.TrueValue, j.FalseValue); ok {
+		return numeric
+	}
+	if j.cachedType != nil {
+		return j.cachedType
+	}
 	typ = types.MergeTypes(TernaryArmRValueType(j.TrueValue), TernaryArmRValueType(j.FalseValue))
 	return typ
 }
@@ -832,14 +861,14 @@ func boolReduceMemo(v JavaValue, funcCtx *class_context.ClassContext, memo map[*
 
 func (j *TernaryExpression) String(funcCtx *class_context.ClassContext) string {
 	if !boundedDecisionGraph(j, 8192, 256) {
-		return EmptySlotValuePlaceholder
+		return IncompleteSourceValue(funcCtx)
 	}
 	if rendered, ok := renderIntegerDecision(j, funcCtx); ok {
 		return rendered
 	}
 	reduced := boolReduce(j, funcCtx)
 	if !boundedDecisionSource(reduced, 65536) {
-		return EmptySlotValuePlaceholder
+		return IncompleteSourceValue(funcCtx)
 	}
 	// A late Boolean leaf may let reduction prove a canonical predicate even
 	// while this producer retains its computational int type. Keep the source
@@ -874,7 +903,7 @@ func ternaryTooLarge(v JavaValue, limit int) bool {
 
 func ternaryRawString(t *TernaryExpression, funcCtx *class_context.ClassContext) string {
 	if t == nil {
-		return EmptySlotValuePlaceholder
+		return IncompleteSourceValue(funcCtx)
 	}
 	condition := branchConditionView(t.Condition)
 	return fmt.Sprintf("(%s) ? (%s) : (%s)",
@@ -886,7 +915,7 @@ func ternaryRawString(t *TernaryExpression, funcCtx *class_context.ClassContext)
 
 func javaValueRawString(value JavaValue, funcCtx *class_context.ClassContext) string {
 	if value == nil {
-		return EmptySlotValuePlaceholder
+		return IncompleteSourceValue(funcCtx)
 	}
 	if t, ok := UnpackSoltValue(value).(*TernaryExpression); ok {
 		return ternaryRawString(t, funcCtx)
@@ -928,8 +957,8 @@ func BoolTernaryCondition(v JavaValue) (JavaValue, bool) {
 
 // EmptySlotValuePlaceholder is rendered when a SlotValue has no underlying value,
 // which means the stack simulation produced an incomplete result for the method.
-// It is not valid Java; the dumper detects this marker and degrades the affected
-// method to a stub instead of emitting un-compilable source.
+// It is debug text only. IncompleteSourceValue separately records the renderer
+// failure; an identical literal in the original program is ordinary data.
 const EmptySlotValuePlaceholder = "empty slot value"
 
 type SlotValue struct {
@@ -956,7 +985,7 @@ func (s *SlotValue) Type() types.JavaType {
 }
 func (s *SlotValue) String(funcCtx *class_context.ClassContext) string {
 	if s.val == nil {
-		return EmptySlotValuePlaceholder
+		return IncompleteSourceValue(funcCtx)
 	}
 	return s.val.String(funcCtx)
 }

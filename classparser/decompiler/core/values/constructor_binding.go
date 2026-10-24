@@ -10,6 +10,61 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
 
+// An original untyped null is applicable to every reference formal. When a
+// complete constructor table has exactly one candidate of this arity, adding
+// a descriptor cast cannot improve binding, but it does invent a CHECKCAST
+// absent from the original operand packet. Constructors are not inherited;
+// all varargs and same-arity rivals still need the ordinary binding proof.
+func (f *FunctionCallExpression) uniqueDelegationNullArgument(i int, ctx *class_context.ClassContext) bool {
+	if f == nil || ctx == nil || ctx.InvocationMetadata == nil || ctx.FunctionName != "<init>" ||
+		f.FunctionName != "<init>" || !f.IsSpecialInvoke || f.Kind != InvokeSpecial || !f.HasOriginPC ||
+		i < 0 || i >= len(f.Arguments) {
+		return false
+	}
+	literal, ok := f.Arguments[i].(*JavaLiteral)
+	if !ok {
+		return false
+	}
+	pc, original := literal.OriginalNullPC()
+	if !original || pc >= f.OriginPC {
+		return false
+	}
+	receiver, ok := UnpackSoltValue(f.Object).(*JavaRef)
+	if !ok || receiver == nil || !receiver.IsThis {
+		return false
+	}
+	owner := strings.ReplaceAll(f.ClassName, ".", "/")
+	if owner != strings.ReplaceAll(ctx.ClassName, ".", "/") && owner != strings.ReplaceAll(ctx.SupperClassName, ".", "/") {
+		return false
+	}
+	params, ret, err := callbinding.Descriptor(f.Descriptor)
+	if err != nil || ret != "V" || len(params) != len(f.Arguments) || !callbinding.Reference(params[i]) {
+		return false
+	}
+	table, known := ctx.InvocationMetadata(owner)
+	if !known || table.Name != owner || !table.MembersComplete || table.Signature != "" {
+		return false
+	}
+	matched := 0
+	for _, method := range table.Methods {
+		if method.Name != "<init>" {
+			continue
+		}
+		ps, result, err := callbinding.Descriptor(method.Desc)
+		if err != nil || result != "V" || method.Static || method.Bridge || method.Varargs {
+			return false
+		}
+		if len(ps) != len(params) {
+			continue
+		}
+		if method.Desc != f.Descriptor || method.Generic || method.Signature != "" {
+			return false
+		}
+		matched++
+	}
+	return matched == 1
+}
+
 // Source expressions can become more specific than their JVM erasure (for
 // example Box<String>.value still has an Object field descriptor). Seal a
 // non-generic this/super overload with the original descriptor, independently
@@ -64,7 +119,7 @@ func (f *FunctionCallExpression) instantiatedConstructorBindingCast(i int, ctx *
 			if !ctx.IsTypeParam(name) {
 				return ""
 			}
-			actual = append(actual, types.NewJavaClass(name))
+			actual = append(actual, types.NewJavaTypeVariable(name))
 		}
 	} else {
 		super, _ := types.ParseClassSignatureSupers(ctx.ClassSig)

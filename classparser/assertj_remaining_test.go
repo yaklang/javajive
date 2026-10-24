@@ -1,15 +1,43 @@
 package javaclassparser
 
 import (
+	"bytes"
 	"os"
 	"strings"
 	"testing"
 )
 
 func TestIntegerAssertDropsNumberCastIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/AbstractIntegerAssert.class", "JDEC_ASSERTJ_REMAINING_OFF",
-		"this.integers.assertIsZero((AssertionInfo)(this.info),((Integer)(this.actual)))",
-		"this.integers.assertIsZero((AssertionInfo)(this.info),(Number)(((Integer)(this.actual)))")
+	// Keep the historical inventory entry, but retire its unsafe contract:
+	// source text cannot license erasing the physical descriptor's Number
+	// view. This single-class input lacks the receiver's declaration table.
+	// The original-first numeric fixture independently checks actual overload
+	// binding, receiver checks and full ABI with complete declarations.
+	raw, err := os.ReadFile("testdata/regression/AbstractIntegerAssert.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before string
+	for _, flag := range []string{"", "1"} {
+		// The budget is shared by every method in this large historical class.
+		// This source-binding regression needs the full class, rather than the
+		// smaller default graph budget used by resource-limit tests.
+		result, err := DecompileWithOptions(bytes.Clone(raw), DecompileOptions{
+			Mode:        Compatibility,
+			Limits:      Limits{MaxGraphScans: 10_000_000},
+			EnvSnapshot: map[string]string{"JDEC_ASSERTJ_REMAINING_OFF": flag},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(result.Source, "this.integers.assertIsZero((AssertionInfo)(this.info),(Number)(((Integer)(this.actual)))") {
+			t.Fatalf("unresolved class binding lost its descriptor view:\n%s", result.Source)
+		}
+		if before != "" && result.Source != before {
+			t.Fatal("class keyword recovery still changed a numeric binding")
+		}
+		before = result.Source
+	}
 }
 
 func TestBigDecimalAssertDropsStringCastIsLoadBearing(t *testing.T) {
@@ -21,24 +49,111 @@ func TestInstantAssertDropsStringParseCastIsLoadBearing(t *testing.T) {
 }
 
 func TestObjectArrayAssertKeepsElementActualIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/AbstractObjectArrayAssert.class", "JDEC_ASSERTJ_REMAINING_OFF",
-		"this.arrays.assertAre((AssertionInfo)(this.info),this.actual,var1)",
-		"this.arrays.assertAre((AssertionInfo)(this.info),((Object[])(this.actual)),var1)")
+	// Retain the inventory entry, but derive the contract from the saved class:
+	// all eleven helpers consume Object[] after an actual field CHECKCAST.
+	// A missing declaration family cannot authorize choosing a narrower rival.
+	// The authored original-first fixture checks the complete family, binary
+	// callers, exceptions, array effects and literal data in both modes/profiles.
+	raw, err := os.ReadFile("testdata/regression/AbstractObjectArrayAssert.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := arrayProducerCheckedInvocations(t, raw)
+	for _, op := range arrayFieldViewOperations() {
+		tail := "Lorg/assertj/core/api/Condition;)V"
+		if op.count == "count" {
+			tail = "I" + tail
+		}
+		if strings.Contains(op.parameters, "Comparator") {
+			tail = "Ljava/util/Comparator;)V"
+		}
+		invocation := "b6:org/assertj/core/internal/ObjectArrays." + op.name + "(Lorg/assertj/core/api/AssertionInfo;[Ljava/lang/Object;" + tail
+		found := false
+		for _, row := range strings.Split(original, "\n") {
+			if at := strings.Index(row, invocation); at >= 0 {
+				if !strings.Contains(row[:at], "checkcast:[Ljava/lang/Object;") {
+					t.Fatal("original helper lost its physical array check", row)
+				}
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("saved original helper/descriptor missing", invocation)
+		}
+	}
+	for _, mode := range []DecompileMode{Precision, Compatibility} {
+		var before []string
+		for _, off := range []string{"", "1"} {
+			// This full historical class contains over a hundred method bodies.
+			// Give their shared proof budget room; resource-limit tests retain
+			// the production defaults. Do not trim unrelated original methods.
+			result, err := DecompileWithOptions(bytes.Clone(raw), DecompileOptions{Mode: mode, TargetSourceVersion: 8, Limits: Limits{MaxGraphScans: 100_000_000}, EnvSnapshot: map[string]string{"JDEC_ASSERTJ_REMAINING_OFF": off}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var calls []string
+			for _, op := range arrayFieldViewOperations() {
+				var found string
+				for _, line := range strings.Split(result.Source, "\n") {
+					if strings.Contains(line, "this.arrays."+op.name+"(") {
+						if found != "" {
+							t.Fatal("ambiguous historical helper source", op.name)
+						}
+						found = strings.TrimSpace(line)
+					}
+				}
+				if found == "" || !strings.Contains(found, "(Object[])") || !strings.Contains(found, "this.actual") {
+					t.Fatalf("%s/%q lost original checked array view: %s", mode, off, found)
+				}
+				calls = append(calls, found)
+			}
+			if before != nil && strings.Join(before, "\n") != strings.Join(calls, "\n") {
+				t.Fatal("source words still changed original array helper bindings")
+			}
+			before = calls
+		}
+	}
 }
 
 func TestNaturalOrderComparatorUsesCompareToIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/NaturalOrderComparator.class", "JDEC_ASSERTJ_REMAINING_OFF",
-		"return var1.compareTo(var2)",
-		"return Comparator.naturalOrder().compare(var1,var2)")
+	// Retain the historical inventory entry, but use the actual original
+	// invocation graph. The generic receiver proof now restores this factory
+	// through its original erasure, rather than replacing it by source spelling.
+	// The independent authored factory-spelling fixture checks effects and
+	// unchanged binary callers; the generic-factory fixture additionally checks
+	// both compiler profiles, complete declarations and all lowering instructions.
+	raw, err := os.ReadFile("testdata/regression/NaturalOrderComparator.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := arrayProducerCheckedInvocations(t, raw)
+	if !strings.Contains(original, "b8:java/util/Comparator.naturalOrder()Ljava/util/Comparator;") ||
+		!strings.Contains(original, "b9:java/util/Comparator.compare(Ljava/lang/Object;Ljava/lang/Object;)I") {
+		t.Fatal("saved original no longer supplies the factory and interface dispatch", original)
+	}
+	for _, mode := range []DecompileMode{Precision, Compatibility} {
+		before := ""
+		for _, off := range []string{"", "1"} {
+			result, err := DecompileWithOptions(bytes.Clone(raw), DecompileOptions{Mode: mode, TargetSourceVersion: 8, EnvSnapshot: map[string]string{"JDEC_ASSERTJ_REMAINING_OFF": off}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(result.Source, ".naturalOrder()") || !strings.Contains(result.Source, ".compare(") || strings.Contains(result.Source, ".compareTo(") {
+				t.Fatalf("%s/%q lost the original factory or selected operation:\n%s", mode, off, result.Source)
+			}
+			if before != "" && result.Source != before {
+				t.Fatal("class text still changed the original factory binding")
+			}
+			before = result.Source
+		}
+	}
 }
 
 func TestJoinStreamCtorCastIsLoadBearing(t *testing.T) {
-	// This test owns the legacy class-source rewrite. The typed constructor-binding
-	// pass now handles the same bytecode path under its own kill switch.
-	t.Setenv("JDEC_THIS_CTOR_OVERLOAD_CAST_OFF", "1")
-	assertKillSwitchDecompile(t, "testdata/regression/Join.class", "JDEC_ASSERTJ_REMAINING_OFF",
-		"this((Stream)(Arrays.stream(((Condition[])(checkNotNullConditions(var1))))))",
-		"this(Arrays.stream(((Condition[])(checkNotNullConditions(var1)))))")
+	// Verify the original selected constructor after real recompilation. The
+	// former counterfactual disabled typed binding and assumed every original
+	// parameter was named var1; neither assumption is a constructor contract.
+	testReviewedJoinConstructorContract(t)
 }
 
 func TestSoftProxiesCacheFindOrInsertCastIsLoadBearing(t *testing.T) {

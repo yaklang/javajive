@@ -65,6 +65,9 @@ func (c *ClassObjectDumper) nativeAnonymousConstructorForCompiler(obj *ClassObje
 			}
 			return packet
 		}
+		if packet := c.artifactStaticAnonymousConstructor(obj, owner, method, assertionRoot, members, forest, metadata, access); packet != nil {
+			return packet
+		}
 		// JDK18+ retains the hidden enclosing constructor parameter while
 		// omitting its unused field. Older output targets must regenerate the
 		// field and cannot preserve that original declaration shape.
@@ -77,12 +80,21 @@ func (c *ClassObjectDumper) nativeAnonymousConstructorForCompiler(obj *ClassObje
 		}
 		return nativeAnonymousConstructorRolesWithLambdas(obj, owner, method, assertionRoot, c.Work, members, forest, metadata, 0x0020, true, lambda, access)
 	}
+	return c.nativeJavac8AnonymousConstructor(obj, owner, method, assertionRoot, members, forest, metadata, access)
+}
+
+func (c *ClassObjectDumper) nativeJavac8AnonymousConstructor(obj *ClassObject, owner, method, assertionRoot string, members *nativeMemberFamily, forest *nativeAnonymousForest, metadata callbinding.Provider, access map[string]*nativeConstructorAccessBridge) *nativeAnonymousClass {
+	lambda := &nativeMemberClass{object: obj, lambdaContext: nativeLambdaImplementationContext{resolve: c.nativeAnnotationDeclarationResolver(), metadata: metadata}}
 	// Native javac8 emits the same anonymous ownership/capture profile when
-	// its input source is Java7 or Java8. The selected output remains Java8.
-	// Admit only the independently compiled major51/52 domains, with matching
-	// original owner/child versions. Version membership does not replace the
-	// exact owning method, self row, constructor and capture proofs below.
-	if c.options.TargetSourceVersion != 8 || c.obj == nil || obj == nil || c.obj.GetClassName() != owner || (c.obj.MajorVersion != 51 && c.obj.MajorVersion != 52) || obj.MajorVersion != c.obj.MajorVersion || c.obj.MinorVersion != 0 || obj.MinorVersion != 0 {
+	// its input source is Java5 through Java8. The selected output remains Java8.
+	// Older inputs must also close their physical classfile-feature domain; a
+	// changed version word cannot make future CP tags or opcodes into legacy
+	// evidence. All owning-method, self-row, constructor and capture proofs below
+	// remain necessary, as does successful final source consumption.
+	if c.options.TargetSourceVersion != 8 || c.obj == nil || obj == nil || c.obj.GetClassName() != owner || c.obj.MajorVersion < 49 || c.obj.MajorVersion > 52 || obj.MajorVersion != c.obj.MajorVersion || c.obj.MinorVersion != 0 || obj.MinorVersion != 0 {
+		return nil
+	}
+	if c.obj.MajorVersion < 51 && (!nativeAnonymousLegacyInputFeatures(c.obj, c.Work) || !nativeAnonymousLegacyInputFeatures(obj, c.Work)) {
 		return nil
 	}
 	originalOwner, originalMethod, known := originalAnonymousOwner(obj)
@@ -92,6 +104,13 @@ func (c *ClassObjectDumper) nativeAnonymousConstructorForCompiler(obj *ClassObje
 	static, known := nativeAnonymousOriginalContext(c.obj, obj, method, c.Work)
 	if !known {
 		return nil
+	}
+	preinitLambda := c.nativeAnonymousPreinitLambdaContext(obj, method, metadata)
+	if preinitLambda {
+		// The physical static helper was generated from an instance constructor.
+		// Its exclusive original factory precedes THIS initialization, so the
+		// anonymous source has instance lexical flags but no enclosing THIS.
+		static = false
 	}
 	expected, selfFlags := uint16(0x0020), uint16(0)
 	if static {
@@ -119,8 +138,19 @@ func (c *ClassObjectDumper) nativeAnonymousConstructorForCompiler(obj *ClassObje
 		}
 	}
 	packet := nativeAnonymousConstructorRolesWithLambdas(obj, owner, method, assertionRoot, c.Work, members, forest, metadata, expected, false, lambda, access)
-	if packet == nil || static != (packet.enclosingField == "") {
+	if packet == nil {
 		return nil
+	}
+	if static != (packet.enclosingField == "") {
+		// Class modifiers follow the owning method. Availability of its THIS is
+		// separate: explicit constructor-invocation arguments precede initialization.
+		if static || packet.enclosingField != "" || !preinitLambda && !c.nativeAnonymousConstructorArgument(obj, method) {
+			return nil
+		}
+	}
+
+	if c.obj.MajorVersion < 51 {
+		packet.legacyInputMajor = c.obj.MajorVersion
 	}
 	return packet
 }

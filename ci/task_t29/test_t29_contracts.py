@@ -19,7 +19,7 @@ from tools.ci_scheduler.envcheck import require_go_matches, require_jdk
 from tools.ci_scheduler.gates import CaseObservation, evaluate_local_gates, promote_capability
 from tools.ci_scheduler.schedule import compare_schedules
 from tools.ci_scheduler.shard import ShardError, TestItem, expand_manifest, shard_items
-from tools.ci_scheduler.workflow_inventory import BASELINE_CI_JOBS, action_pins, list_jobs, required_coverage_snapshot
+from tools.ci_scheduler.workflow_inventory import BASELINE_CI_JOBS, action_pins, list_jobs, required_coverage_snapshot, validate_fast_cross_scope
 
 from tools.evidence_paths import evidence_subdir
 
@@ -246,7 +246,7 @@ class T29Contracts(unittest.TestCase):
         self.assertIn("name: Algorithm regression", pr_ci)
         self.assertRegex(pr_ci, r"(?m)^\s+timeout-minutes:\s+(?:[1-9]|1[0-5])\s*$")
         self.assertNotIn("go test ./...", pr_ci)
-        self.assertNotIn("./test/cross", pr_ci)
+        validate_fast_cross_scope(pr_ci)
 
         gates = ROOT / ".github" / "workflows" / "task-gates.yml"
         extended = ROOT / ".github" / "workflows" / "extended.yml"

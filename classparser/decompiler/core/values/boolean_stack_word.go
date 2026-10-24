@@ -46,8 +46,8 @@ func NarrowBooleanStackWord(value JavaValue) JavaValue {
 		return view
 	}
 	// A rejected graph/category proof must not fall through to a raw Boolean
-	// reduction. The dumper recognizes this marker and reports a stub.
-	return NewCustomValue(func(*class_context.ClassContext) string { return EmptySlotValuePlaceholder }, func() types.JavaType { return types.NewJavaPrimer(types.JavaBoolean) })
+	// reduction. The renderer records failure separately from its debug text.
+	return NewCustomValue(func(ctx *class_context.ClassContext) string { return IncompleteSourceValue(ctx) }, func() types.JavaType { return types.NewJavaPrimer(types.JavaBoolean) })
 }
 
 // BooleanStackConsumerView narrows the selected ternary arm at a Z consumer,

@@ -27,9 +27,9 @@ func TestCheckedEscapePreciseRethrowRequiresUnchangedOriginalCatchBinding(t *tes
 		t.Fatalf("compile %v\n%s", e, out)
 	}
 	raw := readClassBytes(t, dir, "CatchProofMetadata")
-	for _, variant := range []string{"original unchanged parameter", "different printed name same ID", "same printed name different ID", "parameter reassigned", "copied ref writes parameter", "folded assignment", "for header assignment", "while condition assignment", "switch arm assignment", "lambda captured assignment", "alias rethrow", "cast rethrow", "decoded entry value", "wrong decoded entry", "missing entry origin", "missing handler metadata", "wrong handler entry", "catch type mismatch", "missing catch ID", "method parameter is not catch binding", "missing throw origin", "conflicting copy of throw PC", "opaque closure", "value cycle", "statement cycle", "proof budget", "reassigned same-ID nested catch"} {
+	for _, variant := range []string{"original unchanged parameter", "anchor before catch", "anchor in handler", "anchor before reassignment", "sealed release before catch", "sealed release in handler", "sealed release before reassignment", "unsealed release", "changed release payload", "changed release kind", "sealed monitor enter", "nil monitor", "sealed break before catch", "sealed continue in handler", "changed transfer label", "changed transfer payload", "nil anchor", "opaque anchor spelling", "different printed name same ID", "same printed name different ID", "parameter reassigned", "copied ref writes parameter", "folded assignment", "for header assignment", "while condition assignment", "switch arm assignment", "lambda captured assignment", "alias rethrow", "cast rethrow", "decoded entry value", "wrong decoded entry", "missing entry origin", "missing handler metadata", "wrong handler entry", "catch type mismatch", "missing catch ID", "method parameter is not catch binding", "missing throw origin", "conflicting copy of throw PC", "opaque closure", "value cycle", "statement cycle", "proof budget", "reassigned same-ID nested catch"} {
 		t.Run(variant, func(t *testing.T) {
-			obj, e := Parse(raw)
+			obj, e := Parse(append([]byte(nil), raw...))
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -71,6 +71,60 @@ func TestCheckedEscapePreciseRethrowRequiresUnchangedOriginalCatchBinding(t *tes
 			body := []statements.Statement{tr}
 			assign := statements.NewAssignStatement(caught, values.JavaNull, false)
 			switch variant {
+			case "anchor before catch":
+				body = append([]statements.Statement{statements.NewSourceAnchorStatement()}, body...)
+			case "anchor in handler":
+				tr.CatchBodies[0] = append([]statements.Statement{statements.NewSourceAnchorStatement()}, tr.CatchBodies[0]...)
+			case "anchor before reassignment":
+				tr.CatchBodies[0] = []statements.Statement{statements.NewSourceAnchorStatement(), assign, thrown}
+			case "sealed release before catch", "sealed release in handler", "sealed release before reassignment", "unsealed release", "changed release payload", "changed release kind", "sealed monitor enter", "nil monitor":
+				monitor := statements.NewOriginalMonitorStatement("monitor_exit", nil, 3, 1)
+				var leaf statements.Statement = monitor
+				switch variant {
+				case "unsealed release":
+					leaf = statements.NewMiddleStatement("monitor_exit", nil)
+				case "changed release payload":
+					monitor.Data = &values.AssignmentExpression{Target: caught, Value: values.JavaNull}
+				case "changed release kind":
+					monitor.Flag = "monitor_enter"
+				case "sealed monitor enter":
+					leaf = statements.NewOriginalMonitorStatement("monitor_enter", caught, 1, 1)
+				case "nil monitor":
+					leaf = (*statements.MiddleStatement)(nil)
+				}
+				if variant == "sealed release before catch" {
+					body = append([]statements.Statement{leaf}, body...)
+				} else if variant == "sealed release before reassignment" {
+					tr.CatchBodies[0] = []statements.Statement{leaf, assign, thrown}
+				} else {
+					tr.CatchBodies[0] = []statements.Statement{leaf, thrown}
+				}
+				// The certificate answers whether source catch identity is written.
+				// It grants no exception absorption or instruction motion permission.
+				if _, _, known := catchSourceChildren(leaf); known {
+					t.Fatal("catch identity granted control/effect permission")
+				}
+			case "sealed break before catch", "sealed continue in handler", "changed transfer label", "changed transfer payload":
+				leaf := statements.NewSourceTransferStatement("continue", "OUTER")
+				if variant == "sealed break before catch" {
+					leaf = statements.NewSourceTransferStatement("break", "OUTER")
+				}
+				if variant == "changed transfer label" {
+					leaf.LoopTargetLabel = "OUTER;failure=null"
+				}
+				if variant == "changed transfer payload" {
+					leaf.ThrownValue = values.JavaNull
+				}
+				if variant == "sealed break before catch" {
+					body = append([]statements.Statement{leaf}, body...)
+				} else {
+					tr.CatchBodies[0] = []statements.Statement{leaf, thrown}
+				}
+			case "nil anchor":
+				body = append([]statements.Statement{(*statements.SourceAnchorStatement)(nil)}, body...)
+			case "opaque anchor spelling":
+				body = append([]statements.Statement{&statements.MiddleStatement{Flag: "source_anchor", Data: thrown}}, body...)
+
 			case "different printed name same ID":
 				copy := *caught
 				copy.VarUid = "different"
@@ -141,13 +195,13 @@ func TestCheckedEscapePreciseRethrowRequiresUnchangedOriginalCatchBinding(t *tes
 				tr.CatchBodies = [][]statements.Statement{{&inner}}
 			}
 			got := d.preciseCatchRethrows(body, code)
-			want := variant == "original unchanged parameter" || variant == "different printed name same ID" || variant == "decoded entry value"
+			want := variant == "anchor before catch" || variant == "anchor in handler" || variant == "sealed release before catch" || variant == "sealed release in handler" || variant == "sealed break before catch" || variant == "sealed continue in handler" || variant == "original unchanged parameter" || variant == "different printed name same ID" || variant == "decoded entry value"
 			if got[throwPC] != want {
 				t.Fatalf("precise=%v want%v map=%v", got[throwPC], want, got)
 			}
 			// Removing redundant broad classification must not suppress the original
 			// checked invoke, even when its declaration is absent from caller throws.
-			if variant == "original unchanged parameter" {
+			if variant == "original unchanged parameter" || variant == "anchor before catch" || variant == "anchor in handler" || variant == "sealed release before catch" || variant == "sealed release in handler" || variant == "sealed break before catch" || variant == "sealed continue in handler" {
 				var attrs []AttributeInfo
 				for _, a := range method.Attributes {
 					if _, checked := a.(*ExceptionsAttribute); !checked {
