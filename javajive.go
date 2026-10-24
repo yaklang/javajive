@@ -31,7 +31,7 @@ import (
 )
 
 // Version is the javajive library/CLI version.
-const Version = "0.4.0"
+const Version = "0.6.0"
 
 // ---------------------------------------------------------------------------
 // Re-exported types
