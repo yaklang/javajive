@@ -451,6 +451,11 @@ func (c *ClassObjectDumper) methodNeedsCheckedEscapeAllProof(code *CodeAttribute
 					return false, fmt.Errorf("constructor delegation requires original source throws metadata")
 				}
 				invocationAllowed = concrete
+				if sourcePlan != nil && int(op.CurrentOffset) == sourcePlan.pc {
+					if projected, proved := c.constructorCheckedSuperSource(sourcePlan, method); proved {
+						invocationAllowed = projected
+					}
+				}
 				needsDelegateSourceThrows = false
 			}
 			covered := false

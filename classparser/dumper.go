@@ -5468,6 +5468,17 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			return nil, fmt.Errorf("stale constructor invocation throws source binding")
 		}
 		if exceptions == "" {
+			if projected, proved := c.constructorCheckedSuperSource(renderedConstructorPlan, method); proved {
+				names := make([]string, len(projected))
+				for i, name := range projected {
+					dot := strings.ReplaceAll(name, "/", ".")
+					funcCtx.Import(dot)
+					names[i] = funcCtx.ShortTypeName(dot)
+				}
+				exceptions = " throws " + strings.Join(names, ", ")
+			}
+		}
+		if exceptions == "" {
 			extra, err := c.superCtorCheckedThrows(renderedConstructorPlan)
 			if err != nil {
 				return nil, err

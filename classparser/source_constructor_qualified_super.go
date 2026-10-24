@@ -131,6 +131,7 @@ func constructorLoweringExecutablePlanEqual(expected, actual *sourceConstructorL
 	}
 	a, b := *expected, *actual
 	a.qualified, b.qualified = nil, nil
+	a.checkedSuperExceptions, b.checkedSuperExceptions = "", ""
 	return reflect.DeepEqual(a, b)
 }
 

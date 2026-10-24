@@ -45,6 +45,7 @@ type sourceConstructorLoweringPlan struct {
 	arguments                                 []constructorLoweringArgument
 	body                                      bool
 	qualified                                 *constructorLoweringQualifiedSuper
+	checkedSuperExceptions                    string
 }
 
 type sourceConstructorLoweringPublication struct {
@@ -324,6 +325,7 @@ func (c *ClassObjectDumper) planArtifactConstructorLowering(boundary *constructo
 		return false
 	}
 	p.plan.qualified = c.constructorLoweringQualifiedSuperView(p.plan)
+	p.plan.checkedSuperExceptions, _ = constructorLoweringCheckedSuperExceptions(c.obj, method, p.plan, c.FuncCtx.InvocationMetadata, c.Work)
 	boundary.lowering = p.plan
 	return true
 }
@@ -627,6 +629,12 @@ func (a *sourceConstructorLoweringAuthority) lower(original, compiled []byte, wo
 		if originalPacket == nil || !constructorLoweringExecutablePlanEqual(plan, originalPacket.plan) || !a.constructorLoweringQualifiedSuperUnchanged(want, plan, work) {
 			return nil, constructorLoweringFailure(work, "original packet changed")
 		}
+		if plan.checkedSuperExceptions != "" {
+			if exceptions, known := constructorLoweringCheckedSuperExceptions(want, expected[desc], plan, provider, work); !known || exceptions != plan.checkedSuperExceptions {
+				return nil, constructorLoweringFailure(work, "original checked SUPER declaration changed")
+			}
+		}
+		permute := true
 		packet := constructorLoweringTypedPacketWithQualifier(got, method, false, false, plan.qualified != nil, work, provider, len(plan.captures))
 		if packet == nil || !constructorLoweringExecutablePlanEqual(plan, packet.plan) {
 			// A separately verified already-lowered packet makes completion
@@ -635,12 +643,13 @@ func (a *sourceConstructorLoweringAuthority) lower(original, compiled []byte, wo
 			if packet == nil || !constructorLoweringExecutablePlanEqual(plan, packet.plan) {
 				return nil, constructorLoweringFailure(work, "fresh constructor does not match original slots, fields and delegation")
 			}
-			if _, err := constructorLoweringMethodEdit(compiled, got, method, layout, packet, false, work); err != nil {
-				return nil, err
-			}
-			continue
+			permute = false
 		}
-		edit, err := constructorLoweringMethodEdit(compiled, got, method, layout, packet, true, work)
+		edit, err := constructorLoweringMethodEdit(compiled, got, method, layout, packet, permute, work)
+		if err != nil {
+			return nil, err
+		}
+		edit, err = constructorLoweringCheckedSuperMethodEdit(edit, got, method, plan.checkedSuperExceptions, permute, work)
 		if err != nil {
 			return nil, err
 		}
