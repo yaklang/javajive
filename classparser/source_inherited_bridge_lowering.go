@@ -175,7 +175,7 @@ func (c *ClassObjectDumper) inheritedBridgeSource(method *MemberInfo) *dumpedMet
 		return nil
 	}
 	p := c.inheritedBridgeOriginal(method)
-	if p == nil || p.implicitVisibilityBridge {
+	if p == nil || p.implicitVisibilityBridge || !c.inheritedBridgeAnnotationsRepresentable(method, p.descriptor) {
 		return nil
 	}
 	// Several erased return descriptors may share one narrow source override.

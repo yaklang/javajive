@@ -87,7 +87,33 @@ func inheritedBridgeAnnotationsEqual(a *MemberInfo, ad string, b *MemberInfo, bd
 			return false
 		}
 		for name, annotation := range annotations {
-			if !packageAnnotationEqual(annotation, other[name], work) {
+			if !sourceAnnotationGraphEqual(annotation, other[name], work) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (c *ClassObjectDumper) inheritedBridgeAnnotationsRepresentable(method *MemberInfo, descriptor string) bool {
+	tables, valid := inheritedBridgeAnnotationTables(method, descriptor, c.Work)
+	if !valid {
+		return false
+	}
+	resolve := c.nativeAnnotationDeclarationResolver()
+	for site, annotations := range tables {
+		target := "METHOD"
+		if site.parameter >= 0 {
+			target = "PARAMETER"
+		}
+		for _, annotation := range annotations {
+			name := annotation.TypeName[1 : len(annotation.TypeName)-1]
+			definition, known := resolve(name)
+			if !known || definition == nil || definition.GetClassName() != name || definition.AccessFlags&0x2200 != 0x2200 {
+				return false
+			}
+			retention, allowed, valid := nativeAnnotationDeclarationPolicyForTargets(definition, c, target)
+			if !valid || !allowed || retention == "SOURCE" || site.invisible != (retention == "CLASS") {
 				return false
 			}
 		}

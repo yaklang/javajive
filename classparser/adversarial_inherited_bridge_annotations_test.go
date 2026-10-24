@@ -1,6 +1,7 @@
 package javaclassparser
 
 import (
+	"bytes"
 	"os"
 	"strings"
 	"testing"
@@ -29,6 +30,7 @@ func TestAdversarialInheritedBridgePreservesDeclarationAndParameterAnnotations(t
 					if err != nil {
 						t.Fatal("annotated bridge completion", err)
 					}
+					checkInheritedBridgeAnnotationLoweringBoundaries(t, name, original, fresh, artifact)
 					for _, raw := range [][]byte{original, finished} {
 						object := mustParseLowering(t, raw)
 						methodHidden, parameterHidden := false, false
@@ -58,5 +60,87 @@ func TestAdversarialInheritedBridgePreservesDeclarationAndParameterAnnotations(t
 				})
 			})
 		}
+	}
+}
+
+func checkInheritedBridgeAnnotationLoweringBoundaries(t *testing.T, name string, original, fresh []byte, artifact *JarReconstructionArtifact) {
+	t.Helper()
+	for _, variant := range []string{"lost declaration", "changed value", "changed array order", "changed retention", "duplicate table", "lost parameter", "moved parameter", "short parameter table", "helper annotation"} {
+		t.Run(variant, func(t *testing.T) {
+			object := mustParseLowering(t, bytes.Clone(fresh))
+			var method *MemberInfo
+			for _, candidate := range object.Methods {
+				n, _ := sourceBridgeUTF8(object, candidate.NameIndex)
+				if n == "read" && (variant == "helper annotation" && candidate.AccessFlags == 1 || variant != "helper annotation" && candidate.AccessFlags == 0x1041) {
+					method = candidate
+				}
+			}
+			if method == nil {
+				t.Fatal("missing genuine compiled forwarding declaration")
+			}
+			changed := false
+			for i, attr := range method.Attributes {
+				switch a := attr.(type) {
+				case *RuntimeVisibleAnnotationsAttribute:
+					if a.IsInvisible || changed {
+						continue
+					}
+					switch variant {
+					case "lost declaration", "helper annotation":
+						method.Attributes = append(method.Attributes[:i], method.Attributes[i+1:]...)
+					case "changed value":
+						for _, pair := range a.Annotations[0].ElementValuePairs {
+							if pair.Tag == 's' {
+								pair.Value = &ConstantUtf8Info{Value: "changed"}
+							}
+						}
+					case "changed array order":
+						for _, pair := range a.Annotations[0].ElementValuePairs {
+							if pair.Tag == '[' {
+								items := pair.Value.([]*ElementValuePairAttribute)
+								items[0], items[1] = items[1], items[0]
+							}
+						}
+					case "changed retention":
+						a.IsInvisible = true
+					case "duplicate table":
+						method.Attributes = append(method.Attributes, a)
+					default:
+						continue
+					}
+					changed = true
+				case *RuntimeVisibleParameterAnnotationsAttribute:
+					if a.IsInvisible || changed {
+						continue
+					}
+					switch variant {
+					case "lost parameter":
+						method.Attributes = append(method.Attributes[:i], method.Attributes[i+1:]...)
+					case "moved parameter":
+						a.ParameterAnnotations[0], a.ParameterAnnotations[1] = a.ParameterAnnotations[1], a.ParameterAnnotations[0]
+					case "short parameter table":
+						a.NumParameters--
+						a.ParameterAnnotations = a.ParameterAnnotations[:2]
+					default:
+						continue
+					}
+					changed = true
+				}
+				if changed {
+					break
+				}
+			}
+			if !changed {
+				t.Fatal("mutation did not reach its intended metadata table")
+			}
+			input := object.Bytes()
+			if bytes.Equal(input, fresh) {
+				t.Fatal("metadata mutation was not serialized")
+			}
+			got, err := artifact.source.jar.sourceConstructorLowering.lowerInheritedBridges(name, original, input, nil)
+			if err == nil && !bytes.Equal(got, input) || err != nil && got != nil {
+				t.Fatal("metadata mismatch exposed a partial executable repair", err)
+			}
+		})
 	}
 }
