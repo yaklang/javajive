@@ -122,7 +122,7 @@ func interfaceBridgeForwardTarget(obj *ClassObject, method *MemberInfo, provider
 			if a == nil || codeCount != 1 {
 				return ""
 			}
-		case *ExceptionsAttribute, *RuntimeVisibleAnnotationsAttribute, *AnnotationAttribute:
+		case *ExceptionsAttribute, *RuntimeVisibleAnnotationsAttribute:
 			// These describe only the added declaration, absent in the original.
 		case *UnparsedAttribute:
 			if a == nil || a.Name != "MethodParameters" {
@@ -147,7 +147,7 @@ func interfaceBridgeForwardTarget(obj *ClassObject, method *MemberInfo, provider
 		return ""
 	}
 	index := core.Convert2bytesToInt(invoke.Data[:2])
-	if index <= 0 || index > len(obj.ConstantPool) {
+	if index <= 0 || int(index) > len(obj.ConstantPool) {
 		return ""
 	}
 	if _, ok := obj.ConstantPool[index-1].(*ConstantInterfaceMethodrefInfo); !ok {
@@ -191,7 +191,11 @@ func interfaceBridgeForwardTarget(obj *ClassObject, method *MemberInfo, provider
 	case "Z", "B", "C", "S", "I":
 		ret = core.OP_IRETURN
 	}
-	if cursor != len(ops)-2 || int(invoke.Data[2]) != slot || !nativeEnumOpcode(ops[len(ops)-1], ret) || int(code.MaxLocals) < slot || int(code.MaxStack) < slot {
+	stack := slot
+	if width := constructorEffectType(targetResult).width(); width > stack {
+		stack = width
+	}
+	if cursor != len(ops)-2 || int(invoke.Data[2]) != slot || !nativeEnumOpcode(ops[len(ops)-1], ret) || int(code.MaxLocals) < slot || int(code.MaxStack) < stack {
 		return ""
 	}
 	return call.Description
@@ -203,8 +207,13 @@ func interfaceBridgeForwardTarget(obj *ClassObject, method *MemberInfo, provider
 // resolution remains available; final metadata checks still own every other
 // difference. This never deletes an original default method or class bridge.
 func (a *sourceConstructorLoweringAuthority) lowerLegacyInterfaceBridges(owner string, original, compiled []byte, work *workbudget.Budget) ([]byte, error) {
-	decline := func() ([]byte, error) { return compiled, work.Check() }
-	if a == nil || !a.bridgeSourceReturned(owner, original, work) {
+	decline := func() ([]byte, error) {
+		if err := work.Check(); err != nil {
+			return nil, err
+		}
+		return compiled, nil
+	}
+	if a == nil || a.jar == nil || !a.bridgeSourceReturned(owner, original, work) {
 		return decline()
 	}
 	if len(original) > 32<<20 || len(compiled) > 32<<20 || !nativeProofWork(work, int64(len(original)+len(compiled))+1) {
@@ -250,7 +259,7 @@ func (a *sourceConstructorLoweringAuthority) lowerLegacyInterfaceBridges(owner s
 		}
 	}
 	for k, m := range before {
-		if after[k] == nil || after[k].AccessFlags != m.AccessFlags {
+		if after[k] == nil || after[k].AccessFlags != m.AccessFlags || m.AccessFlags&0x0400 != 0 && constructorLoweringCode(after[k]) != nil {
 			return decline()
 		}
 	}
