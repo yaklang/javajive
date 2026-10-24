@@ -7,6 +7,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
@@ -56,10 +57,11 @@ func TestAdversarialEnumEntryPathRejectsCyclesAndUnvisitedEffects(t *testing.T) 
 				cancel()
 				work = workbudget.New(ctx, workbudget.Limits{})
 			}
-			ops, known := nativeEnumMethodOps(obj, method, nil)
-			if !known {
-				t.Fatal("negative must reach control-flow proof")
+			decoder := core.NewDecompiler(code.Code, nil)
+			if err := decoder.ParseOpcode(); err != nil {
+				t.Fatal("negative instruction encoding", err)
 			}
+			ops := constructorMotionOps(decoder)
 			saved := bytes.Clone(code.Code)
 			path, ok := enumArrayOriginalEntryPath(code, ops, work)
 			if ok != (variant == "control") {

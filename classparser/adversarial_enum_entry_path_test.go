@@ -116,3 +116,15 @@ func TestAdversarialEnumEntryControlPathKeepsOriginalArrayProtocol(t *testing.T)
 		}
 	}
 }
+
+func TestAdversarialEnumOwningPublicationKeepsIndependentVersionDomains(t *testing.T) {
+	for _, release := range []int{5, 7, 8} {
+		for _, target := range []int{8, 11, 16} {
+			for _, debug := range []string{"none", "source,lines,vars"} {
+				t.Run(fmt.Sprintf("release%d/target%d/%s", release, target, debug), func(t *testing.T) {
+					enumFreshHelperNativeOwnerRoundTrip(t, "VersionedEnumHost", debug, release, target)
+				})
+			}
+		}
+	}
+}

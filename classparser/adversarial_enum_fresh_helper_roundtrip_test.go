@@ -253,106 +253,109 @@ class ` + owner + `Driver{public static void main(String[]args)throws Exception{
 }
 
 func TestAdversarialEnumFreshHelperNativeOwnerMustReturnWholeSource(t *testing.T) {
+	for _, owner := range []string{"NativeEnumHost", "RenamedNativeEnumHost"} {
+		for _, debug := range []string{"none", "source,lines,vars"} {
+			t.Run(owner+"/"+debug, func(t *testing.T) { enumFreshHelperNativeOwnerRoundTrip(t, owner, debug, 8, 8) })
+		}
+	}
+}
+
+func enumFreshHelperNativeOwnerRoundTrip(t *testing.T, owner, debug string, release, target int) {
+	t.Helper()
 	compiler, java := t04Tools(t)
 	native := os.Getenv("JAVA8_JAVAC")
 	if native == "" {
 		t.Fatal("native original compiler required")
 	}
-	for _, owner := range []string{"NativeEnumHost", "RenamedNativeEnumHost"} {
-		for _, debug := range []string{"none", "source,lines,vars"} {
-			t.Run(owner+"/"+debug, func(t *testing.T) {
-				fixture := `public class ` + owner + `{public enum Mode{A,B,C;public static long fold(long input){long result=input;for(Mode x:values())result=result*31+x.ordinal();return result;}}}
+	fixture := `public class ` + owner + `{public enum Mode{A,B,C;public static long fold(long input){long result=input;for(Mode x:values())result=result*31+x.ordinal();return result;}}}
 class NativeEnumDriver{public static void main(String[]args){int rows=0;
  if(` + owner + `.Mode.class.getDeclaringClass()!=` + owner + `.class||` + owner + `.Mode.class.getDeclaredMethods().length!=3)throw new AssertionError("native enum declaration universe");
  for(long input:new long[]{Long.MIN_VALUE,-1,0,1,Long.MAX_VALUE}){long expected=input;for(int i=0;i<3;i++)expected=java.math.BigInteger.valueOf(expected).multiply(java.math.BigInteger.valueOf(31)).add(java.math.BigInteger.valueOf(i)).longValue();if(` + owner + `.Mode.fold(input)!=expected)throw new AssertionError("native enum values binding/overflow");rows++;}
  System.out.println(rows+":native:enum:owner:method-universe:binding");}}
 `
-				files := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, fixture, owner, debug, false)
-				run := func(dir string) {
-					t.Helper()
-					for _, mode := range []string{"-ea", "-da"} {
-						log, err := enumFreshOracleRun(t, java, mode, dir, "NativeEnumDriver")
-						if err != nil || string(log) != "5:native:enum:owner:method-universe:binding\n" {
-							t.Fatal("original-first native owner observer", err, string(log))
-						}
-					}
-				}
-				run(sourceArtifactWriteFiles(t, files))
-				child := owner + "$Mode.class"
-				jar := filepath.Join(t.TempDir(), "owner.jar")
-				if err := os.WriteFile(jar, t23Zip(t, map[string][]byte{owner + ".class": files[owner+".class"], child: files[child]}), 0600); err != nil {
-					t.Fatal(err)
-				}
-				a, err := NewJarReconstructionArtifactFromLocal(jar, 8, ModernJavac, nil)
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer a.Close()
-				comment, err := a.ReadFile(child)
-				if err != nil || !strings.Contains(string(comment), "original member body owned") {
-					t.Fatal("native child-first source control", err, string(comment))
-				}
-				// Reading through the older metadata source API may finish a
-				// native family, but cannot discharge the new executable client.
-				source, err := a.source.ReadFile(owner + ".class")
-				if err != nil || legacySourceHasFailureMarker(string(source)) {
-					t.Fatal("complete native family source", err, string(source))
-				}
-				out := sourceArtifactWriteFiles(t, map[string][]byte{"NativeEnumDriver.class": files["NativeEnumDriver.class"]})
-				path := filepath.Join(out, owner+".java")
-				if err := os.WriteFile(path, source, 0600); err != nil {
-					t.Fatal(err)
-				}
-				if log, err := exec.Command(compiler, "-proc:none", "--release", "8", "-g:"+debug, "-cp", out, "-sourcepath", out, "-d", out, path).CombinedOutput(); err != nil {
-					t.Fatal("no owned originals on compiler classpath", err, string(log))
-				}
-				fresh, err := os.ReadFile(filepath.Join(out, child))
-				if err != nil {
-					t.Fatal(err)
-				}
-				if got, err := a.FinishClass(child, fresh); err == nil || got != nil {
-					t.Fatal("child comment or unpublished native owner granted executable edits")
-				}
-				// An owning-source conflict is discovered after origin lookup.
-				// It must not activate even the otherwise valid enum child.
-				authority := a.source.jar.sourceConstructorLowering
-				authority.mu.Lock()
-				if authority.active == nil {
-					authority.active = map[string]*sourceConstructorLoweringPublication{}
-				}
-				authority.active[owner] = &sourceConstructorLoweringPublication{}
-				authority.mu.Unlock()
-				if _, err := a.ReadFile(owner + ".class"); err == nil {
-					t.Fatal("conflicting source generations were not refused")
-				}
-				authority.mu.Lock()
-				_, leaked := authority.enumActive[owner+"$Mode"]
-				delete(authority.active, owner)
-				authority.mu.Unlock()
-				if leaked {
-					t.Fatal("failed public source return activated enum edits")
-				}
-				returned, err := a.ReadFile(owner + ".class")
-				if err != nil || !bytes.Equal(returned, source) {
-					t.Fatal("exact whole-source publication", err)
-				}
-				for _, name := range []string{owner + ".class", child} {
-					input, err := os.ReadFile(filepath.Join(out, name))
-					if err != nil {
-						t.Fatal(err)
-					}
-					finished, err := a.FinishClass(name, input)
-					if err != nil {
-						t.Fatal("native owning source must discharge its actual enum output", name, err)
-					}
-					if err := os.WriteFile(filepath.Join(out, name), finished, 0600); err != nil {
-						t.Fatal(err)
-					}
-				}
-				run(out)
-			})
+	files := compileLambdaParameterMetadataFixtureWithSourcesAtRelease(t, native, NativeJavac8, fixture, owner, debug, nil, release, false)
+	run := func(dir string) {
+		t.Helper()
+		for _, mode := range []string{"-ea", "-da"} {
+			log, err := enumFreshOracleRun(t, java, mode, dir, "NativeEnumDriver")
+			if err != nil || string(log) != "5:native:enum:owner:method-universe:binding\n" {
+				t.Fatal("original-first native owner observer", err, string(log))
+			}
 		}
 	}
+	run(sourceArtifactWriteFiles(t, files))
+	child := owner + "$Mode.class"
+	jar := filepath.Join(t.TempDir(), "owner.jar")
+	if err := os.WriteFile(jar, t23Zip(t, map[string][]byte{owner + ".class": files[owner+".class"], child: files[child]}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := NewJarReconstructionArtifactFromLocal(jar, target, ModernJavac, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	comment, err := a.ReadFile(child)
+	if err != nil || !strings.Contains(string(comment), "original member body owned") {
+		t.Fatal("native child-first source control", err, string(comment))
+	}
+	// Reading through the older metadata source API may finish a
+	// native family, but cannot discharge the new executable client.
+	source, err := a.source.ReadFile(owner + ".class")
+	if err != nil || legacySourceHasFailureMarker(string(source)) {
+		t.Fatal("complete native family source", err, string(source))
+	}
+	out := sourceArtifactWriteFiles(t, map[string][]byte{"NativeEnumDriver.class": files["NativeEnumDriver.class"]})
+	path := filepath.Join(out, owner+".java")
+	if err := os.WriteFile(path, source, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if log, err := exec.Command(compiler, "-proc:none", "--release", fmt.Sprint(target), "-g:"+debug, "-cp", out, "-sourcepath", out, "-d", out, path).CombinedOutput(); err != nil {
+		t.Fatal("no owned originals on compiler classpath", err, string(log))
+	}
+	fresh, err := os.ReadFile(filepath.Join(out, child))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := a.FinishClass(child, fresh); err == nil || got != nil {
+		t.Fatal("child comment or unpublished native owner granted executable edits")
+	}
+	// An owning-source conflict is discovered after origin lookup.
+	// It must not activate even the otherwise valid enum child.
+	authority := a.source.jar.sourceConstructorLowering
+	authority.mu.Lock()
+	if authority.active == nil {
+		authority.active = map[string]*sourceConstructorLoweringPublication{}
+	}
+	authority.active[owner] = &sourceConstructorLoweringPublication{}
+	authority.mu.Unlock()
+	if _, err := a.ReadFile(owner + ".class"); err == nil {
+		t.Fatal("conflicting source generations were not refused")
+	}
+	authority.mu.Lock()
+	_, leaked := authority.enumActive[owner+"$Mode"]
+	delete(authority.active, owner)
+	authority.mu.Unlock()
+	if leaked {
+		t.Fatal("failed public source return activated enum edits")
+	}
+	returned, err := a.ReadFile(owner + ".class")
+	if err != nil || !bytes.Equal(returned, source) {
+		t.Fatal("exact whole-source publication", err)
+	}
+	for _, name := range []string{owner + ".class", child} {
+		input, err := os.ReadFile(filepath.Join(out, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		finished, err := a.FinishClass(name, input)
+		if err != nil {
+			t.Fatal("native owning source must discharge its actual enum output", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(out, name), finished, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run(out)
 }
 
 func TestAdversarialEnumFreshHelperPhysicalSourceNamespacesStayIndependent(t *testing.T) {
