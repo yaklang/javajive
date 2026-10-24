@@ -60,6 +60,9 @@ func TestConstructorFamilyDiagnostic(t *testing.T) {
 		for n, c := range p.children {
 			t.Log(n, "constructors", len(c.constructors), "bridges", len(c.accessBridges))
 		}
+		d.nativeMemberRoot = p
+		text, e := d.DumpClass()
+		t.Log("direct member render", e, "bytes", len(text), "failed", p.failed, "degraded", d.sourceDegraded)
 	}
 	source, err := a.ReadFile(name + ".class")
 	t.Log("source", err, len(source))
