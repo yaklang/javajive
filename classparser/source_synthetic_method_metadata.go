@@ -121,15 +121,20 @@ func restoreSyntheticDeclarationFlags(original, compiled []byte, constructorPack
 // private constructor on uninitialized-this, and return without other effects.
 // Whole class/method identities and flags are checked by the caller first.
 func syntheticConstructorMarkerProof(original, fresh *ClassObject, work *workbudget.Budget) func(*MemberInfo) bool {
-	for _, object := range []*ClassObject{original, fresh} {
-		if object == nil || object.MajorVersion < 49 || object.MajorVersion > 54 || object.MinorVersion != 0 || hasOriginalNestAttribute(object, "NestHost") || hasOriginalNestAttribute(object, "NestMembers") {
-			return nil
-		}
+	if original == nil || original.MajorVersion < 49 || original.MajorVersion > 54 || original.MinorVersion != 0 || hasOriginalNestAttribute(original, "NestHost") || hasOriginalNestAttribute(original, "NestMembers") {
+		return nil
+	}
+	// Modern javac uses nest access and no longer regenerates an old access
+	// constructor. Its explicitly emitted forwarding declaration still needs
+	// the unspellable synthetic bit. This accepts no new original ownership
+	// protocol, no missing method, and no change to the freshly compiled Code.
+	if fresh == nil || fresh.MajorVersion < 49 || fresh.MajorVersion > 65 || fresh.MinorVersion != 0 || !nativeAccessorConstantNamespace(fresh, work) {
+		return nil
 	}
 	a, b := NewClassObjectDumper(original), NewClassObjectDumper(fresh)
 	a.Work, b.Work = work, work
 	// Index each method once, rather than rescanning the class per overload.
-	oldPackets, freshPackets := a.originalNativeConstructorAccessBridges(), b.constructorAccessBridgePackets(0)
+	oldPackets, freshPackets := a.originalNativeConstructorAccessBridges(), b.constructorForwardingPackets(0)
 	exceptions := func(object *ClassObject, member *MemberInfo) ([]string, bool) {
 		var result []string
 		seen := false

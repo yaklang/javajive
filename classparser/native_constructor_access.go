@@ -36,11 +36,18 @@ func (c *ClassObjectDumper) originalNativeConstructorAccessBridges() map[string]
 // only unspellable property is ACC_SYNTHETIC. Callers choose the exact flags;
 // the original ownership client always retains its synthetic-only contract.
 func (c *ClassObjectDumper) constructorAccessBridgePackets(requiredFlags uint16) map[string]*nativeConstructorAccessBridge {
+	if !nativeAccessorVersion(c.obj, c.Work) {
+		return map[string]*nativeConstructorAccessBridge{}
+	}
+	return c.constructorForwardingPackets(requiredFlags)
+}
+
+// The forwarding grammar is independent of the classfile's nest-access
+// protocol. The original ownership client above and the fresh declaration
+// metadata client each validate their own version domain before using it.
+func (c *ClassObjectDumper) constructorForwardingPackets(requiredFlags uint16) map[string]*nativeConstructorAccessBridge {
 	result := map[string]*nativeConstructorAccessBridge{}
 	obj := c.obj
-	if !nativeAccessorVersion(obj, c.Work) {
-		return result
-	}
 	constructors := map[string][]*MemberInfo{}
 	if len(obj.Methods) > 65535 {
 		return nil
