@@ -5148,15 +5148,16 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 					getBody := func(caseItems []*statements.CaseItem) string {
 						var res []string
 						for _, st := range caseItems {
+							body := statements.BraceSwitchCaseBody(statementListToString(st.Body))
 							if st.IsDefault {
-								res = append(res, c.GetTabString()+fmt.Sprintf("default:\n%s", statementListToString(st.Body)))
+								res = append(res, c.GetTabString()+fmt.Sprintf("default:\n%s", body))
 								continue
 							}
 							label := fmt.Sprintf("%d", st.IntValue)
 							if projected {
 								label = names[st.IntValue]
 							}
-							res = append(res, c.GetTabString()+fmt.Sprintf("case %s:\n%s", label, statementListToString(st.Body)))
+							res = append(res, c.GetTabString()+fmt.Sprintf("case %s:\n%s", label, body))
 						}
 						return strings.Join(res, "\n")
 					}

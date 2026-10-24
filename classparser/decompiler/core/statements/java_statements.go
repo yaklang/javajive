@@ -4107,6 +4107,13 @@ func (a *SwitchStatement) String(funcCtx *class_context.ClassContext) string {
 // statement in the Java grammar, so "case 1: boolean flag;" does not parse.
 // The braces do not stop fall-through.
 func switchCaseBody(body string) string {
+	return BraceSwitchCaseBody(body)
+}
+
+// BraceSwitchCaseBody wraps a case body in a block. A local declaration is not
+// a statement in the Java grammar, so "case 1: boolean flag;" does not parse.
+// The braces do not stop fall-through. The class dumper calls this directly.
+func BraceSwitchCaseBody(body string) string {
 	if strings.TrimSpace(body) == "" {
 		return "{}"
 	}
