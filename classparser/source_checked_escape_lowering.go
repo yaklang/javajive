@@ -218,7 +218,7 @@ func (a *sourceConstructorLoweringAuthority) lowerCheckedEscapeHelper(owner stri
 		if code == nil || m == helper {
 			continue
 		}
-		ops, ok := nativeEnumMethodOps(got, m, work)
+		ops, ok := checkedEscapeMethodOps(code, work)
 		if !ok || !enumArrayInstructionSpans(code.Code, ops) {
 			return decline()
 		}
@@ -416,4 +416,19 @@ func checkedEscapeInstructionReference(op *core.OpCode) (uint16, bool) {
 		}
 	}
 	return 0, false
+}
+
+// Decode instructions without borrowing the enum protocol's no-handler
+// precondition: exception-table edges are precisely what this proof needs.
+func checkedEscapeMethodOps(code *CodeAttribute, work *workbudget.Budget) ([]*core.OpCode, bool) {
+	if code == nil || !nativeProofWork(work, int64(len(code.Code))+1) {
+		return nil, false
+	}
+	decoder := core.NewDecompiler(code.Code, nil)
+	decoder.Work = work
+	if decoder.ParseOpcode() != nil {
+		return nil, false
+	}
+	ops := constructorMotionOps(decoder)
+	return ops, enumArrayInstructionSpans(code.Code, ops)
 }

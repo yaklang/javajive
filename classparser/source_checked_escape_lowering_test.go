@@ -88,7 +88,7 @@ func TestAdversarialCheckedEscapeCompletionRequiresCaughtIdentityAndClosedUses(t
 			}
 			body := constructorLoweringCode(helper)
 			code := constructorLoweringCode(caller)
-			ops, ok := nativeEnumMethodOps(obj, caller, nil)
+			ops, ok := checkedEscapeMethodOps(code, nil)
 			if !ok {
 				t.Fatal("fresh instructions")
 			}
