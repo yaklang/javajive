@@ -2043,12 +2043,6 @@ func (c *ClassObjectDumper) renderNativeMembers() ([]string, error) {
 		child := p.children[name]
 		sub := NewClassObjectDumper(child.object)
 		sub.options = c.options
-		// This child is an original declaration in the already proved owning
-		// family. Preserve its physical header contract across the reader fork;
-		// a generic private target must not lend its Signature to a raw bridge.
-		if c.options.reconstructionPhysicalRoot == c.obj {
-			sub.options.reconstructionPhysicalRoot = child.object
-		}
 		sub.Work = c.Work
 		sub.foldSiblingResolver = c.foldSiblingResolver
 		sub.declarationResolver = c.declarationResolver

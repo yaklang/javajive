@@ -4151,7 +4151,11 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 	// A physical reconstruction preserves the bridge's own declaration,
 	// including the absence of Signature. A target's generic invocation view
 	// cannot be promoted into a new reflective parameter contract on its caller.
-	if name == "<init>" && !c.reconstructionPhysicalHeader() && c.getenv("JDEC_NO_SYN_BRIDGE_CTOR_RETYPE") == "" &&
+	// A retained native bridge is also an original physical method declaration.
+	// Its containing class still has lexical member visibility; only the bridge
+	// parameters keep their own descriptor instead of borrowing a target's T.
+	retainedConstructor := c.nativeMemberRoot != nil && c.nativeMemberRoot.usesNestAccess && c.nativeMemberRoot.constructorBridges(c.obj.GetClassName())[descriptor] != nil
+	if name == "<init>" && !retainedConstructor && !c.reconstructionPhysicalHeader() && c.getenv("JDEC_NO_SYN_BRIDGE_CTOR_RETYPE") == "" &&
 		c.isSyntheticAccessBridgeCtor(descriptor, method.AccessFlags) {
 		c.reTypeSyntheticBridgeCtorParams(descriptor, methodType.FunctionType())
 	}
