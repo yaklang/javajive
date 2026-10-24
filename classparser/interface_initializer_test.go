@@ -61,7 +61,7 @@ func TestInterfaceInitializerArrayTemporaryRequiresClosedAdjacentFixedType(t *te
 			a.Initializer[0] = values.NewJavaRef(utils.NewRootVariableId(), nil, a.Type())
 		}},
 		{"different assignment type", func(_ *interfaceInitializerSegment, _ *CodeAttribute, _ *values.NewExpression, r *values.JavaRef) {
-			r.JavaType = types.NewJavaArrayType(types.NewJavaPrimer(types.JavaLong))
+			r.ResetVarType(types.NewJavaArrayType(types.NewJavaPrimer(types.JavaLong)))
 		}},
 		{"unknown allocation origin", func(_ *interfaceInitializerSegment, _ *CodeAttribute, a *values.NewExpression, _ *values.JavaRef) {
 			a.HasOriginPC = false
