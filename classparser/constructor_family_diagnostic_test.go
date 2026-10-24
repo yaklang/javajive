@@ -1,7 +1,10 @@
 package javaclassparser
 
 import (
+	"archive/zip"
+	"io"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -10,7 +13,32 @@ func TestConstructorFamilyDiagnostic(t *testing.T) {
 	if path == "" {
 		t.Skip("explicit static diagnostic input")
 	}
-	a, err := NewJarReconstructionArtifactFromLocal(path, 8, ModernJavac, nil)
+	var dependencies []*zip.ReadCloser
+	for _, path := range filepath.SplitList(os.Getenv("JDEC_FAMILY_DIAGNOSTIC_CP")) {
+		z, err := zip.OpenReader(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer z.Close()
+		dependencies = append(dependencies, z)
+	}
+	resolve := func(name string) ([]byte, bool) {
+		for _, z := range dependencies {
+			for _, f := range z.File {
+				if f.Name == name+".class" {
+					r, e := f.Open()
+					if e != nil {
+						return nil, false
+					}
+					defer r.Close()
+					b, e := io.ReadAll(r)
+					return b, e == nil
+				}
+			}
+		}
+		return nil, false
+	}
+	a, err := NewJarReconstructionArtifactFromLocal(path, 8, ModernJavac, resolve)
 	if err != nil {
 		t.Fatal(err)
 	}
