@@ -433,6 +433,7 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 	var src string
 	var e error
 	jdecenv.Run(snap, func() error { src, e = d.DumpClass(); return e })
+	fmt.Printf("RENDER_DIAG %s err=%v failed=%v degraded=%v bytes=%d\n", owner, e, p.failed, d.sourceDegraded, len(src))
 	if p.rootHandleSource != nil && !nativeMemberLambdaSourceClosed(p.rootHandleSource, d, d.Work) {
 		fmt.Printf("FAMILY_DIAG %s:387\n", owner)
 		return nil
