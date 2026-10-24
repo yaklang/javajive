@@ -17,7 +17,7 @@ func (d *Decompiler) carriedPrimitiveRoutingRoot(merge *OpCode, candidates []*Op
 		return nil
 	}
 	for _, root := range candidates {
-		if root == nil || root.Instr == nil || !isIfNode(root) || len(root.Target) != 2 || root.StackEntry == nil || root.StackEntry.depth != 1 || len(d.handlersAt(root)) != 0 {
+		if root == nil || root.Instr == nil || !isConditionalBranchOpcode(root.Instr.OpCode) || len(root.Target) != 2 || root.StackEntry == nil || root.StackEntry.depth != 1 || len(d.handlersAt(root)) != 0 {
 			continue
 		}
 		if root.Target[0] != merge && root.Target[1] != merge {
