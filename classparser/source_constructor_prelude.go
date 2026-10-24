@@ -116,6 +116,7 @@ func (c *ClassObjectDumper) constructorLoweringPreludeSource(boundary *construct
 	}
 	params, _, _ := callbinding.Descriptor(packet.plan.descriptor)
 	slots := constructorParameterSlots(params)
+	effects := make([]statements.Statement, 0, len(boundary.prefix))
 	for i, st := range boundary.prefix {
 		expression, ok := st.(*statements.ExpressionStatement)
 		if !ok || expression == nil {
@@ -124,8 +125,29 @@ func (c *ClassObjectDumper) constructorLoweringPreludeSource(boundary *construct
 		if expression == nil || !constructorLoweringSourceOperand(packet.plan.prelude[i], packet.preludeOrigins[i], expression.Expression, slots, boundary.params, 0) {
 			return false
 		}
+		effects = append(effects, expression)
 	}
+	// Only the dead destination is omitted. The original instruction proof
+	// excludes all reads and overlapping local uses; the exact invocation,
+	// parameter identities, evaluation count and order remain in this view.
+	// Keeping a dead source local would introduce a compiler debug scope that
+	// crosses the reordered SUPER packet without an interval relocation proof.
+	boundary.prefixEffects = effects
 	return true
+}
+
+// Render an owned discarded-effect view without changing the original AST or
+// the statement identity used by exception/source-publication obligations.
+func (p *constructorSourceBoundary) artifactPreludeStatement(st statements.Statement) statements.Statement {
+	if p == nil || p.lowering == nil || len(p.lowering.prelude) == 0 || len(p.prefixEffects) != len(p.prefix) {
+		return st
+	}
+	for i, original := range p.prefix {
+		if st == original {
+			return p.prefixEffects[i]
+		}
+	}
+	return st
 }
 
 func (c *ClassObjectDumper) planImplicitConstructorPrelude(code *CodeAttribute, body []statements.Statement, method *MemberInfo, boundary *constructorSourceBoundary, decoder *core.Decompiler) *constructorSourceBoundary {

@@ -5212,7 +5212,7 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 				}
 				hoistBefore := hoistEventCount
 				statementStr, ordinaryErr := ordinaryThrowsScope.renderStatement(statement, func() string {
-					return statementToString(statement)
+					return statementToString(constructorPlan.artifactPreludeStatement(statement))
 				})
 				if functionalErr != nil {
 					return nil, functionalErr
