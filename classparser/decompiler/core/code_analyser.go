@@ -4729,6 +4729,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	ternaryExpMergeNode := []*OpCode{}
 	ternaryExpMergeNodeSlot := map[*OpCode]*values.SlotValue{}
 	retainedReferenceJoins := map[*OpCode]*OpCode{}
+	carriedPrimitiveJoins := map[*OpCode]*OpCode{}
 	if !d.FunctionContext.IsStatic {
 		d.FunctionType.ParamTypes = append([]types.JavaType{types.NewJavaClass(d.FunctionContext.ClassName)}, d.FunctionType.ParamTypes...)
 	}
@@ -5028,6 +5029,10 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 				if ifSize != -1 && !ifSizeMismatch {
 					isIfMergeNode = ifSize < size
 					if ifSize == 1 && size == 1 {
+						if root := d.carriedPrimitiveRoutingRoot(code, ifNodes); root != nil {
+							isIfMergeNode = true
+							carriedPrimitiveJoins[code] = root
+						}
 						if root := d.retainedReferenceRoutingRoot(code, ifNodes); root != nil {
 							isIfMergeNode = true
 							retainedReferenceJoins[code] = root
@@ -5694,6 +5699,13 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	d.refineClosedStackPhiDefinitions()
 	defer func() { d.stackPhiSources, d.stackPhiTypes, d.stackPhiDefinitions = nil, nil, nil }()
 	for _, merge := range ternaryExpMergeNode {
+		if root := carriedPrimitiveJoins[merge]; root != nil {
+			if !d.lowerCarriedPrimitiveJoin(merge, root, ternaryExpMergeNodeSlot[merge]) {
+				return fmt.Errorf("unsupported carried primitive stack join at pc %d", merge.CurrentOffset)
+			}
+			loweredStackPhis[merge] = true
+			continue
+		}
 		if root := retainedReferenceJoins[merge]; root != nil {
 			if d.retainedReferenceJoinRoot(merge, []*OpCode{root}) == nil || !d.lowerClosedStackPhi(merge, []*OpCode{root}, ternaryExpMergeNodeSlot[merge], false) {
 				return fmt.Errorf("unsupported retained-reference stack join at pc %d", merge.CurrentOffset)
