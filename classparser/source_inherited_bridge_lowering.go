@@ -31,7 +31,7 @@ func inheritedBridgeForwardPacket(object *ClassObject, method *MemberInfo, opcod
 	name, nk := sourceBridgeUTF8(object, method.NameIndex)
 	desc, dk := sourceBridgeUTF8(object, method.DescriptorIndex)
 	params, result, err := callbinding.Descriptor(desc)
-	if !nk || !dk || !class_context.PreservesJava8Identifier(name) || err != nil || !(strings.HasPrefix(result, "L") || strings.HasPrefix(result, "[")) {
+	if !nk || !dk || !class_context.PreservesJava8Identifier(name) || err != nil {
 		return nil
 	}
 	code := constructorLoweringCode(method)
@@ -91,11 +91,16 @@ func inheritedBridgeForwardPacket(object *ClassObject, method *MemberInfo, opcod
 		slot += constructorEffectType(param).width()
 	}
 	call := constructorMotionMember(object, ops[len(ops)-2], opcode)
-	if call == nil || call.Member != name || !nativeSourceBinaryName(call.Name) || !nativeEnumOpcode(ops[len(ops)-1], core.OP_ARETURN) || int(code.MaxStack) < slot || int(code.MaxLocals) < slot {
+	stack := slot
+	if result == "J" || result == "D" {
+		stack = max(stack, 2)
+	}
+	if call == nil || call.Member != name || !nativeSourceBinaryName(call.Name) || !nativeEnumOpcode(ops[len(ops)-1], int(bridgeReturnOpcode(desc))) || int(code.MaxStack) < stack || int(code.MaxLocals) < slot {
 		return nil
 	}
 	args, ret, err := callbinding.Descriptor(call.Description)
-	if err != nil || !slices.Equal(args, params) || !(strings.HasPrefix(ret, "L") || strings.HasPrefix(ret, "[")) {
+	reference := func(s string) bool { return strings.HasPrefix(s, "L") || strings.HasPrefix(s, "[") }
+	if err != nil || !slices.Equal(args, params) || ret != result && !(reference(ret) && reference(result)) {
 		return nil
 	}
 	p.targetOwner, p.targetDescriptor = call.Name, call.Description
@@ -111,7 +116,7 @@ func (c *ClassObjectDumper) inheritedBridgeOriginal(method *MemberInfo) *inherit
 		return nil
 	}
 	p := inheritedBridgeForwardPacket(c.obj, method, core.OP_INVOKESPECIAL, c.Work)
-	if p == nil || p.targetOwner != c.obj.GetSupperClassName() || p.descriptor == p.targetDescriptor {
+	if p == nil || p.targetOwner != c.obj.GetSupperClassName() {
 		return nil
 	}
 	// A real declaration already supplies its own bridge; a second narrow
@@ -123,7 +128,7 @@ func (c *ClassObjectDumper) inheritedBridgeOriginal(method *MemberInfo) *inherit
 		}
 		n, _ := sourceBridgeUTF8(c.obj, m.NameIndex)
 		d, _ := sourceBridgeUTF8(c.obj, m.DescriptorIndex)
-		if n == p.name && d == p.targetDescriptor {
+		if n == p.name && d == p.targetDescriptor && m != method {
 			return nil
 		}
 		if n == p.name && d == p.descriptor {
@@ -182,7 +187,12 @@ func (c *ClassObjectDumper) inheritedBridgeSource(method *MemberInfo) *dumpedMet
 	if len(throws) != 0 {
 		tail = " throws " + strings.Join(throws, ", ")
 	}
-	source := "public " + ft.ReturnType.String(c.FuncCtx) + " " + p.name + "(" + strings.Join(params, ", ") + ")" + tail + " {\n\treturn super." + p.name + "(" + strings.Join(args, ", ") + ");\n}"
+	call := "super." + p.name + "(" + strings.Join(args, ", ") + ");"
+	_, result, _ := callbinding.Descriptor(p.targetDescriptor)
+	if result != "V" {
+		call = "return " + call
+	}
+	source := "public " + ft.ReturnType.String(c.FuncCtx) + " " + p.name + "(" + strings.Join(params, ", ") + ")" + tail + " {\n\t" + call + "\n}"
 	return &dumpedMethods{methodName: p.name, descriptor: p.targetDescriptor, code: source, bodyCode: source, inheritedBridge: p, inheritedBridgeCode: source}
 }
 
@@ -271,7 +281,7 @@ func (a *sourceConstructorLoweringAuthority) lowerInheritedBridges(owner string,
 	if err != nil {
 		return nil, err
 	}
-	if !sourceParameterClassIdentityClosed(want, got) || len(want.Methods) >= len(got.Methods) || len(got.Methods) > 4096 {
+	if !sourceParameterClassIdentityClosed(want, got) || len(want.Methods) > len(got.Methods) || len(got.Methods) > 4096 {
 		return decline()
 	}
 	if work.CheckAlloc(int64(len(got.Methods))*512) != nil {
@@ -305,6 +315,7 @@ func (a *sourceConstructorLoweringAuthority) lowerInheritedBridges(owner string,
 		}
 	}
 	var edits []compiledMetadataEdit
+	exact := 0
 	consumers := map[*MemberInfo]map[*MemberInfo]bool{}
 	packets := map[*MemberInfo]*inheritedBridgePacket{}
 	for k, m := range before {
@@ -313,6 +324,27 @@ func (a *sourceConstructorLoweringAuthority) lowerInheritedBridges(owner string,
 			continue
 		}
 		bridge := after[k]
+		if p.descriptor == p.targetDescriptor {
+			// A visibility bridge need not change the descriptor. Its explicit
+			// source override already is the entire forwarding program: retain
+			// every fresh Code byte and restore only the unspellable flags. Unlike
+			// the covariant case below, no temporary method is removed, so other
+			// callers and method handles continue naming this same declaration.
+			fresh := inheritedBridgeForwardPacket(got, bridge, core.OP_INVOKESPECIAL, work)
+			if bridge.AccessFlags != 1 && bridge.AccessFlags != m.AccessFlags || fresh == nil || fresh.targetOwner != p.targetOwner || fresh.targetDescriptor != p.targetDescriptor || !slices.Equal(p.throws, fresh.throws) {
+				return decline()
+			}
+			span, known := layout.methods[bridge]
+			if !known || span.start < layout.poolEnd || span.end > len(compiled) || span.end-span.start < 8 || binary.BigEndian.Uint16(compiled[span.start:]) != bridge.AccessFlags {
+				return decline()
+			}
+			if bridge.AccessFlags != m.AccessFlags {
+				flags := []byte{byte(m.AccessFlags >> 8), byte(m.AccessFlags)}
+				edits = append(edits, compiledMetadataEdit{compiledMetadataSpan{span.start, span.start + 2}, flags})
+			}
+			exact++
+			continue
+		}
 		helper := after[p.name+"\x00"+p.targetDescriptor]
 		if helper == nil || before[key(got, helper)] != nil || helper.AccessFlags != 1 || bridge.AccessFlags != m.AccessFlags {
 			return decline()
@@ -340,13 +372,16 @@ func (a *sourceConstructorLoweringAuthority) lowerInheritedBridges(owner string,
 		}
 		consumers[helper][bridge] = true
 	}
-	if len(consumers) == 0 || len(after)-len(consumers) != len(before) {
+	if len(consumers) == 0 && exact == 0 || len(after)-len(consumers) != len(before) {
 		return decline()
 	}
 	for helper, bridges := range consumers {
 		if !inheritedBridgeConsumersClosed(got, bridges, packets[helper], work) {
 			return decline()
 		}
+	}
+	if len(consumers) == 0 {
+		return applyCompiledMetadataEdits(compiled, edits, work)
 	}
 	first := len(compiled)
 	for _, span := range layout.methods {
