@@ -40,6 +40,11 @@ import (
 // can also owe removal of javac's added default Object constructor. Only an
 // unused exact default constructor is removed, alongside restoration of the
 // original synthetic class flag; every surviving fresh method stays untouched.
+// A returned physical source can also owe a temporary private static checked-
+// escape adapter. Its exact fresh identity-throw body is removed only after
+// proving that every use directly rethrows a non-null caught operand with
+// identical handler coverage and no alternate entry into its continuation.
+// All retained instruction PCs and the original method universe stay fixed.
 type JarReconstructionArtifact struct{ source *JarSourceArtifact }
 
 var _ fs.ReadFileFS = (*JarReconstructionArtifact)(nil)

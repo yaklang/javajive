@@ -5903,6 +5903,11 @@ func ensureUniqueParameterNames(params []values.JavaValue, funcCtx *class_contex
 
 func renameStatementsInScope(stmts []statements.Statement, live map[string]*utils2.VariableId) {
 	for _, st := range stmts {
+		if forward, ok := st.(*statements.CustomStatement); ok {
+			if assignment, known := forward.SourceAssignmentForward(); known {
+				st = assignment
+			}
+		}
 		switch s := st.(type) {
 		case *statements.AssignStatement:
 			if (s.IsFirst || s.IsDeclare) && s.ArrayMember == nil {

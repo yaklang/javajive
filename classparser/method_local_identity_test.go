@@ -97,3 +97,18 @@ func TestAdversarialMethodLocalNamesIncludeForwardedDeclarationBindings(t *testi
 		})
 	}
 }
+
+func TestAdversarialMethodLocalNamingDoesNotInterpretOpaqueCallbacks(t *testing.T) {
+	first := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaPrimer(types.JavaInteger))
+	first.Id.SetName("existing")
+	second := values.NewJavaRef(utils.NewRootVariableId(), nil, first.Type())
+	second.Id.SetName("existing")
+	hidden := statements.NewAssignStatement(first, values.JavaNull, true)
+	opaque := statements.NewCustomStatement(nil, nil)
+	opaque.Info = hidden
+	root := []statements.Statement{opaque, statements.NewAssignStatement(second, values.JavaNull, true)}
+	resolveLocalNameCollisions(nil, root)
+	if first.Id.String() != "existing" || second.Id.String() != "existing" || opaque.Info != hidden {
+		t.Fatal("public annotation was interpreted as a declaration")
+	}
+}
