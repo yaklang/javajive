@@ -21,6 +21,10 @@ func constructorNoargPreludeOriginal(t *testing.T, debug, category string, nop b
 		fixture = strings.Replace(fixture, "mode==4?null:new Object[]{new Object()}", "Long.MIN_VALUE+mode", 1)
 		fixture = strings.Replace(fixture, "Object[] unused=", "long unused=", 1)
 	}
+	if category == "zero arguments" {
+		fixture = strings.Replace(fixture, "before(int mode){", "before(){int mode=UnusedPrefixEffects.mode;", 1)
+		fixture = strings.Replace(fixture, "UnusedPrefixEffects.before(mode)", "UnusedPrefixEffects.before()", 1)
+	}
 	files := nativeCompileSourceReleaseClasses(t, map[string]string{"UnusedPrefixOwner.java": fixture}, debug, "8")
 	object := mustParseLowering(t, bytes.Clone(files["UnusedPrefixOwner.class"]))
 	for _, method := range object.Methods {
@@ -34,9 +38,14 @@ func constructorNoargPreludeOriginal(t *testing.T, debug, category string, nop b
 			store = 0x42 // lstore_3
 		}
 		// Independent authored fixture: javac emits this/SUPER in bytes 0..3,
-		// followed by mode/static-call/dead-store in bytes 4..8. The production
+		// followed by parameter/static-call/dead-store (or a no-argument call).
+		// The production
 		// packet recognizer and lowering are not used to build the original.
-		if code == nil || len(code.ExceptionTable) != 0 || len(code.Code) < 10 || code.Code[0] != 0x2a || code.Code[1] != 0xb7 || code.Code[4] != 0x1c || code.Code[5] != 0xb8 || code.Code[8] != store {
+		end, call := 9, 5
+		if category == "zero arguments" {
+			end, call = 8, 4
+		}
+		if code == nil || len(code.ExceptionTable) != 0 || len(code.Code) <= end || code.Code[0] != 0x2a || code.Code[1] != 0xb7 || call == 5 && code.Code[4] != 0x1c || code.Code[call] != 0xb8 || code.Code[end-1] != store {
 			t.Fatalf("independent compiler fixture changed: %x", code.Code)
 		}
 		old := bytes.Clone(code.Code)
@@ -46,9 +55,9 @@ func constructorNoargPreludeOriginal(t *testing.T, debug, category string, nop b
 			code.Code = append(code.Code, 0)
 			padding = 1
 		}
-		code.Code = append(code.Code, old[4:9]...)
+		code.Code = append(code.Code, old[4:end]...)
 		code.Code = append(code.Code, old[:4]...)
-		code.Code = append(code.Code, old[9:]...)
+		code.Code = append(code.Code, old[end:]...)
 		code.AttrLen += uint32(padding)
 		for _, attr := range code.Attributes {
 			switch table := attr.(type) {
@@ -56,8 +65,8 @@ func constructorNoargPreludeOriginal(t *testing.T, debug, category string, nop b
 				for _, row := range table.LineNumberTable {
 					pc := int(row.StartPc)
 					if pc < 4 {
-						pc += 5
-					} else if pc < 9 {
+						pc += end - 4
+					} else if pc < end {
 						pc -= 4
 					}
 					row.StartPc = uint16(pc + padding)
@@ -70,8 +79,8 @@ func constructorNoargPreludeOriginal(t *testing.T, debug, category string, nop b
 					start := int(binary.BigEndian.Uint16(table.Info[at:]))
 					length := int(binary.BigEndian.Uint16(table.Info[at+2:]))
 					slot := int(binary.BigEndian.Uint16(table.Info[at+8:]))
-					if slot == 3 && start == 9 {
-						start, length = 5+padding, length+4
+					if slot == 3 && start == end {
+						start, length = end-4+padding, length+4
 					} else if start == 0 && length == len(old) {
 						length += padding
 					} else {
@@ -90,7 +99,7 @@ func constructorNoargPreludeOriginal(t *testing.T, debug, category string, nop b
 }
 
 func TestAdversarialConstructorNoargPreludePreservesOriginalAbruptOrder(t *testing.T) {
-	for _, category := range []string{"reference", "wide"} {
+	for _, category := range []string{"reference", "wide", "zero arguments"} {
 		for _, debug := range []string{"none", "source,lines,vars"} {
 			for _, padding := range []string{"plain", "nop"} {
 				for _, profile := range []SourceCompilerProfile{ModernJavac, NativeJavac8} {
@@ -104,7 +113,7 @@ func TestAdversarialConstructorNoargPreludePreservesOriginalAbruptOrder(t *testi
 	}
 }
 
-func constructorNoargPreludeRoundTrip(t *testing.T, files map[string][]byte, debug string, profile SourceCompilerProfile) {
+func constructorNoargPreludeRoundTrip(t *testing.T, files map[string][]byte, debug string, profile SourceCompilerProfile) ([]byte, []byte, *JarReconstructionArtifact) {
 	t.Helper()
 	compiler, java := t04Tools(t)
 	if profile == NativeJavac8 {
@@ -135,7 +144,7 @@ func constructorNoargPreludeRoundTrip(t *testing.T, files map[string][]byte, deb
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer a.Close()
+	t.Cleanup(func() { a.Close() })
 	source, err := a.ReadFile(owner + ".class")
 	if err != nil || legacySourceHasFailureMarker(string(source)) {
 		t.Fatal("complete source publication", err, string(source))
@@ -179,4 +188,5 @@ func constructorNoargPreludeRoundTrip(t *testing.T, files map[string][]byte, deb
 		t.Fatal(err)
 	}
 	run(out, true)
+	return files[owner+".class"], fresh, a
 }
