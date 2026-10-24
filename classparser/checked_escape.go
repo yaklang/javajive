@@ -888,5 +888,5 @@ func (c *ClassObjectDumper) checkedEscapeHelper() *dumpedMethods {
 	if slices.Contains(c.obj.AccessFlagsVerbose, "annotation") {
 		code = fmt.Sprintf("class %s {public static <E extends java.lang.Throwable> java.lang.RuntimeException rethrow(java.lang.Throwable failure) throws E {%s}}", name, body)
 	}
-	return &dumpedMethods{methodName: name, code: code, bodyCode: body}
+	return &dumpedMethods{methodName: name, code: code, bodyCode: body, checkedEscapeTemporary: access == "private static" && !c.isInterfaceLike()}
 }

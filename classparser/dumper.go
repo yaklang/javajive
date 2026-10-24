@@ -5663,6 +5663,7 @@ type dumpedMethods struct {
 	isStub                         bool
 	initializerCode                string
 	checkedEscape                  bool
+	checkedEscapeTemporary         bool
 	// A typed ordinary-NEW throws receipt was consumed by this method's final
 	// publisher. Class recovery must preserve the complete bound declaration.
 	ordinaryConstructorSource *ordinaryConstructorThrowsScope

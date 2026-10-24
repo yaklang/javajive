@@ -64,6 +64,7 @@ type sourceConstructorLoweringAuthority struct {
 	staticPending, staticActive   map[string]constructorNativeSourceOrigin
 	bridgePending, bridgeActive   map[string]constructorNativeSourceOrigin
 	bindingPending, bindingActive map[string]constructorNativeSourceOrigin
+	escapePending, escapeActive   map[string]checkedEscapeSourceOrigin
 }
 
 type constructorNativeSourceOrigin struct{ originalHash, sourceHash [32]byte }
@@ -357,6 +358,9 @@ func (c *ClassObjectDumper) planArtifactConstructorLowering(boundary *constructo
 }
 
 func (c *ClassObjectDumper) publishConstructorLowering(source string, methods []*dumpedMethods) bool {
+	if !c.publishCheckedEscapeLowering(source, methods) {
+		return false
+	}
 	if !c.publishInheritedBridgeLowering(source, methods) {
 		return false
 	}
@@ -422,6 +426,11 @@ func (a *sourceConstructorLoweringAuthority) sourceReturned(owner string, source
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	hash := sha256.Sum256(source)
+	escapeOrigin, escapeFound := a.escapePending[owner]
+	escapeFound = escapeFound && escapeOrigin.sourceHash == hash
+	if previous, active := a.escapeActive[owner]; active && (!escapeFound || previous != escapeOrigin) {
+		return fmt.Errorf("checked escape lowering: changed returned source")
+	}
 	bindingOrigin, bindingFound := a.bindingPending[owner]
 	bindingFound = bindingFound && bindingOrigin.sourceHash == hash
 	if previous, active := a.bindingActive[owner]; active && (!bindingFound || previous != bindingOrigin) {
@@ -463,6 +472,12 @@ func (a *sourceConstructorLoweringAuthority) sourceReturned(owner string, source
 		}
 	}
 	activateOrigins := func() {
+		if escapeFound {
+			if a.escapeActive == nil {
+				a.escapeActive = map[string]checkedEscapeSourceOrigin{}
+			}
+			a.escapeActive[owner] = escapeOrigin
+		}
 		if bindingFound {
 			if a.bindingActive == nil {
 				a.bindingActive = map[string]constructorNativeSourceOrigin{}
