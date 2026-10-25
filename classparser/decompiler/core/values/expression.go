@@ -308,10 +308,10 @@ func (j *JavaExpression) boolConnectiveConds() (JavaValue, JavaValue, bool) {
 	// expression was built. View only its opposite 0/1 constant as boolean;
 	// keep numeric-only operations and the shared literal unchanged.
 	if ok1 && !ok2 {
-		c2, ok2 = booleanWordConstant(j.Values[1])
+		c2, ok2 = booleanWordConstant(UnpackSoltValue(j.Values[1]))
 	}
 	if ok2 && !ok1 {
-		c1, ok1 = booleanWordConstant(j.Values[0])
+		c1, ok1 = booleanWordConstant(UnpackSoltValue(j.Values[0]))
 	}
 	if !ok1 || !ok2 {
 		return nil, nil, false
@@ -319,8 +319,12 @@ func (j *JavaExpression) boolConnectiveConds() (JavaValue, JavaValue, bool) {
 	return c1, c2, true
 }
 
+// Construction may see a merge slot seeded with just one predecessor's 0/1
+// word. Only a direct literal is final here; capturing a forwarded seed would
+// discard the later predicate/word installed by phi reconstruction. Rendering
+// can inspect the resolved forwarding cell without replacing the stored operand.
 func booleanWordConstant(v JavaValue) (JavaValue, bool) {
-	lit, ok := UnpackSoltValue(v).(*JavaLiteral)
+	lit, ok := v.(*JavaLiteral)
 	if !ok {
 		return v, false
 	}
