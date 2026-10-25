@@ -32,6 +32,7 @@ type constructorLoweringArgument struct {
 	owner, name, descriptor string
 	invocation              *constructorLoweringInvocation
 	literal                 *constructorLoweringLiteral
+	checked                 *constructorLoweringArgument
 }
 
 // The movable prefix contains distinct own final synthetic captures from typed
@@ -55,16 +56,21 @@ type sourceConstructorLoweringPublication struct {
 }
 
 type sourceConstructorLoweringAuthority struct {
-	jar                           *JarFS
-	parent                        *sourceConstructorLoweringAuthority
-	mu                            sync.Mutex
-	pending, active               map[string]*sourceConstructorLoweringPublication
-	nativePending, nativeActive   map[string]constructorNativeSourceOrigin
-	enumPending, enumActive       map[string]constructorNativeSourceOrigin
-	staticPending, staticActive   map[string]constructorNativeSourceOrigin
-	bridgePending, bridgeActive   map[string]constructorNativeSourceOrigin
-	bindingPending, bindingActive map[string]constructorNativeSourceOrigin
-	escapePending, escapeActive   map[string]checkedEscapeSourceOrigin
+	jar                               *JarFS
+	parent                            *sourceConstructorLoweringAuthority
+	mu                                sync.Mutex
+	pending, active                   map[string]*sourceConstructorLoweringPublication
+	nativePending, nativeActive       map[string]constructorNativeSourceOrigin
+	enumPending, enumActive           map[string]constructorNativeSourceOrigin
+	staticPending, staticActive       map[string]constructorNativeSourceOrigin
+	bridgePending, bridgeActive       map[string]constructorNativeSourceOrigin
+	nestPending, nestActive           map[string]constructorNativeSourceOrigin
+	nestNativeActive                  map[string]constructorNativeSourceOrigin
+	bindingPending, bindingActive     map[string]constructorNativeSourceOrigin
+	genericPending, genericActive     map[string]constructorNativeSourceOrigin
+	referencePending, referenceActive map[string]constructorNativeSourceOrigin
+	namedRowsPending, namedRowsActive map[string]constructorNativeSourceOrigin
+	escapePending, escapeActive       map[string]checkedEscapeSourceOrigin
 }
 
 type constructorNativeSourceOrigin struct{ originalHash, sourceHash [32]byte }
@@ -340,7 +346,7 @@ func (c *ClassObjectDumper) planArtifactConstructorLowering(boundary *constructo
 		return false
 	}
 	for i, argument := range p.plan.arguments {
-		if !constructorLoweringSourceOperand(argument, p.argumentOrigins[i], boundary.delegate.Arguments[i], slots, boundary.params, 0) {
+		if !constructorLoweringSourceOperand(argument, p.argumentOrigins[i], boundary.delegate.Arguments[i], slots, boundary.params, 0, c.FuncCtx) {
 			return false
 		}
 	}
@@ -358,6 +364,15 @@ func (c *ClassObjectDumper) planArtifactConstructorLowering(boundary *constructo
 }
 
 func (c *ClassObjectDumper) publishConstructorLowering(source string, methods []*dumpedMethods) bool {
+	if !c.publishNamedMemberRows(source) {
+		return false
+	}
+	if !c.publishMemberReferenceSignatures(source) {
+		return false
+	}
+	if !c.publishMemberGenericScope(source) {
+		return false
+	}
 	if !c.publishCheckedEscapeLowering(source, methods) {
 		return false
 	}
@@ -413,12 +428,14 @@ func (a *sourceConstructorLoweringAuthority) sourceReturned(owner string, source
 	// Import their enum origins only when this exact complete owning source
 	// is actually returned through the reconstruction API.
 	var enums []sourceEnumArrayOrigin
+	var nests []sourcePrivateNestOrigin
 	if a.jar != nil && a.jar.sourceLambdaMetadata != nil {
 		if publication := a.jar.sourceLambdaMetadata.publication(owner, string(source)); publication != nil {
 			enums = publication.enums
+			nests = publication.nests
 		}
-		if len(enums) != 0 {
-			if err := a.jar.nativeMemberReader(nil).Work.CheckAlloc(int64(len(enums)+1) * 192); err != nil {
+		if len(enums)+len(nests) != 0 {
+			if err := a.jar.nativeMemberReader(nil).Work.CheckAlloc(int64(len(enums)+len(nests)+1) * 192); err != nil {
 				return err
 			}
 		}
@@ -426,6 +443,21 @@ func (a *sourceConstructorLoweringAuthority) sourceReturned(owner string, source
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	hash := sha256.Sum256(source)
+	namedRowsOrigin, namedRowsFound := a.namedRowsPending[owner]
+	namedRowsFound = namedRowsFound && namedRowsOrigin.sourceHash == hash
+	if previous, active := a.namedRowsActive[owner]; active && (!namedRowsFound || previous != namedRowsOrigin) {
+		return fmt.Errorf("named member rows: changed returned source")
+	}
+	referenceOrigin, referenceFound := a.referencePending[owner]
+	referenceFound = referenceFound && referenceOrigin.sourceHash == hash
+	if previous, active := a.referenceActive[owner]; active && (!referenceFound || previous != referenceOrigin) {
+		return fmt.Errorf("member reference signature: changed returned source")
+	}
+	genericOrigin, genericFound := a.genericPending[owner]
+	genericFound = genericFound && genericOrigin.sourceHash == hash
+	if previous, active := a.genericActive[owner]; active && (!genericFound || previous != genericOrigin) {
+		return fmt.Errorf("member generic scope: changed returned source")
+	}
 	escapeOrigin, escapeFound := a.escapePending[owner]
 	escapeFound = escapeFound && escapeOrigin.sourceHash == hash
 	if previous, active := a.escapeActive[owner]; active && (!escapeFound || previous != escapeOrigin) {
@@ -440,6 +472,25 @@ func (a *sourceConstructorLoweringAuthority) sourceReturned(owner string, source
 	staticFound = staticFound && staticOrigin.sourceHash == hash
 	if previous, active := a.staticActive[owner]; active && (!staticFound || previous != staticOrigin) {
 		return fmt.Errorf("static class lowering: changed returned source")
+	}
+	nestOrigin, nestFound := a.nestPending[owner]
+	nestFound = nestFound && nestOrigin.sourceHash == hash
+	if previous, active := a.nestActive[owner]; active && (!nestFound || previous != nestOrigin) {
+		return fmt.Errorf("private nest completion: changed returned source")
+	}
+	nativeNests := map[string]constructorNativeSourceOrigin{}
+	for _, origin := range nests {
+		candidate := constructorNativeSourceOrigin{origin.originalHash, hash}
+		if _, duplicate := nativeNests[origin.owner]; duplicate {
+			return fmt.Errorf("private nest completion: duplicate owning source")
+		}
+		if prior, active := a.nestNativeActive[origin.owner]; active && prior != candidate {
+			return fmt.Errorf("private nest completion: changed owning source")
+		}
+		if prior, active := a.nestActive[origin.owner]; active && prior != candidate {
+			return fmt.Errorf("private nest completion: conflicting physical source")
+		}
+		nativeNests[origin.owner] = candidate
 	}
 	bridgeOrigin, bridgeFound := a.bridgePending[owner]
 	bridgeFound = bridgeFound && bridgeOrigin.sourceHash == hash
@@ -472,6 +523,36 @@ func (a *sourceConstructorLoweringAuthority) sourceReturned(owner string, source
 		}
 	}
 	activateOrigins := func() {
+		if len(nativeNests) != 0 && a.nestNativeActive == nil {
+			a.nestNativeActive = map[string]constructorNativeSourceOrigin{}
+		}
+		for name, origin := range nativeNests {
+			a.nestNativeActive[name] = origin
+		}
+		if nestFound {
+			if a.nestActive == nil {
+				a.nestActive = map[string]constructorNativeSourceOrigin{}
+			}
+			a.nestActive[owner] = nestOrigin
+		}
+		if namedRowsFound {
+			if a.namedRowsActive == nil {
+				a.namedRowsActive = map[string]constructorNativeSourceOrigin{}
+			}
+			a.namedRowsActive[owner] = namedRowsOrigin
+		}
+		if referenceFound {
+			if a.referenceActive == nil {
+				a.referenceActive = map[string]constructorNativeSourceOrigin{}
+			}
+			a.referenceActive[owner] = referenceOrigin
+		}
+		if genericFound {
+			if a.genericActive == nil {
+				a.genericActive = map[string]constructorNativeSourceOrigin{}
+			}
+			a.genericActive[owner] = genericOrigin
+		}
 		if escapeFound {
 			if a.escapeActive == nil {
 				a.escapeActive = map[string]checkedEscapeSourceOrigin{}
@@ -675,11 +756,11 @@ func (a *sourceConstructorLoweringAuthority) lower(original, compiled []byte, wo
 		}
 		permute := true
 		packet := constructorLoweringReadPacket(got, method, false, false, plan.qualified != nil, work, provider, len(plan.captures), len(plan.prelude))
-		if packet == nil || !constructorLoweringExecutablePlanEqual(plan, packet.plan) {
+		if packet == nil || !constructorLoweringFreshPlanEqual(plan, packet.plan) {
 			// A separately verified already-lowered packet makes completion
 			// idempotent. An arbitrary constructor body is never a substitute.
 			packet = constructorLoweringReadPacket(got, method, true, false, plan.qualified != nil, work, provider, len(plan.captures), len(plan.prelude))
-			if packet == nil || !constructorLoweringExecutablePlanEqual(plan, packet.plan) {
+			if packet == nil || !constructorLoweringFreshPlanEqual(plan, packet.plan) {
 				return nil, constructorLoweringFailure(work, "fresh constructor does not match original slots, fields and delegation")
 			}
 			permute = false
@@ -692,6 +773,9 @@ func (a *sourceConstructorLoweringAuthority) lower(original, compiled []byte, wo
 		if err != nil {
 			return nil, err
 		}
+		// The fresh-plan proof permits only loss of the original varargs
+		// marker; visibility and all executable operands were checked above.
+		binary.BigEndian.PutUint16(edit.data, plan.flags)
 		edits = append(edits, edit)
 	}
 	if len(seen) != len(publication.plans) {

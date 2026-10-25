@@ -122,7 +122,7 @@ func (c *ClassObjectDumper) constructorLoweringPreludeSource(boundary *construct
 		if !ok || expression == nil {
 			expression = c.constructorDiscardedPrefixEffect(st, decoder, method, boundary.pc)
 		}
-		if expression == nil || !constructorLoweringSourceOperand(packet.plan.prelude[i], packet.preludeOrigins[i], expression.Expression, slots, boundary.params, 0) {
+		if expression == nil || !constructorLoweringSourceOperand(packet.plan.prelude[i], packet.preludeOrigins[i], expression.Expression, slots, boundary.params, 0, c.FuncCtx) {
 			return false
 		}
 		effects = append(effects, expression)

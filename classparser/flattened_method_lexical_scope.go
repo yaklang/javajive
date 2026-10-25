@@ -9,6 +9,32 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
 
+// Flat headers may redeclare enclosing formals, but their original bounds
+// still live in the enclosing declaration. Preserve that environment for
+// expression typing as well as header generation. Native lexical contexts
+// already carry their own parent chain and are never replaced here.
+func (c *ClassObjectDumper) wireFlattenedLexicalTypeScopes() {
+	if c.FuncCtx == nil || c.nativeOuterContext != nil || c.FuncCtx.SourceLexicalParent != nil || c.FuncCtx.LexicalClassName != "" || len(c.FuncCtx.LexicalTypeParamSignatures) != 0 {
+		return
+	}
+	scopes, _, valid := c.flattenedMethodLexicalScopesResolved(c.nativeAnnotationDeclarationResolver())
+	if !valid || len(scopes) < 2 {
+		return
+	}
+	var signatures []string
+	for _, scope := range scopes {
+		signatures = append(signatures, scope.Signature)
+	}
+	if !nativeMethodLocalBindingBudget(signatures, "()V", c.Work) {
+		return
+	}
+	// SourceTypeErasure searches nearest first; the final class is already
+	// represented by ClassSig. Static cuts were checked by the ownership walk.
+	for i := len(scopes) - 2; i >= 0; i-- {
+		c.FuncCtx.LexicalTypeParamSignatures = append(c.FuncCtx.LexicalTypeParamSignatures, scopes[i].Signature)
+	}
+}
+
 // Flattening removes Java's lexical declarations but does not remove their
 // binding identities. Resolve original ownership edges and the full enclosing
 // method descriptor before reconstructing any captured formal. Dollar names

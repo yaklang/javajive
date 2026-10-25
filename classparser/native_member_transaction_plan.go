@@ -60,7 +60,10 @@ func (z *JarFS) prepareNativeMemberFamilyFromRoot(root *ClassObject, snap map[st
 	if !nativeEnumSwitchOrdinalClosed(p, d.Work) {
 		return nil
 	}
-	if !nativeMemberJointBridgeMarkersClosed(p, d.Work) {
+	// Planning readers intentionally omit the physical-lowering recorder.
+	// The owning archive, rather than that temporary reader, defines whether
+	// this transaction must preserve original binary constructor ports.
+	if !nativeMemberJointBridgeMarkersClosed(p, d.Work, z.sourceConstructorLowering != nil) {
 		return nil
 	}
 	index := z.originalMemberIndex()

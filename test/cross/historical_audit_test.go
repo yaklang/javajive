@@ -217,7 +217,7 @@ func TestHistoricalJarAudit(t *testing.T) {
 			if artifact != nil || reconstruction != nil {
 				var err error
 				if reconstruction != nil {
-					o.CompilerMetadata, err = historicalFinishArtifactClasses("explicit-reconstruction-artifact-v1", reconstruction.FinishClass, clsRoot, filepath.Join(dir, "rejected-classes"))
+					o.CompilerMetadata, err = historicalFinishArtifactOutputs("explicit-reconstruction-artifact-v1", reconstruction.FinishOutput, clsRoot, filepath.Join(dir, "rejected-classes"))
 				} else {
 					o.CompilerMetadata, err = historicalRestoreArtifactMetadata(artifact, clsRoot, filepath.Join(dir, "rejected-classes"))
 				}
@@ -229,7 +229,11 @@ func TestHistoricalJarAudit(t *testing.T) {
 				}
 			}
 			repackaged := filepath.Join(dir, "rebuilt.jar")
-			zipRecompiledClassesToJar(t, clsRoot, repackaged, input.Path)
+			var resources []string
+			if o.CompilerMetadata != nil {
+				resources = o.CompilerMetadata.RestoredResources
+			}
+			zipRecompiledClassesAndResourcesToJar(t, clsRoot, repackaged, input.Path, resources)
 			zr, err := zip.OpenReader(repackaged)
 			if err != nil {
 				t.Fatal(err)
@@ -271,7 +275,7 @@ func historicalTreeCompile(t *testing.T, files []string, classpath, outDir strin
 			t.Fatalf("mkdir %s: %v", dst, err)
 		}
 		args := append(append([]string{}, javacLocaleArgs...),
-			"-encoding", "UTF-8", "--release", strconv.Itoa(release), "-nowarn", "-proc:none", "-Xmaxerrs", "100000")
+			"-encoding", "UTF-8", "--release", strconv.Itoa(release), "-nowarn", "-proc:none", "-Xpkginfo:always", "-Xmaxerrs", "100000")
 		if cp != "" {
 			args = append(args, "-cp", cp)
 		}

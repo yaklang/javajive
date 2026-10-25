@@ -140,7 +140,7 @@ func TestNativeEnumSwitchConstructorMarkerCannotEscapeThroughArchive(t *testing.
 			if p == nil || !d.planNativeMemberAnonymousScopes(p) {
 				t.Fatal("original lexical family")
 			}
-			if !nativeMemberJointSwitchTableMarker(p, marker, nil) || !nativeMemberJointBridgeMarkersClosed(p, nil) {
+			if !nativeMemberJointSwitchTableMarker(p, marker, nil) || !nativeMemberJointBridgeMarkersClosed(p, nil, false) {
 				t.Fatal("original joint roles")
 			}
 			index := z.originalMemberIndex()

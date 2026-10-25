@@ -60,7 +60,7 @@ func TestAdversarialConstructorLoweringRefusesUnqualifiedOriginalVersions(t *tes
 
 func TestAdversarialSourceConstructorLoweringRejectsFreshPacketAndPCMutation(t *testing.T) {
 	original, compiled, a := loweringAuthorityTestInputs(t)
-	for _, kind := range []string{"control", "parameter slot", "parameter replaced by literal", "wide category", "field identity", "field descriptor", "delegation", "extra instruction", "handler", "frame", "unknown Code annotation", "line operand PC", "local interior", "max stack", "max locals", "method flags", "missing constructor", "class identity"} {
+	for _, kind := range []string{"control", "parameter slot", "parameter replaced by literal", "wide category", "field identity", "field descriptor", "delegation", "extra instruction", "handler", "frame", "unknown Code annotation", "line operand PC", "local interior", "max stack", "max locals", "method flags", "invented varargs marker", "missing constructor", "class identity"} {
 		t.Run(kind, func(t *testing.T) {
 			obj := mustParseLowering(t, compiled)
 			var ctor *MemberInfo
@@ -110,6 +110,8 @@ func TestAdversarialSourceConstructorLoweringRejectsFreshPacketAndPCMutation(t *
 				code.MaxLocals = 4
 			case "method flags":
 				ctor.AccessFlags = 4
+			case "invented varargs marker":
+				ctor.AccessFlags |= 0x80
 			case "missing constructor":
 				ctor.NameIndex = uint16(obj.ConstantPoolManager.AddUtf8Info("ordinary"))
 			case "class identity":

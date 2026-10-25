@@ -5,6 +5,7 @@ import (
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
@@ -17,12 +18,14 @@ type constructorLoweringInvocation struct {
 	opcode                  int
 	ownerKind               values.MethodOwnerKind
 	arguments               []constructorLoweringArgument
+	receiver                *constructorLoweringArgument
 }
 
 // PCs belong to one decoded encoding; only symbolic trees enter plan equality.
 type constructorLoweringOperandOrigin struct {
 	pc, allocationPC int
 	arguments        []constructorLoweringOperandOrigin
+	receiver         *constructorLoweringOperandOrigin
 }
 
 type constructorLoweringStackOperand struct {
@@ -105,7 +108,24 @@ func constructorLoweringDelegateOperands(object *ClassObject, ops []*core.OpCode
 			node := &constructorLoweringStackOperand{pendingOwner: owner, origin: constructorLoweringOperandOrigin{allocationPC: pc}, depth: 1}
 			stack = append(stack, node, node)
 			*at++ // the immediately adjacent DUP shares this exact NEW identity
-		case core.OP_INVOKESTATIC, core.OP_INVOKESPECIAL:
+		case core.OP_CHECKCAST:
+			// A cast is an ordered, potentially throwing producer. Its target
+			// and child stay in the plan; equal erasures cannot erase the check.
+			if op.IsWide || len(op.Data) != 2 || len(stack) == 0 {
+				return fail()
+			}
+			child := stack[len(stack)-1]
+			name, known := sourceBridgeClassName(object, core.Convert2bytesToInt(op.Data))
+			descriptor := name
+			if !strings.HasPrefix(name, "[") {
+				descriptor = "L" + name + ";"
+			}
+			ps, _, err := callbinding.Descriptor("(" + descriptor + ")V")
+			if !known || err != nil || len(ps) != 1 || !callbinding.Reference(descriptor) || child.pendingOwner != "" || !callbinding.Reference(child.argument.descriptor) || child.depth >= 32 {
+				return fail()
+			}
+			stack[len(stack)-1] = &constructorLoweringStackOperand{argument: constructorLoweringArgument{descriptor: descriptor, checked: &child.argument}, origin: constructorLoweringOperandOrigin{pc: pc, arguments: []constructorLoweringOperandOrigin{child.origin}}, depth: child.depth + 1}
+		case core.OP_INVOKESTATIC, core.OP_INVOKESPECIAL, core.OP_INVOKEVIRTUAL, core.OP_INVOKEINTERFACE:
 			member := constructorMotionMember(object, op, op.Instr.OpCode)
 			if member == nil || op.IsWide || !nativeSourceBinaryName(member.Name) {
 				return fail()
@@ -120,7 +140,7 @@ func constructorLoweringDelegateOperands(object *ClassObject, ops []*core.OpCode
 				return fail()
 			}
 			kind := values.MethodOwnerClass
-			if _, ok := object.ConstantPool[core.Convert2bytesToInt(op.Data)-1].(*ConstantInterfaceMethodrefInfo); ok {
+			if _, ok := object.ConstantPool[core.Convert2bytesToInt(op.Data[:2])-1].(*ConstantInterfaceMethodrefInfo); ok {
 				kind = values.MethodOwnerInterface
 			}
 			invocation := &constructorLoweringInvocation{owner: member.Name, name: member.Member, descriptor: member.Description, opcode: op.Instr.OpCode, ownerKind: kind, arguments: arguments}
@@ -130,6 +150,22 @@ func constructorLoweringDelegateOperands(object *ClassObject, ops []*core.OpCode
 					return fail()
 				}
 				stack = append(stack[:start], &constructorLoweringStackOperand{argument: constructorLoweringArgument{descriptor: result, invocation: invocation}, origin: origin, depth: depth})
+			} else if op.Instr.OpCode == core.OP_INVOKEVIRTUAL || op.Instr.OpCode == core.OP_INVOKEINTERFACE {
+				// The receiver is evaluated before every argument, and may throw
+				// independently. Uninitialized THIS is below this stack and never
+				// available as an ordinary receiver or argument.
+				if start == 0 || result == "V" || !widening.invocation(member, op.Instr.OpCode) || op.Instr.OpCode == core.OP_INVOKEINTERFACE && int(op.Data[2]) != nativeMemberParameterWidth(args)+1 {
+					return fail()
+				}
+				receiver := stack[start-1]
+				if receiver.pendingOwner != "" || !constructorLoweringOperandAssignable(receiver.argument, "L"+member.Name+";", widening) || receiver.depth >= 32 {
+					return fail()
+				}
+				if receiver.depth+1 > depth {
+					depth = receiver.depth + 1
+				}
+				invocation.receiver, origin.receiver = &receiver.argument, &receiver.origin
+				stack = append(stack[:start-1], &constructorLoweringStackOperand{argument: constructorLoweringArgument{descriptor: result, invocation: invocation}, origin: origin, depth: depth})
 			} else {
 				if result != "V" || member.Member != "<init>" || kind != values.MethodOwnerClass {
 					return fail()
@@ -212,12 +248,20 @@ func constructorLoweringDelegateOperands(object *ClassObject, ops []*core.OpCode
 	return fail()
 }
 
-func constructorLoweringSourceOperand(argument constructorLoweringArgument, origin constructorLoweringOperandOrigin, value values.JavaValue, slots map[int]int, params []values.JavaValue, depth int) bool {
+func constructorLoweringSourceOperand(argument constructorLoweringArgument, origin constructorLoweringOperandOrigin, value values.JavaValue, slots map[int]int, params []values.JavaValue, depth int, ctx *class_context.ClassContext) bool {
 	if depth >= 32 {
 		return false
 	}
+	if argument.checked != nil {
+		cast, ok := values.UnpackSoltValue(value).(*values.CastExpression)
+		if !ok || cast == nil {
+			return false
+		}
+		pc, target, known := cast.OriginalCheckCastWitness(ctx)
+		return known && pc == origin.pc && target == argument.descriptor && argument.invocation == nil && argument.literal == nil && !argument.null && len(argument.nullCasts) == 0 && argument.slot == 0 && argument.owner == "" && argument.name == "" && len(origin.arguments) == 1 && constructorLoweringSourceOperand(*argument.checked, origin.arguments[0], cast.Value, slots, params, depth+1, ctx)
+	}
 	if argument.invocation == nil {
-		return constructorLoweringSourceArgument(argument, origin.pc, value, slots, params)
+		return constructorLoweringSourceArgument(argument, origin.pc, value, slots, params, ctx)
 	}
 	invocation := argument.invocation
 	if argument.literal != nil || argument.null || len(argument.nullCasts) != 0 || argument.slot != 0 || argument.owner != "" || argument.name != "" {
@@ -254,6 +298,17 @@ func constructorLoweringSourceOperand(argument constructorLoweringArgument, orig
 		if err != nil || result == "V" || result != argument.descriptor {
 			return false
 		}
+	} else if invocation.opcode == core.OP_INVOKEVIRTUAL || invocation.opcode == core.OP_INVOKEINTERFACE {
+		var ok bool
+		call, ok = value.(*values.FunctionCallExpression)
+		kind := values.InvokeVirtual
+		if invocation.opcode == core.OP_INVOKEINTERFACE {
+			kind = values.InvokeInterface
+		}
+		_, result, err := callbinding.Descriptor(invocation.descriptor)
+		if !ok || call.IsStatic || call.IsSpecialInvoke || call.Kind != kind || err != nil || result == "V" || result != argument.descriptor || invocation.receiver == nil || origin.receiver == nil || !constructorLoweringSourceOperand(*invocation.receiver, *origin.receiver, call.Object, slots, params, depth+1, ctx) {
+			return false
+		}
 	} else {
 		return false
 	}
@@ -261,7 +316,7 @@ func constructorLoweringSourceOperand(argument constructorLoweringArgument, orig
 		return false
 	}
 	for i, child := range invocation.arguments {
-		if !constructorLoweringSourceOperand(child, origin.arguments[i], call.Arguments[i], slots, params, depth+1) {
+		if !constructorLoweringSourceOperand(child, origin.arguments[i], call.Arguments[i], slots, params, depth+1, ctx) {
 			return false
 		}
 	}

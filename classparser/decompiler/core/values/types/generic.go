@@ -31,6 +31,19 @@ func NewParameterizedType(rawClassName string, typeArgs []JavaType) JavaType {
 
 func (j *JavaParameterizedType) String(funcCtx *class_context.ClassContext) string {
 	base := funcCtx.ShortTypeName(j.RawClassName)
+	// A member of a raw generic owner is itself raw (JLS 4.8). Applying
+	// hidden-formal erasure only to the final segment can invent an owner
+	// instantiation from an erased bound, or form an illegal partially raw
+	// member. Check the complete original owner path before source spelling.
+	if funcCtx.HasRawEraseTypeVars() {
+		for _, segment := range j.OwnerSegments {
+			for _, arg := range segment.TypeArgs {
+				if argRefsRawEraseVar(arg, funcCtx) {
+					return base
+				}
+			}
+		}
+	}
 	if len(j.OwnerSegments) > 1 && funcCtx.DeclarationSourceName != nil {
 		if source, known := funcCtx.DeclarationSourceName(j.RawClassName); known {
 			parts := make([]string, 0, len(j.OwnerSegments))
@@ -2350,6 +2363,13 @@ func instantiatedClassFormals(ctx *class_context.ClassContext, internal, signatu
 		}
 	}
 	return names
+}
+
+// SourceClassFormalNames is the common arity view for a proved source
+// declaration. Field and method consumers must use the same projection;
+// original member Signatures alone omit enclosing source parameters.
+func SourceClassFormalNames(ctx *class_context.ClassContext, internal, signature string) []string {
+	return instantiatedClassFormals(ctx, dotToInternal(internal), signature)
 }
 
 func methodDeclarationSubstitution(signature string, receiver map[string]JavaType) map[string]JavaType {

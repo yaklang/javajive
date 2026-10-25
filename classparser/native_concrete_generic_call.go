@@ -13,9 +13,17 @@ import (
 // Class/method variables remain outside this proof; they need a raw receiver or
 // an explicit substitution certificate, not guesses from printed type names.
 func nativeMemberConcretePrivateCall(owner *ClassObject, signature, descriptor string, target *MemberInfo, work *workbudget.Budget) bool {
+	return strings.Contains(signature, "<") && nativeConcreteMethodSignatureClosed(owner, signature, descriptor, target, work)
+}
+
+// This is a declaration certificate, not a dispatch or access certificate.
+// Its caller separately proves the invocation owner, opcode and argument ports.
+// A descriptor-shaped Signature is also legal and needs the same full grammar
+// validation; nested type variables cannot hide behind matching outer erasures.
+func nativeConcreteMethodSignatureClosed(owner *ClassObject, signature, descriptor string, target *MemberInfo, work *workbudget.Budget) bool {
 	// The parser has a depth ceiling of 128. Charge its worst-case nested
 	// argument traversals and retained metadata before doing that work.
-	if owner == nil || target == nil || len(signature) > 4096 || !strings.Contains(signature, "<") || !nativeProofWork(work, int64(len(signature))*130+1) || work != nil && work.CheckAlloc(int64(len(signature))*256) != nil {
+	if owner == nil || target == nil || len(signature) > 4096 || !nativeProofWork(work, int64(len(signature))*130+1) || work != nil && work.CheckAlloc(int64(len(signature))*256) != nil {
 		return false
 	}
 	erased, throws, known := types.EraseConcreteMethodSignatureWithThrows(signature)
@@ -23,6 +31,22 @@ func nativeMemberConcretePrivateCall(owner *ClassObject, signature, descriptor s
 		return false
 	}
 	return nativeOriginalSignatureThrows(owner, target, throws, work)
+}
+
+// Class-owned variables are admissible only when they occur beneath erased
+// type arguments. No receiver substitution can then change a parameter, return
+// or throws port. This does not erase a direct T to its first bound, nor grant
+// a method-formal or an unbound enclosing variable the declaring class's scope.
+func nativeClassInvariantMethodSignatureClosed(owner *ClassObject, signature, descriptor string, target *MemberInfo, work *workbudget.Budget) bool {
+	if owner == nil || target == nil || len(signature) > 4096 {
+		return false
+	}
+	classSignature, known := nativeOriginalClassSignature(owner, work)
+	if !known || len(classSignature) > 4096 || !nativeProofWork(work, int64(len(classSignature)+len(signature))*260+1) || work != nil && work.CheckAlloc(int64(len(classSignature)+len(signature))*256) != nil {
+		return false
+	}
+	erased, throws, known := types.EraseClassBoundInvariantMethodSignatureWithThrows(classSignature, signature)
+	return known && erased == descriptor && nativeOriginalClassSignatureSupersClosed(owner, classSignature, work) && nativeOriginalSignatureThrows(owner, target, throws, work)
 }
 
 // A private instance call on an explicit raw declaring receiver erases its
@@ -44,6 +68,10 @@ func nativeMemberRawOwnPrivateCall(owner *ClassObject, signature, descriptor str
 	if !known || erased != descriptor {
 		return false
 	}
+	return nativeOriginalClassSignatureSupersClosed(owner, classSignature, work) && nativeOriginalSignatureThrows(owner, target, throws, work)
+}
+
+func nativeOriginalClassSignatureSupersClosed(owner *ClassObject, classSignature string, work *workbudget.Budget) bool {
 	// A class Signature is evidence only for this original declaration. Its
 	// class/interface supers must agree with the physical constant-pool owners.
 	super, interfaces := types.ParseClassSignatureSupers(classSignature)
@@ -58,7 +86,7 @@ func nativeMemberRawOwnPrivateCall(owner *ClassObject, signature, descriptor str
 			return false
 		}
 	}
-	return nativeOriginalSignatureThrows(owner, target, throws, work)
+	return true
 }
 
 func nativeOriginalSignatureThrows(owner *ClassObject, target *MemberInfo, throws []string, work *workbudget.Budget) bool {

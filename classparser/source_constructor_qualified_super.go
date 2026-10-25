@@ -135,6 +135,25 @@ func constructorLoweringExecutablePlanEqual(expected, actual *sourceConstructorL
 	return reflect.DeepEqual(a, b)
 }
 
+// The original classfile can mark an anonymous constructor variable-arity
+// even when captured locals follow its array argument. Such a physical port
+// cannot be spelled as Java's final varargs parameter. A fixed-arity source
+// declaration is equivalent only after the complete original capture and
+// delegation packet matches; its original marker is restored at completion.
+// This exception applies only to a missing ACC_VARARGS on freshly compiled
+// source. Original/publication comparisons and every other flag stay exact.
+func constructorLoweringFreshPlanEqual(expected, actual *sourceConstructorLoweringPlan) bool {
+	if constructorLoweringExecutablePlanEqual(expected, actual) {
+		return true
+	}
+	if expected == nil || actual == nil || expected.flags&0x80 == 0 || actual.flags != expected.flags&^uint16(0x80) {
+		return false
+	}
+	copy := *actual
+	copy.flags = expected.flags
+	return constructorLoweringExecutablePlanEqual(expected, &copy)
+}
+
 func constructorLoweringReadQualifierGuard(object *ClassObject, ops []*core.OpCode, at int) (constructorLoweringQualifierGuard, int, bool) {
 	if at < 0 || at >= len(ops) {
 		return constructorLoweringQualifierGuard{}, 0, false

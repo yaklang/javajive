@@ -3,7 +3,9 @@ package cross
 import (
 	"archive/zip"
 	"bytes"
+	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -212,6 +214,21 @@ func zipClassesToJar(t *testing.T, dir, jarPath string) {
 // The caller supplies only authorized runtime metadata. Class bytes always
 // come from the rebuilt tree; resources and original class files are excluded.
 func writeClassTreeJar(dir, jarPath string, manifest []byte) (err error) {
+	return writeClassTreeJarWithResources(dir, jarPath, manifest, nil)
+}
+
+func writeClassTreeJarWithResources(dir, jarPath string, manifest []byte, resources []string) (err error) {
+	allowed := map[string]bool{}
+	for _, name := range resources {
+		if !fs.ValidPath(name) || name == "." || strings.Contains(name, "\\") || strings.HasSuffix(name, ".class") || strings.HasPrefix(name, "META-INF/") || allowed[name] {
+			return fmt.Errorf("invalid class resource inventory %q", name)
+		}
+		info, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(name)))
+		if err != nil || !info.Mode().IsRegular() {
+			return fmt.Errorf("missing or nonregular completed class resource %q", name)
+		}
+		allowed[name] = true
+	}
 	f, err := os.Create(jarPath)
 	if err != nil {
 		return err
@@ -242,12 +259,18 @@ func writeClassTreeJar(dir, jarPath string, manifest []byte) (err error) {
 		if err != nil {
 			return err
 		}
-		if info.IsDir() || !strings.HasSuffix(path, ".class") {
+		if info.IsDir() {
 			return nil
 		}
 		rel, err := filepath.Rel(dir, path)
 		if err != nil {
 			return err
+		}
+		if !strings.HasSuffix(path, ".class") && !allowed[filepath.ToSlash(rel)] {
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("nonregular compiler output %q", rel)
 		}
 		w, err := zw.Create(filepath.ToSlash(rel))
 		if err != nil {

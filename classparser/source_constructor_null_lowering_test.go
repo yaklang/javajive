@@ -6,9 +6,45 @@ import (
 	"testing"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
+
+func TestAdversarialConstructorNullCastRequiresResolvedDeclaration(t *testing.T) {
+	for _, name := range []string{"Token", "Outer$Marker"} {
+		for _, variant := range []string{"exact", "no provider", "unknown", "wrong declaration", "changed target", "changed origin", "changed leaf"} {
+			t.Run(name+"/"+variant, func(t *testing.T) {
+				ctx := &class_context.ClassContext{InvocationMetadata: func(query string) (callbinding.Class, bool) {
+					if query != name {
+						t.Fatalf("unexpected declaration query %q", query)
+					}
+					identity := name
+					if variant == "wrong declaration" {
+						identity = "Unrelated"
+					}
+					return callbinding.Class{Name: identity, MembersComplete: true}, variant != "unknown"
+				}}
+				arg := constructorLoweringArgument{null: true, descriptor: "L" + name + ";", nullCasts: []string{"L" + name + ";"}}
+				cast := values.NewOriginalCheckCast(values.NewOriginalNullLiteral(7), types.NewJavaClass(name), 8)
+				switch variant {
+				case "no provider":
+					ctx.InvocationMetadata = nil
+				case "changed target":
+					cast.TargetType = types.NewJavaClass("java.lang.Object")
+				case "changed origin":
+					cast.OriginPC = 9
+				case "changed leaf":
+					cast.Value = values.NewOriginalNullLiteral(6)
+				}
+				if got := constructorLoweringSourceArgument(arg, 7, cast, nil, nil, ctx); got != (variant == "exact") {
+					t.Fatalf("declared original cast proof=%v", got)
+				}
+			})
+		}
+	}
+}
 
 func TestAdversarialConstructorLoweringNullRequiresExactOriginalOperand(t *testing.T) {
 	for _, variant := range []string{"control", "different pc", "manufactured null", "copied literal", "changed data", "changed source type", "parameter role", "field role", "primitive port"} {
@@ -34,7 +70,7 @@ func TestAdversarialConstructorLoweringNullRequiresExactOriginalOperand(t *testi
 			case "primitive port":
 				arg.descriptor = "I"
 			}
-			if constructorLoweringSourceArgument(arg, 7, literal, nil, nil) != (variant == "control") {
+			if constructorLoweringSourceArgument(arg, 7, literal, nil, nil, nil) != (variant == "control") {
 				t.Fatal("null literal lost original producer proof")
 			}
 		})
@@ -85,7 +121,7 @@ func TestAdversarialConstructorLoweringNullCastChainRetainsOriginalInstructions(
 			case "wrong final descriptor":
 				arg.descriptor = "Ljava/lang/Object;"
 			}
-			if got := constructorLoweringSourceArgument(arg, 7, value, nil, nil); got != want {
+			if got := constructorLoweringSourceArgument(arg, 7, value, nil, nil, nil); got != want {
 				t.Fatalf("original null cast packet=%v want=%v", got, want)
 			}
 		})

@@ -75,8 +75,14 @@ func (f *FunctionCallExpression) planErasedZeroArgumentResult(ctx *class_context
 	}
 	for _, rival := range family.Methods {
 		p, _, e := callbinding.Descriptor(rival.Desc)
-		if e != nil || len(p) == 0 && rival.Desc != f.Descriptor {
+		if e != nil {
 			return nil, false
+		}
+		if len(p) == 0 && rival.Desc != f.Descriptor {
+			if !erasedZeroArgumentOverrideFamily(f, proof) {
+				return nil, false
+			}
+			break
 		}
 	}
 	object := f.Object

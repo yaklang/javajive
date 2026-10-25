@@ -25,7 +25,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -70,17 +70,17 @@ jobs:
       - name: Source algorithm regression tests
         env:
           SOURCE_SHARD: ${{ matrix.shard }}
-          SOURCE_SHARDS: "12"
-          EDGE_TEST_PATTERN: '^Test(Native|ConstructorFinalizerSeal|ScopedClassNameBinding|CheckedEscape|CheckedConstructor|BindingPlan|CtorArrayThisSpillsRoundTrip|CtorArrayThisSpillPreservesEarlierArgumentOrder|CtorDelegationNestedArrayTempRoundTrip|CtorDelegationArgumentSpills|SuperDelegationTrailingArgumentSpills|SuperDelegationSpillAcrossSafePostSuperPrelude|ConditionalThisCtorCheckcastRoundTrip|TernaryCheckcastInvocationReceiverRoundTrip|CtorNPECheckBeforeThis|EnumArrayConstructorArgsRoundTrip|EnumClinit|ZxingEnum|GenericNull|GenericFieldElementOpsRoundTrip|GenericFunctionalThrows|GenericFunctionalValueKeepsErasedCallDescriptor|MaterializedBiFunctionErasureRoundTrip|SameClassBiFunctionTypeVariablesRoundTrip|SameClassFunctionAndSupplierErasureRoundTrip|SiblingClassFunctionalErasureRoundTrip|ChainedSiblingReturnFunctionalErasureRoundTrip|LowerBoundedFunctionalArgumentsRoundTrip|CapturedLowerBoundedFunctionalArgumentsRoundTrip|CapturedParameterizedLowerBoundRoundTrip|LambdaCaptureCopiesStayInsideGenericMethod|ClassCacheTernaryStoreRoundTrip|MapCacheTernaryLocalRoundTrip|ImmediateZeroArgCheckcastInvoke|NonConditionalForkDiamond|InheritedJDK|InvocationMetadata|JDKListNull|MemberLedger|MethodReferenceKeepsPolyTargetTypeRoundTrip|DirectoryStreamFilterKeepsInstantiatedMethodRefTypeRoundTrip|T04ExternalOverloadBindingRoundTrip|LogbackPutUninterruptibly|ProtobufRemainingReconstructs|ProtobufLazyStringArrayListThis|PublicSuffixDatabase|ThisCtorOverloadCast|GenericVarargsConstructorArrayRoundTrip|ShiftedThisCtorGenericArrayRoundTrip|ConditionalArrayCloneStoreRoundTrip|ToListSingleCallableCast|JacksonRemainingMapEntryDeserializerCast|JoinStreamCtorCast|RawGenericReceiver|SyntaxObservation|RetryRollback|ShadowBuilder|ShadowIRRunsFrameSSAAndLowering|T11_C01|Sentinels|Request|R06|T04|T05|T06|T07|T08|T18|T19|T27|TaskT20|TernaryCheckcastMergeRoundTrip|SelfCastNullMergeRoundTrip|ShortCircuitVarargsArraysRoundTrip|SharedFalseTargetFallthroughRoundTrip)'
+          SOURCE_SHARDS: "16"
+          EDGE_TEST_PATTERN: '^Test(Native|InheritedBridgeAnnotationPolicy|LexicalFormalSignature|InterfaceWrappedArrayRequires|MemberArity|PackageDescriptor|MemberGenericSupertype|ConstructorFinalizerSeal|ScopedClassNameBinding|CheckedEscape|CheckedConstructor|BindingPlan|CtorArrayThisSpillsRoundTrip|CtorArrayThisSpillPreservesEarlierArgumentOrder|CtorDelegationNestedArrayTempRoundTrip|CtorDelegationArgumentSpills|SuperDelegationTrailingArgumentSpills|SuperDelegationSpillAcrossSafePostSuperPrelude|ConditionalThisCtorCheckcastRoundTrip|TernaryCheckcastInvocationReceiverRoundTrip|CtorNPECheckBeforeThis|EnumArrayConstructorArgsRoundTrip|EnumClinit|ZxingEnum|GenericNull|GenericFieldElementOpsRoundTrip|GenericFunctionalThrows|GenericFunctionalValueKeepsErasedCallDescriptor|MaterializedBiFunctionErasureRoundTrip|SameClassBiFunctionTypeVariablesRoundTrip|SameClassFunctionAndSupplierErasureRoundTrip|SiblingClassFunctionalErasureRoundTrip|ChainedSiblingReturnFunctionalErasureRoundTrip|LowerBoundedFunctionalArgumentsRoundTrip|CapturedLowerBoundedFunctionalArgumentsRoundTrip|CapturedParameterizedLowerBoundRoundTrip|LambdaCaptureCopiesStayInsideGenericMethod|ClassCacheTernaryStoreRoundTrip|MapCacheTernaryLocalRoundTrip|ImmediateZeroArgCheckcastInvoke|NonConditionalForkDiamond|InheritedJDK|InvocationMetadata|JDKListNull|MemberLedger|MethodReferenceKeepsPolyTargetTypeRoundTrip|DirectoryStreamFilterKeepsInstantiatedMethodRefTypeRoundTrip|T04ExternalOverloadBindingRoundTrip|LogbackPutUninterruptibly|ProtobufRemainingReconstructs|ProtobufLazyStringArrayListThis|PublicSuffixDatabase|ThisCtorOverloadCast|GenericVarargsConstructorArrayRoundTrip|ShiftedThisCtorGenericArrayRoundTrip|ConditionalArrayCloneStoreRoundTrip|ToListSingleCallableCast|JacksonRemainingMapEntryDeserializerCast|JoinStreamCtorCast|RawGenericReceiver|SyntaxObservation|RetryRollback|ShadowBuilder|ShadowIRRunsFrameSSAAndLowering|T11_C01|Sentinels|Request|R06|T04|T05|T06|T07|T08|T18|T19|T27|TaskT20|TernaryCheckcastMergeRoundTrip|SelfCastNullMergeRoundTrip|ShortCircuitVarargsArraysRoundTrip|SharedFalseTargetFallthroughRoundTrip)'
         run: |
           set -o pipefail
           mkdir -p artifacts
           go test ./classparser -c -o "$RUNNER_TEMP/adversarial.test"
-          # Twelve disjoint shards leave headroom for slower runners under the fixed deadline.
+          # Sixteen disjoint shards leave headroom for slower runners under the fixed deadline.
           # Parent groups run concurrently on the same pinned JDK. Four
           # serial processes per shard isolate environment-changing tests.
           # Exact original parent and nested-policy inventories remain checked;
-          # the required summary waits for every shard and the40trusted fixtures.
+          # the required summary waits for every shard and the trusted fixtures.
           python3 - <<'PYTHON'
           import concurrent.futures, json, os, pathlib, re, shutil, signal, subprocess, sys, time
           from tools.ci_scheduler.shard import source_parent_batches, source_parent_shards
@@ -98,7 +98,7 @@ jobs:
           if heavy not in names or not scopes or len(scopes) != len(set(scopes)):
               raise SystemExit("incomplete nested-capture scope inventory")
           shard, count = int(os.environ["SOURCE_SHARD"]), int(os.environ["SOURCE_SHARDS"])
-          if count != 12 or not 0 <= shard < count:
+          if count != 16 or not 0 <= shard < count:
               raise SystemExit("invalid source regression shard")
           all_ordinary = [name for name in names if name != heavy]
           # Measured costs affect placement only. The binary's complete test

@@ -16,6 +16,7 @@ func (c *ClassObjectDumper) buildSiblingSourceClassFormals() func(string) ([]str
 		known bool
 	}
 	cache := map[string]entry{}
+	declarations := c.nativeAnnotationDeclarationResolver()
 	return func(internal string) ([]string, bool) {
 		if hit, ok := cache[internal]; ok {
 			return hit.names, hit.known
@@ -88,12 +89,11 @@ func (c *ClassObjectDumper) buildSiblingSourceClassFormals() func(string) ([]str
 				cache[internal] = entry{names, true}
 				return names, true
 			}
-			b, known := c.foldSiblingResolver(owner)
-			if !known {
-				return nil, false
-			}
-			parent, e := c.parseResolved(b)
-			if e != nil || parent.GetClassName() != owner {
+			// Only the emitted member needs source ownership. Its enclosing
+			// declaration may be an unchanged dependency; original metadata still
+			// proves its binders without granting ownership of that dependency.
+			parent, known := declarations(owner)
+			if !known || parent == nil || parent.GetClassName() != owner {
 				return nil, false
 			}
 			current = parent

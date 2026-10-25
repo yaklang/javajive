@@ -184,12 +184,23 @@ func (d *Decompiler) unifyReferenceWebs() {
 			}
 			// All aliases are retained as objects (existing SlotValues can reference them),
 			// but agree on identity and declaration type before statements are constructed.
+			identity := canon.SolvedWebIdentity
+			if identity == nil && param == nil && len(refs) > 1 {
+				// Source naming visits sibling scopes independently. The same
+				// solved definition web must keep one binder even when its joined
+				// use lies outside the immediate try/if body. A mutable Id alone
+				// loses that fact as soon as one arm is renamed.
+				identity = canon.Id
+			}
 			for ref := range refs {
 				if ref.WebDeclType == nil || !reflect.DeepEqual(ref.WebDeclType.RawType(), joined.RawType()) {
 					changed = true
 				}
 				ref.Id = canon.Id
 				ref.VarUid = canon.VarUid
+				if param == nil && identity != nil {
+					ref.SolvedWebIdentity = identity
+				}
 				ref.ResetVarType(joined.Copy())
 				ref.WebDeclType = joined.Copy()
 			}

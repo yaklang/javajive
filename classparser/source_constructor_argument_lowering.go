@@ -11,7 +11,10 @@ import (
 // independently contain the same symbolic read in the same operand order.
 // Moving the entire fresh SUPER packet behind the capture packet restores the
 // original order of these effects, including abrupt exits before SUPER starts.
-func constructorLoweringSourceArgument(argument constructorLoweringArgument, pc int, value values.JavaValue, slots map[int]int, params []values.JavaValue) bool {
+func constructorLoweringSourceArgument(argument constructorLoweringArgument, pc int, value values.JavaValue, slots map[int]int, params []values.JavaValue, ctx *class_context.ClassContext) bool {
+	if ctx == nil {
+		ctx = &class_context.ClassContext{}
+	}
 	value = values.UnpackSoltValue(value)
 	if argument.literal != nil {
 		return constructorLoweringSourceLiteral(argument, value)
@@ -32,7 +35,10 @@ func constructorLoweringSourceArgument(argument constructorLoweringArgument, pc 
 			if !ok {
 				return false
 			}
-			origin, target, known := cast.OriginalCheckCastWitness(&class_context.ClassContext{})
+			// A default-package binary name has no slash. Resolve it against
+			// the same original declarations as the surrounding source plan;
+			// an empty context cannot distinguish it from a free type formal.
+			origin, target, known := cast.OriginalCheckCastWitness(ctx)
 			if !known || origin != pc+1+3*i || target != argument.nullCasts[i] {
 				return false
 			}

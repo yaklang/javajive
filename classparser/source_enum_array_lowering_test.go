@@ -39,7 +39,7 @@ func enumArrayLoweringInputs(t *testing.T) ([]byte, []byte, *JarReconstructionAr
 
 func TestAdversarialEnumArrayLoweringKeepsCompletePacketAndConsumerProof(t *testing.T) {
 	original, compiled, artifact := enumArrayLoweringInputs(t)
-	for _, variant := range []string{"control", "renamed helper", "expanded integer", "lost synthetic metadata", "new synthetic metadata", "lost synthetic plus synchronized", "unreturned source", "pending namespace", "stale original", "pre-enum version", "unqualified newer version", "preview version", "field universe", "extra method", "visibility", "helper flags", "array order", "array opcode", "extra instruction", "other consumer", "wrong call kind", "method handle", "handler", "frame", "unknown PC table", "max stack", "work", "output", "canceled"} {
+	for _, variant := range []string{"control", "renamed helper", "expanded integer", "lost synthetic metadata", "new synthetic metadata", "lost synthetic plus synchronized", "unreturned source", "pending namespace", "stale original", "pre-enum version", "unsupported future version", "preview version", "field universe", "extra method", "visibility", "helper flags", "array order", "array opcode", "extra instruction", "other consumer", "wrong call kind", "method handle", "handler", "frame", "unknown PC table", "max stack", "work", "output", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			object := mustParseLowering(t, bytes.Clone(compiled))
 			var initializer, helper, fold *MemberInfo
@@ -112,13 +112,13 @@ func TestAdversarialEnumArrayLoweringKeepsCompletePacketAndConsumerProof(t *test
 				old := mustParseLowering(t, want)
 				old.ConstantPoolManager.AddUtf8Info("unused but independently owned physical namespace")
 				want = old.Bytes()
-			case "pre-enum version", "unqualified newer version", "preview version":
+			case "pre-enum version", "unsupported future version", "preview version":
 				old := mustParseLowering(t, want)
 				switch variant {
 				case "pre-enum version":
 					old.MajorVersion = 48
-				case "unqualified newer version":
-					old.MajorVersion = 53
+				case "unsupported future version":
+					old.MajorVersion = 66
 				case "preview version":
 					old.MinorVersion = 65535
 				}

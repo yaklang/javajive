@@ -1,6 +1,9 @@
 package types
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // EraseClassBoundMethodSignature checks erasure using only the declaring class's
 // original formal declarations. Method formals and missing/dependent bounds
@@ -62,6 +65,52 @@ func EraseClassBoundMethodSignatureWithThrows(classSignature, methodSignature st
 		}
 	}
 	return eraseMethodSignature(methodSignature, bounds)
+}
+
+// EraseClassBoundInvariantMethodSignatureWithThrows first validates every
+// original class binder, bound and nested argument. It then erases with NO
+// substitutions: a direct variable (including an array component or throws)
+// cannot be resolved, whereas variables beneath parameterized class arguments
+// disappear without changing a physical invocation port. This proves invariance
+// under receiver instantiation, rather than assuming a parameterized owner raw.
+// Method formals and free enclosing binders are outside this certificate.
+func EraseClassBoundInvariantMethodSignatureWithThrows(classSignature, methodSignature string) (string, []string, bool) {
+	expected, exceptions, valid := EraseClassBoundMethodSignatureWithThrows(classSignature, methodSignature)
+	if !valid {
+		return "", nil, false
+	}
+	actual, throws, stable := eraseMethodSignature(methodSignature, nil)
+	if !stable || actual != expected || !slices.Equal(throws, exceptions) {
+		return "", nil, false
+	}
+	return actual, throws, true
+}
+
+// EraseLexicalInvariantMethodSignatureWithThrows checks class and method
+// declarations in their separate scopes, then requires every physical port to
+// be independent of either set of binders. Removing the method declaration
+// prefix is not enough: full lexical validation must precede the substitution-
+// free erasure so free variables cannot disappear inside type arguments.
+// This certifies erasure, not overload selection or permission to rewrite Code.
+func EraseLexicalInvariantMethodSignatureWithThrows(classSignature, methodSignature string) (string, []string, bool) {
+	expected, exceptions, valid := EraseLexicalMethodSignatureWithThrows(classSignature, methodSignature)
+	if !valid {
+		return "", nil, false
+	}
+	body := methodSignature
+	formals := MethodFormalTypeParamNames(methodSignature)
+	if len(formals) > 0 {
+		_, _, tail, known := signatureConcreteFormalBounds(methodSignature, formals)
+		if !known {
+			return "", nil, false
+		}
+		body = tail
+	}
+	actual, throws, stable := eraseMethodSignature(body, nil)
+	if !stable || actual != expected || !slices.Equal(throws, exceptions) {
+		return "", nil, false
+	}
+	return actual, throws, true
 }
 
 // EraseRawClassInstanceMethodSignatureWithThrows applies JLS raw member

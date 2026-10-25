@@ -62,7 +62,19 @@ func TestAdversarialIndependentNestedSubclassKeepsInheritedCovariantBridge(t *te
 
 func testIndependentInheritedBridge(t *testing.T, modern, java, native, fixture, root, debug string, parameters bool, expected string) {
 	t.Helper()
+	testIndependentInheritedBridgeWithOriginal(t, modern, java, native, fixture, root, debug, parameters, expected, nil)
+}
+
+func testIndependentInheritedBridgeWithOriginal(t *testing.T, modern, java, native, fixture, root, debug string, parameters bool, expected string, mutate func(map[string][]byte), verify ...func(*testing.T, string, []byte, []byte, *JarReconstructionArtifact)) {
+	testIndependentInheritedBridgeOwner(t, modern, java, native, fixture, root, root+"$Leaf", debug, parameters, expected, mutate, verify...)
+}
+
+func testIndependentInheritedBridgeOwner(t *testing.T, modern, java, native, fixture, root, name, debug string, parameters bool, expected string, mutate func(map[string][]byte), verify ...func(*testing.T, string, []byte, []byte, *JarReconstructionArtifact)) {
+	t.Helper()
 	files := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, fixture, root, debug, parameters)
+	if mutate != nil {
+		mutate(files)
+	}
 	run := func(dir string) {
 		t.Helper()
 		for _, mode := range []string{"-ea", "-da"} {
@@ -75,8 +87,17 @@ func testIndependentInheritedBridge(t *testing.T, modern, java, native, fixture,
 		}
 	}
 	run(sourceArtifactWriteFiles(t, files))
-	name := root + "$Leaf"
 	owned := map[string][]byte{name + ".class": files[name+".class"]}
+	if _, _, anonymous := originalAnonymousOwner(mustParseLowering(t, files[name+".class"])); anonymous {
+		// The independent flat source reader needs the original lexical owner
+		// in its owned archive. Only the requested class is recompiled below;
+		// its original owner and unchanged driver remain binary dependencies.
+		for n, b := range files {
+			if n == root+".class" || strings.HasPrefix(n, root+"$") {
+				owned[n] = b
+			}
+		}
+	}
 	jar := filepath.Join(t.TempDir(), "input.jar")
 	if err := os.WriteFile(jar, t23Zip(t, owned), 0600); err != nil {
 		t.Fatal(err)
@@ -107,9 +128,12 @@ func testIndependentInheritedBridge(t *testing.T, modern, java, native, fixture,
 	path = filepath.Join(out, name+".class")
 	fresh, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal("missing independently compiled target", err, string(source))
 	}
 	saved := bytes.Clone(fresh)
+	for _, check := range verify {
+		check(t, name, owned[name+".class"], fresh, a)
+	}
 	finished, err := a.FinishClass(name+".class", fresh)
 	if err != nil {
 		t.Fatal("original inherited bridge method universe", err, string(source), "publication", a.source.jar.sourceConstructorLowering.bridgeActive)

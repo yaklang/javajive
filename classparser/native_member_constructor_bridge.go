@@ -49,7 +49,7 @@ func (p *nativeMemberFamily) retainsConstructorBridge(b *nativeConstructorAccess
 	return p.anonymous != nil && p.anonymous.owner == p.owner && p.anonymous.standalone[b.marker] != nil
 }
 
-func nativeMemberJointBridgeMarkersClosed(p *nativeMemberFamily, work *workbudget.Budget) bool {
+func nativeMemberJointBridgeMarkersClosed(p *nativeMemberFamily, work *workbudget.Budget, retainBinaryPorts bool) bool {
 	if p == nil {
 		return false
 	}
@@ -60,6 +60,18 @@ func nativeMemberJointBridgeMarkersClosed(p *nativeMemberFamily, work *workbudge
 		}
 		for _, bridge := range bridges {
 			if bridge == nil || !nativeProofWork(work, 1) || child != nil && !child.static && child.constructors[bridge.target] == nil {
+				return false
+			}
+			// A reconstruction artifact must retain original binary ports;
+			// plain source jointly recompiles its users and may use nest access.
+			// Nestmate compilation does not regenerate the original access
+			// constructor. Artifact ownership is therefore legal only if its
+			// complete forwarding declaration has a nameable marker type.
+			// An inline anonymous class or switch table cannot supply that
+			// source type. Leave this family to independent reconstruction,
+			// which retains the original binary port, rather than claiming
+			// ownership and silently omitting the original constructor.
+			if retainBinaryPorts && p.usesNestAccess && !p.retainsConstructorBridge(bridge) {
 				return false
 			}
 			if marker := p.emptyMarkers[bridge.marker]; marker != nil && nativeMemberEmptyAccessMarker(marker, p.owner, work) {

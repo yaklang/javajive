@@ -11,6 +11,11 @@ import (
 // booleanStackWord keeps JVM computational int words separate from Java Z
 // operands. Enumerated captures retain effects and variable dependencies.
 func booleanStackWord(value JavaValue) JavaValue {
+	// Keep an original load's forwarding cell. Capturing its current ref
+	// here would lose a later proved web rebinding and retain the old type.
+	if slot, ok := value.(*SlotValue); ok && slot != nil {
+		return &booleanStackView{operand: value, word: true}
+	}
 	if condition, ok := boolOperandCondition(value); ok {
 		value = condition
 	}
@@ -171,9 +176,15 @@ func (v *booleanStackView) String(ctx *class_context.ClassContext) string {
 	if guard && renderRejected(ctx) {
 		return ""
 	}
-	if v.word {
+	// A solved reaching web can replace an initially Boolean local with its
+	// numeric source declaration. This view still denotes its JVM int word:
+	// preserve all bits instead of retaining a stale Boolean-to-int coercion.
+	if v.word && !isBooleanTyped(v.operand) && !IsBooleanStackNarrowing(types.NewJavaPrimer(types.JavaBoolean), v.operand) {
+		return IncompleteSourceValue(ctx)
+	}
+	if v.word && isBooleanTyped(v.operand) {
 		text = fmt.Sprintf("((%s) ? 1 : 0)", text)
-	} else if !isBooleanTyped(v.operand) {
+	} else if !v.word && !isBooleanTyped(v.operand) {
 		text = fmt.Sprintf("(((%s) & 1) != 0)", text)
 	}
 	return finishExpressionRender(ctx, guard, text)

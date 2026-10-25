@@ -180,9 +180,39 @@ func enumRelocateInstructionSpanCode(object *ClassObject, raw []byte, code *Code
 		return pc, pc <= 65535
 	}
 	end := 8 + len(code.Code)
-	if binary.BigEndian.Uint16(raw[end:]) != 0 {
+	handlers := int(binary.BigEndian.Uint16(raw[end:]))
+	if handlers != len(code.ExceptionTable) || end+2+8*handlers+2 > len(raw) {
 		return fail()
 	}
+	handlerBytes := bytes.Clone(raw[end+2 : end+2+8*handlers])
+	for i, h := range code.ExceptionTable {
+		if h == nil || h.StartPc >= h.EndPc {
+			return fail()
+		}
+		a, b, c := int(h.StartPc), int(h.EndPc), int(h.HandlerPc)
+		// A replaced instruction cannot acquire or lose a handler. Each
+		// protected interval and its target must stay within one retained
+		// region. Preserve ordered rows, including their catch-all types.
+		if !(b <= start && c < start || a >= endSpan && c >= endSpan) {
+			return fail()
+		}
+		left, lk := mapPC(a, false)
+		right, rk := mapPC(b, true)
+		target, tk := mapPC(c, false)
+		row := handlerBytes[8*i : 8*i+8]
+		if !lk || !rk || !tk || left >= right || binary.BigEndian.Uint16(row) != h.StartPc || binary.BigEndian.Uint16(row[2:]) != h.EndPc || binary.BigEndian.Uint16(row[4:]) != h.HandlerPc || binary.BigEndian.Uint16(row[6:]) != h.CatchType {
+			return fail()
+		}
+		if h.CatchType != 0 {
+			if _, ok := sourceBridgeClassName(object, h.CatchType); !ok {
+				return fail()
+			}
+		}
+		binary.BigEndian.PutUint16(row, uint16(left))
+		binary.BigEndian.PutUint16(row[2:], uint16(right))
+		binary.BigEndian.PutUint16(row[4:], uint16(target))
+	}
+	attributeCountAt := end + 2 + 8*handlers
 	type attribute struct {
 		name uint16
 		data []byte
@@ -191,8 +221,8 @@ func enumRelocateInstructionSpanCode(object *ClassObject, raw []byte, code *Code
 	seen := map[string]bool{}
 	lines := map[int]uint16{}
 	lineName := helperLineName
-	pos := end + 4
-	for i := 0; i < int(binary.BigEndian.Uint16(raw[end+2:])); i++ {
+	pos := attributeCountAt + 2
+	for i := 0; i < int(binary.BigEndian.Uint16(raw[attributeCountAt:])); i++ {
 		if len(raw)-pos < 6 {
 			return fail()
 		}
@@ -293,7 +323,9 @@ func enumRelocateInstructionSpanCode(object *ClassObject, raw []byte, code *Code
 	binary.BigEndian.PutUint16(out, stack)
 	binary.BigEndian.PutUint32(out[4:], uint32(len(replacement)))
 	out = append(out, replacement...)
-	out = append(out, 0, 0, byte(len(attrs)>>8), byte(len(attrs)))
+	out = append(out, byte(handlers>>8), byte(handlers))
+	out = append(out, handlerBytes...)
+	out = append(out, byte(len(attrs)>>8), byte(len(attrs)))
 	for _, a := range attrs {
 		h := make([]byte, 6)
 		binary.BigEndian.PutUint16(h, a.name)

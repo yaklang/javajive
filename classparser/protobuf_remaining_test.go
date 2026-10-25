@@ -77,9 +77,10 @@ func TestProtobufRemainingReconstructsAreLoadBearing(t *testing.T) {
 		"isInitialized((GeneratedMessageLite)(this),true)",
 		"this((ArrayList<Object>)(new ArrayList(var1)));",
 		"return (RpcCallback<Type>) (RpcCallback) (var0);",
-		"SmallSortedMap$1<FieldDescriptorType extends Comparable<FieldDescriptorType>>",
+		// Declaration spelling cannot authorize a new bound or narrow cast.
+		"SmallSortedMap$1<FieldDescriptorType> extends SmallSortedMap<FieldDescriptorType, Object>",
 		"return this.value.toByteString();",
-		".setKey((String)(var3.getKey())).setValue((Value)(var3.getValue()))",
+		".setKey(var3.getKey()).setValue(var3.getValue())",
 		"synchronized(this){\n\t\t\t\treturn this;",
 		"synchronized(this){\n\t\t\t\treturn false;",
 	}

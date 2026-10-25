@@ -15,6 +15,8 @@ import (
 // metadata obligation. ReadFile returns Java source under the original class
 // paths, as JarFS does. Recompile with the selected compiler profile, then call
 // RestoreClassMetadata for each rebuilt class before publishing the artifact.
+// Use javac -Xpkginfo:always when compiling these units so a package-info.java
+// with no annotations still regenerates its original package descriptor.
 // Plain JarFS source admission remains unchanged.
 //
 // This contract preserves ordinary synthetic storage fields and exact original
@@ -89,10 +91,10 @@ func (a *JarSourceArtifact) Close() error { return a.jar.Close() }
 // bindings change; Code, handlers, stack maps, debug tables and string literals
 // retain the compiler's bytes.
 func (a *JarSourceArtifact) RestoreClassMetadata(name string, compiled []byte) ([]byte, error) {
-	return a.restoreClassMetadata(name, compiled, sourceCaptureMetadataTarget{})
+	return a.restoreClassMetadata(name, compiled, sourceCaptureMetadataTarget{}, nil)
 }
 
-func (a *JarSourceArtifact) restoreClassMetadata(name string, compiled []byte, target sourceCaptureMetadataTarget) ([]byte, error) {
+func (a *JarSourceArtifact) restoreClassMetadata(name string, compiled []byte, target sourceCaptureMetadataTarget, preparedLambda *sourceLambdaMetadataPlan) ([]byte, error) {
 	if a == nil || a.jar == nil {
 		return nil, fs.ErrInvalid
 	}
@@ -100,7 +102,8 @@ func (a *JarSourceArtifact) restoreClassMetadata(name string, compiled []byte, t
 	if release, candidate, physical := physicalClassNamespace(name); physical {
 		z, logical = z.sourceReleaseView(release), candidate
 	}
-	if z == nil || !strings.HasSuffix(logical, ".class") || !nativeSourceBinaryName(strings.TrimSuffix(logical, ".class")) {
+	packageInfo := strings.HasSuffix(logical, ".class") && packageDescriptorName(strings.TrimSuffix(logical, ".class"))
+	if z == nil || !strings.HasSuffix(logical, ".class") || !nativeSourceBinaryName(strings.TrimSuffix(logical, ".class")) && !packageInfo {
 		return nil, fmt.Errorf("field metadata: noncanonical class path %q", name)
 	}
 	original, err := z.readJarEntry(logical)
@@ -115,6 +118,9 @@ func (a *JarSourceArtifact) restoreClassMetadata(name string, compiled []byte, t
 	if object.GetClassName()+".class" != logical {
 		return nil, fmt.Errorf("field metadata: archive path and class identity disagree")
 	}
+	if packageInfo {
+		return finishPackageDescriptor(original, compiled, reader.Work)
+	}
 	if z.sourceFieldMetadata != nil && z.sourceFieldMetadata.hasAssertionStorage(object.GetClassName()) {
 		compiled, err = z.sourceFieldMetadata.restoreAssertionStorage(original, compiled, reader.Work)
 		if err != nil {
@@ -123,8 +129,15 @@ func (a *JarSourceArtifact) restoreClassMetadata(name string, compiled []byte, t
 	}
 	var lambda *sourceLambdaMetadataPlan
 	if authority := z.sourceLambdaMetadata; authority != nil {
-		lambda = authority.plan(object.GetClassName())
-		if lambda != nil && z.sourceConstructorLowering != nil {
+		// Reconstruction may already have proved and completed input ABI
+		// adapters before whole-member scope checks. Carry that per-call plan
+		// forward; never mutate the shared publication or apply its Code edit
+		// twice. Plain source artifacts still enter through the original plan.
+		lambda = preparedLambda
+		if lambda == nil {
+			lambda = authority.plan(object.GetClassName())
+		}
+		if preparedLambda == nil && lambda != nil && z.sourceConstructorLowering != nil {
 			compiled, lambda, err = lowerLambdaCheckedInputs(original, compiled, lambda, reader.Work)
 			if err != nil {
 				return nil, err

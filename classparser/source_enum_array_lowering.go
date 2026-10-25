@@ -68,7 +68,7 @@ func (a *sourceConstructorLoweringAuthority) enumArraySourceReturned(owner strin
 	return active && origin.sourceHash != ([32]byte{}) && origin.originalHash == sha256.Sum256(original)
 }
 
-// A newer compiler can add a private array helper to a Java5-8 enum whose
+// A different compiler can add a private array helper to an enum whose
 // original initializer constructed that same array inline. Declaration-ordered
 // constants and the unique backing producer precede an isolated user suffix.
 // User operands need typed allocation
@@ -77,12 +77,19 @@ func (a *sourceConstructorLoweringAuthority) enumArraySourceReturned(owner strin
 // remaining methods/fields keep their complete identities and other flags.
 // No original executable byte is copied, nor is an extra method ignored by the
 // metadata gate. Suffix branches retain their bytes under an aligned affine PC
-// map; verifier/debug locations are relocated together. Handlers and opaque PC
-// attributes remain outside this executable lowering domain.
+// map; verifier/debug locations are relocated together. A proved entry prelude
+// can own isolated handlers; crossing handlers and opaque PC tables decline.
 func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, original, compiled []byte, work *workbudget.Budget) ([]byte, error) {
+	entryOrderRequired := false
 	decline := func() ([]byte, error) {
 		if err := work.Check(); err != nil {
 			return nil, err
+		}
+		if entryOrderRequired {
+			// An inline-array compiler may preserve the method universe even
+			// while executing the prelude too late. Metadata equality alone
+			// must not silently complete that unproved ordering obligation.
+			return nil, sourceLambdaMetadataFailure(work, "enum entry effect order is not proved")
 		}
 		return compiled, nil
 	}
@@ -96,6 +103,18 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 	if err != nil {
 		return nil, err
 	}
+	if want.AccessFlags&0x4000 != 0 {
+		for _, method := range want.Methods {
+			name, _ := sourceBridgeUTF8(want, method.NameIndex)
+			if name == "<clinit>" {
+				ops, known := enumEntryInitializerOps(want, method, work)
+				if known && len(ops) > 0 && (nativeEnumOpcode(ops[0], core.OP_GOTO) || nativeEnumOpcode(ops[0], core.OP_GOTO_W)) {
+					_, harmless := enumArrayOriginalEntryPath(constructorLoweringCode(method), ops, work)
+					entryOrderRequired = !harmless
+				}
+			}
+		}
+	}
 	reader, err := NewClassReaderWithBudget(compiled, work)
 	if err != nil {
 		return nil, err
@@ -105,10 +124,11 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 	if err != nil {
 		return nil, err
 	}
-	// Enum declarations and this exact inline array protocol predate Java8.
-	// Version selects the supported language, not a substitute for proving the
-	// original producer, fresh helper, complete consumers and suffix PCs below.
-	if want.GetClassName() != owner || want.MajorVersion < 49 || want.MajorVersion > 52 || want.MinorVersion != 0 || got.MinorVersion != 0 || got.MajorVersion < 52 || got.MajorVersion > 65 || want.AccessFlags&0x4020 != 0x4020 || want.GetSupperClassName() != "java/lang/Enum" || !sourceParameterClassIdentityClosed(want, got) || len(got.Methods) != len(want.Methods)+1 || len(got.Methods) > 4096 {
+	// Inline array construction remains valid in newer class versions. The
+	// compiler's helper strategy is not determined by the target version:
+	// qualify every supported non-preview input by its actual producer,
+	// fresh helper, complete consumers and suffix PCs below.
+	if want.GetClassName() != owner || want.MajorVersion < 49 || want.MajorVersion > 65 || want.MinorVersion != 0 || got.MinorVersion != 0 || got.MajorVersion < 52 || got.MajorVersion > 65 || want.AccessFlags&0x4020 != 0x4020 || want.GetSupperClassName() != "java/lang/Enum" || !sourceParameterClassIdentityClosed(want, got) || (len(got.Methods) != len(want.Methods)+1 && len(got.Methods) != len(want.Methods)) || len(got.Methods) > 4096 {
 		return decline()
 	}
 	fields, err := sourceFieldIdentities(want, work)
@@ -121,6 +141,13 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 	}
 	if len(fields) != len(freshFields) {
 		return decline()
+	}
+	// Constant ordinals are int operands, not byte-sized indexes. The parsed
+	// classfile field tables bound this inventory; account for its maps and
+	// ordered views through the request budget. Complete packet lengths and
+	// the JVM Code size limit below still bound the executable transformation.
+	if work.CheckAlloc(int64(len(want.Fields)+len(got.Fields)+1)*192) != nil {
+		return nil, work.Err()
 	}
 	wantMembers, freshMembers := map[sourceFieldIdentity]*MemberInfo{}, map[sourceFieldIdentity]*MemberInfo{}
 	for _, pair := range []struct {
@@ -138,7 +165,12 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 	}
 	for key, flags := range fields {
 		actual, found := freshFields[key]
-		if !found || actual != flags || !enumArrayUTF8Equal(want, wantMembers[key].NameIndex, got, freshMembers[key].NameIndex) || !enumArrayUTF8Equal(want, wantMembers[key].DescriptorIndex, got, freshMembers[key].DescriptorIndex) {
+		// A source declaration cannot encode an original synthetic field marker.
+		// Keep that independent obligation pending, exactly as the final field
+		// metadata restorer does. Array lowering changes no field bytes and must
+		// still prove every executable flag and the complete field bijection.
+		flagsMatch := flags & ^syntheticFieldFlag == actual & ^syntheticFieldFlag && (actual&syntheticFieldFlag == 0 || flags&syntheticFieldFlag != 0)
+		if !found || !flagsMatch || !enumArrayUTF8Equal(want, wantMembers[key].NameIndex, got, freshMembers[key].NameIndex) || !enumArrayUTF8Equal(want, wantMembers[key].DescriptorIndex, got, freshMembers[key].DescriptorIndex) {
 			return decline()
 		}
 	}
@@ -150,7 +182,7 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 			return decline()
 		}
 		if field.AccessFlags&0x4000 != 0 {
-			if field.AccessFlags != 0x4019 || desc != "L"+owner+";" || len(constants) == 256 {
+			if field.AccessFlags != 0x4019 || desc != "L"+owner+";" {
 				return decline()
 			}
 			constants = append(constants, name)
@@ -201,34 +233,52 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 			helper, helperKey = method, key
 		}
 	}
-	if helper == nil || initializer == nil || len(seen) != len(expected)+1 {
+	if initializer == nil || len(seen) != len(expected)+1 && (helper != nil || len(seen) != len(expected)) {
 		return decline()
 	}
-	oldOps, oldOK := nativeEnumMethodOps(want, originalInit, work)
-	initOps, initOK := nativeEnumMethodOps(got, initializer, work)
-	arrayOps, arrayOK := nativeEnumMethodOps(got, helper, work)
-	oldCode, initCode, arrayCode := constructorLoweringCode(originalInit), constructorLoweringCode(initializer), constructorLoweringCode(helper)
-	if !oldOK || !initOK || !arrayOK || oldCode == nil || initCode == nil || arrayCode == nil || arrayCode.MaxLocals != 0 || len(arrayOps) == 0 || !nativeEnumOpcode(arrayOps[len(arrayOps)-1], core.OP_ARETURN) || !nativeEnumValuesArrayPacket(got, arrayOps[:len(arrayOps)-1], constants, work) {
+	oldOps, oldOK := enumEntryInitializerOps(want, originalInit, work)
+	initOps, initOK := enumEntryInitializerOps(got, initializer, work)
+	var arrayOps []*core.OpCode
+	var arrayCode *CodeAttribute
+	oldCode, initCode := constructorLoweringCode(originalInit), constructorLoweringCode(initializer)
+	if !oldOK || !initOK || oldCode == nil || initCode == nil {
 		return decline()
+	}
+	if helper != nil {
+		var known bool
+		arrayOps, known = nativeEnumMethodOps(got, helper, work)
+		arrayCode = constructorLoweringCode(helper)
+		if !known || arrayCode == nil || arrayCode.MaxLocals != 0 || len(arrayOps) == 0 || !nativeEnumOpcode(arrayOps[len(arrayOps)-1], core.OP_ARETURN) || !nativeEnumValuesArrayPacket(got, arrayOps[:len(arrayOps)-1], constants, work) {
+			return decline()
+		}
 	}
 	// The source-regeneration decoder can omit harmless NOPs. Executable
 	// splicing additionally needs every raw instruction boundary accounted for;
 	// a gap cannot be borrowed as a proof for its debug PCs or byte span.
-	if !enumArrayInstructionSpans(oldCode.Code, oldOps) || !enumArrayInstructionSpans(initCode.Code, initOps) || !enumArrayInstructionSpans(arrayCode.Code, arrayOps) {
+	if !enumArrayInstructionSpans(oldCode.Code, oldOps) || !enumArrayInstructionSpans(initCode.Code, initOps) || helper != nil && !enumArrayInstructionSpans(arrayCode.Code, arrayOps) {
 		return decline()
 	}
+	var entryEffect []*core.OpCode
 	if nativeEnumOpcode(oldOps[0], core.OP_GOTO) || nativeEnumOpcode(oldOps[0], core.OP_GOTO_W) {
-		var known bool
-		oldOps, known = enumArrayOriginalEntryPath(oldCode, oldOps, work)
-		if !known {
+		if path, known := enumArrayOriginalEntryPath(oldCode, oldOps, work); known {
+			oldOps = path
+		} else if body, prelude, known := enumOriginalEntryEffect(oldCode, oldOps, work); known {
+			if !enumEntryRegionKnown(want, oldCode, prelude, work) || !enumEntryEffectEmptyCuts(want, originalInit, work, int(prelude[0].CurrentOffset), int(oldOps[len(oldOps)-1].CurrentOffset), int(body[0].CurrentOffset)) {
+				return decline()
+			}
+			oldOps, entryEffect = body, prelude
+		} else {
 			return decline()
 		}
+	}
+	if helper == nil && len(entryEffect) == 0 {
+		return decline()
 	}
 	peak := uint16(1)
 	if len(constants) != 0 {
 		peak = 4
 	}
-	if oldCode.MaxStack < peak || initCode.MaxStack < peak || arrayCode.MaxStack < peak {
+	if oldCode.MaxStack < peak || initCode.MaxStack < peak || helper != nil && arrayCode.MaxStack < peak {
 		return decline()
 	}
 	// Constant-specific allocations retain their exact class and constructor.
@@ -259,22 +309,76 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 		return object, true
 	}
 	oldPrefix, oldPrefixOK := enumArrayConstantBoundary(want, originalInit, oldOps, constants, wantMembers, resolve, work)
-	prefix, prefixOK := enumArrayConstantBoundary(got, initializer, initOps, constants, freshMembers, resolve, work)
+	retainedEntry := 0
+	if len(entryEffect) > 0 {
+		retainedEntry = enumFindFreshEntryRegion(want, oldCode, entryEffect, got, initCode, initOps, 0, work)
+	}
+	if retainedEntry > 0 {
+		if !enumEntryEffectEmptyCuts(got, initializer, work, 0, int(initOps[retainedEntry].CurrentOffset)) {
+			return decline()
+		}
+	}
+	prefix, prefixOK := enumArrayConstantBoundary(got, initializer, initOps[retainedEntry:], constants, freshMembers, resolve, work)
+	prefix += retainedEntry
 	oldStoreAt := oldPrefix + 2 + 4*len(constants)
-	if !oldPrefixOK || !prefixOK || len(initOps) < prefix+3 || len(oldOps) < oldStoreAt+2 || !nativeEnumValuesArrayPacket(want, oldOps[oldPrefix:oldStoreAt], constants, work) || !nativeEnumMemberOperand(got, initOps[prefix], core.OP_INVOKESTATIC, owner, helperKey.name, helperKey.descriptor) || !enumArrayOwnMember(got, initOps[prefix], helper.NameIndex, helper.DescriptorIndex) || !nativeEnumOpcode(initOps[len(initOps)-1], core.OP_RETURN) || !nativeEnumOpcode(oldOps[len(oldOps)-1], core.OP_RETURN) {
+	freshStoreAt := prefix + 1
+	if helper == nil {
+		freshStoreAt = prefix + 2 + 4*len(constants)
+	}
+	if !oldPrefixOK || !prefixOK || len(initOps) < freshStoreAt+2 || len(oldOps) < oldStoreAt+2 || !nativeEnumValuesArrayPacket(want, oldOps[oldPrefix:oldStoreAt], constants, work) || !nativeEnumOpcode(initOps[len(initOps)-1], core.OP_RETURN) || !nativeEnumOpcode(oldOps[len(oldOps)-1], core.OP_RETURN) {
 		return decline()
 	}
+	var freshArray []*core.OpCode
+	if helper != nil {
+		if !nativeEnumMemberOperand(got, initOps[prefix], core.OP_INVOKESTATIC, owner, helperKey.name, helperKey.descriptor) || !enumArrayOwnMember(got, initOps[prefix], helper.NameIndex, helper.DescriptorIndex) {
+			return decline()
+		}
+		freshArray = arrayOps[:len(arrayOps)-1]
+	} else {
+		freshArray = initOps[prefix:freshStoreAt]
+		if !nativeEnumValuesArrayPacket(got, freshArray, constants, work) {
+			return decline()
+		}
+	}
 	oldStore := constructorMotionMember(want, oldOps[oldStoreAt], core.OP_PUTSTATIC)
-	if oldStore == nil || !nativeEnumMemberOperand(want, oldOps[oldStoreAt], core.OP_PUTSTATIC, owner, oldStore.Member, "[L"+owner+";") || !nativeEnumMemberOperand(got, initOps[prefix+1], core.OP_PUTSTATIC, owner, oldStore.Member, "[L"+owner+";") || fields[sourceFieldIdentity{oldStore.Member, "[L" + owner + ";"}] != 0x101a {
+	if oldStore == nil || !nativeEnumMemberOperand(want, oldOps[oldStoreAt], core.OP_PUTSTATIC, owner, oldStore.Member, "[L"+owner+";") || !nativeEnumMemberOperand(got, initOps[freshStoreAt], core.OP_PUTSTATIC, owner, oldStore.Member, "[L"+owner+";") || fields[sourceFieldIdentity{oldStore.Member, "[L" + owner + ";"}] != 0x101a {
 		return decline()
 	}
 	backingKey := sourceFieldIdentity{oldStore.Member, "[L" + owner + ";"}
-	if !enumArrayOwnMember(want, oldOps[oldStoreAt], wantMembers[backingKey].NameIndex, wantMembers[backingKey].DescriptorIndex) || !enumArrayOwnMember(got, initOps[prefix+1], freshMembers[backingKey].NameIndex, freshMembers[backingKey].DescriptorIndex) || !enumArrayExactElements(want, oldOps[oldPrefix:oldStoreAt], constants, wantMembers) || !enumArrayExactElements(got, arrayOps[:len(arrayOps)-1], constants, freshMembers) {
+	if !enumArrayOwnMember(want, oldOps[oldStoreAt], wantMembers[backingKey].NameIndex, wantMembers[backingKey].DescriptorIndex) || !enumArrayOwnMember(got, initOps[freshStoreAt], freshMembers[backingKey].NameIndex, freshMembers[backingKey].DescriptorIndex) || !enumArrayExactElements(want, oldOps[oldPrefix:oldStoreAt], constants, wantMembers) || !enumArrayExactElements(got, freshArray, constants, freshMembers) {
 		return decline()
 	}
-	// User initialization is an unchanged suffix. Every branch must stay in
-	// that suffix, so no edge can re-enter an allocation or the array producer.
-	if !enumArraySuffixAfterAssertionPrefixClosed(want, originalInit, oldCode, oldOps, int(oldOps[oldStoreAt+1].CurrentOffset), work) || !enumArraySuffixAfterAssertionPrefixClosed(got, initializer, initCode, initOps, int(initOps[prefix+2].CurrentOffset), work) {
+	// Both compiler array strategies retain the same closed suffix. The prelude
+	// correction is required even when javac emits no extra helper method.
+	var freshEntry []*core.OpCode
+	if len(entryEffect) > 0 {
+		at := freshStoreAt + 1
+		if retainedEntry > 0 {
+			at = 0
+		}
+		count := retainedEntry
+		if count == 0 {
+			count = enumFindFreshEntryRegion(want, oldCode, entryEffect, got, initCode, initOps, at, work)
+		}
+		if count == 0 || at+count >= len(initOps) {
+			return decline()
+		}
+		freshEntry = initOps[at : at+count]
+		if !enumEntryRegionEqual(want, oldCode, entryEffect, got, initCode, freshEntry, work) {
+			return decline()
+		}
+	}
+	// Remove only the fully compared entry region from this separate branch
+	// query. It owns every exception row; the array cut owns none of them.
+	suffixOps := initOps[retainedEntry:]
+	if retainedEntry == 0 && len(freshEntry) > 0 {
+		suffixOps = append(append([]*core.OpCode(nil), initOps[:freshStoreAt+1]...), initOps[freshStoreAt+1+len(freshEntry):]...)
+	}
+	freshSuffixIndex := freshStoreAt + 1
+	if retainedEntry == 0 {
+		freshSuffixIndex += len(freshEntry)
+	}
+	if !enumEntryArraySuffixClosed(want, originalInit, oldCode, oldOps, entryEffect, int(oldOps[oldStoreAt+1].CurrentOffset), work) || !enumEntryArraySuffixClosed(got, initializer, initCode, suffixOps, freshEntry, int(initOps[freshSuffixIndex].CurrentOffset), work) {
 		return decline()
 	}
 	// A surviving method handle would make deletion observable even without a
@@ -336,8 +440,24 @@ func (a *sourceConstructorLoweringAuthority) lowerEnumArrayHelper(owner string, 
 			}
 		}
 	}
-	if calls != 1 {
+	if helper != nil && calls != 1 {
 		return decline()
+	}
+	if len(entryEffect) > 0 && retainedEntry == 0 {
+		start, end := freshStoreAt+1, freshStoreAt+1+len(freshEntry)
+		if end >= len(initOps) || !enumEntryRegionEqual(want, oldCode, entryEffect, got, initCode, initOps[start:end], work) {
+			return decline()
+		}
+		moved, known := enumMoveFreshEntryEffect(compiled, got, layout, initializer, initOps, int(initOps[start].CurrentOffset), int(initOps[end].CurrentOffset), work)
+		if !known {
+			return decline()
+		}
+		// Reopen every proof over the actual edited bytes. This recursion is
+		// bounded to one move: the exact matched prelude is now at entry.
+		return a.lowerEnumArrayHelper(owner, original, moved, work)
+	}
+	if helper == nil {
+		return compiled, nil
 	}
 	return enumArrayFreshMethodEdits(compiled, got, layout, initializer, helper, initOps, arrayOps, prefix, work)
 }
@@ -370,11 +490,12 @@ func enumArrayInstructionSpans(code []byte, ops []*core.OpCode) bool {
 // allocation and constructor instruction remains in its fresh original order.
 // The first domain still excludes branches, handlers and user initializer tails.
 func enumArrayConstantBoundary(object *ClassObject, initializer *MemberInfo, ops []*core.OpCode, constants []string, fields map[sourceFieldIdentity]*MemberInfo, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) (int, bool) {
-	if enumArrayConstantPrefix(object, ops, constants, fields, work) {
-		return len(constants) * 6, true
-	}
 	code := constructorLoweringCode(initializer)
-	if code == nil || len(constants) == 0 || len(code.ExceptionTable) != 0 {
+	if enumArrayConstantPrefix(object, ops, constants, fields, work) {
+		end := len(constants) * 6
+		return end, enumConstantHandlersDisjoint(code, ops, end)
+	}
+	if code == nil || len(constants) == 0 {
 		return 0, false
 	}
 	reader := NewClassObjectDumper(object)
@@ -503,7 +624,27 @@ func enumArrayConstantBoundary(object *ClassObject, initializer *MemberInfo, ops
 		return 0, false
 	}
 	boundary, known := records[int(ops[end].CurrentOffset)]
-	return end, known && len(boundary.Before.Stack) == 0
+	return end, known && len(boundary.Before.Stack) == 0 && enumConstantHandlersDisjoint(code, ops, end)
+}
+
+// Handlers in a separately proved entry region do not invalidate the enum
+// allocation packet. They may neither protect any of its instructions nor
+// enter it. This query grants no handler edits; the complete entry/suffix
+// proof still owns and compares every exception-table row before completion.
+func enumConstantHandlersDisjoint(code *CodeAttribute, ops []*core.OpCode, end int) bool {
+	if code == nil || len(ops) == 0 || end < 0 || end >= len(ops) {
+		return false
+	}
+	start, stop := int(ops[0].CurrentOffset), int(ops[end].CurrentOffset)
+	for _, h := range code.ExceptionTable {
+		if h == nil || h.StartPc >= h.EndPc || int(h.EndPc) > len(code.Code) || int(h.HandlerPc) >= len(code.Code) {
+			return false
+		}
+		if int(h.StartPc) < stop && int(h.EndPc) > start || int(h.HandlerPc) >= start && int(h.HandlerPc) < stop {
+			return false
+		}
+	}
+	return true
 }
 
 // These prefixes end at an empty stack. Each no-extra-argument allocation

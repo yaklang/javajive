@@ -84,7 +84,7 @@ func TestAdversarialConstructorLiteralPacketSourceRequiresExactCategoryAndWord(t
 			case "integer overflow":
 				v.Data = int64(1<<32) + 42
 			}
-			if constructorLoweringSourceArgument(arg, 2, v, nil, nil) != (variant == "control") {
+			if constructorLoweringSourceArgument(arg, 2, v, nil, nil, nil) != (variant == "control") {
 				t.Fatal("stale source constant accepted")
 			}
 		})

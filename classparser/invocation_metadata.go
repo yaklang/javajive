@@ -10,6 +10,13 @@ import (
 // buildInvocationMetadata reads declaration tables, not just referenced CP entries.
 // Accessibility here is relative to the output compilation unit's package.
 func (c *ClassObjectDumper) buildInvocationMetadata() callbinding.Provider {
+	return c.buildInvocationMetadataResolved(nil)
+}
+
+// A parsed original declaration resolver can supply the same metadata view
+// without losing hierarchy edges at a constructor-signature proof boundary.
+// It grants no output ownership and is subject to the same identity checks.
+func (c *ClassObjectDumper) buildInvocationMetadataResolved(resolve func(string) (*ClassObject, bool)) callbinding.Provider {
 	cache := map[string]callbinding.Class{}
 	misses := map[string]bool{}
 	target := c.options.TargetSourceVersion
@@ -63,26 +70,34 @@ func (c *ClassObjectDumper) buildInvocationMetadata() callbinding.Provider {
 		}
 		obj := c.obj
 		if obj.GetClassName() != n {
-			var data []byte
-			var ok bool
-			if c.foldSiblingResolver != nil {
-				data, ok = c.foldSiblingResolver(n)
-			}
-			if !ok && c.archiveDeclarationResolver != nil {
-				data, ok = c.archiveDeclarationResolver(n)
-			}
-			if !ok && c.declarationResolver != nil {
-				data, ok = c.declarationResolver(n)
-			}
-			if !ok {
-				data, ok = jdkConstructorClassBytes(n, target)
-			}
-			if !ok {
-				return fallback(n)
-			}
 			var err error
-			obj, err = c.parseResolved(data)
-			if err != nil || obj.GetClassName() != n {
+			if resolve != nil {
+				var found bool
+				obj, found = resolve(n)
+				if !found {
+					return fallback(n)
+				}
+			} else {
+				var data []byte
+				var ok bool
+				if c.foldSiblingResolver != nil {
+					data, ok = c.foldSiblingResolver(n)
+				}
+				if !ok && c.archiveDeclarationResolver != nil {
+					data, ok = c.archiveDeclarationResolver(n)
+				}
+				if !ok && c.declarationResolver != nil {
+					data, ok = c.declarationResolver(n)
+				}
+				if !ok {
+					data, ok = jdkConstructorClassBytes(n, target)
+				}
+				if !ok {
+					return fallback(n)
+				}
+				obj, err = c.parseResolved(data)
+			}
+			if err != nil || obj == nil || obj.GetClassName() != n {
 				misses[n] = true
 				return callbinding.Class{}, false
 			}
@@ -134,7 +149,7 @@ func (c *ClassObjectDumper) buildInvocationMetadata() callbinding.Provider {
 			x := callbinding.Method{Name: name, Desc: desc, Public: m.AccessFlags&1 != 0 || (samePackage && m.AccessFlags&2 == 0), Static: m.AccessFlags&8 != 0, Varargs: m.AccessFlags&0x80 != 0, Bridge: m.AccessFlags&0x40 != 0}
 			x.AccessFlags, x.AccessFlagsKnown = m.AccessFlags, true
 			if m.AccessFlags == 0x1041 && !v.IsInterface {
-				if bridge := inheritedBridgeForwardPacket(obj, m, core.OP_INVOKEVIRTUAL, c.Work); bridge != nil && bridge.targetOwner == n && bridge.targetDescriptor != desc {
+				if bridge := inheritedBridgeForwardPacket(obj, m, core.OP_INVOKEVIRTUAL, c.Work); bridge != nil && !bridge.checkedArguments && bridge.targetOwner == n && bridge.targetDescriptor != desc {
 					x.CovariantBridgeTarget = bridge.targetDescriptor
 				}
 			}

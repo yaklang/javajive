@@ -16,14 +16,18 @@ const syntheticMethodFlag uint16 = 0x1000
 // make a method-universe/visibility mismatch acceptable. If this narrow client
 // does not apply, the existing metadata restorer still owns the final refusal.
 func restoreDeclaredSyntheticMethodFlags(original, compiled []byte, work *workbudget.Budget) ([]byte, error) {
-	return restoreSyntheticDeclarationFlags(original, compiled, false, work)
+	return restoreSyntheticDeclarationFlags(original, compiled, false, nil, work)
 }
 
 func restoreReconstructionSyntheticFlags(original, compiled []byte, work *workbudget.Budget) ([]byte, error) {
-	return restoreSyntheticDeclarationFlags(original, compiled, true, work)
+	return restoreSyntheticDeclarationFlags(original, compiled, true, nil, work)
 }
 
-func restoreSyntheticDeclarationFlags(original, compiled []byte, constructorPackets bool, work *workbudget.Budget) ([]byte, error) {
+func restoreReconstructionSyntheticFlagsWithLambda(original, compiled []byte, plan *sourceLambdaMetadataPlan, work *workbudget.Budget) ([]byte, error) {
+	return restoreSyntheticDeclarationFlags(original, compiled, true, plan, work)
+}
+
+func restoreSyntheticDeclarationFlags(original, compiled []byte, constructorPackets bool, plan *sourceLambdaMetadataPlan, work *workbudget.Budget) ([]byte, error) {
 	if len(original) > 32<<20 || len(compiled) > 32<<20 || !nativeProofWork(work, int64(len(original)+len(compiled))+1) {
 		return nil, sourceLambdaMetadataFailure(work, "synthetic method input budget")
 	}
@@ -65,6 +69,10 @@ func restoreSyntheticDeclarationFlags(original, compiled []byte, constructorPack
 		}
 		flags[key] = method.AccessFlags
 	}
+	projection, err := sourceLambdaDeclarationProjection(want, original, plan, work, func(key sourceLambdaMethodIdentity) (uint16, bool) { flags, known := flags[key]; return flags, known })
+	if err != nil {
+		return nil, err
+	}
 	seen := map[sourceLambdaMethodIdentity]bool{}
 	var edits []compiledMetadataEdit
 	var constructorProof func(*MemberInfo) bool
@@ -73,6 +81,9 @@ func restoreSyntheticDeclarationFlags(original, compiled []byte, constructorPack
 		key, known := identity(got, method)
 		if !known || !nativeProofWork(work, int64(len(key.name)+len(key.descriptor))+1) {
 			return nil, sourceLambdaMetadataFailure(work, "invalid compiled synthetic method identity")
+		}
+		if mapped, found := projection[key]; found {
+			key = mapped
 		}
 		expected, found := flags[key]
 		if !found || seen[key] || expected&^syntheticMethodFlag != method.AccessFlags&^syntheticMethodFlag || method.AccessFlags&syntheticMethodFlag != 0 && expected&syntheticMethodFlag == 0 {
@@ -120,7 +131,17 @@ func restoreSyntheticDeclarationFlags(original, compiled []byte, constructorPack
 // Both actual packets must load the same typed arguments, invoke the same
 // private constructor on uninitialized-this, and return without other effects.
 // Whole class/method identities and flags are checked by the caller first.
-func syntheticConstructorMarkerProof(original, fresh *ClassObject, work *workbudget.Budget) func(*MemberInfo) bool {
+func syntheticConstructorMarkerProof(original, fresh *ClassObject, work *workbudget.Budget, completedFlags ...uint16) func(*MemberInfo) bool {
+	flags := uint16(0)
+	if len(completedFlags) > 1 {
+		return nil
+	}
+	if len(completedFlags) == 1 {
+		flags = completedFlags[0]
+		if flags != syntheticMethodFlag {
+			return nil
+		}
+	}
 	if original == nil || original.MajorVersion < 49 || original.MajorVersion > 54 || original.MinorVersion != 0 || hasOriginalNestAttribute(original, "NestHost") || hasOriginalNestAttribute(original, "NestMembers") {
 		return nil
 	}
@@ -134,7 +155,7 @@ func syntheticConstructorMarkerProof(original, fresh *ClassObject, work *workbud
 	a, b := NewClassObjectDumper(original), NewClassObjectDumper(fresh)
 	a.Work, b.Work = work, work
 	// Index each method once, rather than rescanning the class per overload.
-	oldPackets, freshPackets := a.originalNativeConstructorAccessBridges(), b.constructorForwardingPackets(0)
+	oldPackets, freshPackets := a.originalNativeConstructorAccessBridges(), b.constructorForwardingPackets(flags)
 	exceptions := func(object *ClassObject, member *MemberInfo) ([]string, bool) {
 		var result []string
 		seen := false

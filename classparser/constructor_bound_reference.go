@@ -20,6 +20,9 @@ import (
 // exact compiler check together with its original metafactory site. It does not
 // move an arbitrary prefix, trust a source callback, or change the typed IR.
 func (c *ClassObjectDumper) constructorBoundReferenceSource(code *CodeAttribute, body []statements.Statement, params []values.JavaValue, method *MemberInfo) []statements.Statement {
+	if projected, known := c.constructorBoundReferencePortListSource(code, body, params, method); known {
+		return projected
+	}
 	if c == nil || c.obj == nil || c.FuncCtx == nil || method == nil || code == nil || c.isGenuineEnum() {
 		return body
 	}
@@ -126,26 +129,7 @@ func (c *ClassObjectDumper) constructorBoundReferenceSource(code *CodeAttribute,
 	if !proved {
 		return body
 	}
-	// Build the source from original declarations and the checked receiver. The
-	// old CustomValue supplies eager identity only; its renderer never runs here.
-	value := values.NewStreamingCustomValue(func(ctx *class_context.ClassContext, out *workbudget.Writer) error {
-		start := out.Len()
-		receiverText := receiver.String(ctx)
-		if err := out.WriteString("(" + target.String(ctx) + ") (" + receiverText + "::" + class_context.SafeIdentifier(member) + ")"); err != nil {
-			return err
-		}
-		if compilerBody != nil {
-			packet := out.String()[start:]
-			c.recordCompilerReferenceCapture(compilerBody, core.LambdaSourceRender{Packet: packet, Captures: []core.LambdaCaptureRender{{Index: 0, Text: receiverText}}, Complete: true})
-			c.recordNativeLambdaRenderedPacket(compilerBody, compilerBody.code, packet)
-			c.recordLambdaMethodEmission(compilerBody, compilerBody.code, packet)
-		}
-		return nil
-	}, func() types.JavaType { return target })
-	value.Flag, value.IsMethodRef, value.NoOuterCapture, value.CapturesKnown = "lambda", true, true, true
-	value.OriginPC, value.HasOriginPC, value.InstantiatedMtdDesc = pc, true, instantiated
-	value.Captures = []values.JavaValue{receiver}
-	value.MarkOriginalLambdaFactory(pc)
+	value := c.constructorBoundReferenceValue(receiver, target, member, instantiated, pc, compilerBody)
 	copyCall := *delegate
 	copyCall.Arguments = append([]values.JavaValue(nil), delegate.Arguments...)
 	copyCall.Arguments[0] = value
@@ -160,8 +144,15 @@ func (c *ClassObjectDumper) constructorBoundReferenceSource(code *CodeAttribute,
 // SAM/member descriptor is admitted. Varargs, generic methods, markers, bridges,
 // overloaded source families, receiver adaptation and unknown declarations need
 // their own binding proofs. All scans share the bounded original-work budget.
-func (c *ClassObjectDumper) constructorBoundReferenceTarget(code *CodeAttribute, op *core.OpCode, delegateOwner, delegateDescriptor, receiverDescriptor string) (types.JavaType, string, string, bool) {
+func (c *ClassObjectDumper) constructorBoundReferenceTarget(code *CodeAttribute, op *core.OpCode, delegateOwner, delegateDescriptor, receiverDescriptor string, argumentPort ...int) (types.JavaType, string, string, bool) {
 	fail := func() (types.JavaType, string, string, bool) { return nil, "", "", false }
+	port := 0
+	if len(argumentPort) > 1 || len(argumentPort) == 1 && argumentPort[0] < 0 {
+		return fail()
+	}
+	if len(argumentPort) == 1 {
+		port = argumentPort[0]
+	}
 	if c == nil || c.FuncCtx == nil || c.FuncCtx.InvocationMetadata == nil {
 		return fail()
 	}
@@ -325,13 +316,20 @@ func (c *ClassObjectDumper) constructorBoundReferenceTarget(code *CodeAttribute,
 		if sourceSignature == "" {
 			sourceSignature = method.Desc
 		}
-		physical, _, exact := types.EraseConcreteMethodSignatureWithThrows(sourceSignature)
 		original, originalKnown := resolve(delegateOwner)
+		if !originalKnown {
+			return fail()
+		}
+		ownerSignature, ownerKnown := nativeMethodLocalOriginalSignature(original, original.Attributes, c.Work)
+		if !ownerKnown || ownerSignature != owner.Signature || ownerSignature != "" && !nativeOriginalClassSignatureSupersClosed(original, ownerSignature, c.Work) {
+			return fail()
+		}
+		physical, _, exact := types.EraseLexicalMethodSignatureWithThrows(ownerSignature, sourceSignature)
 		if !exact || physical != delegateDescriptor || !originalKnown || !constructorBoundOriginalSignature(original, "<init>", delegateDescriptor, method.Signature, c.Work) {
 			return fail()
 		}
 		formals, parameters, result := types.ParseMethodSignatureFull(sourceSignature, c.FuncCtx)
-		if matched || formals != "" || result == nil || len(parameters) == 0 || parameters[0] == nil || !reflect.DeepEqual(parameters[0].RawType(), target.RawType()) {
+		if matched || formals != "" || result == nil || port >= len(parameters) || parameters[port] == nil || !reflect.DeepEqual(parameters[port].RawType(), target.RawType()) {
 			return fail()
 		}
 		matched = true
@@ -366,4 +364,28 @@ func constructorBoundOriginalSignature(obj *ClassObject, name, descriptor, signa
 		found = true
 	}
 	return found
+}
+
+func (c *ClassObjectDumper) constructorBoundReferenceValue(receiver *values.JavaRef, target types.JavaType, member, instantiated string, pc int, compilerBody *dumpedMethods) *values.CustomValue {
+	// Build the source from original declarations and the checked receiver. The
+	// old CustomValue supplies eager identity only; its renderer never runs here.
+	value := values.NewStreamingCustomValue(func(ctx *class_context.ClassContext, out *workbudget.Writer) error {
+		start := out.Len()
+		receiverText := receiver.String(ctx)
+		if err := out.WriteString("(" + target.String(ctx) + ") (" + receiverText + "::" + class_context.SafeIdentifier(member) + ")"); err != nil {
+			return err
+		}
+		if compilerBody != nil {
+			packet := out.String()[start:]
+			c.recordCompilerReferenceCapture(compilerBody, core.LambdaSourceRender{Packet: packet, Captures: []core.LambdaCaptureRender{{Index: 0, Text: receiverText}}, Complete: true})
+			c.recordNativeLambdaRenderedPacket(compilerBody, compilerBody.code, packet)
+			c.recordLambdaMethodEmission(compilerBody, compilerBody.code, packet)
+		}
+		return nil
+	}, func() types.JavaType { return target })
+	value.Flag, value.IsMethodRef, value.NoOuterCapture, value.CapturesKnown = "lambda", true, true, true
+	value.OriginPC, value.HasOriginPC, value.InstantiatedMtdDesc = pc, true, instantiated
+	value.Captures = []values.JavaValue{receiver}
+	value.MarkOriginalLambdaFactory(pc)
+	return value
 }

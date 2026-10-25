@@ -18,6 +18,7 @@ type compiledMetadataLayout struct {
 	poolEnd              int
 	constants            []compiledMetadataSpan
 	methods              map[*MemberInfo]compiledMetadataSpan
+	fields               map[*MemberInfo]compiledMetadataSpan
 	innerClasses         *InnerClassesAttribute
 	innerClassSpan       compiledMetadataSpan
 	classAttributesStart int
@@ -39,6 +40,10 @@ type sourceLambdaMetadataPlan struct {
 	owner                    string
 	originalHash, sourceHash [32]byte
 	methods                  []sourceLambdaMetadataMethod
+}
+
+func sourceLambdaMetadataPlansEqual(left, right *sourceLambdaMetadataPlan) bool {
+	return left != nil && right != nil && left.owner == right.owner && left.originalHash == right.originalHash && left.sourceHash == right.sourceHash && slices.Equal(left.methods, right.methods)
 }
 
 type compiledMetadataEdit struct {

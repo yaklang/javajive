@@ -80,6 +80,13 @@ func constructorSuffixFamilyAtTargetRoundTrip(t *testing.T, fixture, debug strin
 
 func constructorSuffixFamilyAtTargetWithCompilerRoundTrip(t *testing.T, fixture, debug string, owners []string, expected string, release, sourceTarget int, profile SourceCompilerProfile, packageName ...string) ([]byte, []byte, *JarReconstructionArtifact) {
 	t.Helper()
+	return constructorSuffixFamilyWithOriginalCompilerRoundTrip(t, fixture, debug, owners, expected, release, sourceTarget, profile, NativeJavac8, packageName...)
+}
+
+// Original compiler selection is independent of the reconstruction compiler.
+// Neither side's constructor metadata is assumed to be the other's oracle.
+func constructorSuffixFamilyWithOriginalCompilerRoundTrip(t *testing.T, fixture, debug string, owners []string, expected string, release, sourceTarget int, profile, originalProfile SourceCompilerProfile, packageName ...string) ([]byte, []byte, *JarReconstructionArtifact) {
+	t.Helper()
 	driver := "SuffixDriver"
 	if len(packageName) == 1 && packageName[0] != "" {
 		driver = packageName[0] + "." + driver
@@ -93,20 +100,24 @@ func constructorSuffixFamilyAtTargetWithCompilerRoundTrip(t *testing.T, fixture,
 	if native == "" {
 		t.Fatal("original native compiler required")
 	}
-	original := compileLambdaParameterMetadataFixtureWithSourcesAtRelease(t, native, NativeJavac8, fixture, "SuffixOwner", debug, nil, release, false)
+	originalCompiler := native
+	if originalProfile == ModernJavac {
+		originalCompiler = modern
+	}
+	original := compileLambdaParameterMetadataFixtureWithSourcesAtRelease(t, originalCompiler, originalProfile, fixture, "SuffixOwner", debug, nil, release, false)
 	if int(mustParseLowering(t, original[owner+".class"]).MajorVersion) != 44+release {
 		t.Fatal("original compiler target mismatch")
 	}
-	run := func(dir string) {
+	run := func(dir, phase string) {
 		t.Helper()
 		for _, mode := range []string{"-ea", "-da"} {
 			out, err := enumFreshOracleRun(t, java, mode, dir, driver)
 			if err != nil || string(out) != expected {
-				t.Fatal("unchanged original suffix oracle", err, string(out))
+				t.Fatal("unchanged original suffix oracle", phase, err, string(out))
 			}
 		}
 	}
-	run(sourceArtifactWriteFiles(t, original))
+	run(sourceArtifactWriteFiles(t, original), "original")
 	jar := filepath.Join(t.TempDir(), "original.jar")
 	owned := map[string][]byte{}
 	for _, name := range owners {
@@ -124,6 +135,13 @@ func constructorSuffixFamilyAtTargetWithCompilerRoundTrip(t *testing.T, fixture,
 	}
 	t.Cleanup(func() { a.Close() })
 	sources := map[string][]byte{}
+	t.Cleanup(func() {
+		if t.Failed() {
+			for _, name := range owners {
+				t.Logf("reconstructed source for %s:\n%s", name, sources[name])
+			}
+		}
+	})
 	for _, name := range owners {
 		source, err := a.ReadFile(name + ".class")
 		if err != nil || legacySourceHasFailureMarker(string(source)) {
@@ -212,6 +230,25 @@ func constructorSuffixFamilyAtTargetWithCompilerRoundTrip(t *testing.T, fixture,
 			t.Fatal("input mutated", name)
 		}
 		if again, err := a.FinishClass(name+".class", finished); err != nil || !bytes.Equal(again, finished) {
+			if err == nil {
+				before, after := mustParseLowering(t, finished), mustParseLowering(t, again)
+				t.Logf("second completion constants %d -> %d, class attributes %#v -> %#v", len(before.ConstantPool), len(after.ConstantPool), before.Attributes, after.Attributes)
+				for group, members := range [][]*MemberInfo{before.Methods, before.Fields} {
+					next := after.Methods
+					if group == 1 {
+						next = after.Fields
+					}
+					for i, member := range members {
+						if i >= len(next) {
+							break
+						}
+						x, _, _ := sourceMethodSignatureKey(before, member)
+						y, _, _ := sourceMethodSignatureKey(after, next[i])
+						n, _ := sourceBridgeUTF8(before, member.NameIndex)
+						t.Logf("second completion member %s flags %x -> %x signature %q -> %q", n, member.AccessFlags, next[i].AccessFlags, x, y)
+					}
+				}
+			}
 			t.Fatal("completion not idempotent", name, err)
 		}
 		if err := os.WriteFile(path, finished, 0600); err != nil {
@@ -223,7 +260,7 @@ func constructorSuffixFamilyAtTargetWithCompilerRoundTrip(t *testing.T, fixture,
 			t.Fatal(err)
 		}
 	}
-	run(out)
+	run(out, "reconstructed")
 	return original[owner+".class"], primaryFresh, a
 }
 

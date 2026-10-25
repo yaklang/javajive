@@ -36,12 +36,16 @@ func rebuiltJarManifest(originalJar string) ([]byte, error) {
 }
 
 func zipRecompiledClassesToJar(t *testing.T, dir, jarPath, originalJar string) {
+	zipRecompiledClassesAndResourcesToJar(t, dir, jarPath, originalJar, nil)
+}
+
+func zipRecompiledClassesAndResourcesToJar(t *testing.T, dir, jarPath, originalJar string, resources []string) {
 	t.Helper()
 	manifest, err := rebuiltJarManifest(originalJar)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writeClassTreeJar(dir, jarPath, manifest); err != nil {
+	if err := writeClassTreeJarWithResources(dir, jarPath, manifest, resources); err != nil {
 		t.Fatalf("build rebuilt jar: %v", err)
 	}
 }

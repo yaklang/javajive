@@ -39,7 +39,7 @@ func (c *ClassObjectDumper) newOrdinaryConstructorClassSource(source string, met
 		return nil, fmt.Errorf("ordinary constructor class-source inventory budget")
 	}
 	for _, method := range methods {
-		if method != nil && (method.ordinaryConstructorSource != nil || method.genericFunctionalSource != nil || method.constructorLowering != nil || method.constructorBindingSignature != "") {
+		if method != nil && (method.ordinaryConstructorSource != nil || method.genericFunctionalSource != nil || method.constructorLowering != nil || method.constructorBindingSignature != "" || method.constructorAccessDeclaration != nil) {
 			s.bound = append(s.bound, method)
 		}
 	}
@@ -109,8 +109,16 @@ func (s *ordinaryConstructorClassSourceReceipt) closed() bool {
 			if descriptor, valid := sourceBridgeUTF8(s.c.obj, m.member.DescriptorIndex); !valid || descriptor != m.descriptor {
 				return false
 			}
-			if original, proved := constructorEnclosingBindingSignature(s.c.obj, m.member, s.c.Work); !proved || original != signature {
+			if original, proved := constructorEnclosingDeclarationSignature(s.c.obj, m.member, s.c.Work, s.c.nativeAnnotationDeclarationResolver()); !proved || original != signature {
 				return false
+			}
+		}
+		if declaration := m.constructorAccessDeclaration; declaration != nil {
+			if cached.constructorAccessDeclaration != declaration || cached.member != m.member || cached.descriptor != m.descriptor || !declaration.fresh(s.c, m) {
+				return false
+			}
+			if m.ordinaryConstructorSource == nil && m.genericFunctionalSource == nil && m.constructorLowering == nil && m.constructorBindingSignature == "" {
+				continue
 			}
 		}
 		if generic := m.genericFunctionalSource; generic != nil {
