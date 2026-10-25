@@ -44,6 +44,7 @@ func TestSwitchLatchContinuePreservesBoundaryAndSingleStep(t *testing.T) {
 				manager.WhileNode = append(manager.WhileNode, inner)
 			case "ordinary tail":
 				owner.RemoveNext(arm)
+				merge.RemoveNext(latch)
 				merge.AddNext(arm)
 			case "shared switch merge":
 				owner.MergeNode = latch
@@ -103,6 +104,66 @@ func TestSwitchLatchContinuePreservesBoundaryAndSingleStep(t *testing.T) {
 			materializeSwitchLatchContinues(manager, loop)
 			if arm.Next[0] != copy || copy.Next[0] != transfer {
 				t.Fatal("second pass duplicated the loop step")
+			}
+		})
+	}
+}
+
+func TestSwitchLoopLocalStepRequiresPureExactIntUpdate(t *testing.T) {
+	for _, variant := range []string{"add two", "subtract seven", "negative displacement", "min int", "max int", "zero displacement", "other local", "declaration", "first store", "final store", "array store", "division", "call", "floating literal", "wrong literal type", "overflow literal"} {
+		t.Run(variant, func(t *testing.T) {
+			integer := types.NewJavaPrimer(types.JavaInteger)
+			local := values.NewJavaRef(coreutils.NewRootVariableId(), nil, integer)
+			amount := values.NewJavaLiteral(2, integer)
+			expr := values.NewBinaryExpression(local, amount, values.ADD, integer)
+			store := statements.NewAssignStatement(local, expr, false)
+			want := false
+			switch variant {
+			case "add two":
+				want = true
+			case "subtract seven":
+				want, expr.Op, amount.Data = true, values.SUB, 7
+			case "negative displacement":
+				want, amount.Data = true, -2
+			case "min int":
+				want, amount.Data = true, -2147483648
+			case "max int":
+				want, amount.Data = true, 2147483647
+			case "zero displacement":
+				want, amount.Data = true, 0
+			case "other local":
+				expr.Values[0] = values.NewJavaRef(coreutils.NewRootVariableId(), nil, integer)
+			case "declaration":
+				store.IsDeclare = true
+			case "first store":
+				store.IsFirst = true
+			case "final store":
+				store.Final = true
+			case "array store":
+				store.ArrayMember = &values.JavaArrayMember{}
+			case "division":
+				expr.Op = values.DIV
+			case "call":
+				expr.Values[1] = &values.FunctionCallExpression{}
+			case "floating literal":
+				amount.Data = float64(2)
+			case "wrong literal type":
+				amount.JavaType = types.NewJavaPrimer(types.JavaLong)
+			case "overflow literal":
+				amount.Data = int64(2147483648)
+			}
+			copyStep, ok := switchLoopLocalStep(core.NewNode(store))
+			if ok != want {
+				t.Fatalf("pure local step=%v want=%v", ok, want)
+			}
+			if !ok {
+				return
+			}
+			first := copyStep().(*statements.AssignStatement)
+			second := copyStep().(*statements.AssignStatement)
+			value := first.JavaValue.(*values.JavaExpression)
+			if first == store || first == second || value == expr || value == second.JavaValue || first.LeftValue != local || value.Values[0] != local || value.Values[1] != amount || value.Op != expr.Op || first.IsDeclare || first.IsFirst {
+				t.Fatal("step copy changed binding, displacement, declaration or original expression identity")
 			}
 		})
 	}

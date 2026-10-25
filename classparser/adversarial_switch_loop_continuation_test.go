@@ -124,35 +124,7 @@ class GuardMapDriver {public static void main(String[] args){
 }
 
 func TestAdversarialSwitchContinueRetainsEffectfulContinueMapTail(t *testing.T) {
-	const fixture = `import java.util.*;
-public class EffectMapSubject {
- public static void read(Map target,int[] tags,long flags){Map output=target;if(target instanceof EffectMapWrapper)output=(Map)((EffectMapWrapper)target).unwrap(Map.class);for(int i=0;;i++){
-  if(i>=tags.length)break;
-  if(i!=0 && tags.length==0)throw EffectMapTrace.FAILURE; else {
-  Object value;switch(tags[i]){case 0:value=Integer.valueOf(i+1);break;case 1:if((i&1)==0){EffectMapTrace.skips++;continue;}else throw EffectMapTrace.FAILURE;case 2:value=null;break;default:throw new IllegalArgumentException();}
-  if(value==null&&(flags&1L)!=0)continue;
-  Object old=output.put(Integer.valueOf(i&1),value);
-  if(old!=null&&(flags&2L)!=0){if(old instanceof Collection){((Collection)old).add(value);output.put(Integer.valueOf(i&1),old);}else{ArrayList values=new ArrayList();values.add(old);values.add(value);output.put(Integer.valueOf(i&1),values);}}
- }}EffectMapTrace.ends++;}
-}
-interface EffectMapWrapper {Object unwrap(Class type);}
-class EffectMapTrace extends LinkedHashMap {static final RuntimeException FAILURE=new IllegalStateException("same");static boolean failPut;static int skips;static int ends;int calls;public Object put(Object k,Object v){calls++;if(failPut)throw FAILURE;return super.put(k,v);}}
-class EffectMapBox extends LinkedHashMap implements EffectMapWrapper {final Map actual;EffectMapBox(Map actual){this.actual=actual;}public Object unwrap(Class type){if(type!=Map.class)throw new AssertionError();return actual;}}
-class EffectMapDriver {public static void main(String[] args){
- String[] full={"{0=5, 1=4}","{0=5, 1=4}","{0=[1, null, 5], 1=[2, 4]}","{0=[1, 5], 1=[2, 4]}"};int[] calls={5,4,8,6};
- String[] skipped={"{1=4, 0=5}","{1=4, 0=5}","{1=[2, 4], 0=5}","{1=[2, 4], 0=5}"};int[] skippedCalls={4,3,5,4};
- for(boolean boxed:new boolean[]{false,true})for(int flags=0;flags<4;flags++)for(boolean skip:new boolean[]{false,true}){
-  EffectMapTrace.ends=0;EffectMapTrace.skips=0;EffectMapTrace actual=new EffectMapTrace();Map target=boxed?new EffectMapBox(actual):actual;
-  EffectMapSubject.read(target,skip?new int[]{1,0,2,0,0}:new int[]{0,0,2,0,0},flags);
-  if(EffectMapTrace.ends!=1||EffectMapTrace.skips!=(skip?1:0))throw new AssertionError("end");
-  if(!actual.toString().equals((skip?skipped:full)[flags])||actual.calls!=(skip?skippedCalls:calls)[flags]||(boxed&&!target.isEmpty()))throw new AssertionError("tail "+boxed+":"+flags+":"+skip+":"+actual+":"+actual.calls);
- }
- EffectMapTrace actual=new EffectMapTrace();EffectMapTrace.skips=0;EffectMapTrace.ends=0;
- try{EffectMapSubject.read(actual,new int[]{0,1,0},0);throw new AssertionError("missing case failure");}catch(RuntimeException e){if(e!=EffectMapTrace.FAILURE||actual.calls!=1||!actual.toString().equals("{0=1}")||EffectMapTrace.ends!=0||EffectMapTrace.skips!=0)throw new AssertionError("case failure identity/effects");}
- actual=new EffectMapTrace();EffectMapTrace.failPut=true;
- try{EffectMapSubject.read(actual,new int[]{0,0},0);throw new AssertionError("missing tail failure");}catch(RuntimeException e){if(e!=EffectMapTrace.FAILURE||actual.calls!=1||!actual.isEmpty()||EffectMapTrace.ends!=0||EffectMapTrace.skips!=0)throw new AssertionError("tail failure identity/effects");}finally{EffectMapTrace.failPut=false;}
- System.out.println("18:map:continue:null:alias:duplicate-effects:failures");}}
-`
+	fixture := effectfulSwitchMapTailFixture
 	modern, _ := t04Tools(t)
 	for _, profile := range []SourceCompilerProfile{ModernJavac, NativeJavac8} {
 		t.Run(string(profile), func(t *testing.T) {
@@ -172,7 +144,53 @@ class EffectMapDriver {public static void main(String[] args){
 }
 
 func TestAdversarialSwitchContinueRetainsDescendingEffectfulContinueMapTail(t *testing.T) {
-	const forward = `import java.util.*;
+	forward := effectfulSwitchMapTailFixture
+	fixture := strings.NewReplacer("EffectMap", "DescendingMap", "for(int i=0;;i++)", "for(int i=tags.length-1;;i--)", "if(i>=tags.length)", "if(i<0)",
+		"{0=5, 1=4}", "{0=1, 1=2}", "{0=[1, null, 5], 1=[2, 4]}", "{0=[5, null, 1], 1=[4, 2]}", "{0=[1, 5], 1=[2, 4]}", "{0=[5, 1], 1=[4, 2]}",
+		"String[] skipped={\"{1=4, 0=5}\",\"{1=4, 0=5}\",\"{1=[2, 4], 0=5}\",\"{1=[2, 4], 0=5}\"}", "String[] skipped={\"{0=null, 1=2}\",\"{0=5, 1=2}\",\"{0=[5, null], 1=[4, 2]}\",\"{0=5, 1=[4, 2]}\"}",
+		"int[] skippedCalls={4,3,5,4}", "int[] skippedCalls={4,3,6,4}", "{0=1}", "{0=3}").Replace(forward)
+
+	modern, _ := t04Tools(t)
+	for _, profile := range []SourceCompilerProfile{ModernJavac, NativeJavac8} {
+		t.Run(string(profile), func(t *testing.T) {
+			compiler := modern
+			if profile == NativeJavac8 {
+				compiler = os.Getenv("JAVA8_JAVAC")
+				if compiler == "" {
+					t.Fatal("native compiler required")
+				}
+			}
+			compile := func(debug string) map[string][]byte {
+				return compileLambdaParameterMetadataFixture(t, compiler, profile, fixture, "DescendingMapSubject", debug, false)
+			}
+			testNativeIndependentCompilerFamilyWithPolicies(t, compile, profile, compiler, []string{"DescendingMapSubject"}, "DescendingMapDriver", "18:map:continue:null:alias:duplicate-effects:failures\n", nil, nil, []string{"normal", "no-source-rewrites"})
+		})
+	}
+}
+
+func TestAdversarialSwitchContinueRetainsNonunitEffectfulContinueMapTail(t *testing.T) {
+	unit := effectfulSwitchMapTailFixture
+	fixture := strings.NewReplacer("EffectMap", "NonunitMap", "for(int i=0;;i++)", "for(int i=0;;i+=2)", "i>=tags.length", "i>=tags.length*2", "tags[i]", "tags[i/2]", "(i&1)", "((i/2)&1)", "Integer.valueOf(i+1)", "Integer.valueOf(i/2+1)", "Integer.valueOf(i&1)", "Integer.valueOf((i/2)&1)").Replace(unit)
+
+	modern, _ := t04Tools(t)
+	for _, profile := range []SourceCompilerProfile{ModernJavac, NativeJavac8} {
+		t.Run(string(profile), func(t *testing.T) {
+			compiler := modern
+			if profile == NativeJavac8 {
+				compiler = os.Getenv("JAVA8_JAVAC")
+				if compiler == "" {
+					t.Fatal("native compiler required")
+				}
+			}
+			compile := func(debug string) map[string][]byte {
+				return compileLambdaParameterMetadataFixture(t, compiler, profile, fixture, "NonunitMapSubject", debug, false)
+			}
+			testNativeIndependentCompilerFamilyWithPolicies(t, compile, profile, compiler, []string{"NonunitMapSubject"}, "NonunitMapDriver", "18:map:continue:null:alias:duplicate-effects:failures\n", nil, nil, []string{"normal", "no-source-rewrites"})
+		})
+	}
+}
+
+const effectfulSwitchMapTailFixture = `import java.util.*;
 public class EffectMapSubject {
  public static void read(Map target,int[] tags,long flags){Map output=target;if(target instanceof EffectMapWrapper)output=(Map)((EffectMapWrapper)target).unwrap(Map.class);for(int i=0;;i++){
   if(i>=tags.length)break;
@@ -201,7 +219,10 @@ class EffectMapDriver {public static void main(String[] args){
  try{EffectMapSubject.read(actual,new int[]{0,0},0);throw new AssertionError("missing tail failure");}catch(RuntimeException e){if(e!=EffectMapTrace.FAILURE||actual.calls!=1||!actual.isEmpty()||EffectMapTrace.ends!=0||EffectMapTrace.skips!=0)throw new AssertionError("tail failure identity/effects");}finally{EffectMapTrace.failPut=false;}
  System.out.println("18:map:continue:null:alias:duplicate-effects:failures");}}
 `
-	fixture := strings.NewReplacer("EffectMap", "DescendingMap", "for(int i=0;;i++)", "for(int i=tags.length-1;;i--)", "if(i>=tags.length)", "if(i<0)",
+
+func TestAdversarialSwitchContinueRetainsDescendingNonunitEffectfulContinueMapTail(t *testing.T) {
+	forward := effectfulSwitchMapTailFixture
+	fixture := strings.NewReplacer("EffectMap", "DescendingNonunitMap", "for(int i=0;;i++)", "for(int i=(tags.length-1)*2;;i-=2)", "if(i>=tags.length)", "if(i<0)", "tags[i]", "tags[i/2]", "(i&1)", "((i/2)&1)", "Integer.valueOf(i+1)", "Integer.valueOf(i/2+1)",
 		"{0=5, 1=4}", "{0=1, 1=2}", "{0=[1, null, 5], 1=[2, 4]}", "{0=[5, null, 1], 1=[4, 2]}", "{0=[1, 5], 1=[2, 4]}", "{0=[5, 1], 1=[4, 2]}",
 		"String[] skipped={\"{1=4, 0=5}\",\"{1=4, 0=5}\",\"{1=[2, 4], 0=5}\",\"{1=[2, 4], 0=5}\"}", "String[] skipped={\"{0=null, 1=2}\",\"{0=5, 1=2}\",\"{0=[5, null], 1=[4, 2]}\",\"{0=5, 1=[4, 2]}\"}",
 		"int[] skippedCalls={4,3,5,4}", "int[] skippedCalls={4,3,6,4}", "{0=1}", "{0=3}").Replace(forward)
@@ -217,9 +238,9 @@ class EffectMapDriver {public static void main(String[] args){
 				}
 			}
 			compile := func(debug string) map[string][]byte {
-				return compileLambdaParameterMetadataFixture(t, compiler, profile, fixture, "DescendingMapSubject", debug, false)
+				return compileLambdaParameterMetadataFixture(t, compiler, profile, fixture, "DescendingNonunitMapSubject", debug, false)
 			}
-			testNativeIndependentCompilerFamilyWithPolicies(t, compile, profile, compiler, []string{"DescendingMapSubject"}, "DescendingMapDriver", "18:map:continue:null:alias:duplicate-effects:failures\n", nil, nil, []string{"normal", "no-source-rewrites"})
+			testNativeIndependentCompilerFamilyWithPolicies(t, compile, profile, compiler, []string{"DescendingNonunitMapSubject"}, "DescendingNonunitMapDriver", "18:map:continue:null:alias:duplicate-effects:failures\n", nil, nil, []string{"normal", "no-source-rewrites"})
 		})
 	}
 }
