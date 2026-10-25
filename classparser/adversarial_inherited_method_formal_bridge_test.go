@@ -160,3 +160,41 @@ func TestInheritedMethodFormalBridgeRequiresOriginalInvariantDeclaration(t *test
 		})
 	}
 }
+
+// An unused method binder is a strict subcase of bound-independent ports.
+// Exercise original javac bridges and unchanged old callers for both an
+// ordinary owner and a generic owner. Metadata mutation alone would not prove
+// that the declaration remains expressible or that invokespecial stays exact.
+func TestAdversarialInheritedUnusedMethodFormalKeepsOriginalBridge(t *testing.T) {
+	modern, java := t04Tools(t)
+	native := os.Getenv("JAVA8_JAVAC")
+	if native == "" {
+		t.Fatal("original native compiler required")
+	}
+	for _, ownerScope := range []string{"ordinary", "class-scope", "argument-casts"} {
+		for _, root := range []string{"BridgeOuter", "UnusedScopeOwner"} {
+			for _, debug := range []string{"none", "source,lines,vars"} {
+				label := root + "/" + ownerScope + "/" + debug
+				expected := "36:inherited:covariant:bridge:dispatch:wide:exception\n"
+				fixture := inheritedVarargsBridgeFixture("java.lang.Class<?>", "java.lang.Class", "new java.lang.Class<?>[]{String.class,int.class}", root)
+				if ownerScope == "class-scope" {
+					fixture = inheritedClassArgumentBridgeFixture("list", "C", root)
+				}
+				// Both override declarations acquire the same unused method scope; the
+				// derived override retains that scope too: a parameterized array
+				// is not the raw subsignature of a method-generic declaration.
+				fixture = strings.Replace(fixture, "public Object read(", "public <Unused extends Comparable<Unused>> Object read(", 1)
+				fixture = strings.ReplaceAll(fixture, "public String read(", "public <Unused extends Comparable<Unused>> String read(")
+				if ownerScope == "argument-casts" {
+					fixture = strings.ReplaceAll(inheritedArgumentBridgeFixture, "BridgeOuter", root)
+					fixture = strings.Replace(fixture, "{T exchange(", "{<Unused extends Comparable<Unused>> T exchange(", 1)
+					fixture = strings.ReplaceAll(fixture, "public String exchange(", "public <Unused extends Comparable<Unused>> String exchange(")
+					expected = "288:inherited:argument:casts:wide:dispatch:exception\n"
+				}
+				t.Run(label, func(t *testing.T) {
+					testIndependentInheritedBridge(t, modern, java, native, fixture, root, debug, true, expected)
+				})
+			}
+		}
+	}
+}

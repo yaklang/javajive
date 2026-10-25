@@ -15,7 +15,7 @@ func TestAdversarialInheritedBridgeClassArgumentsRequireOriginalScope(t *testing
 		t.Fatal("native original compiler required")
 	}
 	files := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, inheritedClassArgumentBridgeFixture("list", "C", "BridgeOuter"), "BridgeOuter", "none", false)
-	for _, variant := range []string{"control", "renamed binder", "missing owner signature", "duplicate owner signature", "wrong physical parent", "free nested variable", "method formal", "bad bound grammar", "direct dependent port", "budget", "canceled"} {
+	for _, variant := range []string{"control", "renamed binder", "missing owner signature", "duplicate owner signature", "wrong physical parent", "free nested variable", "unused method formal", "method-dependent array", "free method bound", "bad bound grammar", "direct dependent port", "budget", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			child := mustParseLowering(t, files["BridgeOuter$Leaf.class"])
 			owner := mustParseLowering(t, files["BridgeOuter.class"])
@@ -69,8 +69,14 @@ func TestAdversarialInheritedBridgeClassArgumentsRequireOriginalScope(t *testing
 				cs = strings.Replace(cs, "LBridgeBase<TC;>;", "Ljava/lang/Object;", 1)
 			case "free nested variable":
 				ms = strings.ReplaceAll(ms, "TC;", "TUnbound;")
-			case "method formal":
+			case "unused method formal":
+				// A declared but unused binder cannot change an invocation port.
 				ms = "<Unused:Ljava/lang/Object;>" + ms
+			case "method-dependent array":
+				// Same List[] erasure, but inference can change the element type.
+				ms = "<U::Ljava/util/List<TC;>;>(JD[TU;)Ljava/lang/String;"
+			case "free method bound":
+				ms = "<U:Ljava/lang/Comparable<TMissing;>;>" + ms
 			case "bad bound grammar":
 				cs = strings.ReplaceAll(cs, "Comparable<TC;>", "Comparable<I>")
 			case "direct dependent port":
@@ -94,7 +100,7 @@ func TestAdversarialInheritedBridgeClassArgumentsRequireOriginalScope(t *testing
 				b, ok := files[name+".class"]
 				return b, ok
 			}
-			if (d.inheritedBridgeOriginal(bridge) != nil) != (variant == "control" || variant == "renamed binder") {
+			if (d.inheritedBridgeOriginal(bridge) != nil) != (variant == "control" || variant == "renamed binder" || variant == "unused method formal") {
 				t.Fatal("unproved declaring scope", variant)
 			}
 		})

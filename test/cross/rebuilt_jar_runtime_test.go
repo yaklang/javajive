@@ -177,6 +177,7 @@ public class RebuiltJarDriver {public static void main(String[]args)throws Excep
 }
 
 func TestRebuiltJarRejectsUnknownMetadataAndKeepsPlainPacking(t *testing.T) {
+	t.Run("explicit resource completion preserves defining loader", testHistoricalClassResourceUsesActualReconstructionAndPacking)
 	t.Run("explicit artifact metadata before packing", testHistoricalArtifactMetadataRoundTrip)
 	t.Run("explicit constructor lowering before packing", testHistoricalConstructorLoweringRoundTrip)
 	t.Run("source and compiler share target", testHistoricalSourceAndCompilerShareTarget)

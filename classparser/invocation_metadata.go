@@ -10,6 +10,13 @@ import (
 // buildInvocationMetadata reads declaration tables, not just referenced CP entries.
 // Accessibility here is relative to the output compilation unit's package.
 func (c *ClassObjectDumper) buildInvocationMetadata() callbinding.Provider {
+	return c.buildInvocationMetadataResolved(nil)
+}
+
+// A parsed original declaration resolver can supply the same metadata view
+// without losing hierarchy edges at a constructor-signature proof boundary.
+// It grants no output ownership and is subject to the same identity checks.
+func (c *ClassObjectDumper) buildInvocationMetadataResolved(resolve func(string) (*ClassObject, bool)) callbinding.Provider {
 	cache := map[string]callbinding.Class{}
 	misses := map[string]bool{}
 	target := c.options.TargetSourceVersion
@@ -63,26 +70,34 @@ func (c *ClassObjectDumper) buildInvocationMetadata() callbinding.Provider {
 		}
 		obj := c.obj
 		if obj.GetClassName() != n {
-			var data []byte
-			var ok bool
-			if c.foldSiblingResolver != nil {
-				data, ok = c.foldSiblingResolver(n)
-			}
-			if !ok && c.archiveDeclarationResolver != nil {
-				data, ok = c.archiveDeclarationResolver(n)
-			}
-			if !ok && c.declarationResolver != nil {
-				data, ok = c.declarationResolver(n)
-			}
-			if !ok {
-				data, ok = jdkConstructorClassBytes(n, target)
-			}
-			if !ok {
-				return fallback(n)
-			}
 			var err error
-			obj, err = c.parseResolved(data)
-			if err != nil || obj.GetClassName() != n {
+			if resolve != nil {
+				var found bool
+				obj, found = resolve(n)
+				if !found {
+					return fallback(n)
+				}
+			} else {
+				var data []byte
+				var ok bool
+				if c.foldSiblingResolver != nil {
+					data, ok = c.foldSiblingResolver(n)
+				}
+				if !ok && c.archiveDeclarationResolver != nil {
+					data, ok = c.archiveDeclarationResolver(n)
+				}
+				if !ok && c.declarationResolver != nil {
+					data, ok = c.declarationResolver(n)
+				}
+				if !ok {
+					data, ok = jdkConstructorClassBytes(n, target)
+				}
+				if !ok {
+					return fallback(n)
+				}
+				obj, err = c.parseResolved(data)
+			}
+			if err != nil || obj == nil || obj.GetClassName() != n {
 				misses[n] = true
 				return callbinding.Class{}, false
 			}

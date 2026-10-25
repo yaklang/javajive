@@ -591,12 +591,24 @@ type recompileSourceReader interface {
 
 func decompileAllFromSourceReader(t *testing.T, jarPath, root string, maxFiles int, reader recompileSourceReader) (files []string, units, decompFail int) {
 	t.Helper()
+	written := map[string]bool{}
 	entries := classEntries(t, jarPath)
 	if maxFiles > 0 && len(entries) > maxFiles {
 		entries = entries[:maxFiles]
 	}
 	for _, entry := range entries {
-		raw, err := reader.ReadFile(entry)
+		var raw []byte
+		var err error
+		rel := strings.TrimSuffix(strings.TrimSuffix(entry, ".class"), ".raw") + ".java"
+		if resource, ok := reader.(interface {
+			ReadClassResource(string) ([]byte, string, error)
+		}); ok && !strings.HasSuffix(entry, ".class") {
+			var owner string
+			raw, owner, err = resource.ReadClassResource(entry)
+			rel = owner + ".java"
+		} else {
+			raw, err = reader.ReadFile(entry)
+		}
 		if err != nil {
 			// ReadFile maps a class entry to its decompiled source; a read error is itself a failure.
 			decompFail++
@@ -611,9 +623,14 @@ func decompileAllFromSourceReader(t *testing.T, jarPath, root string, maxFiles i
 			decompFail++
 			// 仍写出 (会编译失败), 让 iso 计数把它算进 decErr
 		}
-		// entry 形如 com/google/common/math/LongMath$1.class (or mockito .raw class bytes)
-		rel := strings.TrimSuffix(strings.TrimSuffix(entry, ".class"), ".raw") + ".java" // 保留扁平 $ 名
+		// Resource paths supply loader bytes; their declared binary identity
+		// supplies the source filename. Never infer one from a file extension.
 		dst := filepath.Join(root, filepath.FromSlash(rel))
+		if written[dst] {
+			decompFail++
+			continue
+		}
+		written[dst] = true
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			t.Fatalf("mkdir: %v", err)
 		}

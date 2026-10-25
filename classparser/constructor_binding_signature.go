@@ -117,10 +117,21 @@ func constructorEnclosingSignature(object *ClassObject, method *MemberInfo, uniq
 	// Reuse the typed original initialization-cut proof. It accepts only own
 	// final synthetic captures from physical parameter slots, followed by SUPER
 	// and a closed suffix. A similarly named field or copied value is no proof.
-	packet := constructorLoweringPacketFor(object, method, true, true, work)
+	// The enclosing slot is transported through the entire THIS graph. Its
+	// other operands can widen from a concrete allocation, factory result or
+	// static field to an interface/superclass formal. Use the same original
+	// declaration hierarchy as the source binder; discarding that resolver
+	// incorrectly erases the constructor's complete generic declaration.
+	var provider callbinding.Provider
+	if len(resolver) == 1 && resolver[0] != nil {
+		d := NewClassObjectDumper(object)
+		d.Work = work
+		provider = d.buildInvocationMetadataResolved(resolver[0])
+	}
+	packet := constructorLoweringTypedPacketFor(object, method, true, true, work, provider)
 	captured := packet != nil && len(packet.plan.captures) == 1 && packet.plan.captures[0].slot == 1 && packet.plan.captures[0].field.descriptor == params[0]
 	if !captured && !uniqueArity {
-		proof := memberScopeConstructorGraph(object, owner, true, work, nil)[descriptor]
+		proof := memberScopeConstructorGraph(object, owner, true, work, provider)[descriptor]
 		captured = proof != nil && proof.forward != nil
 	}
 	if !captured {

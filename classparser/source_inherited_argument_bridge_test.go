@@ -16,7 +16,7 @@ func TestAdversarialInheritedArgumentBridgeRequiresExactChecksAndSlots(t *testin
 		t.Fatal("native original compiler required")
 	}
 	files := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, inheritedArgumentBridgeFixture, "BridgeOuter", "none", false)
-	for _, variant := range []string{"exact", "concrete signature", "wrong first cast", "wrong array cast", "swapped casts", "missing cast", "extra cast", "wrong wide slot", "wrong reference slot", "virtual", "handler", "missing parent", "generic target", "work", "cancelled"} {
+	for _, variant := range []string{"exact", "concrete signature", "wrong first cast", "wrong array cast", "swapped casts", "missing cast", "extra cast", "wrong wide slot", "wrong reference slot", "virtual", "handler", "missing parent", "unused generic target", "dependent generic target", "free generic bound", "work", "cancelled"} {
 		t.Run(variant, func(t *testing.T) {
 			obj := mustParseLowering(t, bytes.Clone(files["BridgeOuter$Leaf.class"]))
 			parent := mustParseLowering(t, bytes.Clone(files["BridgeOuter.class"]))
@@ -72,12 +72,16 @@ func TestAdversarialInheritedArgumentBridgeRequiresExactChecksAndSlots(t *testin
 				code.Code[int(ops[len(ops)-2].CurrentOffset)] = core.OP_INVOKEVIRTUAL
 			case "handler":
 				code.ExceptionTable = []*ExceptionTableEntry{{StartPc: 0, EndPc: 1, HandlerPc: 0}}
-			case "generic target", "concrete signature":
+			case "unused generic target", "dependent generic target", "free generic bound", "concrete signature":
 				// A descriptor-shaped Signature is fully concrete. Method
-				// formals still require an independent substitution proof.
+				// scopes are valid only when the complete erasure is invariant.
 				signature := "(JDLjava/lang/String;[Ljava/lang/String;)Ljava/lang/String;"
-				if variant == "generic target" {
+				if variant == "unused generic target" {
 					signature = "<T:Ljava/lang/Object;>" + signature
+				} else if variant == "dependent generic target" {
+					signature = "<T:Ljava/lang/String;>(JDTT;[TT;)Ljava/lang/String;"
+				} else if variant == "free generic bound" {
+					signature = "<T:Ljava/lang/Comparable<TMissing;>;>" + signature
 				}
 				for _, m := range parent.Methods {
 					n, _ := sourceBridgeUTF8(parent, m.NameIndex)
@@ -92,7 +96,7 @@ func TestAdversarialInheritedArgumentBridgeRequiresExactChecksAndSlots(t *testin
 				cancel()
 				work = workbudget.New(base, workbudget.Limits{})
 			}
-			if variant == "concrete signature" || variant == "generic target" {
+			if variant == "concrete signature" || variant == "unused generic target" || variant == "dependent generic target" || variant == "free generic bound" {
 				if _, err := Parse(parent.Bytes()); err != nil {
 					t.Fatal("target declaration must reach semantic proof", err)
 				}
@@ -110,7 +114,7 @@ func TestAdversarialInheritedArgumentBridgeRequiresExactChecksAndSlots(t *testin
 				return b, k
 			}
 			packet := reader.inheritedBridgeOriginal(method)
-			if (packet != nil) != (variant == "exact" || variant == "concrete signature") {
+			if (packet != nil) != (variant == "exact" || variant == "concrete signature" || variant == "unused generic target") {
 				t.Fatalf("accepted=%v", packet != nil)
 			}
 			if packet != nil && (!packet.checkedArguments || len(packet.argumentCasts) != 4 || packet.argumentCasts[2] != "Ljava/lang/String;" || packet.argumentCasts[3] != "[Ljava/lang/String;") {

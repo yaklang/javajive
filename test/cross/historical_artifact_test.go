@@ -15,9 +15,10 @@ import (
 )
 
 type historicalArtifactMetadata struct {
-	Policy          string
-	RestoredClasses []string
-	Failures        []historicalMetadataFailure
+	Policy            string
+	RestoredClasses   []string
+	RestoredResources []string
+	Failures          []historicalMetadataFailure
 }
 type historicalMetadataFailure struct{ Class, Reason string }
 
@@ -28,6 +29,13 @@ func historicalRestoreArtifactMetadata(artifact *classparser.JarSourceArtifact, 
 }
 
 func historicalFinishArtifactClasses(policy string, finish func(string, []byte) ([]byte, error), classes, rejected string) (*historicalArtifactMetadata, error) {
+	return historicalFinishArtifactOutputs(policy, func(name string, compiled []byte) (string, []byte, error) {
+		out, err := finish(name, compiled)
+		return name, out, err
+	}, classes, rejected)
+}
+
+func historicalFinishArtifactOutputs(policy string, finish func(string, []byte) (string, []byte, error), classes, rejected string) (*historicalArtifactMetadata, error) {
 	report := &historicalArtifactMetadata{Policy: policy, RestoredClasses: []string{}, Failures: []historicalMetadataFailure{}}
 	err := filepath.WalkDir(classes, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -49,7 +57,7 @@ func historicalFinishArtifactClasses(policy string, finish func(string, []byte) 
 		if err != nil {
 			return err
 		}
-		restored, metadataError := finish(name, compiled)
+		output, restored, metadataError := finish(name, compiled)
 		if metadataError != nil {
 			report.Failures = append(report.Failures, historicalMetadataFailure{name, metadataError.Error()})
 			target := filepath.Join(rejected, relative)
@@ -58,8 +66,30 @@ func historicalFinishArtifactClasses(policy string, finish func(string, []byte) 
 			}
 			return os.Rename(path, target)
 		}
-		if err := os.WriteFile(path, restored, 0644); err != nil {
+		if !fs.ValidPath(output) || output == "." || strings.Contains(output, "\\") {
+			return fmt.Errorf("invalid completed physical path %q", output)
+		}
+		target := filepath.Join(classes, filepath.FromSlash(output))
+		if output != name {
+			if strings.HasSuffix(output, ".class") {
+				return fmt.Errorf("completion changed class identity")
+			}
+			if _, err := os.Stat(target); !os.IsNotExist(err) {
+				return fmt.Errorf("resource output collision %s: %v", output, err)
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return err
+			}
+		}
+		if err := os.WriteFile(target, restored, 0644); err != nil {
 			return err
+		}
+		if output != name {
+			if err := os.Remove(path); err != nil {
+				return err
+			}
+			report.RestoredResources = append(report.RestoredResources, output)
+			return nil
 		}
 		report.RestoredClasses = append(report.RestoredClasses, name)
 		return nil

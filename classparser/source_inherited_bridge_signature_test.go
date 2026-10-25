@@ -20,7 +20,7 @@ func TestAdversarialInheritedBridgeRequiresClosedTargetSignature(t *testing.T) {
 	files := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, fixture, "BridgeOuter", "none", false)
 	const descriptor = "(JD[Ljava/lang/Class;)Ljava/lang/String;"
 	const signature = "(JD[Ljava/lang/Class<*>;)Ljava/lang/String;"
-	for _, variant := range []string{"control", "plain signature", "matching throws", "empty", "malformed", "free variable", "nested free variable", "method formal", "different array rank", "different return", "primitive type argument", "throws mismatch", "duplicate", "invalid pool index", "oversized", "work budget", "allocation budget", "canceled"} {
+	for _, variant := range []string{"control", "plain signature", "matching throws", "empty", "malformed", "free variable", "nested free variable", "unused method formal", "method-dependent array", "method-dependent result", "free method bound", "different array rank", "different return", "primitive type argument", "throws mismatch", "duplicate", "invalid pool index", "oversized", "work budget", "allocation budget", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			child := mustParseLowering(t, files["BridgeOuter$Leaf.class"])
 			parent := mustParseLowering(t, files["BridgeOuter.class"])
@@ -71,8 +71,15 @@ func TestAdversarialInheritedBridgeRequiresClosedTargetSignature(t *testing.T) {
 				altered = "(JDTT;)Ljava/lang/String;"
 			case "nested free variable":
 				altered = "(JD[Ljava/lang/Class<TT;>;)Ljava/lang/String;"
-			case "method formal":
+			case "unused method formal":
+				// Presence of a binder alone does not make physical ports dependent.
 				altered = "<T:Ljava/lang/Object;>" + signature
+			case "method-dependent array":
+				altered = "<T:Ljava/lang/Class;>(JD[TT;)Ljava/lang/String;"
+			case "method-dependent result":
+				altered = "<T:Ljava/lang/String;>(JD[Ljava/lang/Class<*>;)TT;"
+			case "free method bound":
+				altered = "<T:Ljava/lang/Comparable<TMissing;>;>" + signature
 			case "different array rank":
 				altered = "(JD[[Ljava/lang/Class<*>;)Ljava/lang/String;"
 			case "different return":
@@ -109,7 +116,7 @@ func TestAdversarialInheritedBridgeRequiresClosedTargetSignature(t *testing.T) {
 				b, ok := files[name+".class"]
 				return b, ok
 			}
-			want := variant == "control" || variant == "plain signature" || variant == "matching throws"
+			want := variant == "control" || variant == "plain signature" || variant == "matching throws" || variant == "unused method formal"
 			if (d.inheritedBridgeOriginal(bridge) != nil) != want {
 				t.Fatal("unproved target signature", variant)
 			}

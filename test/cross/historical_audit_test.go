@@ -217,7 +217,7 @@ func TestHistoricalJarAudit(t *testing.T) {
 			if artifact != nil || reconstruction != nil {
 				var err error
 				if reconstruction != nil {
-					o.CompilerMetadata, err = historicalFinishArtifactClasses("explicit-reconstruction-artifact-v1", reconstruction.FinishClass, clsRoot, filepath.Join(dir, "rejected-classes"))
+					o.CompilerMetadata, err = historicalFinishArtifactOutputs("explicit-reconstruction-artifact-v1", reconstruction.FinishOutput, clsRoot, filepath.Join(dir, "rejected-classes"))
 				} else {
 					o.CompilerMetadata, err = historicalRestoreArtifactMetadata(artifact, clsRoot, filepath.Join(dir, "rejected-classes"))
 				}
@@ -229,7 +229,11 @@ func TestHistoricalJarAudit(t *testing.T) {
 				}
 			}
 			repackaged := filepath.Join(dir, "rebuilt.jar")
-			zipRecompiledClassesToJar(t, clsRoot, repackaged, input.Path)
+			var resources []string
+			if o.CompilerMetadata != nil {
+				resources = o.CompilerMetadata.RestoredResources
+			}
+			zipRecompiledClassesAndResourcesToJar(t, clsRoot, repackaged, input.Path, resources)
 			zr, err := zip.OpenReader(repackaged)
 			if err != nil {
 				t.Fatal(err)

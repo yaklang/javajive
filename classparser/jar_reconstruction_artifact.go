@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io/fs"
 	"strings"
+	"sync"
 
 	"github.com/yaklang/javajive/internal/memfile"
 )
@@ -57,7 +58,11 @@ import (
 // only with the complete returned-source graph; handles, new callers, changed
 // helper effects or private flags prevent completion. This preserves private
 // dispatch, operand/null-check order and the original declaration universe.
-type JarReconstructionArtifact struct{ source *JarSourceArtifact }
+type JarReconstructionArtifact struct {
+	source     *JarSourceArtifact
+	resourceMu sync.Mutex
+	resources  map[string]classResourcePublication
+}
 
 var _ fs.ReadFileFS = (*JarReconstructionArtifact)(nil)
 var _ fs.ReadDirFS = (*JarReconstructionArtifact)(nil)
