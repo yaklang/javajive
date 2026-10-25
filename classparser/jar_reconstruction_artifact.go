@@ -148,6 +148,10 @@ func (a *JarReconstructionArtifact) FinishClass(name string, compiled []byte) ([
 	if err != nil {
 		return nil, err
 	}
+	lowered, err = z.sourceConstructorLowering.lowerFinalInheritedBridges(strings.TrimSuffix(logical, ".class"), original, lowered, reader.Work)
+	if err != nil {
+		return nil, err
+	}
 	lowered, err = z.sourceConstructorLowering.lowerInheritedBridges(strings.TrimSuffix(logical, ".class"), original, lowered, reader.Work)
 	if err != nil {
 		return nil, err

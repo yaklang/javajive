@@ -21,6 +21,7 @@ type inheritedBridgePacket struct {
 	visibility                                      uint16
 	throws                                          []string
 	sourceDescriptor                                string
+	sourceName                                      string
 	sourceParameters                                []types.JavaType
 	implicitVisibilityBridge                        bool
 	argumentCasts                                   []string
@@ -33,6 +34,13 @@ type inheritedBridgePacket struct {
 // narrow source override. Receiver/argument identity, category-two local slots,
 // invocation kind and exception declarations are part of the proof.
 func inheritedBridgeForwardPacket(object *ClassObject, method *MemberInfo, opcode int, work *workbudget.Budget, referenceAdaptation ...bool) *inheritedBridgePacket {
+	return inheritedBridgeNamedForwardPacket(object, method, opcode, work, "", referenceAdaptation...)
+}
+
+// The named variant proves a compiler-only declaration whose body still calls
+// the independently selected original super target. It grants no name-based
+// matching: the caller must own the publication and the exact fresh member.
+func inheritedBridgeNamedForwardPacket(object *ClassObject, method *MemberInfo, opcode int, work *workbudget.Budget, targetName string, referenceAdaptation ...bool) *inheritedBridgePacket {
 	if len(referenceAdaptation) > 1 || object == nil || method == nil || object.MajorVersion < 49 || object.MajorVersion > 65 || object.MinorVersion != 0 || len(object.Methods) > 4096 {
 		return nil
 	}
@@ -116,7 +124,10 @@ func inheritedBridgeForwardPacket(object *ClassObject, method *MemberInfo, opcod
 		return nil
 	}
 	call := constructorMotionMember(object, ops[len(ops)-2], opcode)
-	if call == nil || call.Member != name || !nativeSourceBinaryName(call.Name) {
+	if targetName == "" {
+		targetName = name
+	}
+	if call == nil || call.Member != targetName || !nativeSourceBinaryName(call.Name) {
 		return nil
 	}
 	args, ret, err := callbinding.Descriptor(call.Description)
@@ -155,7 +166,7 @@ func inheritedBridgeForwardPacket(object *ClassObject, method *MemberInfo, opcod
 	if result == "J" || result == "D" {
 		stack = max(stack, 2)
 	}
-	if call == nil || call.Member != name || !nativeSourceBinaryName(call.Name) || !nativeEnumOpcode(ops[len(ops)-1], int(bridgeReturnOpcode(desc))) || int(code.MaxStack) < stack || int(code.MaxLocals) < slot {
+	if call == nil || call.Member != targetName || !nativeSourceBinaryName(call.Name) || !nativeEnumOpcode(ops[len(ops)-1], int(bridgeReturnOpcode(desc))) || int(code.MaxStack) < stack || int(code.MaxLocals) < slot {
 		return nil
 	}
 	reference := func(s string) bool { return strings.HasPrefix(s, "L") || strings.HasPrefix(s, "[") }
@@ -284,6 +295,9 @@ func (c *ClassObjectDumper) inheritedBridgeSource(method *MemberInfo) *dumpedMet
 		return nil
 	}
 	p := c.inheritedBridgeOriginal(method)
+	if p == nil {
+		p = c.finalInheritedBridgeOriginal(method)
+	}
 	if p == nil || p.implicitVisibilityBridge || !c.inheritedBridgeAnnotationsRepresentable(method, p.descriptor) {
 		return nil
 	}
@@ -347,11 +361,16 @@ func (c *ClassObjectDumper) inheritedBridgeSource(method *MemberInfo) *dumpedMet
 	if p.visibility == 4 {
 		access = "protected "
 	}
-	source := access + ft.ReturnType.String(c.FuncCtx) + " " + p.name + "(" + strings.Join(params, ", ") + ")" + tail + " {\n\t" + call + "\n}"
+	sourceName := p.name
+	if p.sourceName != "" {
+		sourceName = p.sourceName
+		access = "private "
+	}
+	source := access + ft.ReturnType.String(c.FuncCtx) + " " + sourceName + "(" + strings.Join(params, ", ") + ")" + tail + " {\n\t" + call + "\n}"
 	if len(annotations) > 0 {
 		source = strings.Join(annotations, "\n") + "\n" + source
 	}
-	return &dumpedMethods{methodName: p.name, descriptor: p.sourceDescriptor, code: source, bodyCode: source, inheritedBridge: p, inheritedBridgeCode: source}
+	return &dumpedMethods{methodName: sourceName, descriptor: p.sourceDescriptor, code: source, bodyCode: source, inheritedBridge: p, inheritedBridgeCode: source}
 }
 
 func (c *ClassObjectDumper) publishInheritedBridgeLowering(source string, methods []*dumpedMethods) bool {
