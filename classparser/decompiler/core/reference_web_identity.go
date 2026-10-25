@@ -4,6 +4,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/workbudget"
 	"reflect"
 )
 
@@ -36,6 +37,23 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 	firstOwner := map[*values.JavaRef]int{}
 	order := []int{}
 	complete := map[int]bool{}
+	// A parameter's entry value can die at an unconditional assignment.
+	// The simulator may still reuse its parameter ref for the later web;
+	// retain the signature binder only for reads reached by the entry def.
+	parameterSlots := map[*values.JavaRef]int{}
+	parameterPartitions := map[int]int{}
+	decoded := map[*OpCode]bool{}
+	for _, op := range d.opCodes {
+		decoded[op] = true
+	}
+	if len(d.ExceptionTable) == 0 && len(d.evaluationSnapshots) == 0 && len(d.opCodes) <= 8192 {
+		parameters := d.parameterWebRefs(webs)
+		for slot, web := range webs.entryWeb {
+			if ref := parameters[web]; ref != nil && ref.IsParam && !ref.IsThis {
+				parameterSlots[ref] = slot
+			}
+		}
+	}
 	for _, op := range d.opCodes {
 		if op == nil || op.Instr == nil || !isReferenceStoreOpcode(op.Instr.OpCode) {
 			continue
@@ -55,9 +73,17 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 			continue
 		}
 		ref, ok := infos[0][0].(*values.JavaRef)
-		if !ok || ref == nil || ref.Id == nil || ref.IsParam || ref.IsThis {
+		if !ok || ref == nil || ref.Id == nil || ref.IsThis {
 			complete[w] = false
 			continue
+		}
+		if ref.IsParam {
+			slot, known := parameterSlots[ref]
+			if !known || slot != GetStoreIdx(op) || webs.entryWeb[slot] == w {
+				complete[w] = false
+				continue
+			}
+			parameterPartitions[w] = slot
 		}
 		if owners[ref] == nil {
 			owners[ref] = map[int]bool{}
@@ -150,6 +176,12 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 			continue
 		}
 		stores := groups[w]
+		parameterSlot, parameterConflict := parameterPartitions[w]
+		if parameterConflict {
+			if len(stores) < 2 || !d.completeOverwrittenParameterWeb(webs, w, parameterSlot, decoded) {
+				continue
+			}
+		}
 		first := d.opcodeIdToRef[stores[0]][0][0].(*values.JavaRef)
 		seedType := first.Type()
 		singletonConflict := false
@@ -195,14 +227,14 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 				continue
 			}
 		}
-		conflict := false
+		conflict := parameterConflict
 		distinct := map[*values.JavaRef]bool{}
 		for _, op := range stores {
 			r := d.opcodeIdToRef[op][0][0].(*values.JavaRef)
 			distinct[r] = true
 			conflict = conflict || len(owners[r]) > 1
 		}
-		if !conflict || (len(distinct) < 2 && !singletonConflict) || seedType == nil {
+		if !conflict || (len(distinct) < 2 && !singletonConflict && !parameterConflict) || seedType == nil {
 			continue
 		}
 		d.tracef("var-fold", "partition shared reference web=%d stores=%d", w, len(stores))
@@ -210,7 +242,7 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 		id.SetName(first.Id.String())
 		canon := values.NewJavaRef(id, nil, seedType.Copy())
 		canon.SolvedWebIdentity = id
-		if singletonConflict {
+		if singletonConflict || parameterConflict {
 			// ResetValue must not write a load's stale DFS snapshot back into
 			// the freshly owned declaration while rebinding its use sites.
 			canon.WebDeclType = seedType.Copy()
@@ -256,4 +288,38 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 			d.varUserMap.Set(canon, moved)
 		}
 	}
+}
+
+// A new binder may replace an overwritten parameter only for a fully decoded
+// reference web in that same physical slot. Unknown reads cannot be left on
+// the signature variable while writes move to a fresh declaration.
+func (d *Decompiler) completeOverwrittenParameterWeb(webs *slotWeb, web, slot int, decoded map[*OpCode]bool) bool {
+	if d.Work != nil && (d.Work.Charge(workbudget.CounterGraphScans, int64(len(webs.webOf))) != nil || d.Work.CheckAlloc(int64(len(webs.webOf))*128) != nil) {
+		return false
+	}
+	uses := 0
+	for op, owner := range webs.webOf {
+		if owner != web {
+			continue
+		}
+		if !decoded[op] || op == nil || op.Instr == nil {
+			return false
+		}
+		if isReferenceStoreOpcode(op.Instr.OpCode) {
+			if GetStoreIdx(op) != slot {
+				return false
+			}
+		} else if isReferenceLoadOpcode(op.Instr.OpCode) {
+			if GetRetrieveIdx(op) != slot || len(op.stackProduced) != 1 {
+				return false
+			}
+			if value, ok := op.stackProduced[0].(*values.SlotValue); !ok || value == nil {
+				return false
+			}
+			uses++
+		} else {
+			return false
+		}
+	}
+	return uses != 0
 }
