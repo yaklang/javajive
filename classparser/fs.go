@@ -718,33 +718,10 @@ func (e *ExpandedZipFS) ReadFile(name string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	var raw []byte
 	if e.zipFS != nil {
-		raw, err = e.readSelectedJarEntry(chosen)
-	} else {
-		raw, err = e.underlying.ReadFile(chosen)
+		return e.readSelectedJarEntry(chosen)
 	}
-	if err != nil || !strings.EqualFold(path.Ext(name), ".class") {
-		return raw, err
-	}
-	cf, err := Parse(raw)
-	if err != nil {
-		return nil, err
-	}
-	d := NewClassObjectDumper(cf)
-	d.options.RetainUnprovedSource = e.retainUnprovedSource
-	logical := cf.GetClassName() + ".class"
-	if normalized := normalizeArchivePath(name); strings.HasSuffix(normalized, logical) {
-		root := strings.TrimSuffix(normalized, logical)
-		if root == "" {
-			root = "."
-		}
-		d.declarationResolver = func(owner string) ([]byte, bool) {
-			return e.resolveDeclarationScope("directory:"+root, e.underlying, root, owner)
-		}
-	}
-	source, err := d.DumpClass()
-	return []byte(source), err
+	return e.underlying.ReadFile(chosen)
 }
 
 func (e *ExpandedZipFS) readFileFromArchive(name string) ([]byte, error) {
@@ -824,8 +801,8 @@ func (e *ExpandedZipFS) Ext(s string) string {
 }
 
 func (e *ExpandedZipFS) Open(name string) (fs.File, error) {
-	if isArchivePath(name) || strings.EqualFold(path.Ext(name), ".class") {
-		data, err := e.ReadFile(name)
+	if isArchivePath(name) {
+		data, err := e.readFileFromArchive(name)
 		if err != nil {
 			return nil, err
 		}
@@ -849,10 +826,7 @@ func (e *ExpandedZipFS) Open(name string) (fs.File, error) {
 }
 
 func (e *ExpandedZipFS) OpenFile(name string, flag int, perm os.FileMode) (fs.File, error) {
-	if isArchivePath(name) || strings.EqualFold(path.Ext(name), ".class") {
-		return e.Open(name)
-	}
-	if e.zipFS == nil {
+	if e.zipFS == nil && !isArchivePath(name) {
 		return e.underlying.OpenFile(name, flag, perm)
 	}
 	return e.Open(name)

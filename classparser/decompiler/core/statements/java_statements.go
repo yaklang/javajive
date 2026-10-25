@@ -4086,7 +4086,7 @@ func (a *SwitchStatement) String(funcCtx *class_context.ClassContext) string {
 	selector, names, projected := a.SourceSelection(funcCtx)
 	casesStrs := []string{}
 	for _, c := range a.Cases {
-		body := switchCaseBody(StatementsString(c.Body, funcCtx))
+		body := SwitchCaseSource(c.Body, StatementsString(c.Body, funcCtx))
 		if c.IsDefault {
 			casesStrs = append(casesStrs, fmt.Sprintf("default:\n%s", body))
 			continue
@@ -4103,11 +4103,32 @@ func (a *SwitchStatement) String(funcCtx *class_context.ClassContext) string {
 	return fmt.Sprintf("switch(%s) {\n%s\n}", selector, strings.Join(casesStrs, "\n"))
 }
 
-// switchCaseBody wraps a case body in a block. A local declaration is not a
-// statement in the Java grammar, so "case 1: boolean flag;" does not parse.
-// The braces do not stop fall-through.
-func switchCaseBody(body string) string {
-	return BraceSwitchCaseBody(body)
+// SwitchCaseSource braces a case only when Java requires a block: the label is
+// empty, or a direct body statement is a local declaration. A declaration is
+// not a Statement, so "case 1: boolean flag;" does not parse. Other bodies stay
+// unbraced; a block would not change fall-through, but load-bearing repairs
+// match the original label text.
+func SwitchCaseSource(body []Statement, rendered string) string {
+	if strings.TrimSpace(rendered) == "" || caseBodyDeclaresLocal(body) {
+		return BraceSwitchCaseBody(rendered)
+	}
+	return rendered
+}
+
+func caseBodyDeclaresLocal(body []Statement) bool {
+	for _, st := range body {
+		switch s := st.(type) {
+		case *AssignStatement:
+			if s != nil && (s.IsDeclare || s.IsFirst) {
+				return true
+			}
+		case *CustomStatement:
+			if a, ok := s.SourceAssignmentForward(); ok && (a.IsDeclare || a.IsFirst) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // BraceSwitchCaseBody wraps a case body in a block. A local declaration is not

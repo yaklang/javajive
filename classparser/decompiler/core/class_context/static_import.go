@@ -93,8 +93,10 @@ func (f *ClassContext) StaticClassCallPrefix(owner, member, descriptor string) s
 	if known {
 		return bound + "."
 	}
-	if f.staticOwnerTypeSyntax(owner, bound) && f.boundNamesOwner(owner, bound) && !f.packageRootIsType(owner) {
-		return "((" + bound + ")null)."
+	if f.staticOwnerTypeSyntax(owner, bound) && !f.packageRootIsType(owner) {
+		if f.boundNamesOwner(owner, bound) || f.samePackageClassOwnerCast(owner, bound, member, descriptor) {
+			return "((" + bound + ")null)."
+		}
 	}
 	return f.staticImportCallPrefix(owner, member, descriptor, bound, false)
 }
@@ -211,6 +213,41 @@ func (f *ClassContext) staticImportCallPrefix(owner, member, descriptor, bound s
 	f.StaticMethodImports.owners[member] = qualified
 	f.StaticMethodImports.retainedBytes = retained
 	return ""
+}
+
+// samePackageClassOwnerCast proves a cast primary for an exact same-package
+// top-level class whose simple name is shadowed by a value. Cast type syntax
+// is resolved in the type namespace. Require an exact original declaration,
+// complete members, one matching static target, no private/source-inaccessible
+// target, and no type parameter, lexical type, or imported type taking the
+// simple name.
+func (f *ClassContext) samePackageClassOwnerCast(owner, bound, member, descriptor string) bool {
+	if f == nil || owner == "" || member == "" || bound == "" {
+		return false
+	}
+	pkg, cls := SplitPackageClassName(owner)
+	internal := strings.ReplaceAll(owner, ".", "/")
+	if pkg != f.PackageName || cls == "" || cls != bound || f.IsTypeParam(bound) || f.LexicalTypeNames[bound] || f.KeySet != nil && f.KeySet.Has(bound) {
+		return false
+	}
+	if f.InvocationMetadata == nil {
+		return false
+	}
+	declaration, ok := f.InvocationMetadata(internal)
+	if !ok || declaration.Name != internal || declaration.IsInterface || !declaration.MembersComplete {
+		return false
+	}
+	matches := 0
+	for _, target := range declaration.Methods {
+		if target.Name != member || target.Desc != descriptor || !target.Static || target.Bridge {
+			continue
+		}
+		if target.SourceInaccessible || target.AccessFlagsKnown && target.AccessFlags&0x0002 != 0 {
+			return false
+		}
+		matches++
+	}
+	return matches == 1
 }
 
 // boundNamesOwner reports that a cast type still denotes this owner. A

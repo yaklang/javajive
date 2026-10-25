@@ -84,11 +84,15 @@ type ClassObjectDumper struct {
 	nativeCaptureTypes                    map[string]types.JavaType
 	nativeOuterContext                    *class_context.ClassContext
 
-	options       DecompileOptions
-	report        *DecompileResult
-	rewriteSeen   map[string]bool
-	Work          *workbudget.Budget
-	diagTruncated bool
+	options DecompileOptions
+	report  *DecompileResult
+	// Survives releaseClassDumpScratch. Completion hooks run after DumpClass
+	// returns, when the scratch maps are already gone.
+	recordReconstructionOK  bool
+	patternReconstructionOK bool
+	rewriteSeen             map[string]bool
+	Work                    *workbudget.Budget
+	diagTruncated           bool
 	// Set by actual degraded output, never by scanning user literals/comments.
 	sourceDegraded         bool
 	overloadFamilyUnproven bool
@@ -661,7 +665,19 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 	c.options.SourceCompiler = c.options.SourceCompiler.effective()
 	if c != nil && c.obj != nil {
 		obj := c.obj
-		defer releaseClassDumpScratch(obj)
+		defer func() {
+			if v, ok := recordWorkByObj.Load(obj); ok {
+				w := v.(*recordWork)
+				c.recordReconstructionOK = w.complete
+				if dumpError == nil && rendered != "" && w.layout != nil {
+					rendered = sanitizeRecordSource(rendered, w)
+				}
+			}
+			if v, ok := patternWorkByObj.Load(obj); ok {
+				c.patternReconstructionOK = v.(*patternWork).complete
+			}
+			releaseClassDumpScratch(obj)
+		}()
 	}
 	if c.options.EnvSnapshot == nil {
 		// Nested legacy Dump (Dump/Decompile inside DecompileWithOptions) must
@@ -4352,7 +4368,14 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 		var parameterNamesKnown bool
 		originalParameterNames, parameterNamesKnown = c.originalOrdinaryMethodParameterNames(method, descriptor)
 		if !parameterNamesKnown {
-			return nil, fmt.Errorf("unproved original ordinary parameter names")
+			if c.Work != nil && c.Work.Check() != nil {
+				return nil, c.Work.Check()
+			}
+			// Analysis output keeps the member. Slot names are not a source certificate.
+			if !c.options.RetainUnprovedSource {
+				return nil, fmt.Errorf("unproved original ordinary parameter names")
+			}
+			originalParameterNames = nil
 		}
 	}
 	if !isLambda {
@@ -4581,7 +4604,13 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 				var namesBound bool
 				parameterNameBinding, namesBound = c.bindOrdinaryMethodParameterNames(method, descriptor, originalParameterNames, samParams)
 				if !namesBound {
-					return nil, fmt.Errorf("unproved original parameter entry identities")
+					if c.Work != nil && c.Work.Check() != nil {
+						return nil, c.Work.Check()
+					}
+					// The retain path already dropped the unproved table. Slot names stay.
+					if !c.options.RetainUnprovedSource || originalParameterNames != nil {
+						return nil, fmt.Errorf("unproved original parameter entry identities")
+					}
 				}
 			}
 			// A lambda body is emitted as an arrow expression `(Type p0, Type p1) -> ...`
@@ -5148,7 +5177,7 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 					getBody := func(caseItems []*statements.CaseItem) string {
 						var res []string
 						for _, st := range caseItems {
-							body := statements.BraceSwitchCaseBody(statementListToString(st.Body))
+							body := statements.SwitchCaseSource(st.Body, statementListToString(st.Body))
 							if st.IsDefault {
 								res = append(res, c.GetTabString()+fmt.Sprintf("default:\n%s", body))
 								continue

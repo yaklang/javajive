@@ -134,7 +134,7 @@ func applyBootstrapCapabilities(result *DecompileResult, d *ClassObjectDumper) {
 
 	if classLooksLikeRecord(d.obj) {
 		cap := core.EvaluateCapability(core.FamilyRecord, target, major)
-		complete := RecordReconstructionComplete != nil && RecordReconstructionComplete(d.obj)
+		complete := d.recordReconstructionOK || RecordReconstructionComplete != nil && RecordReconstructionComplete(d.obj)
 		if !cap.Lossless {
 			reports = append(reports, core.DispatchResult{
 				Status:         "unsupported",
@@ -159,7 +159,7 @@ func applyBootstrapCapabilities(result *DecompileResult, d *ClassObjectDumper) {
 			fam = core.FamilyEnumSwitch
 		}
 		cap := core.EvaluateCapability(fam, target, major)
-		complete := PatternSwitchReconstructionComplete != nil && PatternSwitchReconstructionComplete(d.obj)
+		complete := d.patternReconstructionOK || PatternSwitchReconstructionComplete != nil && PatternSwitchReconstructionComplete(d.obj)
 		if !cap.Lossless {
 			reports = append(reports, core.DispatchResult{
 				Status:         "unsupported",

@@ -2,8 +2,8 @@ package class_context
 
 import "testing"
 
-func TestSafeIdentifierRewritesBareDollar(t *testing.T) {
-	if got := SafeIdentifier("$"); got != "_dollar" {
+func TestSafeIdentifierKeepsBareDollar(t *testing.T) {
+	if got := SafeIdentifier("$"); got != "$" {
 		t.Fatalf("bare dollar: %q", got)
 	}
 	if got := SafeIdentifier("ENUM$VALUES"); got != "ENUM$VALUES" {

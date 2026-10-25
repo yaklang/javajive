@@ -23,6 +23,33 @@ func snapshotJDECEnv() map[string]string {
 	return out
 }
 
+// jdecPolicyMap is the native-member cache identity. A class dump binds the
+// whole process environment so later lookups avoid the env lock; only JDEC_*
+// keys belong in that identity. A map that is already only JDEC_* is returned
+// unchanged, including its nil/empty distinction.
+func jdecPolicyMap(snap map[string]string) map[string]string {
+	if snap == nil {
+		return nil
+	}
+	extra := false
+	for k := range snap {
+		if !strings.HasPrefix(k, "JDEC_") {
+			extra = true
+			break
+		}
+	}
+	if !extra {
+		return snap
+	}
+	out := make(map[string]string)
+	for k, v := range snap {
+		if strings.HasPrefix(k, "JDEC_") {
+			out[k] = v
+		}
+	}
+	return out
+}
+
 func cloneStringMap(in map[string]string) map[string]string {
 	if in == nil {
 		return nil
