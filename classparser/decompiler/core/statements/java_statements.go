@@ -181,7 +181,12 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 		if ft, ok := funcCtx.FunctionType.(*types.JavaFuncType); ok && ft != nil {
 			if call, ok := values.UnpackSoltValue(r.JavaValue).(*values.FunctionCallExpression); ok {
 				if planned, ok := call.PlanErasedFormalResult(funcCtx, ft.ReturnType); ok {
-					expr = planned.String(funcCtx)
+					// Planning changes the source receiver to its erased view. The
+					// original call's generic return can no longer justify omitting
+					// the result view below. The planner proves that this formal's
+					// first bound only widens the physical result, so this unchecked
+					// cast introduces no runtime check inside the current handler.
+					return renderExistingReturnCast(funcCtx, ft.ReturnType.String(funcCtx), planned.String(funcCtx))
 				}
 			}
 		}

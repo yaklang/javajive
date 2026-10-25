@@ -60,6 +60,23 @@ func (q *variableArityQuery) allocate(n int64) bool {
 // public instance access, ancestry and return-substitutability evidence. Bridges
 // additionally require a certified forwarding body; generic families stay unknown.
 func SelectVariableArityReference(w Witness, sam string, provider Provider, work *workbudget.Budget) VariableArityReferencePlan {
+	return selectInvocationReference(w, sam, provider, work, false)
+}
+
+// SelectFixedArityReference proves the first applicable strict/loose phase for
+// a bound reference. The notional SAM inputs can require unboxing; supplying
+// the target's physical parameters instead would hide competing overloads.
+// ExpandedParameters contains the exact selected declaration's parameters.
+// Result adaptation, checked exceptions, capture and special dispatch remain
+// separate obligations of the caller, just as for variable-arity references.
+func SelectFixedArityReference(w Witness, sam string, provider Provider, work *workbudget.Budget) VariableArityReferencePlan {
+	if w.Kind != Virtual && w.Kind != Interface {
+		return VariableArityReferencePlan{Reason: "bound fixed-arity reference required"}
+	}
+	return selectInvocationReference(w, sam, provider, work, true)
+}
+
+func selectInvocationReference(w Witness, sam string, provider Provider, work *workbudget.Budget, fixed bool) VariableArityReferencePlan {
 	out := VariableArityReferencePlan{}
 	reject := func(reason string) VariableArityReferencePlan { out.Reason = reason; return out }
 	if provider == nil || w.Owner == "" || w.Name == "" || strings.ContainsAny(w.Name, "<>") || w.Kind != Virtual && w.Kind != Interface && w.Kind != Static {
@@ -132,6 +149,54 @@ func SelectVariableArityReference(w Witness, sam string, provider Provider, work
 	family, normalized = q.sourceOverrideFamily(family, w.Kind, len(arguments))
 	if !normalized || len(family) == 0 {
 		return reject("source override family unavailable")
+	}
+	if fixed {
+		for _, loose := range []bool{false, true} {
+			var applicable []variableArityCandidate
+			for _, candidate := range family {
+				if len(candidate.parameters) != len(arguments) {
+					continue
+				}
+				applies, known := q.applicable(arguments, candidate.parameters, loose)
+				if !known {
+					return reject("fixed-arity applicability unknown")
+				}
+				if applies {
+					applicable = append(applicable, candidate)
+				}
+			}
+			if len(applicable) == 0 {
+				continue
+			}
+			winner := -1
+			for i, candidate := range applicable {
+				moreThanAll := true
+				for j, other := range applicable {
+					if i == j {
+						continue
+					}
+					more, known := q.applicable(candidate.parameters, other.parameters, false)
+					if !known {
+						return reject("fixed-arity specificity unknown")
+					}
+					moreThanAll = moreThanAll && more
+				}
+				if moreThanAll {
+					if winner >= 0 {
+						return reject("multiple most-specific fixed declarations")
+					}
+					winner = i
+				}
+			}
+			if winner < 0 || applicable[winner].method.Desc != w.Desc || !q.charge(1) || !q.allocate(int64(len(arguments))*32+64) {
+				return reject("original invocation is not the unique fixed source selection")
+			}
+			selected := applicable[winner]
+			out.ExpandedParameters = slices.Clone(selected.parameters)
+			out.Supported, out.Selected, out.DeclaringOwner = true, selected.method, selected.owner
+			return out
+		}
+		return reject("no fixed-arity phase applies")
 	}
 	targets := 0
 	for _, candidate := range family {

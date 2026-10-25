@@ -80,6 +80,13 @@ func constructorSuffixFamilyAtTargetRoundTrip(t *testing.T, fixture, debug strin
 
 func constructorSuffixFamilyAtTargetWithCompilerRoundTrip(t *testing.T, fixture, debug string, owners []string, expected string, release, sourceTarget int, profile SourceCompilerProfile, packageName ...string) ([]byte, []byte, *JarReconstructionArtifact) {
 	t.Helper()
+	return constructorSuffixFamilyWithOriginalCompilerRoundTrip(t, fixture, debug, owners, expected, release, sourceTarget, profile, NativeJavac8, packageName...)
+}
+
+// Original compiler selection is independent of the reconstruction compiler.
+// Neither side's constructor metadata is assumed to be the other's oracle.
+func constructorSuffixFamilyWithOriginalCompilerRoundTrip(t *testing.T, fixture, debug string, owners []string, expected string, release, sourceTarget int, profile, originalProfile SourceCompilerProfile, packageName ...string) ([]byte, []byte, *JarReconstructionArtifact) {
+	t.Helper()
 	driver := "SuffixDriver"
 	if len(packageName) == 1 && packageName[0] != "" {
 		driver = packageName[0] + "." + driver
@@ -93,7 +100,11 @@ func constructorSuffixFamilyAtTargetWithCompilerRoundTrip(t *testing.T, fixture,
 	if native == "" {
 		t.Fatal("original native compiler required")
 	}
-	original := compileLambdaParameterMetadataFixtureWithSourcesAtRelease(t, native, NativeJavac8, fixture, "SuffixOwner", debug, nil, release, false)
+	originalCompiler := native
+	if originalProfile == ModernJavac {
+		originalCompiler = modern
+	}
+	original := compileLambdaParameterMetadataFixtureWithSourcesAtRelease(t, originalCompiler, originalProfile, fixture, "SuffixOwner", debug, nil, release, false)
 	if int(mustParseLowering(t, original[owner+".class"]).MajorVersion) != 44+release {
 		t.Fatal("original compiler target mismatch")
 	}
@@ -124,6 +135,13 @@ func constructorSuffixFamilyAtTargetWithCompilerRoundTrip(t *testing.T, fixture,
 	}
 	t.Cleanup(func() { a.Close() })
 	sources := map[string][]byte{}
+	t.Cleanup(func() {
+		if t.Failed() {
+			for _, name := range owners {
+				t.Logf("reconstructed source for %s:\n%s", name, sources[name])
+			}
+		}
+	})
 	for _, name := range owners {
 		source, err := a.ReadFile(name + ".class")
 		if err != nil || legacySourceHasFailureMarker(string(source)) {

@@ -138,7 +138,7 @@ func TestAdversarialExtraVisibilityBridgeRequiresOriginalDeclarationDomain(t *te
 		t.Fatal("fixture needs its original non-public parent")
 	}
 	parentBytes := parent.Bytes()
-	for _, variant := range []string{"control", "non-public child", "public parent", "interface parent", "missing parent", "foreign parent", "preview child", "old child", "new child", "existing declaration", "missing target", "duplicate target", "private target", "static target", "final target", "synchronized target", "native target", "abstract target", "changed throws", "nil original", "nil target", "budget", "canceled"} {
+	for _, variant := range []string{"control", "non-public child", "public parent", "interface parent", "missing parent", "foreign parent", "preview child", "old child", "new child", "existing declaration", "missing target", "duplicate target", "private target", "static target", "final target", "synchronized target", "native target", "abstract target", "varargs without array", "changed throws", "nil original", "nil target", "budget", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			want, fresh, parent := mustParseLowering(t, original), mustParseLowering(t, raw), mustParseLowering(t, parentBytes)
 			d := NewClassObjectDumper(want)
@@ -198,6 +198,8 @@ func TestAdversarialExtraVisibilityBridgeRequiresOriginalDeclarationDomain(t *te
 				target.AccessFlags |= 0x100
 			case "abstract target":
 				target.AccessFlags |= 0x400
+			case "varargs without array":
+				target.AccessFlags |= 0x80
 			case "changed throws":
 				for _, a := range target.Attributes {
 					if e, ok := a.(*ExceptionsAttribute); ok {

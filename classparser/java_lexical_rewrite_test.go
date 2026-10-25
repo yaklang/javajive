@@ -17,13 +17,16 @@ func TestJavaCodeRewriteLiteralBoundaries(t *testing.T) {
 	}
 	for _, data := range cases {
 		t.Run(data, func(t *testing.T) {
-			src := "class X { Object f = Integer::intValue; Object v = " + data + "; }"
+			src := "class X { Object f = Integer::intValue; Object match = this.getMatchers(); Object v = " + data + "; }"
 			got := applyMockitoShapes(src)
 			if !strings.Contains(got, data) {
 				t.Fatalf("protected data changed:\n%s", got)
 			}
-			if !strings.Contains(got, "Object f = x -> ((Integer)x).intValue();") {
+			if !strings.Contains(got, "Object match = (List)(this.getMatchers());") {
 				t.Fatalf("code was not rewritten:\n%s", got)
+			}
+			if !strings.Contains(got, "Object f = Integer::intValue;") {
+				t.Fatalf("text-only rewrite changed a method-reference factory:\n%s", got)
 			}
 			if twice := applyMockitoShapes(got); twice != got {
 				t.Fatalf("rule not idempotent:\n%s", twice)

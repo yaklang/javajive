@@ -459,7 +459,7 @@ func (c *ClassObjectDumper) privateNestHelpers() ([]*dumpedMethods, error) {
 		if err := c.holdOutput(int64(len(code))); err != nil {
 			return nil, err
 		}
-		helpers = append(helpers, &dumpedMethods{methodName: plan.bridges[key], code: code})
+		helpers = append(helpers, &dumpedMethods{methodName: plan.bridges[key], descriptor: key.descriptor, code: code, privateNestTarget: &privateNestTarget{key.name, key.descriptor}, privateNestCode: code})
 	}
 	return helpers, nil
 }

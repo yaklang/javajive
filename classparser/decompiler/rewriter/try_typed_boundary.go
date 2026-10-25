@@ -56,8 +56,16 @@ func typedTryNormalBoundary(region, start *core.Node, successors []*core.Node, d
 	// A generated transfer is not a method continuation. A physical RETURN
 	// can be retained outside this try only with its exact original node/PC;
 	// the complete operand effect-domain proof below remains necessary.
+	conditional := false
 	switch candidate.Statement.(type) {
 	case *statements.AssignStatement, *statements.ExpressionStatement:
+	case *statements.IfStatement:
+		// The original exclusive-end reference can survive IF structuring.
+		// Its normal continuation is still outside this handler, including
+		// both arms and later reachable effects. Treating the structured
+		// conditional as protected would incorrectly catch failures in it
+		// merely because the actual handler terminates by rethrowing.
+		conditional = true
 	case *statements.TryCatchStatement:
 		// An adjacent protected region can already have been structured. Its
 		// whole body, handlers and original ranges must remain outside this
@@ -82,6 +90,9 @@ func typedTryNormalBoundary(region, start *core.Node, successors []*core.Node, d
 	outside := func(pc int) bool { return pc >= 0 && !finallyContains(ranges, pc) }
 	proof := outsideHandlerDomainProof(ranges)
 	if !proof.block([]statements.Statement{candidate.Statement}, outside, 0) {
+		return nil
+	}
+	if conditional && !typedOutsideFrontierClosed(candidate, outside) {
 		return nil
 	}
 	// ProtectedEnd can be an obsolete node after graph rewrites. Its original

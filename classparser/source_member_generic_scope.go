@@ -19,9 +19,16 @@ func (c *ClassObjectDumper) publishMemberGenericScope(source string) bool {
 	if a == nil || !c.reconstructionPhysicalHeader() || c.nativeCaptureFields != nil || c.FuncCtx == nil {
 		return true
 	}
-	_, _, flags, member := originalMemberOwner(c.obj)
+	owner, _, flags, member := originalMemberOwner(c.obj)
+	anonymous := false
+	if !member {
+		owner, anonymous = c.anonymousGenericScopeOwner()
+	}
 	signature, valid := nativeMethodLocalOriginalSignature(c.obj, c.obj.Attributes, c.Work)
-	if !member || flags&8 != 0 || !valid {
+	if !member && !anonymous || flags&8 != 0 || !valid {
+		return true
+	}
+	if anonymous && anonymousScopeConstructorGraph(c.obj, owner, true, c.Work, c.buildInvocationMetadata(), nil) == nil {
 		return true
 	}
 	if len(types.ClassFormalTypeParamNames(signature)) != 0 && !originalMemberScopeCapturesClosed(c.obj, c.Work) {
@@ -32,7 +39,7 @@ func (c *ClassObjectDumper) publishMemberGenericScope(source string) bool {
 		// Enroll only a closed, entirely non-generic lexical path with proved
 		// original capture packets. This grants no guessed outer type binder.
 		scopes, method, known := c.flattenedMethodLexicalScopesResolved(c.nativeAnnotationDeclarationResolver())
-		if !known || method || memberScopeHasFormals(scopes) || !originalMemberScopeCapturesClosed(c.obj, c.Work) {
+		if !known || method != anonymous || memberScopeHasFormals(scopes) || !anonymous && !originalMemberScopeCapturesClosed(c.obj, c.Work) {
 			return true
 		}
 	}
@@ -103,8 +110,14 @@ func (a *sourceConstructorLoweringAuthority) restoreMemberGenericScope(original,
 	if err != nil {
 		return nil, err
 	}
+	d := NewClassObjectDumper(want)
+	d.Work, d.foldSiblingResolver, d.declarationResolver = work, a.jar.enumSiblingResolver(), a.jar.declarationResolver
 	owner, _, flags, member := originalMemberOwner(want)
-	if !member || flags&8 != 0 || want.MajorVersion < 49 || want.MajorVersion > 52 || want.MinorVersion != 0 {
+	anonymous := false
+	if !member {
+		owner, anonymous = d.anonymousGenericScopeOwner()
+	}
+	if !member && !anonymous || flags&8 != 0 || want.MajorVersion < 49 || want.MajorVersion > 52 || want.MinorVersion != 0 {
 		return decline()
 	}
 	oldSignature, valid := nativeMethodLocalOriginalSignature(want, want.Attributes, work)
@@ -137,10 +150,8 @@ func (a *sourceConstructorLoweringAuthority) restoreMemberGenericScope(original,
 		return decline()
 	}
 	stage = "lexical owner scopes"
-	d := NewClassObjectDumper(want)
-	d.Work, d.foldSiblingResolver, d.declarationResolver = work, a.jar.enumSiblingResolver(), a.jar.declarationResolver
 	scopes, methodScope, valid := d.flattenedMethodLexicalScopesResolved(d.nativeAnnotationDeclarationResolver())
-	if !valid || methodScope {
+	if !valid || methodScope != anonymous {
 		return decline()
 	}
 	var signatures []string
@@ -169,12 +180,23 @@ func (a *sourceConstructorLoweringAuthority) restoreMemberGenericScope(original,
 		return nil, err
 	}
 	row, exists := oldRows[key]
-	if !exists || row.outer == "" || row.name == "" || row.anonymous {
+	if !exists || row.anonymous != anonymous || anonymous && (row.outer != "" || row.name != "") || !anonymous && (row.outer == "" || row.name == "") {
 		return decline()
 	}
 	actual, hasRow := newRows[key]
-	if hasRow && (actual.outer != row.outer || actual.name != row.name || actual.flags != row.flags || actual.anonymous) {
+	if hasRow && (actual.outer != row.outer || actual.name != row.name || actual.flags != row.flags || actual.anonymous != anonymous) {
 		return decline()
+	}
+	var enclosing sourceEnclosingMethodKey
+	hasEnclosing := false
+	if anonymous {
+		var present, valid bool
+		enclosing, present, valid = sourceEnclosingMethodIdentity(want, work)
+		fresh, has, freshValid := sourceEnclosingMethodIdentity(got, work)
+		if !present || !valid || !freshValid || has && fresh != enclosing {
+			return decline()
+		}
+		hasEnclosing = has
 	}
 	stage = "physical generic supertypes"
 	// The idempotent path owes the same physical declaration proof.
@@ -197,7 +219,7 @@ func (a *sourceConstructorLoweringAuthority) restoreMemberGenericScope(original,
 		}
 	}
 	stage = "lexical signature projection"
-	completed := freshSignature == oldSignature && hasRow
+	completed := freshSignature == oldSignature && hasRow && (!anonymous || hasEnclosing)
 	rowsOnly := ownFormals || freshSignature == oldSignature && !memberScopeHasFormals(scopes)
 	if ownFormals && freshSignature != oldSignature && !memberOwnScopeProjectedClassSignature(want, freshSignature, scopes, work) {
 		return decline() // Own bounds/arity are never inferred from erased descriptors.
@@ -216,11 +238,18 @@ func (a *sourceConstructorLoweringAuthority) restoreMemberGenericScope(original,
 		}
 		freshScopes = []types.LexicalTypeScope{{Signature: freshSignature}}
 	}
+	beforeProjection := compiled
 	if ownFormals {
 		compiled, err = restoreHiddenMemberSignatures(want, got, compiled, layout, scopes, work)
-		if err != nil {
-			return nil, err
-		}
+	} else {
+		compiled, err = restoreProjectedMemberSignatures(want, got, compiled, layout, scopes, work, func(method *MemberInfo, original, fresh string) bool {
+			return a.projectedOverrideSignature(want, method, original, fresh, work)
+		})
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(beforeProjection, compiled) {
 		reader, err = NewClassReaderWithBudget(compiled, work)
 		if err != nil {
 			return nil, err
@@ -236,8 +265,14 @@ func (a *sourceConstructorLoweringAuthority) restoreMemberGenericScope(original,
 		return decline()
 	}
 	provider := d.buildInvocationMetadata()
-	originalConstructors := memberScopeConstructorGraph(want, owner, true, work, provider)
-	freshConstructors := memberScopeConstructorGraph(got, owner, false, work, provider)
+	var originalConstructors, freshConstructors map[string]*memberScopeConstructorProof
+	if anonymous {
+		originalConstructors = anonymousScopeConstructorGraph(want, owner, true, work, provider, nil)
+		freshConstructors = anonymousScopeConstructorGraph(got, owner, false, work, provider, originalConstructors)
+	} else {
+		originalConstructors = memberScopeConstructorGraph(want, owner, true, work, provider)
+		freshConstructors = memberScopeConstructorGraph(got, owner, false, work, provider)
+	}
 	stage = "member signatures"
 	constructors := 0
 	// An access constructor forwards its unchanged typed operands to a
@@ -261,6 +296,15 @@ func (a *sourceConstructorLoweringAuthority) restoreMemberGenericScope(original,
 			signature, valid := nativeMethodLocalOriginalSignature(want, m.Attributes, work)
 			if !valid {
 				return decline()
+			}
+			if anonymous && name == "<init>" && signature == "()V" && a.constructorBindingSourceReturned(want.GetClassName(), original, work) {
+				// The independent captured-port transaction has restored the empty
+				// declared signature. For this erasure check only, expand its exact
+				// typed capture bijection back to physical parameters. The complete
+				// fresh constructor graph is still compared below.
+				if packet := d.anonymousCapturedConstructor(m); packet != nil {
+					signature = packet.plan.descriptor
+				}
 			}
 			before, _, ok := types.EraseLexicalScopedMethodSignatureWithThrows(scopes, signature)
 			after, _, freshOK := types.EraseLexicalScopedMethodSignatureWithThrows(freshScopes, signature)
@@ -378,8 +422,12 @@ func (a *sourceConstructorLoweringAuthority) restoreMemberGenericScope(original,
 	var newRow []byte
 	if !hasRow {
 		inner, ik := class(key)
-		outer, ok := class(row.outer)
-		name, nk := text(row.name)
+		var outer, name uint16
+		ok, nk := true, true
+		if !anonymous {
+			outer, ok = class(row.outer)
+			name, nk = text(row.name)
+		}
 		if !ik || !ok || !nk {
 			return fail("constant budget")
 		}
@@ -402,7 +450,7 @@ func (a *sourceConstructorLoweringAuthority) restoreMemberGenericScope(original,
 		}
 		end := pos + 6 + int(size)
 		name, ok := sourceBridgeUTF8(got, binary.BigEndian.Uint16(compiled[pos:]))
-		if !ok || name == "EnclosingMethod" || name == "RuntimeVisibleTypeAnnotations" || name == "RuntimeInvisibleTypeAnnotations" {
+		if !ok || name == "EnclosingMethod" && !anonymous || name == "RuntimeVisibleTypeAnnotations" || name == "RuntimeInvisibleTypeAnnotations" {
 			return decline()
 		}
 		if name == "Signature" {
@@ -441,6 +489,21 @@ func (a *sourceConstructorLoweringAuthority) restoreMemberGenericScope(original,
 			return fail("attribute constant")
 		}
 		payload = append(payload, append(append(word(attribute), 0, 0, 0, 10, 0, 1), newRow...)...)
+		kept++
+	}
+	if anonymous && !hasEnclosing {
+		owner, ok := class(enclosing.owner)
+		name, nk := text(enclosing.name)
+		descriptor, dk := text(enclosing.descriptor)
+		method, mk := entry(CONSTANT_NameAndType, append(word(name), word(descriptor)...))
+		attribute, ak := text("EnclosingMethod")
+		if !ok || !nk || !dk || !mk || !ak || kept >= 65535 {
+			return fail("enclosing declaration constant budget")
+		}
+		payload = append(payload, word(attribute)...)
+		payload = append(payload, 0, 0, 0, 4)
+		payload = append(payload, word(owner)...)
+		payload = append(payload, word(method)...)
 		kept++
 	}
 	return applyCompiledMetadataEdits(compiled, []compiledMetadataEdit{

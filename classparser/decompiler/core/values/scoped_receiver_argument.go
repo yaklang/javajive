@@ -10,8 +10,10 @@ import (
 
 // A parameterized receiver binds its class variables before argument typing.
 // Restore that binder only from an exact original declaration and a complete,
-// unique overload family. Both the binder and the existing operand must erase
-// to the physical formal: the source view adds no narrower runtime check.
+// unique overload family. The binder and existing operand must have identical
+// erasure, which can widen to the physical formal: substituting a recursively
+// bounded caller variable into an Object-bounded interface does not make that
+// variable's bound Object. The source view adds no narrower runtime check.
 // Platform and archive declarations use the same metadata proof. No API names
 // or guessed class signatures participate in this rule.
 func (f *FunctionCallExpression) scopedReceiverArgument(i int, ctx *class_context.ClassContext) types.JavaType {
@@ -79,7 +81,7 @@ func (f *FunctionCallExpression) scopedReceiverArgument(i int, ctx *class_contex
 		}
 	}
 	physical, known := SourceTypeErasure(target, proof)
-	if !known || physical != params[i] || !ScopedErasureView(proof, target, f.Arguments[i]) {
+	if !known || !callbinding.Assignable(physical, params[i], proof.InvocationMetadata) || !ScopedErasureView(proof, target, f.Arguments[i]) {
 		return nil
 	}
 	return target

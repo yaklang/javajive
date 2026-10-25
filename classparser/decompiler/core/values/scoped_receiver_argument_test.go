@@ -121,3 +121,32 @@ func TestScopedReceiverArgumentRequiresExactDeclarationAndErasure(t *testing.T) 
 		})
 	}
 }
+
+func TestScopedReceiverArgumentSubstitutedBoundMayWidenToDeclaration(t *testing.T) {
+	for _, variant := range []string{"exact", "wider physical formal", "narrow operand", "unresolved substituted bound", "method shadow"} {
+		t.Run(variant, func(t *testing.T) {
+			f, ctx, meta := scopedReceiverArgumentFixture()
+			if variant != "exact" {
+				c := meta["example/Port"]
+				c.Signature = "<E:Ljava/lang/Object;>Ljava/lang/Object;"
+				f.Descriptor = "(Ljava/lang/Object;)Ljava/lang/Object;"
+				ft, _ := types.ParseMethodDescriptor(f.Descriptor)
+				f.FuncType = ft.FunctionType()
+				c.Methods[0].Desc = f.Descriptor
+				meta["example/Port"] = c
+			}
+			switch variant {
+			case "narrow operand":
+				f.Arguments[0] = NewJavaRef(nil, nil, types.NewJavaClass("java.lang.Object"))
+			case "unresolved substituted bound":
+				ctx.ClassSig = "<R:TUnknown;>Ljava/lang/Object;"
+			case "method shadow":
+				ctx.CurrentMethodSig = "<R:Ljava/lang/Number;>()V"
+			}
+			got := f.scopedReceiverArgument(0, ctx)
+			if (got != nil) != (variant == "exact" || variant == "wider physical formal") {
+				t.Fatalf("substituted view=%v", got)
+			}
+		})
+	}
+}

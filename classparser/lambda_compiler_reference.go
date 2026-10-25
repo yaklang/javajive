@@ -35,6 +35,7 @@ type compilerReferenceCaptureEmission struct {
 
 type lambdaCompilerReference struct {
 	static                                           bool
+	superReceiver                                    bool
 	qualifier                                        string
 	parameter                                        *values.JavaRef
 	local                                            *nativeEnumSelectorProducer
@@ -57,6 +58,10 @@ type compilerReferenceSite struct {
 
 // Reopen the actual typed CP/bootstrap edge; callback labels never establish it.
 func (c *ClassObjectDumper) originalCompilerReferenceSite(f *lambdaSourceFactory) (compilerReferenceSite, bool) {
+	return c.originalCompilerReferenceSiteKind(f, 6)
+}
+
+func (c *ClassObjectDumper) originalCompilerReferenceSiteKind(f *lambdaSourceFactory, kind uint8) (compilerReferenceSite, bool) {
 	var out compilerReferenceSite
 	if c == nil || c.obj == nil || !f.closed() || !f.sealed || f.object != c.obj || f.pc+5 > len(f.code.Code) || f.code.Code[f.pc] != byte(core.OP_INVOKEDYNAMIC) {
 		return out, false
@@ -102,10 +107,14 @@ func (c *ClassObjectDumper) originalCompilerReferenceSite(f *lambdaSourceFactory
 	out.erased, ek = methodType(boot.BootstrapArguments[0])
 	out.actual, ak = methodType(boot.BootstrapArguments[2])
 	impl, ik := c.obj.ConstantPool[boot.BootstrapArguments[1]-1].(*ConstantMethodHandleInfo)
-	if !ek || !ak || !ik || impl == nil || impl.ReferenceKind != 6 {
+	if !ek || !ak || !ik || impl == nil || impl.ReferenceKind != kind || kind != 6 && kind != 7 {
 		return out, false
 	}
-	implementation := constructorMotionMember(c.obj, &core.OpCode{Instr: &core.Instruction{OpCode: core.OP_INVOKESTATIC}, Data: []byte{byte(impl.ReferenceIndex >> 8), byte(impl.ReferenceIndex)}}, core.OP_INVOKESTATIC)
+	opcode := core.OP_INVOKESTATIC
+	if kind == 7 {
+		opcode = core.OP_INVOKESPECIAL
+	}
+	implementation := constructorMotionMember(c.obj, &core.OpCode{Instr: &core.Instruction{OpCode: opcode}, Data: []byte{byte(impl.ReferenceIndex >> 8), byte(impl.ReferenceIndex)}}, opcode)
 	if implementation == nil || implementation.Name != c.obj.GetClassName() {
 		return out, false
 	}
@@ -560,6 +569,9 @@ func (c *ClassObjectDumper) compilerReferenceFlatScope() bool {
 					return false
 				}
 				site, known := c.originalCompilerReferenceSite(f)
+				if !known {
+					site, known = c.originalCompilerReferenceSiteKind(f, 7)
+				}
 				if !known || c.originalLambdaDeclaration(c.obj.GetClassName(), site.implementation.Member, site.implementation.Description) != core.LambdaDeclarationSyntheticBody {
 					if _, ordinary := c.originalOrdinaryReferenceSite(f); ordinary {
 						continue
@@ -582,6 +594,9 @@ func (c *ClassObjectDumper) dumpCompilerVarargsReference(name, descriptor string
 		return core.LambdaBodySource{}, false
 	}
 	proof := c.proveCompilerVarargsReference(name, descriptor, captured, request, c.FuncCtx)
+	if proof == nil {
+		proof = c.proveCompilerSuperReference(name, descriptor, captured, request, c.FuncCtx)
+	}
 	if proof == nil || proof.static && !c.compilerReferenceCounterScopeClosed() || !proof.static && !c.compilerReferenceFlatScope() {
 		return core.LambdaBodySource{}, false
 	}
@@ -626,8 +641,11 @@ func (c *ClassObjectDumper) compilerReferenceSourcePacketClosed(body *dumpedMeth
 		captured = []values.JavaValue{p.receiver}
 	}
 	fresh := c.proveCompilerVarargsReference(body.methodName, body.descriptor, captured, body.sourceRequest, p.context)
+	if p.superReceiver {
+		fresh = c.proveCompilerSuperReference(body.methodName, body.descriptor, captured, body.sourceRequest, p.context)
+	}
 	scopeClosed := p.static && c.compilerReferenceCounterScopeClosed() || !p.static && c.compilerReferenceFlatScope()
-	return fresh != nil && fresh.static == p.static && fresh.qualifier == p.qualifier && fresh.parameter == p.parameter && reflect.DeepEqual(fresh.local, p.local) && fresh.shape.method == p.shape.method && fresh.shape.code == p.shape.code && slices.Equal(fresh.shape.codeBytes, p.shape.codeBytes) && fresh.shape.member == p.shape.member && fresh.shape.packCount == p.shape.packCount && slices.Equal(fresh.shape.parameters, p.shape.parameters) && fresh.template == p.template && fresh.erased == p.erased && fresh.instantiated == p.instantiated && reflect.DeepEqual(fresh.target.RawType(), p.target.RawType()) && scopeClosed
+	return fresh != nil && fresh.superReceiver == p.superReceiver && fresh.static == p.static && fresh.qualifier == p.qualifier && fresh.parameter == p.parameter && reflect.DeepEqual(fresh.local, p.local) && fresh.shape.method == p.shape.method && fresh.shape.code == p.shape.code && slices.Equal(fresh.shape.codeBytes, p.shape.codeBytes) && fresh.shape.member == p.shape.member && fresh.shape.packCount == p.shape.packCount && slices.Equal(fresh.shape.parameters, p.shape.parameters) && fresh.template == p.template && fresh.erased == p.erased && fresh.instantiated == p.instantiated && reflect.DeepEqual(fresh.target.RawType(), p.target.RawType()) && scopeClosed
 }
 
 // A compiler-owned reference consumes an implementation ordinal at its real
@@ -766,6 +784,17 @@ func (c *ClassObjectDumper) recordCompilerReferenceCapture(body *dumpedMethods, 
 	if frame == nil {
 		return true
 	}
+	if p.superReceiver {
+		if !observation.Complete || len(observation.Captures) != 0 || frame.body == nil || frame.body.member != p.factory.method || frame.ended || frame.invalid || p.captureEmission != nil || c.FuncCtx == nil || c.CurrentMethod != p.factory.method || !c.compilerSuperReceiverPort(p.factory, p.receiver, c.FuncCtx, true) {
+			return false
+		}
+		context, known := c.FuncCtx.SnapshotForSourceProof(c.Work)
+		if !known {
+			return false
+		}
+		p.captureEmission = &compilerReferenceCaptureEmission{frame: frame, context: context, text: "super"}
+		return true
+	}
 	if p.static {
 		if !observation.Complete || len(observation.Captures) != 0 || frame.body == nil || frame.body.member != p.factory.method || frame.ended || frame.invalid || p.captureEmission != nil || c.FuncCtx == nil || c.CurrentMethod != p.factory.method {
 			return false
@@ -813,6 +842,9 @@ func (c *ClassObjectDumper) compilerReferenceFinalCaptureClosed(body, parent *du
 	emission := p.captureEmission
 	if emission == nil || emission.frame != parent.lambdaEmission || !emission.frame.closed() || emission.frame.body != parent || emission.frame.request != parent.sourceRequest || emission.parameter != p.parameter || p.factory.method != parent.member || emission.context == nil {
 		return false
+	}
+	if p.superReceiver {
+		return emission.parameter == nil && emission.localSource == nil && emission.text == "super" && c.compilerSuperReceiverPort(p.factory, p.receiver, emission.context, true)
 	}
 	if p.static {
 		qualifier, known := emission.context.StaticMethodReferenceTypeName(strings.ReplaceAll(p.shape.member.Name, "/", "."))

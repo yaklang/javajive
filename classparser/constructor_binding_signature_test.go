@@ -115,6 +115,15 @@ func TestAdversarialConstructorBindingSignatureRequiresOriginalEnclosingPort(t *
 			if declared != wantDeclaration || declared && declaration != expected {
 				t.Fatalf("exact declaration=%v want=%v signature=%q", declared, wantDeclaration, declaration)
 			}
+			d := NewClassObjectDumper(obj)
+			d.Work = work
+			signature, _ := sourceBridgeUTF8(obj, sig.SignatureIndex)
+			if d.constructorDeclarationHasEnclosingPort(method, signature) != wantDeclaration {
+				t.Fatal("declaration writer borrowed an unproved enclosing port")
+			}
+			if d.constructorDeclarationHasEnclosingPort(method, signature+"x") {
+				t.Fatal("declaration writer accepted a stale signature")
+			}
 			if !bytes.Equal(before, obj.Bytes()) {
 				t.Fatal("binding view mutated original")
 			}

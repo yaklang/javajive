@@ -18,7 +18,10 @@ import (
 
 type inheritedBridgePacket struct {
 	name, descriptor, targetOwner, targetDescriptor string
+	visibility                                      uint16
 	throws                                          []string
+	sourceDescriptor                                string
+	sourceParameters                                []types.JavaType
 	implicitVisibilityBridge                        bool
 	argumentCasts                                   []string
 	checkedArguments                                bool
@@ -29,8 +32,8 @@ type inheritedBridgePacket struct {
 // Only a pure typed forwarding program can be regenerated through a temporary
 // narrow source override. Receiver/argument identity, category-two local slots,
 // invocation kind and exception declarations are part of the proof.
-func inheritedBridgeForwardPacket(object *ClassObject, method *MemberInfo, opcode int, work *workbudget.Budget) *inheritedBridgePacket {
-	if object == nil || method == nil || object.MajorVersion < 49 || object.MajorVersion > 65 || object.MinorVersion != 0 || len(object.Methods) > 4096 {
+func inheritedBridgeForwardPacket(object *ClassObject, method *MemberInfo, opcode int, work *workbudget.Budget, referenceAdaptation ...bool) *inheritedBridgePacket {
+	if len(referenceAdaptation) > 1 || object == nil || method == nil || object.MajorVersion < 49 || object.MajorVersion > 65 || object.MinorVersion != 0 || len(object.Methods) > 4096 {
 		return nil
 	}
 	name, nk := sourceBridgeUTF8(object, method.NameIndex)
@@ -46,6 +49,7 @@ func inheritedBridgeForwardPacket(object *ClassObject, method *MemberInfo, opcod
 	if code == nil || len(code.Code) > 512 || len(code.ExceptionTable) != 0 || !nativeProofWork(work, int64(len(code.Code))+1) {
 		return nil
 	}
+	adapt := len(referenceAdaptation) == 1 && referenceAdaptation[0]
 	p := &inheritedBridgePacket{name: name, descriptor: desc}
 	exceptionCount, codeCount := 0, 0
 	// Modern javac emits MethodParameters on synthetic bridges even without
@@ -64,6 +68,23 @@ func inheritedBridgeForwardPacket(object *ClassObject, method *MemberInfo, opcod
 			}
 		case *UnparsedAttribute:
 			if a == nil || a.Name != "MethodParameters" {
+				return nil
+			}
+		case *SignatureAttribute:
+			// A temporary generic source declaration may carry a Signature.
+			// Bridges themselves remain signature-free; prove this helper's
+			// complete erasure before inspecting its executable forwarding.
+			if !adapt || method.AccessFlags != 1 && method.AccessFlags != 4 || a == nil {
+				return nil
+			}
+			sig, known := nativeMethodLocalOriginalSignature(object, method.Attributes, work)
+			classSig, classKnown := nativeOriginalClassSignature(object, work)
+			size := len(classSig) + len(sig)
+			if !known || !classKnown || size > 16384 || !nativeProofWork(work, int64(size)*260+1) || work.CheckAlloc(int64(size)*256) != nil {
+				return nil
+			}
+			erased, throws, valid := types.EraseClassBoundMethodSignatureWithThrows(classSig, sig)
+			if !known || !classKnown || sig == "" || !valid || erased != desc || !nativeOriginalSignatureThrows(object, method, throws, work) {
 				return nil
 			}
 		case *ExceptionsAttribute:
@@ -117,12 +138,12 @@ func inheritedBridgeForwardPacket(object *ClassObject, method *MemberInfo, opcod
 				cast = "L" + cast + ";"
 			}
 			_, _, syntax := callbinding.Descriptor("(" + cast + ")V")
-			if !known || !valid || syntax != nil || !callbinding.Reference(param) || cast != args[i] {
+			if !known || !valid || syntax != nil || !callbinding.Reference(param) || cast != args[i] && !(adapt && callbinding.Reference(args[i])) {
 				return nil
 			}
 			p.argumentCasts[i], p.checkedArguments = cast, true
 			at++
-		} else if param != args[i] {
+		} else if param != args[i] && !(adapt && callbinding.Reference(param) && callbinding.Reference(args[i])) {
 			return nil
 		}
 		slot += constructorEffectType(param).width()
@@ -152,13 +173,14 @@ func (c *ClassObjectDumper) inheritedBridgeOriginal(method *MemberInfo) *inherit
 	// covariance and synthetic bridges already exist in the Java 5 format.
 	// Its receiver, argument slots, direct superclass and exact target are
 	// proved below; none of those obligations depends on Java 8 metadata.
-	if c.obj.MajorVersion < 49 || c.obj.MajorVersion > 52 || method.AccessFlags != 0x1041 {
+	if c.obj.MajorVersion < 49 || c.obj.MajorVersion > 52 || method.AccessFlags != 0x1041 && method.AccessFlags != 0x1044 {
 		return nil
 	}
-	p := inheritedBridgeForwardPacket(c.obj, method, core.OP_INVOKESPECIAL, c.Work)
+	p := inheritedBridgeForwardPacket(c.obj, method, core.OP_INVOKESPECIAL, c.Work, true)
 	if p == nil || p.targetOwner != c.obj.GetSupperClassName() {
 		return nil
 	}
+	p.visibility = method.AccessFlags & 7
 	// A real declaration already supplies its own bridge; a second narrow
 	// override would change its dispatch or collide with an existing overload.
 	originalMatches := 0
@@ -190,7 +212,14 @@ func (c *ClassObjectDumper) inheritedBridgeOriginal(method *MemberInfo) *inherit
 	// Keep that symbolic owner for the fresh invokespecial proof; do not replace
 	// it with a guessed declaration owner or skip a nearer incompatible method.
 	declaring, target := nativeMemberCallTarget(parent, p.name, p.targetDescriptor, true, resolve, c.Work)
-	if target == nil || target.AccessFlags & ^uint16(0x80) != 1 {
+	if target == nil {
+		return nil
+	}
+	visibility := target.AccessFlags & ^uint16(0x80)
+	// A source override must preserve the original bridge access and may
+	// never narrow its inherited target. Both public and protected calls use
+	// this exact implicit receiver; no arbitrary protected receiver is granted.
+	if visibility != 1 && visibility != 4 || visibility == 1 && p.visibility != 1 {
 		return nil
 	}
 	// ACC_VARARGS affects source applicability, not the physical array port
@@ -206,10 +235,20 @@ func (c *ClassObjectDumper) inheritedBridgeOriginal(method *MemberInfo) *inherit
 	// Concrete parameterization cannot change this already resolved physical
 	// invocation. Prove its complete erasure using the actual declaration's
 	// constant pool, including throws. Class variables are permitted only
-	// beneath erased arguments; direct variables and method formals still
-	// require a separate substitution certificate.
+	// beneath erased arguments. Method-owned variables need the independent
+	// lexical certificate below; direct variables need actual substitution.
 	signature, known := nativeMethodLocalOriginalSignature(declaring, target.Attributes, c.Work)
-	if !known || signature != "" && !nativeConcreteMethodSignatureClosed(declaring, signature, p.targetDescriptor, target, c.Work) && !nativeClassInvariantMethodSignatureClosed(declaring, signature, p.targetDescriptor, target, c.Work) {
+	if !known {
+		return nil
+	}
+	p.sourceDescriptor = p.targetDescriptor
+	plain := signature == "" || nativeConcreteMethodSignatureClosed(declaring, signature, p.targetDescriptor, target, c.Work) || nativeClassInvariantMethodSignatureClosed(declaring, signature, p.targetDescriptor, target, c.Work) || inheritedBridgeMethodFormalPortsClosed(declaring, signature, p.targetDescriptor, target, c.Work)
+	if plain {
+		// Preserve the old exact-port grammar for an uninstantiated target.
+		if inheritedBridgeForwardPacket(c.obj, method, core.OP_INVOKESPECIAL, c.Work) == nil {
+			return nil
+		}
+	} else if !c.inheritedBridgeGenericView(p, declaring, target, signature) {
 		return nil
 	}
 	// A public subclass exposes a public implementation inherited from its
@@ -218,8 +257,26 @@ func (c *ClassObjectDumper) inheritedBridgeOriginal(method *MemberInfo) *inherit
 	// and can trigger another erased-interface bridge that the original child
 	// never declared. Keep inheritance as the source representation; the final
 	// artifact still has to prove the original method universe and bridge Code.
-	p.implicitVisibilityBridge = p.descriptor == p.targetDescriptor && c.obj.AccessFlags&1 != 0 && parent.AccessFlags&1 == 0
+	p.implicitVisibilityBridge = p.visibility == 1 && visibility == 1 && p.descriptor == p.targetDescriptor && c.obj.AccessFlags&1 != 0 && parent.AccessFlags&1 == 0
 	return p
+}
+
+// A non-generic override of a generic method's erasure is a subsignature.
+// Here it exists only to make javac regenerate an inherited bridge. Permit it
+// when method inference cannot change any invocation port, including throws.
+// The original typed forwarding proof and final fresh-Code/unique-consumer
+// proof remain mandatory; erasure alone never licenses an executable rewrite.
+func inheritedBridgeMethodFormalPortsClosed(owner *ClassObject, signature, descriptor string, target *MemberInfo, work *workbudget.Budget) bool {
+	if owner == nil || target == nil || len(signature) > 4096 || !nativeProofWork(work, int64(len(signature))*130+1) || len(types.MethodFormalTypeParamNames(signature)) == 0 {
+		return false
+	}
+	classSignature, known := nativeMethodLocalOriginalSignature(owner, owner.Attributes, work)
+	size := len(signature) + len(classSignature)
+	if !known || len(classSignature) > 4096 || !nativeProofWork(work, int64(size)*260+1) || work != nil && work.CheckAlloc(int64(size)*256) != nil {
+		return false
+	}
+	erased, throws, known := types.EraseLexicalInvariantMethodSignatureWithThrows(classSignature, signature)
+	return known && erased == descriptor && (classSignature == "" || nativeOriginalClassSignatureSupersClosed(owner, classSignature, work)) && nativeOriginalSignatureThrows(owner, target, throws, work)
 }
 
 func (c *ClassObjectDumper) inheritedBridgeSource(method *MemberInfo) *dumpedMethods {
@@ -234,19 +291,22 @@ func (c *ClassObjectDumper) inheritedBridgeSource(method *MemberInfo) *dumpedMet
 	// A single declaration can regenerate their annotations only when those
 	// original metadata contracts agree; otherwise keep the existing refusal.
 	for _, other := range c.obj.Methods {
-		if other == method || other == nil || other.AccessFlags != 0x1041 {
+		if other == method || other == nil || other.AccessFlags != 0x1041 && other.AccessFlags != 0x1044 {
 			continue
 		}
 		q := c.inheritedBridgeOriginal(other)
-		if q != nil && q.name == p.name && q.targetDescriptor == p.targetDescriptor && !inheritedBridgeAnnotationsEqual(method, p.descriptor, other, q.descriptor, c.Work) {
+		if q != nil && q.name == p.name && q.sourceDescriptor == p.sourceDescriptor && (q.visibility != p.visibility || !inheritedBridgeAnnotationsEqual(method, p.descriptor, other, q.descriptor, c.Work)) {
 			return nil
 		}
 	}
-	typ, err := types.ParseMethodDescriptor(p.targetDescriptor)
+	typ, err := types.ParseMethodDescriptor(p.sourceDescriptor)
 	if err != nil {
 		return nil
 	}
 	ft := typ.FunctionType()
+	if p.sourceParameters != nil {
+		ft.ParamTypes = p.sourceParameters
+	}
 	params, args := []string{}, []string{}
 	for i, t := range ft.ParamTypes {
 		name := fmt.Sprintf("bridgeArgument%d", i)
@@ -283,11 +343,15 @@ func (c *ClassObjectDumper) inheritedBridgeSource(method *MemberInfo) *dumpedMet
 	if result != "V" {
 		call = "return " + call
 	}
-	source := "public " + ft.ReturnType.String(c.FuncCtx) + " " + p.name + "(" + strings.Join(params, ", ") + ")" + tail + " {\n\t" + call + "\n}"
+	access := "public "
+	if p.visibility == 4 {
+		access = "protected "
+	}
+	source := access + ft.ReturnType.String(c.FuncCtx) + " " + p.name + "(" + strings.Join(params, ", ") + ")" + tail + " {\n\t" + call + "\n}"
 	if len(annotations) > 0 {
 		source = strings.Join(annotations, "\n") + "\n" + source
 	}
-	return &dumpedMethods{methodName: p.name, descriptor: p.targetDescriptor, code: source, bodyCode: source, inheritedBridge: p, inheritedBridgeCode: source}
+	return &dumpedMethods{methodName: p.name, descriptor: p.sourceDescriptor, code: source, bodyCode: source, inheritedBridge: p, inheritedBridgeCode: source}
 }
 
 func (c *ClassObjectDumper) publishInheritedBridgeLowering(source string, methods []*dumpedMethods) bool {
@@ -426,6 +490,7 @@ func (a *sourceConstructorLoweringAuthority) lowerInheritedBridges(owner string,
 	exact := 0
 	consumers := map[*MemberInfo]map[*MemberInfo]bool{}
 	packets := map[*MemberInfo]*inheritedBridgePacket{}
+	redundant := map[*MemberInfo]*inheritedBridgePacket{}
 	for k, m := range before {
 		p := d.inheritedBridgeOriginal(m)
 		if p == nil {
@@ -442,7 +507,7 @@ func (a *sourceConstructorLoweringAuthority) lowerInheritedBridges(owner string,
 			// the covariant case below, no temporary method is removed, so other
 			// callers and method handles continue naming this same declaration.
 			fresh := inheritedBridgeForwardPacket(got, bridge, core.OP_INVOKESPECIAL, work)
-			if bridge.AccessFlags != 1 && bridge.AccessFlags != m.AccessFlags || fresh == nil || fresh.targetOwner != p.targetOwner || fresh.targetDescriptor != p.targetDescriptor || !slices.Equal(p.throws, fresh.throws) || !slices.Equal(p.argumentCasts, fresh.argumentCasts) {
+			if bridge.AccessFlags != p.visibility && bridge.AccessFlags != m.AccessFlags || fresh == nil || fresh.targetOwner != p.targetOwner || fresh.targetDescriptor != p.targetDescriptor || !slices.Equal(p.throws, fresh.throws) || !slices.Equal(p.argumentCasts, fresh.argumentCasts) {
 				return decline()
 			}
 			span, known := layout.methods[bridge]
@@ -456,13 +521,13 @@ func (a *sourceConstructorLoweringAuthority) lowerInheritedBridges(owner string,
 			exact++
 			continue
 		}
-		helper := after[p.name+"\x00"+p.targetDescriptor]
-		if helper == nil || before[key(got, helper)] != nil || helper.AccessFlags != 1 || bridge.AccessFlags != m.AccessFlags || !inheritedBridgeAnnotationsEqual(m, p.descriptor, helper, p.targetDescriptor, work) {
+		helper := after[p.name+"\x00"+p.sourceDescriptor]
+		if helper == nil || before[key(got, helper)] != nil || helper.AccessFlags != p.visibility || bridge.AccessFlags != m.AccessFlags || !inheritedBridgeAnnotationsEqual(m, p.descriptor, helper, p.sourceDescriptor, work) {
 			return decline()
 		}
-		fresh := inheritedBridgeForwardPacket(got, helper, core.OP_INVOKESPECIAL, work)
+		fresh := inheritedBridgeForwardPacket(got, helper, core.OP_INVOKESPECIAL, work, p.sourceParameters != nil)
 		forward := inheritedBridgeForwardPacket(got, bridge, core.OP_INVOKEVIRTUAL, work)
-		if fresh == nil || forward == nil || fresh.checkedArguments || fresh.targetOwner != p.targetOwner || fresh.targetDescriptor != p.targetDescriptor || forward.targetOwner != owner || forward.targetDescriptor != p.targetDescriptor || !slices.Equal(p.throws, fresh.throws) || !slices.Equal(p.throws, forward.throws) || !slices.Equal(p.argumentCasts, forward.argumentCasts) {
+		if fresh == nil || forward == nil || fresh.checkedArguments || fresh.targetOwner != p.targetOwner || fresh.targetDescriptor != p.targetDescriptor || forward.targetOwner != owner || forward.targetDescriptor != p.sourceDescriptor || !slices.Equal(p.throws, fresh.throws) || !slices.Equal(p.throws, forward.throws) || !slices.Equal(p.argumentCasts, forward.argumentCasts) {
 			return decline()
 		}
 		bridgeCode, err := enumArrayCodePayload(compiled, got, layout.methods[bridge], work)
@@ -491,9 +556,46 @@ func (a *sourceConstructorLoweringAuthority) lowerInheritedBridges(owner string,
 			edits = append(edits, compiledMetadataEdit{layout.methods[helper], nil})
 		}
 		consumers[helper][bridge] = true
+		// A narrower generic override also causes javac to bridge the erased
+		// parent declaration. The original inherited that method directly.
+		// Remove only this proven temporary forwarding node, after proving
+		// that nobody calls it and including its helper edge in closure.
+		if p.sourceParameters != nil && p.sourceDescriptor != p.targetDescriptor {
+			extra := after[p.name+"\x00"+p.targetDescriptor]
+			if extra != nil {
+				if before[key(got, extra)] != nil || visibility[extra] || extra.AccessFlags != 0x1040|p.visibility {
+					return decline()
+				}
+				ep := inheritedBridgeForwardPacket(got, extra, core.OP_INVOKEVIRTUAL, work)
+				if ep == nil || ep.targetOwner != owner || ep.targetDescriptor != p.sourceDescriptor || !slices.Equal(p.throws, ep.throws) || !inheritedBridgeAnnotationsEqual(helper, p.sourceDescriptor, extra, p.targetDescriptor, work) {
+					return decline()
+				}
+				args, _, _ := callbinding.Descriptor(p.targetDescriptor)
+				narrow, _, _ := callbinding.Descriptor(p.sourceDescriptor)
+				for i, arg := range args {
+					cast := ""
+					if arg != narrow[i] {
+						cast = narrow[i]
+					}
+					if ep.argumentCasts[i] != cast {
+						return decline()
+					}
+				}
+				if redundant[extra] == nil {
+					redundant[extra] = &inheritedBridgePacket{name: p.name, sourceDescriptor: p.targetDescriptor}
+					edits = append(edits, compiledMetadataEdit{layout.methods[extra], nil})
+				}
+				consumers[helper][extra] = true
+			}
+		}
 	}
-	if len(consumers) == 0 && exact == 0 && len(visibility) == 0 || len(after)-len(consumers)-len(visibility) != len(before) {
+	if len(consumers) == 0 && exact == 0 && len(visibility) == 0 || len(after)-len(consumers)-len(visibility)-len(redundant) != len(before) {
 		return decline()
+	}
+	for _, packet := range redundant {
+		if !inheritedBridgeConsumersClosed(got, nil, packet, work) {
+			return decline()
+		}
 	}
 	for helper, bridges := range consumers {
 		if !inheritedBridgeConsumersClosed(got, bridges, packets[helper], work) {
@@ -538,7 +640,7 @@ func inheritedBridgeConsumersClosed(object *ClassObject, bridges map[*MemberInfo
 		}
 		n, _ := sourceBridgeUTF8(object, nt.NameIndex)
 		d, _ := sourceBridgeUTF8(object, nt.DescriptorIndex)
-		if owner == object.GetClassName() && n == p.name && d == p.targetDescriptor {
+		if owner == object.GetClassName() && n == p.name && d == p.sourceDescriptor {
 			refs[uint16(i+1)] = true
 		}
 	}
@@ -577,5 +679,6 @@ func inheritedBridgeConsumersClosed(object *ClassObject, bridges map[*MemberInfo
 			}
 		}
 	}
-	return len(bridges) > 0 && calls == len(bridges)
+	// An empty admitted set proves that a removed forwarding node has no users.
+	return calls == len(bridges)
 }

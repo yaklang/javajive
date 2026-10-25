@@ -137,18 +137,36 @@ func (c *ClassObjectDumper) artifactConstructorPlan(child *nativeAnonymousClass)
 // Called at the successful typed allocation renderer, after capture, SUPER,
 // lexical access and body proofs. A provisional body alone cannot activate it.
 func (c *ClassObjectDumper) recordArtifactConstructorPublication(group *nativeAnonymousFamily, child *nativeAnonymousClass, sub *ClassObjectDumper, source string) bool {
-	if !c.artifactConstructorMetadataAllowed() {
+	metadataAllowed := c.artifactConstructorMetadataAllowed()
+	// A modern anonymous declaration can own a member of a reciprocal nest
+	// without owing legacy implicit-constructor metadata. Transport only its
+	// completed source origin through the same typed allocation/body proof.
+	// This grants no additional constructor, lambda or class-flag rewriting.
+	nestAllowed := c != nil && c.obj != nil && c.obj.MajorVersion >= 55 && c.obj.MajorVersion <= 65 && c.obj.MinorVersion == 0 && c.options.SourceCompiler.effective() == ModernJavac && c.options.TargetSourceVersion >= 11 && c.options.TargetSourceVersion <= 21 && c.options.sourceLambdaMetadata != nil && c.privateNestCompletionAuthority() != nil
+	if !metadataAllowed && !nestAllowed {
 		return true
 	}
 	if group == nil || group != c.nativeAnonymousRoot || group.owner != c.obj.GetClassName() || child == nil || child.object == nil || group.children[child.object.GetClassName()] != child || sub == nil || sub.obj != child.object {
 		return false
 	}
-	plan := c.artifactConstructorPlan(child)
-	anonymous := c.artifactAnonymousClassPlan(child)
+	var plan *sourceConstructorMetadataPlan
+	var anonymous *sourceAnonymousClassMetadataPlan
+	if metadataAllowed {
+		plan = c.artifactConstructorPlan(child)
+		anonymous = c.artifactAnonymousClassPlan(child)
+	}
 	if child.artifactStaticMetadata && anonymous == nil {
 		return false
 	}
 	publication := c.options.sourceLambdaMetadata.publication(child.object.GetClassName(), source)
+	if !metadataAllowed {
+		if publication == nil || len(publication.nests) == 0 {
+			return c.Work.Check() == nil
+		}
+		if len(publication.plans)+len(publication.constructors)+len(publication.anonymous)+len(publication.enums) != 0 {
+			return false
+		}
+	}
 	if plan == nil && anonymous == nil && publication == nil {
 		return c.Work.Check() == nil
 	}

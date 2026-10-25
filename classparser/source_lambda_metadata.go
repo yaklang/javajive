@@ -42,6 +42,10 @@ type sourceLambdaMetadataPlan struct {
 	methods                  []sourceLambdaMetadataMethod
 }
 
+func sourceLambdaMetadataPlansEqual(left, right *sourceLambdaMetadataPlan) bool {
+	return left != nil && right != nil && left.owner == right.owner && left.originalHash == right.originalHash && left.sourceHash == right.sourceHash && slices.Equal(left.methods, right.methods)
+}
+
 type compiledMetadataEdit struct {
 	compiledMetadataSpan
 	data []byte

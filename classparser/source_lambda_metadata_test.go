@@ -381,6 +381,29 @@ func TestNativeSourceLambdaMetadataOpenPublishesOnlyItsCompletedSource(t *testin
 			t.Fatal("same completed source spent retained-memory allowance again")
 		}
 	}
+	// A speculative alternate layout must not evict the certificate for a
+	// source unit already retained by the owning-family cache. Re-sealing the
+	// original is idempotent even after the latest-layout index has advanced.
+	a := artifact.jar.sourceLambdaMetadata
+	later := &sourceLambdaPublication{owner: publication.owner, sourceHash: sha256.Sum256([]byte("different complete layout"))}
+	a.publications[publication.owner] = later
+	for i := 0; i < 3; i++ {
+		// An independent successful rendering can reconstruct an equivalent
+		// plan in a new allocation. Certificate equality is about the bound
+		// originals, source, and method correspondence, not pointer identity.
+		copyPlan := *publication.plans[0]
+		copyPlan.methods = append([]sourceLambdaMetadataMethod(nil), copyPlan.methods...)
+		a.plans[publication.owner] = &copyPlan
+		if !d.sealArtifactLambdaPublication(string(source), nil) || a.bytes != retained || a.publication(publication.owner, string(source)) != publication {
+			t.Fatal("cached source certificate was replaced or charged again")
+		}
+	}
+	conflict := *publication.plans[0]
+	conflict.originalHash[0] ^= 1
+	a.plans[publication.owner] = &conflict
+	if d.sealArtifactLambdaPublication(string(source), nil) || a.bytes != retained || a.publication(publication.owner, string(source)) != publication {
+		t.Fatal("same source acquired a conflicting original certificate")
+	}
 }
 
 func TestNativeSourceLambdaMetadataRejectsCrossClassEnclosingMethodRename(t *testing.T) {

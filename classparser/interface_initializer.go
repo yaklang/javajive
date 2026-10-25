@@ -414,7 +414,7 @@ func (c *ClassObjectDumper) renderInterfaceInitializers(body []statements.Statem
 		// witness. A direct declaration preserves its ABI without a helper,
 		// provided it cannot create a new JLS constant variable or expose an
 		// unchecked declaration of a checked exception.
-		if directExpressions && len(plan.prefix) == 0 && (interfaceInitializerNonconstant(plan.value, plan.write.descriptor) || c.interfaceInitializerOwnNonconstantRead(plan.value, code, plan.write.pc, writes)) {
+		if directExpressions && len(plan.prefix) == 0 && (interfaceInitializerNonconstant(plan.value, plan.write.descriptor) || c.interfaceInitializerOwnNonconstantRead(plan.value, code, plan.write.pc, writes) || c.interfaceInitializerForeignNonconstantRead(plan.value, code, plan.write.pc)) {
 			directContext := *ctx
 			directContext.QualifiedStaticFields = true
 			value := values.ErasedFactoryAssignmentView(plan.value, fieldType, &directContext)
@@ -766,6 +766,38 @@ func (c *ClassObjectDumper) interfaceInitializerOwnNonconstantRead(value values.
 		}
 		original := constructorMotionMember(c.obj, op, core.OP_GETSTATIC)
 		return original != nil && original.Name == c.obj.GetClassName() && original.Member == field.Member && original.Description == field.Description
+	}
+	return false
+}
+
+// A field read in a different declaration is nonconstant only when that exact
+// original symbolic owner resolves to the actual nonconstant field. Retain the
+// GETSTATIC producer and the store partition; the expression stays at the same
+// initialization position, so class initialization, volatile reads and abrupt
+// completion keep their original order. Unknown or inherited declarations must
+// retain the fallback until their separate resolution proof is available.
+func (c *ClassObjectDumper) interfaceInitializerForeignNonconstantRead(value values.JavaValue, code *CodeAttribute, storePC int) bool {
+	if c == nil || c.obj == nil || code == nil || sourceProofNil(value) || !nativeProofWork(c.Work, int64(len(code.Code))+1) {
+		return false
+	}
+	field, ok := values.UnpackSoltValue(value).(*values.JavaClassMember)
+	if !ok || field == nil || normalizedInitializerOwner(field.Name) == c.obj.GetClassName() || !field.OriginalStaticFieldRead(field.OriginPC, field.Name, field.Member, field.Description) || field.OriginPC < 0 || field.OriginPC >= storePC || storePC >= len(code.Code) {
+		return false
+	}
+	if !nativeAnonymousInitializerFieldDeclaration(field, true, c.nativeAnnotationDeclarationResolver(), c.Work) {
+		return false
+	}
+	decoder := core.NewDecompiler(code.Code, func(index int) values.JavaValue { return GetValueFromCP(c.ConstantPool, index) })
+	decoder.Work = c.Work
+	if decoder.ParseOpcode() != nil {
+		return false
+	}
+	for _, op := range decoder.Opcodes() {
+		if op == nil || op.IsCustom || op.Instr == nil || op.Instr.OpCode != core.OP_GETSTATIC || int(op.CurrentOffset) != field.OriginPC {
+			continue
+		}
+		original := constructorMotionMember(c.obj, op, core.OP_GETSTATIC)
+		return original != nil && original.Name == normalizedInitializerOwner(field.Name) && original.Member == field.Member && original.Description == field.Description
 	}
 	return false
 }

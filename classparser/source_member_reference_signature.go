@@ -16,6 +16,10 @@ func (c *ClassObjectDumper) publishMemberReferenceSignatures(source string) bool
 		return true
 	}
 	found := false
+	projected := c.buildSiblingReferenceSourceFormals(nil)
+	if projected == nil {
+		return true
+	}
 	for _, method := range append(append([]*MemberInfo(nil), c.obj.Methods...), c.obj.Fields...) {
 		if method == nil || !nativeProofWork(c.Work, 1) {
 			return false
@@ -36,7 +40,7 @@ func (c *ClassObjectDumper) publishMemberReferenceSignatures(source string) bool
 			return true
 		}
 		for _, name := range refs {
-			if names, known := c.FuncCtx.SiblingSourceClassFormals(strings.ReplaceAll(name, ".", "/")); known && len(names) > 0 {
+			if names, known := projected(strings.ReplaceAll(name, ".", "/")); known && len(names) > 0 {
 				found = true
 			}
 		}
@@ -126,7 +130,12 @@ func (a *sourceConstructorLoweringAuthority) restoreMemberReferenceSignatures(or
 	if !wv || !gv || !environment {
 		return compiled, work.Check()
 	}
-	projected, resolve := d.buildSiblingSourceClassFormals(), d.nativeAnnotationDeclarationResolver()
+	projected := d.buildSiblingReferenceSourceFormals(func(name string, raw []byte) bool {
+		// An own-formal member's independent scope transaction must own the
+		// exact returned source. Original declarations alone grant no edit.
+		return a.memberGenericSourceReturned(name, raw, work)
+	})
+	resolve := d.nativeAnnotationDeclarationResolver()
 	if projected == nil || work.CheckAlloc(int64(len(compiled))*2+int64(len(got.Methods)+len(got.Fields))*256) != nil {
 		return compiled, work.Check()
 	}

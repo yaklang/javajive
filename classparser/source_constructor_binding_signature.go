@@ -22,13 +22,14 @@ func (c *ClassObjectDumper) publishConstructorBindingSignatures(source string, m
 			continue
 		}
 		signature, ok := constructorEnclosingDeclarationSignature(c.obj, m.member, c.Work, c.nativeAnnotationDeclarationResolver())
-		if !ok {
+		hidden := c.anonymousCapturedConstructor(m.member)
+		if !ok && hidden == nil {
 			continue
 		}
 		if c.sourceDegraded || m.sourceReconstructionFailed() || legacySourceHasFailureMarker(source) {
 			return true
 		}
-		if m.constructorBindingSignature != signature || m.constructorBindingCode != m.code || m.sourceDumper != c || m.sourceObject != c.obj || m.sourceRequest.role != methodSourceDeclaration || c.dumpedMethodsSet[m.sourceCacheKey] != m || m.code == "" || strings.Count(source, m.code) != 1 {
+		if ok && (m.constructorBindingSignature != signature || m.constructorBindingCode != m.code) || m.sourceDumper != c || m.sourceObject != c.obj || m.sourceRequest.role != methodSourceDeclaration || c.dumpedMethodsSet[m.sourceCacheKey] != m || m.code == "" || strings.Count(source, m.code) != 1 {
 			return false
 		}
 		found = true
@@ -90,6 +91,35 @@ func (a *sourceConstructorLoweringAuthority) restoreConstructorBindingSignatures
 		}
 		return compiled, nil
 	}
+	// A source-return receipt can also publish an anonymous capture obligation.
+	// Select this client's original named-member lift before inspecting the
+	// projected fresh class scope. A receipt is provenance, not permission to
+	// apply every constructor protocol to the same declaration.
+	d := NewClassObjectDumper(want)
+	d.Work, d.foldSiblingResolver, d.declarationResolver = work, a.jar.enumSiblingResolver(), a.jar.declarationResolver
+	resolve := d.nativeAnnotationDeclarationResolver()
+	if err := work.CheckAlloc(int64(len(want.Methods)) * 32); err != nil {
+		return nil, err
+	}
+	lifts := map[*MemberInfo]string{}
+	for _, before := range want.Methods {
+		if !nativeProofWork(work, 1) {
+			return fail("original constructor inventory budget")
+		}
+		name, known := sourceBridgeUTF8(want, before.NameIndex)
+		if !known || name != "<init>" {
+			continue
+		}
+		if lifted, proved := constructorEnclosingDeclarationSignature(want, before, work, resolve); proved {
+			lifts[before] = lifted
+		}
+	}
+	if len(lifts) == 0 {
+		if err := work.Check(); err != nil {
+			return nil, err
+		}
+		return compiled, nil
+	}
 	reader, err := NewClassReaderWithBudget(compiled, work)
 	if err != nil {
 		return nil, err
@@ -101,9 +131,6 @@ func (a *sourceConstructorLoweringAuthority) restoreConstructorBindingSignatures
 	}
 	ws, wv := nativeMethodLocalOriginalSignature(want, want.Attributes, work)
 	gs, gv := nativeMethodLocalOriginalSignature(got, got.Attributes, work)
-	d := NewClassObjectDumper(want)
-	d.Work, d.foldSiblingResolver, d.declarationResolver = work, a.jar.enumSiblingResolver(), a.jar.declarationResolver
-	resolve := d.nativeAnnotationDeclarationResolver()
 	environment := ws == gs
 	if wv && gv && !environment && a.memberGenericSourceReturned(want.GetClassName(), original, work) {
 		scopes, local, valid := d.flattenedMethodLexicalScopesResolved(resolve)
@@ -121,7 +148,7 @@ func (a *sourceConstructorLoweringAuthority) restoreConstructorBindingSignatures
 	var added []byte
 	var edits []compiledMetadataEdit
 	for _, before := range want.Methods {
-		lifted, proved := constructorEnclosingDeclarationSignature(want, before, work, resolve)
+		lifted, proved := lifts[before]
 		if !proved {
 			continue
 		}
@@ -146,13 +173,29 @@ func (a *sourceConstructorLoweringAuthority) restoreConstructorBindingSignatures
 		signature, valid := nativeMethodLocalOriginalSignature(got, after.Attributes, work)
 		originalSig, validOriginal := nativeMethodLocalOriginalSignature(want, before.Attributes, work)
 		binding := signature == lifted || signature == originalSig
+		if valid && validOriginal && !binding && len(types.ClassFormalTypeParamNames(ws)) != 0 && a.memberGenericSourceReturned(want.GetClassName(), original, work) && memberReferenceAttributesUnannotated(before.Attributes) && memberReferenceAttributesUnannotated(after.Attributes) {
+			// A member's own binders stay in source, but occurrences of hidden
+			// enclosing binders use the same lexical projection as its fields and
+			// ordinary methods. Apply that operation to the independently proved
+			// physical enclosing-port lift, then require the complete fresh type
+			// tree and both descriptor erasures. Neither equal arity nor erasure
+			// alone permits substituting a constructor's generic arguments.
+			scopes, local, known := d.flattenedMethodLexicalScopesResolved(resolve)
+			projected, closed := types.ProjectHiddenLexicalMethodSignature(scopes, lifted)
+			oldErasure, _, oldValid := types.EraseLexicalScopedMethodSignatureWithThrows(scopes, lifted)
+			newErasure, _, newValid := types.EraseLexicalScopedMethodSignatureWithThrows(scopes, signature)
+			binding = known && !local && closed && projected == signature && oldValid && newValid && oldErasure == desc && newErasure == desc
+		}
 		if valid && validOriginal && !binding && a.memberReferenceSourceReturned(want.GetClassName(), original, work) && memberReferenceAttributesUnannotated(before.Attributes) && memberReferenceAttributesUnannotated(after.Attributes) {
 			// Compose the proved enclosing port lift with the independent owner
 			// argument relocation. Both complete signatures must erase to this
 			// exact constructor descriptor; the typed capture packet below still
 			// proves the initialization boundary and unchanged physical slots.
 			scopes, local, known := d.flattenedMethodLexicalScopesResolved(resolve)
-			binding = known && !local && memberReferenceSignatureProjection(lifted, signature, desc, scopes, d.buildSiblingSourceClassFormals(), resolve, work)
+			projected := d.buildSiblingReferenceSourceFormals(func(name string, raw []byte) bool {
+				return a.memberGenericSourceReturned(name, raw, work)
+			})
+			binding = known && !local && memberReferenceSignatureProjection(lifted, signature, desc, scopes, projected, resolve, work)
 		}
 		if !valid || !validOriginal || !binding {
 			return fail("fresh signature is not the proved lifted binding")

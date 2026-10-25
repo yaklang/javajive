@@ -728,8 +728,12 @@ func nativeAnonymousInitializerFieldDeclaration(field *values.JavaClassMember, s
 	if field == nil || resolve == nil || !class_context.PreservesJava8Identifier(field.Member) || !nativeProofWork(work, 1) {
 		return false
 	}
-	object, known := resolve(field.Name)
-	if !known || object == nil || object.GetClassName() != field.Name {
+	// Expression owners use source spelling; declaration resolvers are keyed
+	// by JVM binary names. Normalize only the package separators, preserving
+	// nested '$' names and requiring the exact resolved declaration identity.
+	owner := strings.ReplaceAll(field.Name, ".", "/")
+	object, known := resolve(owner)
+	if !known || object == nil || object.GetClassName() != owner {
 		return false
 	}
 	var declaration *MemberInfo

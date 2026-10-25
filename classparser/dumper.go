@@ -2204,6 +2204,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		return "", fmt.Errorf("final serializable reference source changed after compiler layout")
 	}
 	c.recordEnumRegeneratedMembers(full, methods)
+	if !c.publishPrivateNestCompletion(full, methods) {
+		return "", fmt.Errorf("private nest source publication is not closed")
+	}
 	if !c.publishArtifactLambdaMetadata(full, members, methods) {
 		return "", fmt.Errorf("lambda postcompile metadata obligation is not closed")
 	}
@@ -4009,15 +4012,11 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 						mt.ParamTypes, mt.ReturnType = aligned, sigRet
 					} else if name == "<init>" && c.getenv("JDEC_INNER_CTOR_SIG_ALIGN_OFF") == "" &&
 						len(sigParams) == len(mt.ParamTypes)-1 && len(mt.ParamTypes) >= 1 &&
-						(c.nativeMemberConstructorHasEnclosingParameter(descriptor) || c.nativeMemberCurrent == nil && c.hasOuterThisField()) {
-						// Non-static inner class constructor: javac OMITS the synthetic enclosing
-						// parameter from the ctor Signature, so its param count is exactly one less than
-						// the descriptor's. Align the Signature params to the TRAILING descriptor params,
-						// keeping the erased outer-instance param[0], and lift the generic types onto
-						// params[1:]. Recovers e.g. guava TreeTraverser$PreOrderIterator(TreeTraverser, T)
-						// whose real param was erased to Object, so `singletonIterator(checkNotNull(v))`
-						// now infers `Iterator<T>` for the `Deque<Iterator<T>>` field. Behaviour-preserving
-						// (descriptor unchanged). Kill-switch JDEC_INNER_CTOR_SIG_ALIGN_OFF.
+						(c.nativeMemberConstructorHasEnclosingParameter(descriptor) || c.constructorDeclarationHasEnclosingPort(method, sigStr)) {
+						// The original member/capture proof identifies the omitted enclosing
+						// instance, independently of lexical depth or field spelling. Only
+						// then align the declared payload with the physical trailing ports;
+						// the complete generic erasure is checked by that same proof.
 						aligned := slices.Clone(mt.ParamTypes)
 						copy(aligned[1:], sigParams)
 						mt.ParamTypes = aligned
@@ -5558,20 +5557,27 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 		}
 		c.constructorLowerings[renderedConstructorPlan.lowering.descriptor] = renderedConstructorPlan.lowering
 	}
+	if declaration := c.sealConstructorAccessDeclaration(dumped); declaration != nil {
+		dumped.constructorAccessDeclaration = declaration
+		c.ordinaryConstructorEmissionSeen = true
+	}
 	return dumped, nil
 }
 
 type dumpedMethods struct {
-	inheritedBridge             *inheritedBridgePacket
-	inheritedBridgeCode         string
-	constructorLowering         *sourceConstructorLoweringPlan
-	constructorLoweringCode     string
-	constructorBindingSignature string
-	constructorBindingCode      string
-	serializableReferences      *serializableReferenceMethodGraph
-	compilerReference           *lambdaCompilerReference
-	lambdaEmission              *lambdaMethodEmission
-	enumLambdaInitializer       *enumLambdaInitializerReceipt
+	privateNestTarget            *privateNestTarget
+	privateNestCode              string
+	constructorAccessDeclaration *constructorAccessDeclaration
+	inheritedBridge              *inheritedBridgePacket
+	inheritedBridgeCode          string
+	constructorLowering          *sourceConstructorLoweringPlan
+	constructorLoweringCode      string
+	constructorBindingSignature  string
+	constructorBindingCode       string
+	serializableReferences       *serializableReferenceMethodGraph
+	compilerReference            *lambdaCompilerReference
+	lambdaEmission               *lambdaMethodEmission
+	enumLambdaInitializer        *enumLambdaInitializerReceipt
 	// Only the concrete declaration writer sets these offsets. Class recovery
 	// may edit an unsealed body without parsing or reinterpreting its header.
 	sourceBodyStart, sourceBodyEnd int
@@ -9936,25 +9942,8 @@ func fixProtobufRemainingReconstructs(body string) string {
 			"public static <Type extends Message> RpcCallback<Type> specializeCallback(RpcCallback<Message> var0) {\n\t\treturn var0;\n\t}",
 			"public static <Type extends Message> RpcCallback<Type> specializeCallback(RpcCallback<Message> var0) {\n\t\treturn (RpcCallback<Type>) (RpcCallback) (var0);\n\t}")
 	}
-	// SmallSortedMap: K extends Comparable<K>; anonymous FieldDescriptorType needs the bound.
-	if strings.Contains(body, "class SmallSortedMap$1") {
-		body = strings.ReplaceAll(body,
-			"final class SmallSortedMap$1<FieldDescriptorType> extends SmallSortedMap<FieldDescriptorType, Object> {",
-			"final class SmallSortedMap$1<FieldDescriptorType extends Comparable<FieldDescriptorType>> extends SmallSortedMap<FieldDescriptorType, Object> {")
-	}
-	if strings.Contains(body, "class SmallSortedMap") {
-		body = strings.ReplaceAll(body,
-			"var1.compareTo(((SmallSortedMap$Entry)(this.entryList.get(var3))).getKey())",
-			"var1.compareTo((K)(((SmallSortedMap$Entry)(this.entryList.get(var3))).getKey()))")
-		body = strings.ReplaceAll(body,
-			"var1.compareTo(((SmallSortedMap$Entry)(this.entryList.get(var4))).getKey())",
-			"var1.compareTo((K)(((SmallSortedMap$Entry)(this.entryList.get(var4))).getKey()))")
-	}
 	// Struct map keys are Object from entrySet.
 	if strings.Contains(body, "class Struct") {
-		body = strings.ReplaceAll(body,
-			".setKey(var3.getKey()).setValue(var3.getValue())",
-			".setKey((String)(var3.getKey())).setValue((Value)(var3.getValue()))")
 		body = strings.ReplaceAll(body,
 			".put(var5.getKey(),var5.getValue())",
 			".put((String)(var5.getKey()),(Value)(var5.getValue()))")

@@ -15,8 +15,16 @@ import (
 // The enclosing scope completion still checks constructors and declaration
 // rows before any result leaves the transaction. Fresh Code stays opaque.
 func restoreHiddenMemberSignatures(want, got *ClassObject, compiled []byte, layout *compiledMetadataLayout, scopes []types.LexicalTypeScope, work *workbudget.Budget) ([]byte, error) {
+	return restoreProjectedMemberSignatures(want, got, compiled, layout, scopes, work, nil)
+}
+
+func restoreProjectedMemberSignatures(want, got *ClassObject, compiled []byte, layout *compiledMetadataLayout, scopes []types.LexicalTypeScope, work *workbudget.Budget, override func(*MemberInfo, string, string) bool) ([]byte, error) {
 	fail := func(s string) ([]byte, error) {
-		return nil, constructorLoweringFailure(work, "hidden member signature: "+s)
+		kind := "hidden member signature: "
+		if override != nil {
+			kind = "override parameter signature: "
+		}
+		return nil, constructorLoweringFailure(work, kind+s)
 	}
 	if len(want.Methods) != len(got.Methods) || len(want.Fields) != len(got.Fields) || len(want.Methods)+len(want.Fields) > 8192 || work.CheckAlloc(int64(len(compiled))*3+int64(len(got.ConstantPool))*64) != nil {
 		return fail("member inventory or allocation budget")
@@ -76,10 +84,21 @@ func restoreHiddenMemberSignatures(want, got *ClassObject, compiled []byte, layo
 			if group == 1 {
 				original, target = "()"+original, "()"+desc
 			}
-			projected, proved := types.ProjectHiddenLexicalMethodSignature(scopes, original)
+			var projected string
+			var proved bool
 			erased, _, erasureValid := types.EraseLexicalScopedMethodSignatureWithThrows(scopes, original)
 			if group == 1 && gp {
 				fresh = "()" + fresh
+			}
+			if override != nil {
+				actual := fresh
+				if !gp {
+					actual = target
+				}
+				proved = group == 0 && override(before, original, actual)
+				projected = actual
+			} else {
+				projected, proved = types.ProjectHiddenLexicalMethodSignature(scopes, original)
 			}
 			if !valid || !freshValid || !proved || !erasureValid || erased != target || gp && projected != fresh || !gp && projected != target {
 				return fail("fresh signature differs from lexical projection")

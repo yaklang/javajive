@@ -90,6 +90,22 @@ func (f *FunctionCallExpression) planErasedResultChain(ctx *class_context.ClassC
 	owner := "L" + strings.ReplaceAll(f.ClassName, ".", "/") + ";"
 	valid := true
 	hasParameterized := false
+	if !f.IsStatic && len(ps) > 0 && ctx.InvocationMetadata != nil {
+		// Receiver instantiation constrains even an Object-valued argument
+		// (Builder<String>.put(Object)). It is a use-site generic constraint,
+		// just like a parameterized operand, and may be erased only under the
+		// same descriptor-exact tuple and independently proved result context.
+		// A zero-input factory has no such argument obligation. Leave its
+		// receiver intact; the consuming fluent edge owns its raw result view.
+		raw, args := f.receiverParamTypeArgs(ctx)
+		meta, known := ctx.InvocationMetadata(strings.ReplaceAll(f.ClassName, ".", "/"))
+		if known && meta.Name == strings.ReplaceAll(f.ClassName, ".", "/") && meta.MembersComplete && meta.ParentsComplete && sameErasureClassName(raw, f.ClassName) && len(args) > 0 && erasedResultUniqueTarget(meta, f) && f.declaredClassArgumentConstraints(meta, ctx) {
+			hasParameterized = true
+		}
+		if known && !hasParameterized && f.freshReceiverClassArgumentConstraints(meta, ctx) {
+			hasParameterized = true
+		}
+	}
 	for i, arg := range f.Arguments {
 		if arg == nil || arg.Type() == nil {
 			valid = false

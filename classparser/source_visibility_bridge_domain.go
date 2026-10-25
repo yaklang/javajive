@@ -2,8 +2,10 @@ package javaclassparser
 
 import (
 	"slices"
+	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 )
 
 // javac versions disagree about visibility forwarders for generic methods
@@ -15,9 +17,29 @@ func (c *ClassObjectDumper) inheritedVisibilityDomainParent() *ClassObject {
 		return nil
 	}
 	owner := c.obj.GetSupperClassName()
-	parent, known := c.nativeAnnotationDeclarationResolver()(owner)
-	if !known || parent == nil || parent.GetClassName() != owner || parent.AccessFlags&0x6201 != 0 || len(parent.Methods) > 4096 {
+	resolve := c.nativeAnnotationDeclarationResolver()
+	parent, known := resolve(owner)
+	if !known || parent == nil || parent.GetClassName() != owner || parent.AccessFlags&0x6200 != 0 || len(parent.Methods) > 4096 {
 		return nil
+	}
+	if parent.AccessFlags&1 != 0 {
+		// ClassFile access is not source access: a protected member class
+		// has ACC_PUBLIC in its physical header. Its original reciprocal
+		// InnerClasses edge carries the narrower lexical declaration. A
+		// public top-level parent (or an unproved/mismatched edge) remains
+		// outside this domain. Neither a fresh compiler row nor a '$' name
+		// is evidence of that original declaration.
+		if !nativeMemberDeclarationMetadataBounded(parent, c.Work) {
+			return nil
+		}
+		outerName, _, flags, named := originalMemberOwner(parent)
+		if !named || flags&7 != 4 || flags & ^uint16(0x761f) != 0 || parent.AccessFlags & ^uint16(0x7631) != 0 || flags&0x7610 != parent.AccessFlags&0x7610 {
+			return nil
+		}
+		outer, known := resolve(outerName)
+		if !known || outer == nil || outer.GetClassName() != outerName || !nativeOriginalDeclarationEdge(outer, parent, c.Work) {
+			return nil
+		}
 	}
 	return parent
 }
@@ -57,8 +79,19 @@ func (c *ClassObjectDumper) extraInheritedVisibilityBridge(fresh *ClassObject, m
 		}
 		if name == p.name && desc == p.descriptor {
 			throws, known := originalMethodExceptions(parent, target)
-			if target.AccessFlags != 1 || !known || !slices.Equal(throws, p.throws) {
+			if target.AccessFlags&^uint16(0x80) != 1 || !known || !slices.Equal(throws, p.throws) {
 				return false
+			}
+			// A resolved JVM invocation passes its array port unchanged. Varargs
+			// is a source-call convention, not an executable adaptation. Admit
+			// that marker only when its physical final parameter really is an
+			// array; the pure forwarding proof above still forbids allocation,
+			// casts, repacking or a different target descriptor.
+			if target.AccessFlags&0x80 != 0 {
+				params, _, err := callbinding.Descriptor(desc)
+				if err != nil || len(params) == 0 || !strings.HasPrefix(params[len(params)-1], "[") {
+					return false
+				}
 			}
 			matches++
 		}

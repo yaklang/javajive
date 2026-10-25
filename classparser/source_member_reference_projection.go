@@ -10,7 +10,7 @@ import (
 )
 
 // A physical member with no own formals can redeclare its nearest enclosing
-// formals. References then spell Outer<T>.Member as Outer$Member<T>. Prove the
+// formals; an own-formal member retains its own ordered arguments. Prove the
 // actual source declaration and each original ownership edge before comparing
 // the relocated arguments; equal erasure alone never establishes this relation.
 func memberReferenceSignatureProjection(original, fresh, descriptor string, scopes []types.LexicalTypeScope, projected func(string) ([]string, bool), resolve func(string) (*ClassObject, bool), work *workbudget.Budget) bool {
@@ -63,7 +63,7 @@ func memberReferenceSignatureProjection(original, fresh, descriptor string, scop
 				// TypeArgs also supports legacy flattened consumers and can retain
 				// the nearest owner's arguments. Only the original final segment
 				// describes this member's own declaration arguments.
-				if len(x.OwnerSegments) < 2 || len(y.OwnerSegments) != 0 || len(x.OwnerSegments[len(x.OwnerSegments)-1].TypeArgs) != 0 {
+				if len(x.OwnerSegments) < 2 || len(y.OwnerSegments) != 0 {
 					return false
 				}
 				names, known := projected(strings.ReplaceAll(x.RawClassName, ".", "/"))

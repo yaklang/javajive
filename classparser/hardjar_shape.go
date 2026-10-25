@@ -163,10 +163,10 @@ func applyMockitoCodeShapes(body string) string {
 	if strings.Contains(body, ".getAllInvocations()") {
 		body = wrapGetAllInvocationsList(body)
 	}
-	body = fixMapToIntForEachRemove(body)
-	if strings.Contains(body, "Integer::intValue") {
-		body = strings.ReplaceAll(body, "Integer::intValue", "x -> ((Integer)x).intValue()")
-	}
+	// The typed SAM/implementation binding owns method-reference adaptation.
+	// Textual arrow substitution invents a synthetic declaration and can move
+	// a bound receiver's eager null check to invocation time. A raw stream or
+	// overloaded member name is not evidence for changing that factory.
 	body = strings.ReplaceAll(body, ".implement((List)(new ArrayList(", ".implement((List<Type>)(new ArrayList(")
 	body = strings.ReplaceAll(body, "new TreeSet(Comparator.comparing(Class::getName))", "new TreeSet<Class>(Comparator.comparing((Class c) -> c.getName()))")
 	if strings.Contains(body, "implements FieldAnnotationProcessor<A>") && !strings.Contains(body, "extends java.lang.annotation.Annotation") {
@@ -445,35 +445,6 @@ func fixGetWantedAssignCast(body string) string {
 		wrapped := "(ContainsExtraTypeInfo)(" + call + ")"
 		body = body[:k] + wrapped + body[i+len(".getWanted()"):]
 		from = k + len(wrapped)
-	}
-}
-
-func fixMapToIntForEachRemove(body string) string {
-	// IntStream.forEach(list::remove) is an invalid overloaded method ref.
-	const needle = "::remove)"
-	if !strings.Contains(body, needle) || !strings.Contains(body, "mapToInt") {
-		return body
-	}
-	from := 0
-	for {
-		rel := strings.Index(body[from:], "::remove)")
-		if rel < 0 {
-			return body
-		}
-		i := from + rel
-		// ident::remove
-		k := i
-		for k > 0 && isJavaIdentChar(body[k-1]) {
-			k--
-		}
-		ident := body[k:i]
-		if !isDecompilerLocal(ident) {
-			from = i + len("::remove")
-			continue
-		}
-		neu := "(i -> " + ident + ".remove(i))"
-		body = body[:k] + neu + body[i+len("::remove"):]
-		from = k + len(neu)
 	}
 }
 

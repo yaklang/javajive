@@ -86,6 +86,33 @@ func EraseClassBoundInvariantMethodSignatureWithThrows(classSignature, methodSig
 	return actual, throws, true
 }
 
+// EraseLexicalInvariantMethodSignatureWithThrows checks class and method
+// declarations in their separate scopes, then requires every physical port to
+// be independent of either set of binders. Removing the method declaration
+// prefix is not enough: full lexical validation must precede the substitution-
+// free erasure so free variables cannot disappear inside type arguments.
+// This certifies erasure, not overload selection or permission to rewrite Code.
+func EraseLexicalInvariantMethodSignatureWithThrows(classSignature, methodSignature string) (string, []string, bool) {
+	expected, exceptions, valid := EraseLexicalMethodSignatureWithThrows(classSignature, methodSignature)
+	if !valid {
+		return "", nil, false
+	}
+	body := methodSignature
+	formals := MethodFormalTypeParamNames(methodSignature)
+	if len(formals) > 0 {
+		_, _, tail, known := signatureConcreteFormalBounds(methodSignature, formals)
+		if !known {
+			return "", nil, false
+		}
+		body = tail
+	}
+	actual, throws, stable := eraseMethodSignature(body, nil)
+	if !stable || actual != expected || !slices.Equal(throws, exceptions) {
+		return "", nil, false
+	}
+	return actual, throws, true
+}
+
 // EraseRawClassInstanceMethodSignatureWithThrows applies JLS raw member
 // erasure only to instance methods of a generic declaring class. Class and
 // method scopes are checked separately; a method declaration may shadow a

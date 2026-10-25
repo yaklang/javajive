@@ -18,7 +18,7 @@ func TestAdversarialInheritedBridgeRequiresExactTypedSuperForwarding(t *testing.
 		t.Fatal("native original compiler required")
 	}
 	files := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, inheritedCovariantBridgeFixture, "BridgeOuter", "none", false)
-	for _, kind := range []string{"control", "pre-covariant version", "later protocol", "nonzero minor", "not bridge", "wrong receiver", "wrong wide slot", "virtual target", "effectful prefix", "wrong return", "handler", "missing parent", "foreign parent", "final target", "varargs nonarray target", "varargs static target", "varargs final target", "generic target", "duplicate method", "own narrow declaration", "budget", "canceled"} {
+	for _, kind := range []string{"control", "protected program", "public bridge protected target", "protected bridge public target", "package bridge", "private target", "pre-covariant version", "later protocol", "nonzero minor", "not bridge", "wrong receiver", "wrong wide slot", "virtual target", "effectful prefix", "wrong return", "handler", "missing parent", "foreign parent", "final target", "varargs nonarray target", "varargs static target", "varargs final target", "generic target", "duplicate method", "own narrow declaration", "budget", "canceled"} {
 		t.Run(kind, func(t *testing.T) {
 			o := mustParseLowering(t, bytes.Clone(files["BridgeOuter$Leaf.class"]))
 			parent := mustParseLowering(t, bytes.Clone(files["BridgeOuter.class"]))
@@ -46,6 +46,16 @@ func TestAdversarialInheritedBridgeRequiresExactTypedSuperForwarding(t *testing.
 			ops := constructorMotionOps(d)
 			var work *workbudget.Budget
 			switch kind {
+			case "protected program":
+				m.AccessFlags, target.AccessFlags = 0x1044, 4
+			case "public bridge protected target":
+				target.AccessFlags = 4
+			case "protected bridge public target":
+				m.AccessFlags = 0x1044
+			case "package bridge":
+				m.AccessFlags = 0x1040
+			case "private target":
+				target.AccessFlags = 2
 			case "pre-covariant version":
 				o.MajorVersion = 48
 			case "later protocol":
@@ -110,7 +120,7 @@ func TestAdversarialInheritedBridgeRequiresExactTypedSuperForwarding(t *testing.
 				b, k := files[n+".class"]
 				return b, k
 			}
-			if (reader.inheritedBridgeOriginal(m) != nil) != (kind == "control") {
+			if (reader.inheritedBridgeOriginal(m) != nil) != (kind == "control" || kind == "protected program" || kind == "public bridge protected target") {
 				t.Fatal("unproved super binding", kind)
 			}
 		})

@@ -24,6 +24,21 @@ func constructorEnclosingDeclarationSignature(object *ClassObject, method *Membe
 	return constructorEnclosingSignature(object, method, false, work, resolver...)
 }
 
+func (c *ClassObjectDumper) constructorDeclarationHasEnclosingPort(method *MemberInfo, signature string) bool {
+	if c == nil || c.obj == nil || method == nil {
+		return false
+	}
+	// Require the same original Signature that the declaration writer consumed.
+	// A field with a conventional compiler spelling cannot establish membership,
+	// capture provenance, or the erasure of the remaining arguments.
+	original, valid := nativeMethodLocalOriginalSignature(c.obj, method.Attributes, c.Work)
+	if !valid || original != signature {
+		return false
+	}
+	_, proved := constructorEnclosingDeclarationSignature(c.obj, method, c.Work, c.nativeAnnotationDeclarationResolver())
+	return proved
+}
+
 func constructorEnclosingSignature(object *ClassObject, method *MemberInfo, uniqueArity bool, work *workbudget.Budget, resolver ...func(string) (*ClassObject, bool)) (string, bool) {
 	if object == nil || method == nil || len(object.Methods) > 4096 || !nativeProofWork(work, int64(len(object.Methods))+1) {
 		return "", false

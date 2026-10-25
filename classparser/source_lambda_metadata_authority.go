@@ -25,7 +25,16 @@ type sourceLambdaMetadataAuthority struct {
 	constructors map[string]*sourceConstructorMetadataPlan
 	anonymous    map[string]*sourceAnonymousClassMetadataPlan
 	publications map[string]*sourceLambdaPublication
-	bytes        int64
+	// Several complete provisional layouts can coexist with a cached source
+	// unit. Retain their certificates by exact source identity; only ReadFile
+	// returning that complete unit can activate any of its obligations.
+	publicationSources map[sourceLambdaPublicationKey]*sourceLambdaPublication
+	bytes              int64
+}
+
+type sourceLambdaPublicationKey struct {
+	owner string
+	hash  [32]byte
 }
 
 func (a *sourceLambdaMetadataAuthority) original(object *ClassObject, work *workbudget.Budget) ([]byte, bool) {
@@ -53,8 +62,8 @@ func (a *sourceLambdaMetadataAuthority) sourceReturned(owner string, source []by
 	hash := sha256.Sum256(source)
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	publication := a.publications[owner]
-	if publication == nil || publication.sourceHash != hash {
+	publication := a.publicationLocked(owner, hash)
+	if publication == nil {
 		return nil
 	}
 	for _, plan := range publication.plans {
@@ -238,17 +247,27 @@ type sourceLambdaPublication struct {
 	constructors             []*sourceConstructorMetadataPlan
 	anonymous                []*sourceAnonymousClassMetadataPlan
 	enums                    []sourceEnumArrayOrigin
+	nests                    []sourcePrivateNestOrigin
 }
 
 func (a *sourceLambdaMetadataAuthority) publication(owner, source string) *sourceLambdaPublication {
 	hash := sha256.Sum256([]byte(source))
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	publication := a.publications[owner]
-	if publication == nil || publication.sourceHash != hash {
-		return nil
+	return a.publicationLocked(owner, hash)
+}
+
+// Caller holds mu. Source equality remains exact, including formatting and
+// ownership comments. A later layout is neither an invalidation of cached
+// source nor permission to activate a different source's metadata plans.
+func (a *sourceLambdaMetadataAuthority) publicationLocked(owner string, hash [32]byte) *sourceLambdaPublication {
+	if publication := a.publications[owner]; publication != nil && publication.sourceHash == hash {
+		return publication
 	}
-	return publication
+	if publication := a.publicationSources[sourceLambdaPublicationKey{owner, hash}]; publication != nil && publication.sourceHash == hash {
+		return publication
+	}
+	return nil
 }
 
 func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members []string) bool {
@@ -270,7 +289,16 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 	// plans independently prove all-hidden ports and an exact compiler target.
 	enumPublicationAllowed := c.options.SourceCompiler.effective() == ModernJavac && c.options.TargetSourceVersion >= 8 && c.options.TargetSourceVersion <= 21
 	ownEnum := enumPublicationAllowed && c.nativeEnumBacking != nil && c.nativeEnumBacking.object == c.obj && !c.sourceDegraded && !legacySourceHasFailureMarker(source)
-	if own == nil && !ownEnum && len(c.sourceLambdaMembers) == 0 && len(c.sourceConstructorMembers) == 0 && len(c.sourceFlatEnumBodies) == 0 {
+	var ownNest *sourcePrivateNestOrigin
+	if authority := c.privateNestCompletionAuthority(); authority != nil {
+		authority.mu.Lock()
+		origin, known := authority.nestPending[c.obj.GetClassName()]
+		authority.mu.Unlock()
+		if known && origin.sourceHash == hash && origin.originalHash != ([32]byte{}) {
+			ownNest = &sourcePrivateNestOrigin{c.obj.GetClassName(), origin.originalHash}
+		}
+	}
+	if own == nil && !ownEnum && ownNest == nil && len(c.sourceLambdaMembers) == 0 && len(c.sourceConstructorMembers) == 0 && len(c.sourceFlatEnumBodies) == 0 {
 		return true
 	}
 	// Enum-only origins transport a completed lexical source packet; they
@@ -298,7 +326,7 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 	}
 	for _, nested := range constantPublications {
 		// Flat constant bodies have no arbitrary nested declaration authority.
-		if len(nested.constructors) != 0 || len(nested.anonymous) != 0 || len(nested.enums) != 0 {
+		if len(nested.constructors) != 0 || len(nested.anonymous) != 0 || len(nested.enums) != 0 || len(nested.nests) != 0 {
 			return false
 		}
 		for _, plan := range nested.plans {
@@ -334,6 +362,15 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 		publication.enums = append(publication.enums, origin)
 		return true
 	}
+	nestSeen := map[string]bool{}
+	addNest := func(origin sourcePrivateNestOrigin) bool {
+		if origin.owner == "" || origin.originalHash == ([32]byte{}) || nestSeen[origin.owner] || len(publication.nests) >= 129 || !nativeProofWork(c.Work, int64(len(origin.owner))+1) {
+			return false
+		}
+		nestSeen[origin.owner] = true
+		publication.nests = append(publication.nests, origin)
+		return true
+	}
 	bytes := int64(0)
 	for _, member := range c.sourceConstructorMembers {
 		cost := int64(len(source)) + 1
@@ -365,6 +402,11 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 			}
 			for _, origin := range nested.enums {
 				if !addEnum(origin) {
+					return false
+				}
+			}
+			for _, origin := range nested.nests {
+				if !addNest(origin) {
 					return false
 				}
 			}
@@ -422,6 +464,11 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 				return false
 			}
 		}
+		for _, origin := range member.publication.nests {
+			if !addNest(origin) {
+				return false
+			}
+		}
 	}
 	if (len(publication.plans) != 0 || len(publication.anonymous) != 0) && !c.artifactLambdaMetadataAllowed() {
 		return false
@@ -437,12 +484,17 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 	if ownEnum && !addEnum(sourceEnumArrayOrigin{c.obj.GetClassName(), publication.originalHash}) {
 		return false
 	}
+	if ownNest != nil && (ownNest.originalHash != publication.originalHash || !addNest(*ownNest)) {
+		return false
+	}
 	if c.sourceDegraded || legacySourceHasFailureMarker(source) {
 		// A partial owning unit is not executable reconstruction authority.
 		// Existing metadata plans keep their independent narrower contracts.
 		publication.enums = nil
+		publication.nests = nil
 	}
-	size := int64(128 + len(publication.owner) + len(publication.plans)*16)
+	// Charge the retained version index as well as the certificate itself.
+	size := int64(224 + 2*len(publication.owner) + len(publication.plans)*16)
 	for _, plan := range publication.constructors {
 		size += int64(128 + len(plan.owner) + len(plan.descriptor) + len(plan.flags)*2)
 	}
@@ -452,22 +504,31 @@ func (c *ClassObjectDumper) sealArtifactLambdaPublication(source string, members
 	for _, origin := range publication.enums {
 		size += int64(96 + len(origin.owner))
 	}
+	for _, origin := range publication.nests {
+		size += int64(96 + len(origin.owner))
+	}
 	if c.Work != nil && c.Work.CheckAlloc(size) != nil {
 		return false
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if prior := a.publications[publication.owner]; prior != nil && prior.originalHash == publication.originalHash && prior.sourceHash == publication.sourceHash && slices.Equal(prior.plans, publication.plans) && slices.EqualFunc(prior.constructors, publication.constructors, sourceConstructorMetadataPlansEqual) && slices.EqualFunc(prior.anonymous, publication.anonymous, sourceAnonymousMetadataPlansEqual) && slices.Equal(prior.enums, publication.enums) {
+	if prior := a.publicationLocked(publication.owner, publication.sourceHash); prior != nil {
 		// The typed/source checks above still run on a cache hit. Reusing the
-		// same immutable publication must not spend retained-memory allowance.
-		return true
+		// same immutable publication must not spend retained-memory allowance,
+		// including when a later speculative layout is the latest publication.
+		// A conflicting certificate for identical source cannot replace it.
+		return prior.originalHash == publication.originalHash && slices.EqualFunc(prior.plans, publication.plans, sourceLambdaMetadataPlansEqual) && slices.EqualFunc(prior.constructors, publication.constructors, sourceConstructorMetadataPlansEqual) && slices.EqualFunc(prior.anonymous, publication.anonymous, sourceAnonymousMetadataPlansEqual) && slices.Equal(prior.enums, publication.enums) && slices.Equal(prior.nests, publication.nests)
 	}
-	if size > (16<<20)-a.bytes || len(a.publications) >= 4096 {
+	if size > (16<<20)-a.bytes || len(a.publications) >= 4096 || len(a.publicationSources) >= 4096 {
 		return false
 	}
 	if a.publications == nil {
 		a.publications = map[string]*sourceLambdaPublication{}
 	}
+	if a.publicationSources == nil {
+		a.publicationSources = map[sourceLambdaPublicationKey]*sourceLambdaPublication{}
+	}
+	a.publicationSources[sourceLambdaPublicationKey{publication.owner, publication.sourceHash}] = publication
 	a.publications[publication.owner] = publication
 	a.bytes += size
 	return true
