@@ -256,6 +256,7 @@ func convertSplitContinueToLatch(manager *RewriteManager, circleNode *core.Node)
 }
 
 func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
+	materializeSwitchLatchContinues(manager, circleNode)
 	convertSplitContinueToLatch(manager, circleNode)
 	loopEnd := searchCircleEndNode(circleNode, circleNode.Next[0], manager.DominatorMap, manager.LoopRegionReducible)
 
