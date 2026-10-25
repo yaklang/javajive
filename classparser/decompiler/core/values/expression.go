@@ -4544,7 +4544,7 @@ func (f *FunctionCallExpression) witnessOverloadPinCast(i int, argType, param ty
 			return ""
 		}
 	}
-	if f.recoverableGenericParamType(i, funcCtx) != nil {
+	if recovered := f.recoverableGenericParamType(i, funcCtx); recovered != nil && !sameConcreteDescriptorFormal(recovered, param) {
 		return ""
 	}
 	proof := f.overloadFamilyProof(funcCtx)
@@ -4599,6 +4599,24 @@ func witnessStealShaped(f *FunctionCallExpression, argType, param types.JavaType
 		return false
 	}
 	return false
+}
+
+// A generic Signature may describe an ordinary concrete input (for example
+// <T> T select(View input)). Recovering that same descriptor formal does not
+// create an inference constraint and must not suppress an overload pin. This
+// matters when another use has refined the actual local to a parameterized
+// subtype: assignment compatibility alone would silently select that subtype's
+// overload. Type variables, parameterizations and substituted narrower formals
+// still defer to the source-generic conversion paths.
+func sameConcreteDescriptorFormal(recovered, physical types.JavaType) bool {
+	if recovered == nil || physical == nil {
+		return false
+	}
+	r, rok := recovered.RawType().(*types.JavaClass)
+	p, pok := physical.RawType().(*types.JavaClass)
+	_, rv := types.TypeVariableName(recovered)
+	_, pv := types.TypeVariableName(physical)
+	return rok && pok && r != nil && p != nil && !rv && !pv && r.Name != "" && r.Name == p.Name
 }
 
 func (f *FunctionCallExpression) recoverableGenericParamType(i int, funcCtx *class_context.ClassContext) types.JavaType {
