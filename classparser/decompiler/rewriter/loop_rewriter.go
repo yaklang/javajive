@@ -281,6 +281,12 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 		nextList := []*core.Node{}
 		allNext := slices.Clone(node.Next)
 		for _, next := range allNext {
+			// A structured body already emits these transfers on its abrupt
+			// paths. Emitting another continue/break here would make that
+			// transfer unconditional and discard its normal continuation.
+			if encodedJumpTo(node, next) {
+				continue
+			}
 			// An exception-handler entry (catch / finally-desugar / try-with-resources suppress handler)
 			// is reached ONLY via the exception edge, never by normal loop control flow. LoopJmpRewriter
 			// must not rewrite that edge into a break/continue: doing so deletes the handler from the

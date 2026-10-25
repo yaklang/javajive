@@ -845,6 +845,10 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 	for _, node := range NodeDeduplication(endNodes) {
 		switchNode.AddNext(node)
 	}
+	// Case-local transfers remain abrupt edges of the structured switch.
+	// Retain them for enclosing-loop analysis without turning them into a
+	// second, unconditional transfer after normally completing cases.
+	markEncodedJumps(switchNode, bodyNodes)
 
 	return nil
 }

@@ -14,12 +14,17 @@ import (
 // switch's normal continuation. Removing the bytecode GOTO does not turn that
 // edge into fall-through: the normal continuation may still contain effects.
 // Materialize this boundary before case/if collection makes its edges opaque.
-// Only the nonthrowing local step is copied; the arm's effects stay in place.
+// Each bypass gets its original step once; the arm's effects stay in place.
+// A potentially throwing assignment additionally requires identical protected
+// membership on the direct incoming edge, so its handler selection is unchanged.
 func materializeSwitchLatchContinues(manager *RewriteManager, loop *core.Node) {
 	changed := false
 	for _, latch := range slices.Clone(loop.Source) {
-		copyStep, ok := switchLoopLocalStep(latch)
-		if !ok || len(latch.Next) != 1 || latch.Next[0] != loop {
+		copyStep, pure := switchLoopLocalStep(latch)
+		if !pure {
+			copyStep = switchLoopAssignmentStep(latch)
+		}
+		if copyStep == nil || len(latch.Next) != 1 || latch.Next[0] != loop {
 			continue
 		}
 		if !utils.IsDominate(manager.DominatorMap, loop, latch) {
@@ -38,7 +43,11 @@ func materializeSwitchLatchContinues(manager *RewriteManager, loop *core.Node) {
 					utils.IsDominate(manager.DominatorMap, merge, predecessor) {
 					continue
 				}
+				if !pure && !sameProtectedMembership(manager.RootNode, predecessor, latch) {
+					continue
+				}
 				increment := manager.NewNode(copyStep())
+				increment.OriginPC, increment.HasOriginPC = latch.OriginPC, latch.HasOriginPC
 				transfer := manager.NewNode(statements.NewSourceTransferStatement("continue", ""))
 				transfer.IsJmp = true
 				manager.recordLoopTransfer(transfer, loop, "continue", predecessor)
@@ -151,4 +160,66 @@ func switchLoopLocalStep(node *core.Node) (func() statements.Statement, bool) {
 		}
 		return copied
 	}, true
+}
+
+// Tail duplication along a direct CFG edge preserves evaluation order even
+// when the step calls a method. The caller proves identical handler membership
+// and inserts the copy only on a mutually exclusive bypass of the normal tail.
+// No expression is hoisted and the original step remains on the normal path.
+// Keep the exact store evidence and operands; declarations or nonlocal writes
+// are not ordinary loop-carried local updates.
+func switchLoopAssignmentStep(node *core.Node) func() statements.Statement {
+	if node == nil || !node.HasOriginPC || node.HideNext != nil || len(node.EncodedJumps) != 0 || node.IsJmp || node.IsTryCatch || node.IsCatchStart {
+		return nil
+	}
+	step, ok := node.Statement.(*statements.AssignStatement)
+	if !ok || step == nil || step.IsDeclare || step.IsFirst || step.Final || step.ArrayMember != nil || step.JavaValue == nil || !switchStepCopyStableValue(step.JavaValue) || !step.HasOriginPC || step.OriginPC != node.OriginPC {
+		return nil
+	}
+	local, ok := step.LeftValue.(*values.JavaRef)
+	if !ok || local == nil || local.Id == nil || local.IsThis || local.CustomValue != nil || local.StackVar != nil {
+		return nil
+	}
+	return func() statements.Statement { copy := *step; return &copy }
+}
+
+// Repeating source that declares an anonymous class or a lambda can create a
+// different declaration/call-site identity. Only ordinary calls and bound
+// operands are copy-stable here; opaque emitters and allocation syntax are not.
+// The depth/work bounds also reject cyclic or oversized expression graphs.
+func switchStepCopyStableValue(value values.JavaValue) bool {
+	remaining := 128
+	var visit func(values.JavaValue, int) bool
+	visit = func(value values.JavaValue, depth int) bool {
+		if value == nil || depth > 16 || remaining == 0 {
+			return false
+		}
+		remaining--
+		switch v := value.(type) {
+		case *values.SlotValue:
+			return v != nil && visit(v.GetValue(), depth+1)
+		case *values.JavaRef:
+			return v != nil && (v.Id != nil || v.IsThis) && v.CustomValue == nil && v.StackVar == nil
+		case *values.JavaLiteral:
+			return v != nil
+		case *values.JavaClassValue:
+			return v != nil
+		case *values.FunctionCallExpression:
+			if v == nil || v.Kind == values.InvokeDynamic || v.FunctionName == "<init>" || v.FunctionName == "" || v.Descriptor == "" || len(v.Arguments) > remaining {
+				return false
+			}
+			if v.Object != nil && !visit(v.Object, depth+1) {
+				return false
+			}
+			for _, arg := range v.Arguments {
+				if !visit(arg, depth+1) {
+					return false
+				}
+			}
+			return true
+		default:
+			return false
+		}
+	}
+	return visit(value, 0)
 }
