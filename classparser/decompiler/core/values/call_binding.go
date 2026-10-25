@@ -4,6 +4,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/workbudget"
 	"strings"
 )
 
@@ -160,11 +161,34 @@ func (f *FunctionCallExpression) staticCallHasUniqueErasedBinding(ctx *class_con
 		return false
 	}
 	for _, method := range family.Methods {
-		if method.Desc != f.Descriptor || !method.Public || !method.Static || method.Generic || method.Varargs || method.Bridge {
+		if method.Desc != f.Descriptor || !method.Public || !method.Static || method.Varargs || method.Bridge || !staticBindingParametersConcrete(method, ctx) {
 			return false
 		}
 	}
 	return true
+}
+
+// A Signature attribute can describe only a parameterized return type. That
+// does not introduce a method binder or change applicability of its concrete
+// parameters. Preserve complete family selection while avoiding a descriptor
+// pin on null: naming a reference type would introduce a new CHECKCAST and
+// therefore a class-resolution effect absent from the original instruction.
+func staticBindingParametersConcrete(method callbinding.Method, ctx *class_context.ClassContext) bool {
+	if !method.Generic {
+		return method.Signature == ""
+	}
+	sig := method.Signature
+	if len(sig) == 0 || len(sig) > 8192 || ctx.Work != nil && (ctx.Work.Charge(workbudget.CounterGraphScans, int64(len(sig))*130+1) != nil || ctx.Work.CheckAlloc(int64(len(sig))*256+128) != nil) {
+		return false
+	}
+	erasure, _, valid := types.EraseConcreteMethodSignatureWithThrows(sig)
+	if !valid || erasure != method.Desc {
+		return false
+	}
+	end := strings.IndexByte(method.Desc, ')')
+	// Exact parameter syntax excludes parameterization and type variables,
+	// including inside arrays; the strict erasure parser checks the remainder.
+	return end >= 1 && strings.HasPrefix(sig, method.Desc[:end+1])
 }
 
 func (f *FunctionCallExpression) rawReceiverHasUniqueErasedBinding(ctx *class_context.ClassContext, owner string, params []string, args []callbinding.Argument) bool {
