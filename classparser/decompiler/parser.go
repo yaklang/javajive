@@ -147,6 +147,7 @@ func ParseBytesCode(decompiler *core.Decompiler) (res []statements.Statement, er
 		}
 	}
 	decompiler.InlineDroppedBranchArrayCalls(&sts)
+	decompiler.JoinInitializerFinalStores(&sts)
 	rewriter.RewriteVar(&sts, decompiler.BodyStartId, params, decompiler.FunctionContext)
 	// Restore lazy evaluation when CFG value merging left a single-use instance call
 	// in a local immediately before its null-guarded ternary. Run after RewriteVar so

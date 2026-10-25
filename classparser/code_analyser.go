@@ -224,6 +224,10 @@ func parseBytesCodeWithLambdaCaptureOrder(dumper *ClassObjectDumper, codeAttr *C
 	}
 	parser.OriginalLambdaDeclaration = dumper.originalLambdaDeclaration
 	originalMethod := dumper.CurrentMethod
+	originalObject := dumper.obj
+	parser.OriginalOwnStaticFinalStore = func(pc int, owner, name, descriptor string) bool {
+		return originalOwnStaticFinalStore(originalObject, originalMethod, codeAttr, pc, owner, name, descriptor, dumper.Work)
+	}
 	parser.SerializableLambdaSource = func(request core.CallSiteRequest) (core.SerializableReferenceSource, bool) {
 		return dumper.serializableReferenceFactorySource(originalMethod, codeAttr, request)
 	}
