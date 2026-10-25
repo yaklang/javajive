@@ -95,6 +95,56 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 			}
 		}
 	}
+	// A caught exception copied into a pending completion variable is also a
+	// distinct computational definition, but the structured finally protocol
+	// requires those copies to share one source binder. Track that constraint
+	// through the same witnessed local copies instead of guessing from Throwable
+	// types or variable names. Unknown handler entry ownership grants no split.
+	handlerCopies := map[int]bool{}
+	copyEdges := map[int][]int{}
+	handlersKnown := true
+	byPC := map[uint16]*OpCode{}
+	for _, op := range d.opCodes {
+		if op != nil {
+			byPC[op.CurrentOffset] = op
+		}
+	}
+	queue := []int{}
+	for _, row := range d.ExceptionTable {
+		if row == nil {
+			handlersKnown = false
+			continue
+		}
+		entry := byPC[row.HandlerPc]
+		web, known := webs.webOf[entry]
+		if !known || entry == nil || entry.Instr == nil || !isReferenceStoreOpcode(entry.Instr.OpCode) {
+			handlersKnown = false
+			continue
+		}
+		if !handlerCopies[web] {
+			handlerCopies[web] = true
+			queue = append(queue, web)
+		}
+	}
+	for target, stores := range groups {
+		for _, store := range stores {
+			if len(store.stackConsumed) == 1 {
+				if load := copyLoads[store.stackConsumed[0]]; load != nil {
+					if source, known := webs.webOf[load]; known {
+						copyEdges[source] = append(copyEdges[source], target)
+					}
+				}
+			}
+		}
+	}
+	for i := 0; i < len(queue); i++ {
+		for _, target := range copyEdges[queue[i]] {
+			if !handlerCopies[target] {
+				handlerCopies[target] = true
+				queue = append(queue, target)
+			}
+		}
+	}
 	for _, w := range order {
 		if !complete[w] {
 			continue
@@ -125,14 +175,13 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 			// definitions but still require a shared pending-exception source
 			// binder. Until those source constraints are represented explicitly,
 			// the general equal-type permission requires no raw handlers. A
-			// witnessed copy from another slot/web is independently a new value
-			// definition, even inside a handler region. It must remain separate
-			// while its producer's type is solved. No Val link or matching name
-			// certifies that copy, and dynamic snapshots retain their ownership.
+			// witnessed copy from a complete ordinary web is a new value whose
+			// type still needs solving. Handler completion copies above and dynamic
+			// snapshots retain their separate source-binding constraints.
 			differentType := definedType != nil && seedType != nil && !reflect.DeepEqual(seedType.RawType(), definedType.RawType())
 			independentCopy := false
 			if load := copyLoads[value]; load != nil && GetRetrieveIdx(load) != GetStoreIdx(stores[0]) {
-				if sourceWeb, known := webs.webOf[load]; known && sourceWeb != w {
+				if sourceWeb, known := webs.webOf[load]; known && sourceWeb != w && complete[sourceWeb] && handlersKnown && !handlerCopies[sourceWeb] {
 					independentCopy = true
 				}
 			}

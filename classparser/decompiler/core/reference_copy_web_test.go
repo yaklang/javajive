@@ -10,7 +10,7 @@ import (
 )
 
 func TestHandlerLocalCopyKeepsIndependentTypeFixedPoint(t *testing.T) {
-	for _, kind := range []string{"copy", "missing producer", "missing source web", "same slot", "same web", "entry", "missing store", "snapshot owner"} {
+	for _, kind := range []string{"copy", "missing producer", "missing source web", "same slot", "same web", "entry", "missing store", "snapshot owner", "handler source", "copied handler source", "unknown handler"} {
 		t.Run(kind, func(t *testing.T) {
 			str := types.NewJavaClass("java.lang.String")
 			old := values.NewJavaRef(utils.NewRootVariableId(), nil, str)
@@ -22,8 +22,23 @@ func TestHandlerLocalCopyKeepsIndependentTypeFixedPoint(t *testing.T) {
 			b.stackConsumed = []values.JavaValue{input}
 			use.stackProduced = []values.JavaValue{output}
 			webs := &slotWeb{webOf: map[*OpCode]int{a: 1, load: 2, b: 3, use: 3}, entryWeb: map[int]int{}}
-			d := &Decompiler{FunctionContext: &class_context.ClassContext{}, cachedSlotWebs: webs, opCodes: []*OpCode{a, load, b, use}, opcodeIdToRef: map[*OpCode][][2]any{a: {{old, true}}, b: {{old, false}}}, ExceptionTable: []*ExceptionTableEntry{{StartPc: 0, EndPc: 5, HandlerPc: 6}}}
+			sourceStore, handlerStore := op(OP_ASTORE_2, 2), op(OP_ASTORE_3, 6)
+			sourceStore.stackConsumed = []values.JavaValue{values.NewJavaLiteral("source", str)}
+			handlerStore.stackConsumed = []values.JavaValue{values.NewJavaRef(utils.NewRootVariableId(), nil, str)}
+			webs.webOf[sourceStore], webs.webOf[handlerStore] = 2, 4
+			d := &Decompiler{FunctionContext: &class_context.ClassContext{}, cachedSlotWebs: webs, opCodes: []*OpCode{a, sourceStore, load, b, use, handlerStore}, opcodeIdToRef: map[*OpCode][][2]any{a: {{old, true}}, b: {{old, false}}, sourceStore: {{source, true}}, handlerStore: {{values.NewJavaRef(utils.NewRootVariableId(), nil, str), true}}}, ExceptionTable: []*ExceptionTableEntry{{StartPc: 0, EndPc: 5, HandlerPc: 6}}}
 			switch kind {
+			case "handler source":
+				d.ExceptionTable[0].HandlerPc = 2
+			case "copied handler source":
+				handlerLoad := op(OP_ALOAD_3, 7)
+				handlerValue := values.NewSlotValue(values.NewJavaRef(utils.NewRootVariableId(), nil, str), str)
+				handlerLoad.stackProduced = []values.JavaValue{handlerValue}
+				sourceStore.stackConsumed = []values.JavaValue{handlerValue}
+				d.opCodes = append(d.opCodes, handlerLoad)
+				webs.webOf[handlerLoad] = 4
+			case "unknown handler":
+				d.ExceptionTable[0].HandlerPc = 99
 			case "missing producer":
 				load.stackProduced = nil
 			case "missing source web":
