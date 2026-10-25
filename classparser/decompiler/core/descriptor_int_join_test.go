@@ -10,7 +10,7 @@ import (
 )
 
 func TestDescriptorIntJoinRequiresClosedOriginalNumericDefinitions(t *testing.T) {
-	for _, name := range []string{"char", "byte", "short", "int", "boolean descriptor", "long descriptor", "reference descriptor", "missing descriptor", "wrong origin", "no origin", "undecoded invoke", "wrong invoke", "entry", "missing store", "missing load", "wrong load", "wrong store", "increment other web", "boolean seed", "boolean annotated constant", "local seed", "parameter", "handler", "dynamic", "work cap", "allocation cap"} {
+	for _, name := range []string{"char", "byte", "short", "int", "boolean descriptor", "long descriptor", "reference descriptor", "missing descriptor", "malformed descriptor", "wrong origin", "no origin", "undecoded invoke", "wrong invoke", "entry", "missing store", "missing load", "wrong load", "wrong store", "increment other web", "boolean seed", "boolean annotated constant", "local seed", "parameter", "handler", "dynamic", "work cap", "allocation cap"} {
 		t.Run(name, func(t *testing.T) {
 			typ := types.NewJavaPrimer(types.JavaInteger)
 			a, b, load, invoke, foreign := op(OP_ISTORE_1, 1), op(OP_ISTORE_1, 3), op(OP_ILOAD_1, 4), op(OP_INVOKESTATIC, 2), op(OP_ISTORE_1, 5)
@@ -32,6 +32,8 @@ func TestDescriptorIntJoinRequiresClosedOriginalNumericDefinitions(t *testing.T)
 				desc = "()J"
 			case "reference descriptor":
 				desc = "()Ljava/lang/Object;"
+			case "malformed descriptor":
+				desc = "()Ctrailing"
 			case "missing descriptor":
 				desc = ""
 			}

@@ -2,6 +2,7 @@ package javaclassparser
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -22,7 +23,8 @@ public class WordCompare {
   }return zero?-1:-2;
  }
 }
-class WordCompareDriver {public static void main(String[]args){int rows=0;String[] words={"","p","p0","p1","pa","pb","\u0000","\u0000x","\u8000","\uffff","\uD800\uDC00"};
+class CharCell {final char word;CharCell(char value){word=value;}}
+class WordCompareDriver {static CharCell[] cells(String s){CharCell[] out=new CharCell[s.length()];for(int i=0;i<out.length;i++)out[i]=new CharCell(s.charAt(i));return out;}public static void main(String[]args){int rows=0;String[] words={"","p","p0","p1","pa","pb","\u0000","\u0000x","\u8000","\uffff","\uD800\uDC00"};
  for(String a:words)for(String b:words){int expected=-1;boolean different=false;for(int i=0;i<Math.max(a.length(),b.length());i++){int x=i<a.length()?a.charAt(i):0,y=i<b.length()?b.charAt(i):0;if(x!=0||y!=0)expected=-2;for(int bit=15;bit>=0;bit--)if(((x>>>bit)&1)!=((y>>>bit)&1)){expected=i*16+15-bit;different=true;break;}if(different)break;}
   int got=WordCompare.firstBit(a,0,a.length(),b,0,b.length());if(got!=expected)throw new AssertionError("word bits "+rows+":"+got+" != "+expected);rows++;
  }
@@ -32,20 +34,41 @@ class WordCompareDriver {public static void main(String[]args){int rows=0;String
   if(b!=wantB||s!=wantS||i!=(select?x:0)||WordCompare.effects!=(select?3:0))throw new AssertionError("descriptor join "+x+":"+select);rows++;
  }System.out.println(rows+":character:word:join:all-bits");}}
 `
-	modern, _ := t04Tools(t)
-	for _, profile := range []SourceCompilerProfile{ModernJavac, NativeJavac8} {
-		t.Run(string(profile), func(t *testing.T) {
-			compiler := modern
-			if profile == NativeJavac8 {
-				compiler = os.Getenv("JAVA8_JAVAC")
-				if compiler == "" {
-					t.Fatal("native compiler required")
+
+	for _, producer := range []string{"call", "array", "field"} {
+		t.Run(producer, func(t *testing.T) {
+			text := fixture
+			if producer != "call" {
+				kind, left, right := "char[]", "left[at]", "right[otherAt]"
+				if producer == "field" {
+					kind, left, right = "CharCell[]", "left[at].word", "right[otherAt].word"
 				}
+				text = strings.ReplaceAll(text, "firstBit(String left,int start,int length,String right", "firstBit("+kind+" left,int start,int length,"+kind+" right")
+				text = strings.ReplaceAll(text, "left.charAt(at)", left)
+				text = strings.ReplaceAll(text, "right.charAt(otherAt)", right)
+				args := "a.toCharArray(),0,a.length(),b.toCharArray(),0,b.length()"
+				if producer == "field" {
+					args = "cells(a),0,a.length(),cells(b),0,b.length()"
+				}
+				text = strings.ReplaceAll(text, "a,0,a.length(),b,0,b.length()", args)
 			}
-			compile := func(debug string) map[string][]byte {
-				return compileLambdaParameterMetadataFixture(t, compiler, profile, fixture, "WordCompare", debug, false)
+			modern, _ := t04Tools(t)
+			for _, profile := range []SourceCompilerProfile{ModernJavac, NativeJavac8} {
+				t.Run(string(profile), func(t *testing.T) {
+					compiler := modern
+					if profile == NativeJavac8 {
+						compiler = os.Getenv("JAVA8_JAVAC")
+						if compiler == "" {
+							t.Fatal("native compiler required")
+						}
+					}
+					compile := func(debug string) map[string][]byte {
+						return compileLambdaParameterMetadataFixture(t, compiler, profile, text, "WordCompare", debug, false)
+					}
+					testNativeIndependentCompilerFamilyWithPolicies(t, compile, profile, compiler, []string{"WordCompare"}, "WordCompareDriver", "149:character:word:join:all-bits\n", nil, nil, []string{"normal", "no-source-rewrites"})
+				})
 			}
-			testNativeIndependentCompilerFamilyWithPolicies(t, compile, profile, compiler, []string{"WordCompare"}, "WordCompareDriver", "149:character:word:join:all-bits\n", nil, nil, []string{"normal", "no-source-rewrites"})
+
 		})
 	}
 }

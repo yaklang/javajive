@@ -1,6 +1,7 @@
 package core
 
 import (
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/workbudget"
@@ -10,41 +11,17 @@ import (
 // sibling definition is the literal zero. Preserve that complete reaching web
 // as one numeric declaration. Inferring each branch separately can turn the
 // zero arm into boolean and disconnect the other arm from the joined reads.
-// Only original descriptor calls and integer literals supply domain evidence;
+// Only original typed producers and integer literals supply domain evidence;
 // mutable local types, names and inferred expression types do not.
 func (d *Decompiler) unifyDescriptorIntJoins() {
-	if d == nil || d.getenv("JDEC_LIVEINTERVAL_OFF") != "" || len(d.ExceptionTable) != 0 || len(d.evaluationSnapshots) != 0 || len(d.opCodes) > 8192 || len(d.invokeFuncCall) == 0 {
+	if d == nil || d.getenv("JDEC_LIVEINTERVAL_OFF") != "" || len(d.ExceptionTable) != 0 || len(d.evaluationSnapshots) != 0 || len(d.opCodes) > 8192 {
 		return
 	}
 	if d.Work != nil && (d.Work.Charge(workbudget.CounterGraphScans, int64(len(d.opCodes)+len(d.invokeFuncCall))) != nil || d.Work.CheckAlloc(int64(len(d.opCodes)+len(d.invokeFuncCall))*192) != nil) {
 		return
 	}
-	calls := map[*values.FunctionCallExpression]bool{}
-	decodedCalls := map[*OpCode]bool{}
-	for _, op := range d.opCodes {
-		if op != nil && op.Instr != nil && (op.Instr.OpCode == OP_INVOKEVIRTUAL || op.Instr.OpCode == OP_INVOKESTATIC || op.Instr.OpCode == OP_INVOKESPECIAL || op.Instr.OpCode == OP_INVOKEINTERFACE) {
-			decodedCalls[op] = true
-		}
-	}
-	for op, call := range d.invokeFuncCall {
-		if !decodedCalls[op] || call == nil || !call.HasOriginPC || call.OriginPC != int(op.CurrentOffset) {
-			continue
-		}
-		typ, err := types.ParseMethodDescriptor(call.Descriptor)
-		if err != nil || typ == nil {
-			continue
-		}
-		fn, ok := typ.RawType().(*types.JavaFuncType)
-		if !ok || fn.ReturnType == nil {
-			continue
-		}
-		for _, kind := range []string{types.JavaByte, types.JavaShort, types.JavaChar, types.JavaInteger} {
-			if isExactPrimer(fn.ReturnType, kind) {
-				calls[call] = true
-			}
-		}
-	}
-	if len(calls) == 0 {
+	producers := d.originalNumericJoinProducers()
+	if len(producers) == 0 {
 		return
 	}
 	webs := d.slotWebs()
@@ -80,7 +57,7 @@ func (d *Decompiler) unifyDescriptorIntJoins() {
 		if d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, int64(len(stores)+len(webs.webOf))) != nil {
 			return
 		}
-		valid, hasCall, uses := true, false, 0
+		valid, hasNumericProducer, uses := true, false, 0
 		for op, owner := range webs.webOf {
 			if owner != web {
 				continue
@@ -119,15 +96,75 @@ func (d *Decompiler) unifyDescriptorIntJoins() {
 				// word as boolean. Its unchanged integer payload still proves
 				// the value; a bool-valued literal supplies no numeric proof.
 				valid = integer && (isExactPrimer(rhs.Type(), types.JavaInteger) || ((word == 0 || word == 1) && isExactPrimer(rhs.Type(), types.JavaBoolean)))
-			case *values.FunctionCallExpression:
-				valid = calls[rhs]
-				hasCall = hasCall || valid
 			default:
-				valid = false
+				valid = producers[rhs]
+				hasNumericProducer = hasNumericProducer || valid
 			}
 		}
-		if valid && hasCall && uses > 0 {
+		if valid && hasNumericProducer && uses > 0 {
 			d.bindProvedPrimitiveWeb(webs, web, stores, types.JavaInteger)
 		}
 	}
+}
+
+// The numeric result witness belongs to the decoded producer, rather than a
+// mutable local type. Calls and fields use their original descriptor; typed
+// array reads use the opcode category. BALOAD is ambiguous between byte[] and
+// boolean[], so it cannot alone establish a numeric source domain.
+func (d *Decompiler) originalNumericJoinProducers() map[values.JavaValue]bool {
+	result := map[values.JavaValue]bool{}
+	for _, op := range d.opCodes {
+		if op == nil || op.Instr == nil {
+			continue
+		}
+		switch op.Instr.OpCode {
+		case OP_INVOKEVIRTUAL, OP_INVOKESTATIC, OP_INVOKESPECIAL, OP_INVOKEINTERFACE:
+			call := d.invokeFuncCall[op]
+			if call == nil || !call.HasOriginPC || call.OriginPC != int(op.CurrentOffset) {
+				continue
+			}
+			if d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, int64(len(call.Descriptor))) != nil {
+				return nil
+			}
+			_, ret, err := callbinding.Descriptor(call.Descriptor)
+			if err == nil && numericJoinDescriptor(ret) {
+				result[call] = true
+			}
+		case OP_IALOAD, OP_CALOAD, OP_SALOAD:
+			if len(op.stackProduced) != 1 {
+				continue
+			}
+			value, ok := safeSeedOperand(op.stackProduced[0]).(*values.JavaArrayMember)
+			if ok && value != nil && value.HasOriginPC && value.OriginPC == int(op.CurrentOffset) && value.Object != nil && value.Index != nil {
+				result[value] = true
+			}
+		case OP_GETFIELD, OP_GETSTATIC:
+			if len(op.stackProduced) != 1 || len(op.Data) != 2 || d.constantPoolGetter == nil {
+				continue
+			}
+			member, ok := d.constantPoolGetter(int(Convert2bytesToInt(op.Data))).(*values.JavaClassMember)
+			if !ok || member == nil || !numericJoinDescriptor(member.Description) {
+				continue
+			}
+			value := safeSeedOperand(op.stackProduced[0])
+			known := false
+			switch field := value.(type) {
+			case *values.RefMember:
+				known = op.Instr.OpCode == OP_GETFIELD && field.OriginalInstanceFieldRead(int(op.CurrentOffset), member.Name, member.Member, member.Description)
+			case *values.JavaClassMember:
+				known = op.Instr.OpCode == OP_GETSTATIC && field.OriginalStaticFieldRead(int(op.CurrentOffset), member.Name, member.Member, member.Description)
+			}
+			if known {
+				result[value] = true
+			}
+		}
+	}
+	return result
+}
+func numericJoinDescriptor(descriptor string) bool {
+	switch descriptor {
+	case "B", "S", "C", "I":
+		return true
+	}
+	return false
 }
