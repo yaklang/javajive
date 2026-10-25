@@ -124,15 +124,37 @@ func lowerLambdaCheckedInputs(original, compiled []byte, plan *sourceLambdaMetad
 			return fail("duplicate projection")
 		}
 		seen[p.generated] = true
-		om, fm := oldMethods[p.original], freshMethods[p.generated]
+		om := oldMethods[p.original]
+		// Reopen a completed adapter by its physical declaration and live
+		// factory, never by the presence of a spare constant. At most one of
+		// the published fresh, input-normalized or fully restored identities
+		// may exist. Completion is therefore idempotent without a cache.
+		actual := p.generated
+		candidates := []sourceLambdaMethodIdentity{p.generated, {p.generated.name, p.original.descriptor}, p.original}
+		unique := map[sourceLambdaMethodIdentity]bool{}
+		var fm *MemberInfo
+		for _, key := range candidates {
+			if unique[key] {
+				continue
+			}
+			unique[key] = true
+			if m := freshMethods[key]; m != nil {
+				if fm != nil {
+					return fail("competing implementations")
+				}
+				fm = m
+				actual = key
+			}
+		}
 		if om == nil || fm == nil {
 			return fail("missing implementation")
 		}
+		completed := actual.descriptor == p.original.descriptor
 		of, os, known := lambdaCheckedInputFactory(want, p.original.name, p.original.descriptor, work)
 		if !known {
 			return fail("original factory")
 		}
-		ff, fs, known := lambdaCheckedInputFactory(got, p.generated.name, p.generated.descriptor, work)
+		ff, fs, known := lambdaCheckedInputFactory(got, actual.name, actual.descriptor, work)
 		if !known || fs.actual != os.actual || fs.erased != os.erased || fs.functional != os.functional || fs.samName != os.samName || p.generated.descriptor != os.actual {
 			return fail("fresh factory adaptation")
 		}
@@ -143,7 +165,9 @@ func lowerLambdaCheckedInputs(original, compiled []byte, plan *sourceLambdaMetad
 		parent := sourceLambdaMethodIdentity{on, od}
 		for _, q := range plan.methods {
 			if q.original == parent {
-				parent = q.generated
+				if freshMethods[q.generated] != nil {
+					parent = q.generated
+				}
 				break
 			}
 		}
@@ -151,9 +175,13 @@ func lowerLambdaCheckedInputs(original, compiled []byte, plan *sourceLambdaMetad
 			return fail("factory declaration moved")
 		}
 		old := lambdaCheckedInputPacket(want, om, os.actual, true, work)
-		fresh := lambdaCheckedInputPacket(got, fm, fs.actual, false, work)
+		fresh := lambdaCheckedInputPacket(got, fm, fs.actual, completed, work)
 		if old == nil || fresh == nil || old.member != fresh.member || old.owner != fresh.owner {
 			return fail("typed forwarding packet")
+		}
+		if completed {
+			normalized.methods[i].generated = actual
+			continue
 		}
 		descriptor, ok := text(p.original.descriptor)
 		if !ok {
@@ -274,6 +302,12 @@ func lowerLambdaCheckedInputs(original, compiled []byte, plan *sourceLambdaMetad
 			return fail("missing live implementation reference")
 		}
 		normalized.methods[i].generated.descriptor = p.original.descriptor
+	}
+	if len(edits) == 0 {
+		if err := work.Check(); err != nil {
+			return nil, nil, err
+		}
+		return compiled, &normalized, nil
 	}
 	edits = append(edits, compiledMetadataEdit{compiledMetadataSpan{8, 10}, word(uint16(count))}, compiledMetadataEdit{compiledMetadataSpan{layout.poolEnd, layout.poolEnd}, added})
 	out, err := applyCompiledMetadataEdits(compiled, edits, work)

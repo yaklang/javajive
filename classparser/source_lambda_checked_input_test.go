@@ -136,6 +136,30 @@ func TestAdversarialLambdaCheckedInputCompletionPreservesInvocationAndRejectsDri
 					if err != nil || normalized == nil {
 						t.Fatal("checked lowering", err)
 					}
+					completedInput := bytes.Clone(out)
+					for _, change := range []string{"idempotent", "missing completed cast", "competing completed implementation"} {
+						t.Run(change, func(t *testing.T) {
+							object := mustParseLowering(t, bytes.Clone(completedInput))
+							member := find(object)
+							if change == "missing completed cast" {
+								constructorLoweringCode(member).Code[1] = core.OP_INSTANCEOF
+							}
+							if change == "competing completed implementation" {
+								duplicate := *member
+								duplicate.DescriptorIndex = sourceBridgePoolString(t, object, p.methods[0].generated.descriptor)
+								object.Methods = append(object.Methods, &duplicate)
+							}
+							raw := object.Bytes()
+							again, next, e := lowerLambdaCheckedInputs(inputOriginal, raw, &p, nil)
+							if change == "idempotent" {
+								if e != nil || next == nil || !bytes.Equal(raw, again) {
+									t.Fatal("completed input is not stable", e)
+								}
+							} else if e == nil || again != nil || next != nil {
+								t.Fatal("drifted completed adapter accepted", e)
+							}
+						})
+					}
 					out, err = restoreLambdaMethodMetadata(inputOriginal, out, normalized, nil)
 					if err != nil {
 						t.Fatal("metadata completion", err)

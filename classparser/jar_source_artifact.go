@@ -91,10 +91,10 @@ func (a *JarSourceArtifact) Close() error { return a.jar.Close() }
 // bindings change; Code, handlers, stack maps, debug tables and string literals
 // retain the compiler's bytes.
 func (a *JarSourceArtifact) RestoreClassMetadata(name string, compiled []byte) ([]byte, error) {
-	return a.restoreClassMetadata(name, compiled, sourceCaptureMetadataTarget{})
+	return a.restoreClassMetadata(name, compiled, sourceCaptureMetadataTarget{}, nil)
 }
 
-func (a *JarSourceArtifact) restoreClassMetadata(name string, compiled []byte, target sourceCaptureMetadataTarget) ([]byte, error) {
+func (a *JarSourceArtifact) restoreClassMetadata(name string, compiled []byte, target sourceCaptureMetadataTarget, preparedLambda *sourceLambdaMetadataPlan) ([]byte, error) {
 	if a == nil || a.jar == nil {
 		return nil, fs.ErrInvalid
 	}
@@ -129,8 +129,15 @@ func (a *JarSourceArtifact) restoreClassMetadata(name string, compiled []byte, t
 	}
 	var lambda *sourceLambdaMetadataPlan
 	if authority := z.sourceLambdaMetadata; authority != nil {
-		lambda = authority.plan(object.GetClassName())
-		if lambda != nil && z.sourceConstructorLowering != nil {
+		// Reconstruction may already have proved and completed input ABI
+		// adapters before whole-member scope checks. Carry that per-call plan
+		// forward; never mutate the shared publication or apply its Code edit
+		// twice. Plain source artifacts still enter through the original plan.
+		lambda = preparedLambda
+		if lambda == nil {
+			lambda = authority.plan(object.GetClassName())
+		}
+		if preparedLambda == nil && lambda != nil && z.sourceConstructorLowering != nil {
 			compiled, lambda, err = lowerLambdaCheckedInputs(original, compiled, lambda, reader.Work)
 			if err != nil {
 				return nil, err

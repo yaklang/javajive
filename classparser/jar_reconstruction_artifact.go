@@ -130,7 +130,7 @@ func (a *JarReconstructionArtifact) FinishClass(name string, compiled []byte) ([
 		z, logical = z.sourceReleaseView(release), candidate
 	}
 	if z != nil && strings.HasSuffix(logical, ".class") && packageDescriptorName(strings.TrimSuffix(logical, ".class")) {
-		return a.source.restoreClassMetadata(name, compiled, sourceCaptureMetadataTarget{})
+		return a.source.restoreClassMetadata(name, compiled, sourceCaptureMetadataTarget{}, nil)
 	}
 	if z == nil || !strings.HasSuffix(logical, ".class") || !nativeSourceBinaryName(strings.TrimSuffix(logical, ".class")) {
 		return nil, fmt.Errorf("constructor lowering: noncanonical class path %q", name)
@@ -195,6 +195,13 @@ func (a *JarReconstructionArtifact) FinishClass(name string, compiled []byte) ([
 	if authority := z.sourceLambdaMetadata; authority != nil {
 		declarationLambda = authority.plan(strings.TrimSuffix(logical, ".class"))
 	}
+	// A checked lambda input changes the physical descriptor as well as Code.
+	// Complete and prove that obligation before applying a declaration-only
+	// projection. Keep its normalized plan local to this completion transaction.
+	lowered, declarationLambda, err = lowerLambdaCheckedInputs(original, lowered, declarationLambda, reader.Work)
+	if err != nil {
+		return nil, err
+	}
 	lowered, err = restoreReconstructionSyntheticFlagsWithLambda(original, lowered, declarationLambda, reader.Work)
 	if err != nil {
 		return nil, err
@@ -229,11 +236,7 @@ func (a *JarReconstructionArtifact) FinishClass(name string, compiled []byte) ([
 		// independent proof first, rather than rejecting an obligation that
 		// the artifact already knows how to complete. The final metadata gate
 		// below still checks the entire finished result.
-		var lambda *sourceLambdaMetadataPlan
-		if authority := z.sourceLambdaMetadata; authority != nil {
-			lambda = authority.plan(strings.TrimSuffix(logical, ".class"))
-		}
-		lowered, err = restoreMethodParameterMetadata(original, lowered, lambda, reader.Work)
+		lowered, err = restoreMethodParameterMetadata(original, lowered, declarationLambda, reader.Work)
 		if err != nil {
 			return nil, err
 		}
@@ -246,5 +249,5 @@ func (a *JarReconstructionArtifact) FinishClass(name string, compiled []byte) ([
 	if err != nil {
 		return nil, err
 	}
-	return a.source.restoreClassMetadata(name, lowered, reconstructionCaptureMetadataTarget(z))
+	return a.source.restoreClassMetadata(name, lowered, reconstructionCaptureMetadataTarget(z), declarationLambda)
 }
