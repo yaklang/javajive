@@ -37,7 +37,7 @@ func constructorLoweringCheckedSuperExceptions(object *ClassObject, method *Memb
 		return "", false
 	}
 	for _, argument := range packet.plan.arguments {
-		if argument.invocation != nil {
+		if argument.invocation != nil || argument.checked != nil {
 			return "", false // An eager argument call owns a separate throws boundary.
 		}
 	}

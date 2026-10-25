@@ -32,6 +32,7 @@ type constructorLoweringArgument struct {
 	owner, name, descriptor string
 	invocation              *constructorLoweringInvocation
 	literal                 *constructorLoweringLiteral
+	checked                 *constructorLoweringArgument
 }
 
 // The movable prefix contains distinct own final synthetic captures from typed
