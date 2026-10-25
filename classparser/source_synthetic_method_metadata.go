@@ -16,14 +16,18 @@ const syntheticMethodFlag uint16 = 0x1000
 // make a method-universe/visibility mismatch acceptable. If this narrow client
 // does not apply, the existing metadata restorer still owns the final refusal.
 func restoreDeclaredSyntheticMethodFlags(original, compiled []byte, work *workbudget.Budget) ([]byte, error) {
-	return restoreSyntheticDeclarationFlags(original, compiled, false, work)
+	return restoreSyntheticDeclarationFlags(original, compiled, false, nil, work)
 }
 
 func restoreReconstructionSyntheticFlags(original, compiled []byte, work *workbudget.Budget) ([]byte, error) {
-	return restoreSyntheticDeclarationFlags(original, compiled, true, work)
+	return restoreSyntheticDeclarationFlags(original, compiled, true, nil, work)
 }
 
-func restoreSyntheticDeclarationFlags(original, compiled []byte, constructorPackets bool, work *workbudget.Budget) ([]byte, error) {
+func restoreReconstructionSyntheticFlagsWithLambda(original, compiled []byte, plan *sourceLambdaMetadataPlan, work *workbudget.Budget) ([]byte, error) {
+	return restoreSyntheticDeclarationFlags(original, compiled, true, plan, work)
+}
+
+func restoreSyntheticDeclarationFlags(original, compiled []byte, constructorPackets bool, plan *sourceLambdaMetadataPlan, work *workbudget.Budget) ([]byte, error) {
 	if len(original) > 32<<20 || len(compiled) > 32<<20 || !nativeProofWork(work, int64(len(original)+len(compiled))+1) {
 		return nil, sourceLambdaMetadataFailure(work, "synthetic method input budget")
 	}
@@ -65,6 +69,10 @@ func restoreSyntheticDeclarationFlags(original, compiled []byte, constructorPack
 		}
 		flags[key] = method.AccessFlags
 	}
+	projection, err := sourceLambdaDeclarationProjection(want, original, plan, work, func(key sourceLambdaMethodIdentity) (uint16, bool) { flags, known := flags[key]; return flags, known })
+	if err != nil {
+		return nil, err
+	}
 	seen := map[sourceLambdaMethodIdentity]bool{}
 	var edits []compiledMetadataEdit
 	var constructorProof func(*MemberInfo) bool
@@ -73,6 +81,9 @@ func restoreSyntheticDeclarationFlags(original, compiled []byte, constructorPack
 		key, known := identity(got, method)
 		if !known || !nativeProofWork(work, int64(len(key.name)+len(key.descriptor))+1) {
 			return nil, sourceLambdaMetadataFailure(work, "invalid compiled synthetic method identity")
+		}
+		if mapped, found := projection[key]; found {
+			key = mapped
 		}
 		expected, found := flags[key]
 		if !found || seen[key] || expected&^syntheticMethodFlag != method.AccessFlags&^syntheticMethodFlag || method.AccessFlags&syntheticMethodFlag != 0 && expected&syntheticMethodFlag == 0 {

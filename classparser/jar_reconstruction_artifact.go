@@ -184,7 +184,14 @@ func (a *JarReconstructionArtifact) FinishClass(name string, compiled []byte) ([
 	if err != nil {
 		return nil, err
 	}
-	lowered, err = restoreReconstructionSyntheticFlags(original, lowered, reader.Work)
+	// Lambda spelling and ordinary synthetic flags are independent compiler
+	// obligations. Apply their published identity projection before checking
+	// the whole declaration bijection; no method-name pattern is authority.
+	var declarationLambda *sourceLambdaMetadataPlan
+	if authority := z.sourceLambdaMetadata; authority != nil {
+		declarationLambda = authority.plan(strings.TrimSuffix(logical, ".class"))
+	}
+	lowered, err = restoreReconstructionSyntheticFlagsWithLambda(original, lowered, declarationLambda, reader.Work)
 	if err != nil {
 		return nil, err
 	}

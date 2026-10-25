@@ -2,7 +2,6 @@ package javaclassparser
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"slices"
@@ -189,24 +188,17 @@ func restoreMethodParameterMetadata(original, compiled []byte, plan *sourceLambd
 		}
 		expected[key] = method
 	}
-	projection := map[sourceLambdaMethodIdentity]sourceLambdaMethodIdentity{}
-	projectedOriginals := map[sourceLambdaMethodIdentity]bool{}
-	planIdentity := func(key sourceLambdaMethodIdentity) sourceLambdaMethodIdentity {
-		return sourceLambdaMethodIdentity{string(NewUtf8FromString(key.name).mutf8Bytes()), string(NewUtf8FromString(key.descriptor).mutf8Bytes())}
-	}
-	if plan != nil {
-		if plan.owner != want.GetClassName() || plan.originalHash != sha256.Sum256(original) || plan.sourceHash == ([32]byte{}) || len(plan.methods) == 0 || len(plan.methods) > 4096 {
-			return fail("unpublished or stale lambda projection")
+	projection, err := sourceLambdaDeclarationProjection(want, original, plan, work, func(key sourceLambdaMethodIdentity) (uint16, bool) {
+		method := expected[key]
+		if method == nil {
+			return 0, false
 		}
-		for _, method := range plan.methods {
-			originalKey, generatedKey := planIdentity(method.original), planIdentity(method.generated)
-			if method.original.descriptor != method.generated.descriptor || projection[generatedKey].name != "" || projectedOriginals[originalKey] || expected[originalKey] == nil || !sourceLambdaImplementationFlags(expected[originalKey].AccessFlags) || !nativeProofWork(work, 1) {
-				return fail("ambiguous lambda projection")
-			}
-			projection[generatedKey] = originalKey
-			projectedOriginals[originalKey] = true
-		}
+		return method.AccessFlags, true
+	})
+	if err != nil {
+		return nil, err
 	}
+
 	// A new UTF8 is encoded from lossless logical name units. Never edit shared
 	// existing constants, import an original CP blob, or use its CP indexes.
 	poolCount := len(got.ConstantPool) + 1
