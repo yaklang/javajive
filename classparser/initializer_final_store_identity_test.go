@@ -3,6 +3,8 @@ package javaclassparser
 import (
 	"bytes"
 	"encoding/binary"
+	"github.com/yaklang/javajive/internal/workbudget"
+	"strings"
 	"testing"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
@@ -73,4 +75,36 @@ func TestAdversarialInitializerFinalStoreNeedsLosslessDeclarationIdentity(t *tes
 			}
 		})
 	}
+}
+
+func TestAdversarialInitializerFinalStoreChargesPhysicalIdentityWork(t *testing.T) {
+	compiler, _ := t04Tools(t)
+	files := compileLambdaParameterMetadataFixture(t, compiler, ModernJavac, `public class FinalIdentity {static int value;static {value=42;}}`, "FinalIdentity", "none", false)
+	obj := mustParseLowering(t, files["FinalIdentity.class"])
+	field := obj.Fields[0]
+	field.AccessFlags |= 0x10
+	// One legal CP name is enough to exceed this request. Counting only fields
+	// misses the actual UTF-16 identity encoding/comparison work.
+	obj.ConstantPool[field.NameIndex-1].(*ConstantUtf8Info).SetString(strings.Repeat("x", 8192))
+	method := sourceParameterTestMethod(t, obj, "<clinit>")
+	code := constructorLoweringCode(method)
+	ops, ok := enumEntryInitializerOps(obj, method, nil)
+	if !ok {
+		t.Fatal("initializer")
+	}
+	for _, op := range ops {
+		if op.Instr.OpCode != core.OP_PUTSTATIC {
+			continue
+		}
+		name, _ := sourceBridgeUTF8(obj, field.NameIndex)
+		if !originalOwnStaticFinalStore(obj, method, code, int(op.CurrentOffset), obj.GetClassName(), name, "I", nil) {
+			t.Fatal("unlimited valid control")
+		}
+		work := workbudget.New(nil, workbudget.Limits{MaxRequestWork: 128})
+		if originalOwnStaticFinalStore(obj, method, code, int(op.CurrentOffset), obj.GetClassName(), name, "I", work) || work.Check() == nil {
+			t.Fatal("physical identity scan escaped shared request budget")
+		}
+		return
+	}
+	t.Fatal("missing store")
 }

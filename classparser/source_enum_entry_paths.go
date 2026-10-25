@@ -78,20 +78,20 @@ func enumEntryPathEffects(obj *ClassObject, code *CodeAttribute, ops []*core.OpC
 		if !known || pair == nil {
 			return false
 		}
-		owner, okOwner := sourceParameterClassKey(obj, ref.ClassIndex)
-		self, okSelf := sourceParameterClassKey(obj, obj.ThisClass)
-		name, okName := sourceParameterUTF8Key(obj, pair.NameIndex)
-		desc, okDesc := sourceParameterUTF8Key(obj, pair.DescriptorIndex)
+		owner, okOwner := initializerIdentityClassKey(obj, ref.ClassIndex, work)
+		self, okSelf := initializerIdentityClassKey(obj, obj.ThisClass, work)
+		name, okName := initializerIdentityUTF8Key(obj, pair.NameIndex, work)
+		desc, okDesc := initializerIdentityUTF8Key(obj, pair.DescriptorIndex, work)
 		if !okOwner || !okSelf || !okName || !okDesc || owner != self {
 			return false
 		}
 		count := 0
 		for _, f := range obj.Fields {
-			if f == nil {
+			if f == nil || !nativeProofWork(work, 1) {
 				return false
 			}
-			n, nk := sourceParameterUTF8Key(obj, f.NameIndex)
-			d, dk := sourceParameterUTF8Key(obj, f.DescriptorIndex)
+			n, nk := initializerIdentityUTF8Key(obj, f.NameIndex, work)
+			d, dk := initializerIdentityUTF8Key(obj, f.DescriptorIndex, work)
 			if nk && dk && n == name && d == desc {
 				if f.AccessFlags&8 == 0 {
 					return false
@@ -304,7 +304,7 @@ func enumEntryPathEffects(obj *ClassObject, code *CodeAttribute, ops []*core.OpC
 					typ := "*"
 					if h.CatchType != 0 {
 						var known bool
-						typ, known = sourceParameterClassKey(obj, h.CatchType)
+						typ, known = initializerIdentityClassKey(obj, h.CatchType, work)
 						if !known {
 							valid = false
 							return

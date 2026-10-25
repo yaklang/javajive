@@ -53,7 +53,7 @@ func enumEntryRegionProgram(obj *ClassObject, code *CodeAttribute, ops []*core.O
 		typ := ""
 		if h.CatchType != 0 {
 			var known bool
-			typ, known = sourceParameterClassKey(obj, h.CatchType)
+			typ, known = initializerIdentityClassKey(obj, h.CatchType, work)
 			if !known {
 				return nil, false
 			}

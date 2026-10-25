@@ -332,13 +332,13 @@ func enumEntryRegionFrames(obj *ClassObject, raw []byte, maxLocals uint16, handl
 			if !valid {
 				return nil, false
 			}
-			typ, valid := sourceParameterClassKey(obj, uint16(index))
+			typ, valid := initializerIdentityClassKey(obj, uint16(index), work)
 			if !valid {
 				return nil, false
 			}
 			expected := "java/lang/Throwable"
 			if catch != 0 {
-				expected, valid = sourceParameterClassKey(obj, catch)
+				expected, valid = initializerIdentityClassKey(obj, catch, work)
 				if !valid {
 					return nil, false
 				}

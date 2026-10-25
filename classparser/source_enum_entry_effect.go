@@ -77,13 +77,13 @@ func enumEntryEffectProgram(obj *ClassObject, ops []*core.OpCode, work *workbudg
 					if c == nil || wide {
 						return nil, false
 					}
-					key, valid := sourceParameterUTF8Key(obj, c.StringIndex)
+					key, valid := initializerIdentityUTF8Key(obj, c.StringIndex, work)
 					if !valid {
 						return nil, false
 					}
 					i.operand = "string\x00" + key
 				case *ConstantClassInfo:
-					key, valid := sourceParameterClassKey(obj, index)
+					key, valid := initializerIdentityClassKey(obj, index, work)
 					if !valid || wide {
 						return nil, false
 					}
@@ -134,9 +134,9 @@ func enumEntryEffectProgram(obj *ClassObject, ops []*core.OpCode, work *workbudg
 				if !valid || pair == nil {
 					return nil, false
 				}
-				owner, okOwner := sourceParameterClassKey(obj, ref.ClassIndex)
-				name, okName := sourceParameterUTF8Key(obj, pair.NameIndex)
-				desc, okDesc := sourceParameterUTF8Key(obj, pair.DescriptorIndex)
+				owner, okOwner := initializerIdentityClassKey(obj, ref.ClassIndex, work)
+				name, okName := initializerIdentityUTF8Key(obj, pair.NameIndex, work)
+				desc, okDesc := initializerIdentityUTF8Key(obj, pair.DescriptorIndex, work)
 				if !okOwner || !okName || !okDesc {
 					return nil, false
 				}

@@ -2,8 +2,38 @@ package javaclassparser
 
 import (
 	"encoding/binary"
+
 	"github.com/yaklang/javajive/internal/workbudget"
 )
+
+// Charge the physical payload before the lossless identity helper builds its
+// display and encoded forms. A single long name, or many references to it,
+// must consume the same request budget as other proof graph work.
+func initializerIdentityUTF8Key(obj *ClassObject, index uint16, work *workbudget.Budget) (string, bool) {
+	if obj == nil || index == 0 || int(index) > len(obj.ConstantPool) {
+		return "", false
+	}
+	u, ok := obj.ConstantPool[index-1].(*ConstantUtf8Info)
+	if !ok || u == nil || u.DecodeErr != nil {
+		return "", false
+	}
+	size := int64(len(u.Units)) + int64(len(u.Value)) + 1
+	if !nativeProofWork(work, size) || work.CheckAlloc(size*16) != nil {
+		return "", false
+	}
+	return sourceParameterUTF8Key(obj, index)
+}
+
+func initializerIdentityClassKey(obj *ClassObject, index uint16, work *workbudget.Budget) (string, bool) {
+	if obj == nil || index == 0 || int(index) > len(obj.ConstantPool) {
+		return "", false
+	}
+	c, ok := obj.ConstantPool[index-1].(*ConstantClassInfo)
+	if !ok || c == nil {
+		return "", false
+	}
+	return initializerIdentityUTF8Key(obj, c.NameIndex, work)
+}
 
 // Source views are not physical member identities. Require the original
 // Fieldref's exact UTF-16 owner/name/descriptor to identify one own static
@@ -30,10 +60,10 @@ func originalOwnStaticFinalStore(obj *ClassObject, method *MemberInfo, code *Cod
 	if !ok || pair == nil {
 		return false
 	}
-	self, sk := sourceParameterClassKey(obj, obj.ThisClass)
-	target, tk := sourceParameterClassKey(obj, ref.ClassIndex)
-	n, nk := sourceParameterUTF8Key(obj, pair.NameIndex)
-	d, dk := sourceParameterUTF8Key(obj, pair.DescriptorIndex)
+	self, sk := initializerIdentityClassKey(obj, obj.ThisClass, work)
+	target, tk := initializerIdentityClassKey(obj, ref.ClassIndex, work)
+	n, nk := initializerIdentityUTF8Key(obj, pair.NameIndex, work)
+	d, dk := initializerIdentityUTF8Key(obj, pair.DescriptorIndex, work)
 	viewName, vn := sourceBridgeUTF8(obj, pair.NameIndex)
 	viewDesc, vd := sourceBridgeUTF8(obj, pair.DescriptorIndex)
 	if !sk || !tk || self != target || !nk || !dk || !vn || !vd || viewName != name || viewDesc != descriptor {
@@ -44,8 +74,8 @@ func originalOwnStaticFinalStore(obj *ClassObject, method *MemberInfo, code *Cod
 		if f == nil || !nativeProofWork(work, 1) {
 			return false
 		}
-		fn, fk := sourceParameterUTF8Key(obj, f.NameIndex)
-		fd, dk := sourceParameterUTF8Key(obj, f.DescriptorIndex)
+		fn, fk := initializerIdentityUTF8Key(obj, f.NameIndex, work)
+		fd, dk := initializerIdentityUTF8Key(obj, f.DescriptorIndex, work)
 		if !fk || !dk {
 			return false
 		}
