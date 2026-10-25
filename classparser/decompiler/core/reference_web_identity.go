@@ -68,6 +68,21 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 	for _, w := range webs.entryWeb {
 		complete[w] = false
 	}
+	// A local-to-local copy can still have the same provisional type as an
+	// earlier use of its destination slot. Its source web may widen only in
+	// the following fixed-point solver. Record the actual LOAD producer now;
+	// comparing those provisional types cannot establish lifetime equality.
+	copyLoads := map[values.JavaValue]*OpCode{}
+	for _, op := range d.opCodes {
+		if op == nil || op.Instr == nil || !isReferenceLoadOpcode(op.Instr.OpCode) {
+			continue
+		}
+		for _, value := range op.stackProduced {
+			if _, ok := value.(*values.SlotValue); ok {
+				copyLoads[value] = op
+			}
+		}
+	}
 	// A store absent from the decoded opcode list is not a complete web.
 	for op, w := range webs.webOf {
 		if op != nil && op.Instr != nil && isLocalStoreOpcode(op.Instr.OpCode) {
@@ -109,10 +124,19 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 			// Duplicated catch/finally paths can have separate computational
 			// definitions but still require a shared pending-exception source
 			// binder. Until those source constraints are represented explicitly,
-			// the new equal-type lifetime permission requires no raw handlers.
-			// Preserve the existing different-type partition independently.
+			// the general equal-type permission requires no raw handlers. A
+			// witnessed copy from another slot/web is independently a new value
+			// definition, even inside a handler region. It must remain separate
+			// while its producer's type is solved. No Val link or matching name
+			// certifies that copy, and dynamic snapshots retain their ownership.
 			differentType := definedType != nil && seedType != nil && !reflect.DeepEqual(seedType.RawType(), definedType.RawType())
-			separateLifetime := firstOwner[first] != w && len(d.ExceptionTable) == 0 && !snapshotOwned[first.Id]
+			independentCopy := false
+			if load := copyLoads[value]; load != nil && GetRetrieveIdx(load) != GetStoreIdx(stores[0]) {
+				if sourceWeb, known := webs.webOf[load]; known && sourceWeb != w {
+					independentCopy = true
+				}
+			}
+			separateLifetime := firstOwner[first] != w && (len(d.ExceptionTable) == 0 || independentCopy) && !snapshotOwned[first.Id]
 			if len(owners[first]) > 1 && value != nil && values.UnpackSoltValue(value) != values.JavaNull && !values.IsNullLiteral(values.UnpackSoltValue(value)) &&
 				definedType != nil && seedType != nil && (differentType || separateLifetime) {
 				seedType = definedType

@@ -24,6 +24,13 @@ class WebResource implements AutoCloseable {
 class WebOwner {
  static Object create(boolean choice){WebEffects.trace+="N";if(WebEffects.mode==1)throw WebEffects.first;return choice?new WebNumber():new WebDirect();}
  static WebResult branch(boolean choice,boolean publish){
+  WebResult selected;
+  try {if(choice){WebInput input=(WebInput)create(true);selected=new WebWrapped(input);}else{selected=(WebResult)create(false);}}
+  catch(RuntimeException failure){WebEffects.trace+="H";throw failure;}
+  if(publish){WebEffects.trace+="P";WebEffects.seen=selected;if(WebEffects.mode==2)throw WebEffects.last;}
+  return selected;
+ }
+ static WebResult copied(boolean choice,boolean publish){
   WebResult result=null;
   try {WebResult selected;if(choice){WebInput input=(WebInput)create(true);selected=new WebWrapped(input);}else{selected=(WebResult)create(false);}result=selected;}
   catch(RuntimeException failure){WebEffects.trace+="H";throw failure;}
@@ -41,9 +48,9 @@ class WebOwner {
  }
 }
 class WebDriver {public static void main(String[]args){int rows=0;
- for(boolean choice:new boolean[]{false,true})for(boolean publish:new boolean[]{false,true})for(int mode=0;mode<3;mode++){
+ for(boolean copy:new boolean[]{false,true})for(boolean choice:new boolean[]{false,true})for(boolean publish:new boolean[]{false,true})for(int mode=0;mode<3;mode++){
   WebEffects.trace="";WebEffects.mode=mode;WebEffects.seen=null;RuntimeException caught=null;WebResult result=null;
-  try{result=WebOwner.branch(choice,publish);}catch(RuntimeException e){caught=e;}
+  try{result=copy?WebOwner.copied(choice,publish):WebOwner.branch(choice,publish);}catch(RuntimeException e){caught=e;}
   RuntimeException want=mode==1?WebEffects.first:mode==2&&publish?WebEffects.last:null;
   if(caught!=want||!WebEffects.trace.equals(mode==1?"NH":publish?"NP":"N"))throw new AssertionError("branch effects: "+WebEffects.trace);
   if(want==null&&(result.value()!=(choice?36:-19)||publish&&WebEffects.seen!=result))throw new AssertionError("branch value/identity");rows++;
@@ -58,16 +65,22 @@ class WebDriver {public static void main(String[]args){int rows=0;
 `
 
 func TestAdversarialHandlerContinuationLocalWeb(t *testing.T) {
-	for _, owner := range []string{"WebOwner", "RenamedScopeOwner"} {
-		t.Run(owner, func(t *testing.T) {
-			fixture := strings.ReplaceAll(handlerLocalWebFixture, "WebOwner", owner)
-			testNativePrivateSetterCompiledFixtureWithPolicies(t, owner, "WebDriver", "18:local-web:join:handler:resource\n", func(t *testing.T, debug string) map[string][]byte {
-				javac := os.Getenv("JAVA8_JAVAC")
-				if javac == "" {
-					t.Fatal("native compiler required")
-				}
-				return compileLambdaParameterMetadataFixture(t, javac, NativeJavac8, fixture, owner, debug, false)
-			}, nil, []string{"normal"})
-		})
+	modern, _ := t04Tools(t)
+	for _, profile := range []SourceCompilerProfile{NativeJavac8, ModernJavac} {
+		for _, owner := range []string{"WebOwner", "RenamedScopeOwner"} {
+			t.Run(string(profile)+"/"+owner, func(t *testing.T) {
+				fixture := strings.ReplaceAll(handlerLocalWebFixture, "WebOwner", owner)
+				testNativePrivateSetterCompiledFixtureWithPolicies(t, owner, "WebDriver", "30:local-web:join:handler:resource\n", func(t *testing.T, debug string) map[string][]byte {
+					javac := os.Getenv("JAVA8_JAVAC")
+					if javac == "" {
+						t.Fatal("native compiler required")
+					}
+					if profile == ModernJavac {
+						javac = modern
+					}
+					return compileLambdaParameterMetadataFixture(t, javac, profile, fixture, owner, debug, false)
+				}, nil, []string{"normal"})
+			})
+		}
 	}
 }
