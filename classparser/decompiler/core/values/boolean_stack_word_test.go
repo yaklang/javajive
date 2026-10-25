@@ -95,6 +95,30 @@ func TestBooleanConsumerViewFollowsProvedLateProducerDomain(t *testing.T) {
 	}
 }
 
+func TestBooleanWordViewFollowsSolvedNumericLoadWithoutNarrowing(t *testing.T) {
+	ctx := &class_context.ClassContext{}
+	flag := NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaPrimer(types.JavaBoolean))
+	flag.Id.SetName("flag")
+	load := NewSlotValue(flag, flag.Type())
+	view := booleanStackWord(NewStackLifetimeUseView(load))
+	if text := view.String(ctx); strings.Count(text, "? 1 : 0") != 1 {
+		t.Fatal("initial boolean word lost conversion: " + text)
+	}
+	for _, kind := range []string{types.JavaByte, types.JavaShort, types.JavaChar, types.JavaInteger} {
+		word := NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaPrimer(kind))
+		word.Id.SetName("word")
+		word.WebDeclType = word.Type().Copy()
+		load.ResetValue(word)
+		if text := view.String(ctx); text != "word" || view.Type().String(ctx) != "int" || flag.Type().String(ctx) != "boolean" {
+			t.Fatal("numeric word narrowed or unrelated producer mutated: " + text)
+		}
+	}
+	load.ResetValue(flag)
+	if text := view.String(ctx); strings.Count(text, "? 1 : 0") != 1 {
+		t.Fatal("view cached a previous source domain: " + text)
+	}
+}
+
 func TestPrimitiveABIAndNumericProducerDoNotAdoptConsumerType(t *testing.T) {
 	ctx := &class_context.ClassContext{}
 	for _, name := range []string{types.JavaBoolean, types.JavaByte, types.JavaChar, types.JavaShort, types.JavaInteger, types.JavaLong, types.JavaFloat, types.JavaDouble} {

@@ -6435,6 +6435,8 @@ func (d *Decompiler) ParseStatement() error {
 	d.propagateNullOnlyLocalLoads()
 	d.refreshReferenceOperandSnapshotTypes()
 	d.partitionSharedDynamicCaptureWebs()
+	d.partitionSharedPrimitiveCopies()
+	d.unifyDescriptorIntJoins()
 	d.unifyNumericExitWebs()
 	d.restoreNumericConditionalWebs()
 	d.restoreNormalizedBooleanWebs()

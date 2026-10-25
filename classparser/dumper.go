@@ -9441,7 +9441,7 @@ func fixGetFieldClassHoist(body string) string {
 }
 
 // fixJacksonRemainingReconstructs applies the remaining jackson-databind dump reconstructs
-// (empty-sync return, inverted instanceof slot mix, CAP#1 ctor args, raw Map.Entry keys,
+// (empty-sync return, CAP#1 ctor args, raw Map.Entry keys,
 // LinkedDeque type-var returns, etc.). Kill-switch: JDEC_JACKSON_REMAINING_OFF=1.
 func fixJacksonRemainingReconstructs(body string) string {
 	if jdecenv.Get("JDEC_JACKSON_REMAINING_OFF") == "1" {
@@ -9453,26 +9453,6 @@ func fixJacksonRemainingReconstructs(body string) string {
 		body = strings.ReplaceAll(body,
 			"synchronized(var4){\n\n\t\t}",
 			"synchronized(var4){\n\t\t\treturn this._createAndCache2(var1,var2,var3);\n\t\t}")
-	}
-	// BeanDeserializerFactory.constructSettableProperty: instanceof AnnotatedMethod but
-	// constructs FieldProperty (inverted), splitting MethodProperty var8 / FieldProperty
-	// var8_1 so later var8.withValueDeserializer cannot find the FieldProperty branch.
-	if strings.Contains(body, "new FieldProperty(") && (strings.Contains(body, "instanceof AnnotatedMethod") || strings.Contains(body, "instanceof AnnotatedField")) {
-		body = strings.ReplaceAll(body, "MethodProperty var8 = null;", "SettableBeanProperty var8 = null;")
-		body = strings.ReplaceAll(body, "FieldProperty var8_1;\n", "")
-		body = strings.ReplaceAll(body, "var8_1 = new FieldProperty(", "var8 = new FieldProperty(")
-		body = strings.ReplaceAll(body, "if (var5 instanceof AnnotatedMethod){", "if (var5 instanceof AnnotatedField){")
-		// After the Field/MethodProperty split is unified onto var8, the rest of the
-		// method still talks to var9 (the SettableBeanProperty) and a later ObjectIdInfo
-		// var10. Seed var9 from var8 and route managed-ref / object-id onto var9.
-		body = strings.ReplaceAll(body,
-			"var8 = new MethodProperty(var3,var6,var7,var2.getClassAnnotations(),((AnnotatedMethod)(var5)));\n\t\t}\n\t\tJsonDeserializer var8_2",
-			"var8 = new MethodProperty(var3,var6,var7,var2.getClassAnnotations(),((AnnotatedMethod)(var5)));\n\t\t}\n\t\tvar9 = var8;\n\t\tJsonDeserializer var8_2")
-		body = strings.ReplaceAll(body, "var10.setManagedReferenceName(var9_1.getName());", "var9.setManagedReferenceName(var9_1.getName());")
-		body = strings.ReplaceAll(body, "var10.setObjectIdInfo(var10);", "var9.setObjectIdInfo(var10);")
-		body = strings.ReplaceAll(body,
-			"var9.setObjectIdInfo(var10);\n\t\t}\n\t\treturn var10;",
-			"var9.setObjectIdInfo(var10);\n\t\t}\n\t\treturn var9;")
 	}
 	// MapEntryDeserializer.withResolved: JsonDeserializer<?> arg into JsonDeserializer<Object> ctor.
 	body = strings.ReplaceAll(body,
