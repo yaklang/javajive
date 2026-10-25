@@ -512,6 +512,11 @@ func (c *ClassObjectDumper) planConstructorArgumentBridges(p *constructorSourceB
 	}
 	calls := map[int]*values.FunctionCallExpression{}
 	remaining := 1024
+	for _, arg := range p.delegate.Arguments {
+		if !constructorBoundaryValue(arg, allowed, map[values.JavaValue]bool{}, calls, &remaining) {
+			return fmt.Errorf("unproved constructor argument effect graph")
+		}
+	}
 	for _, st := range p.sourcePrefixEffects() {
 		if expr, ok := st.(*statements.ExpressionStatement); ok && expr != nil {
 			if !constructorBoundaryValue(expr.Expression, allowed, map[values.JavaValue]bool{}, calls, &remaining) {
