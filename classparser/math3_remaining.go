@@ -90,12 +90,6 @@ func fixMath3RemainingReconstructs(body string) string {
 		body = strings.ReplaceAll(body, "var3.getKey()", "(Long)(var3.getKey())")
 		body = strings.ReplaceAll(body, "(Long)((Long)(var3.getKey()))", "(Long)(var3.getKey())")
 	}
-	if strings.Contains(body, "class SymmLQ$State") {
-		body = strings.Replace(body,
-			"static final double CBRT_MACH_PREC = FastMath.cbrt(MACH_PREC);\n\tstatic final double MACH_PREC = FastMath.ulp(1D);",
-			"static final double MACH_PREC = FastMath.ulp(1D);\n\tstatic final double CBRT_MACH_PREC = FastMath.cbrt(MACH_PREC);",
-			1)
-	}
 	if strings.Contains(body, "class Frequency$NaturalComparator") {
 		body = strings.Replace(body,
 			"return var1.compareTo(var2);",
@@ -154,12 +148,6 @@ func fixMath3RemainingReconstructs(body string) string {
 		body = strings.Replace(body,
 			"ResizableDoubleArray var2 = this;\n\t\t\t\tsynchronized(this){\n\n\t\t\t\t}",
 			filled,
-			1)
-	}
-	if strings.Contains(body, "class Erf") {
-		body = strings.Replace(body,
-			"if ((var0) < (-0.4769362762044697D)){\n\n\t\t\t}else{",
-			"if ((var0) < (-0.4769362762044697D)){\n\t\t\t\treturn ((var1) < (0D)) ? ((erfc(-var1)) - (erfc(-var0))) : ((erfc(-var0)) - (erfc(var1)));\n\t\t\t}else{",
 			1)
 	}
 	return body
