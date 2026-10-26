@@ -93,7 +93,11 @@ func TestMonitorContinuationsPartitionEveryCertifiedReleaseWithoutInventingValue
 				t.Fatal("partition invented initialization or lost source ownership")
 			}
 			if variant == "two tails" {
-				decision := held[0].(*statements.IfStatement)
+				region := held[0].(*statements.DoWhileStatement)
+				if region.Label == "" || region.ConditionValue.(*values.JavaLiteral).Data != false {
+					t.Fatal("release barrier can repeat or lacks a target")
+				}
+				decision := region.Body[0].(*statements.IfStatement)
 				dispatch := tail[0].(*statements.IfStatement)
 				if decision.Condition != branch.Condition || decision.IfBody[0] != originalA[0] || decision.ElseBody[0] != originalB[0] || dispatch.IfBody[0] != originalA[2] || dispatch.ElseBody[0] != originalB[2] || len(branch.IfBody) != 4 {
 					t.Fatal("partition moved evaluation or mutated the original graph")
