@@ -110,3 +110,77 @@ func TestSharedValueReturnRequiresOriginalEffectDomainAndCopyIdentity(t *testing
 		})
 	}
 }
+
+func TestSharedValueReturnWaitsForPendingProtectedBoundary(t *testing.T) {
+	for _, variant := range []string{"inside", "outside", "end exclusive", "start inclusive", "unknown range", "inverted range", "invalid end", "shared inside", "shared gap", "shared malformed", "shared budget", "owner budget", "missing dominators", "unrelated owner", "nested outside", "already structured"} {
+		t.Run(variant, func(t *testing.T) {
+			owner, branch, other := jumpTestNode("try"), jumpTestNode("branch"), jumpTestNode("other")
+			call := layerTestCall(15)
+			call.Descriptor = "()J"
+			call.FuncType = &types.JavaFuncType{ReturnType: types.NewJavaPrimer(types.JavaLong)}
+			ret := &statements.ReturnStatement{JavaValue: call, OriginPC: 20, HasOriginPC: true}
+			target := core.NewNode(ret)
+			target.OriginPC, target.HasOriginPC = 20, true
+			branch.OriginPC, branch.HasOriginPC = 10, true
+			owner.AddNext(branch)
+			owner.AddNext(other)
+			branch.AddNext(target)
+			other.AddNext(target)
+			owner.HasProtectedRange = true
+			owner.ProtectedStartPC, owner.ProtectedEndPC = 0, 30
+			m := NewRootStatementManager(owner)
+			m.SetOriginalExceptionTable(nil)
+			m.TryNodes = []*core.Node{owner}
+			want := variant == "inside" || variant == "start inclusive" || variant == "shared inside" || variant == "unrelated owner" || variant == "already structured"
+			switch variant {
+			case "outside":
+				owner.ProtectedEndPC = 5
+			case "end exclusive":
+				owner.ProtectedEndPC = 10
+			case "start inclusive":
+				owner.ProtectedStartPC = 10
+			case "unknown range":
+				owner.HasProtectedRange = false
+			case "inverted range":
+				owner.ProtectedStartPC = 30
+			case "invalid end":
+				owner.ProtectedEndPC = 65537
+			case "shared inside":
+				owner.ProtectedEndPC = 5
+				owner.SharedProtectedRanges = []core.HandlerRange{{StartPc: 0, EndPc: 5}, {StartPc: 10, EndPc: 21}}
+			case "shared gap":
+				owner.SharedProtectedRanges = []core.HandlerRange{{StartPc: 0, EndPc: 5}, {StartPc: 11, EndPc: 21}}
+			case "shared malformed":
+				owner.SharedProtectedRanges = []core.HandlerRange{{StartPc: 10, EndPc: 21}, {StartPc: 30, EndPc: 20}}
+			case "shared budget":
+				owner.SharedProtectedRanges = make([]core.HandlerRange, 513)
+			case "owner budget":
+				m.TryNodes = make([]*core.Node, 257)
+			case "unrelated owner":
+				m.TryNodes = []*core.Node{other}
+			case "nested outside":
+				inner := jumpTestNode("nested try")
+				inner.HasProtectedRange = true
+				inner.ProtectedStartPC, inner.ProtectedEndPC = 0, 5
+				owner.RemoveNext(branch)
+				owner.AddNext(inner)
+				inner.AddNext(branch)
+				m.TryNodes = append(m.TryNodes, inner)
+			case "already structured":
+				// Replacing a processed try removes its old raw marker from live dominance.
+				detached := jumpTestNode("old try")
+				m.TryNodes = []*core.Node{detached}
+			}
+			m.DominatorMap = GenerateDominatorTree(owner)
+			if variant == "missing dominators" {
+				m.DominatorMap = nil
+			}
+			if got := sharedReturnCanFollowEdge(m, branch, target, ret); got != want {
+				t.Fatalf("copy allowed=%v want=%v", got, want)
+			}
+			if branch.Next[0] != target || other.Next[0] != target || target.Statement != ret {
+				t.Fatal("proof mutated the original return or its edges")
+			}
+		})
+	}
+}
