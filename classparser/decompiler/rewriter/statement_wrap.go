@@ -1045,7 +1045,7 @@ func (s *RewriteManager) Rewrite() error {
 		}
 		s.DominatorMap = GenerateDominatorTree(s.RootNode)
 	}
-	order := s.TopologicalSortReverse(keyNodes)
+	order := protectedSiblingRewriteOrder(s, s.TopologicalSortReverse(keyNodes))
 	loopJmpRewriterRecoed := map[*core.Node]struct{}{}
 	processed := map[*core.Node]struct{}{}
 	for i := 0; i < len(order); i++ {
