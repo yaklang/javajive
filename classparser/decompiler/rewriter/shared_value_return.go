@@ -4,6 +4,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	utils2 "github.com/yaklang/javajive/classparser/decompiler/utils"
 )
 
 // A shared return is an abrupt completion on each incoming edge. An edge-local
@@ -16,6 +17,35 @@ func sharedReturnCanFollowEdge(manager *RewriteManager, from, target *core.Node,
 		ret == nil || ret.JavaValue == nil || !from.HasOriginPC || !forwardOriginalMethodExit(target) ||
 		len(manager.originalHandlers) > 512 || !sharedReturnCopyStable(ret.JavaValue) {
 		return false
+	}
+	// A raw try owner may still dominate its physically unprotected cleanup
+	// tail. Original effect membership alone does not make that tail a source
+	// body: cloning its shared return now would let the body collector consume
+	// it and prevent the original finally from being recovered once. Wait for
+	// that exception boundary to be structured before giving this edge a copy.
+	if len(manager.TryNodes) > 256 || (len(manager.TryNodes) > 0 && manager.DominatorMap == nil) {
+		return false
+	}
+	for _, owner := range manager.TryNodes {
+		if owner == nil || !utils2.IsDominate(manager.DominatorMap, owner, from) {
+			continue
+		}
+		if !owner.HasProtectedRange || owner.ProtectedStartPC < 0 || owner.ProtectedStartPC >= owner.ProtectedEndPC || owner.ProtectedEndPC > 65536 || len(owner.SharedProtectedRanges) > 512 {
+			return false
+		}
+		covered := from.OriginPC >= owner.ProtectedStartPC && from.OriginPC < owner.ProtectedEndPC
+		if len(owner.SharedProtectedRanges) > 0 {
+			covered = false
+			for _, row := range owner.SharedProtectedRanges {
+				if row.StartPc >= row.EndPc {
+					return false
+				}
+				covered = covered || from.OriginPC >= int(row.StartPc) && from.OriginPC < int(row.EndPc)
+			}
+		}
+		if !covered {
+			return false
+		}
 	}
 	remaining := 65536
 	covered := func(pc int) bool {
