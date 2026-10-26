@@ -40,6 +40,11 @@ func materializeForwardRegionExits(manager *RewriteManager, condition *core.Node
 			continue
 		}
 		seen[n] = true
+		// Method exits have no normal frontier. Counting their synthetic END
+		// edge would turn a simple return-or-continue into a region bypass.
+		if forwardOriginalMethodExit(n) {
+			continue
+		}
 		for _, next := range n.Next {
 			remaining--
 			if remaining < 0 {
@@ -177,6 +182,12 @@ func closedForwardRegion(manager *RewriteManager, owner, exit *core.Node) bool {
 		if n.HasOriginPC && !sameDomain(n) {
 			return false
 		}
+		// A witnessed return/throw closes its own path, not the normal
+		// continuation. Keep that original terminal inside the region.
+		if forwardOriginalMethodExit(n) {
+			state[n] = 2
+			return true
+		}
 		switch n.Statement.(type) {
 		case *statements.ConditionStatement, *statements.AssignStatement, *statements.ExpressionStatement, *values.JavaExpression:
 			if !sameDomain(n) {
@@ -214,7 +225,64 @@ func closedForwardRegion(manager *RewriteManager, owner, exit *core.Node) bool {
 		state[n] = 2
 		return true
 	}
-	return visit(owner)
+	if !visit(owner) {
+		return false
+	}
+	// Dominance alone does not prove single entry after choosing an exit:
+	// the proposed exit might lead back into the collected interior. Check
+	// all live incoming edges, not stale Source links from consumed bodies.
+	// An edge into the owner is a fresh invocation/outer-loop iteration;
+	// every other interior predecessor must belong to this same region.
+	seen := map[*core.Node]bool{}
+	pending := []*core.Node{manager.RootNode}
+	for len(pending) > 0 {
+		n := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		remaining--
+		if n == nil || remaining < 0 || len(seen) >= 4096 || len(pending) > 4096 {
+			return false
+		}
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		for _, next := range n.Next {
+			remaining--
+			if remaining < 0 || next != owner && state[next] != 0 && state[n] == 0 {
+				return false
+			}
+			pending = append(pending, next)
+		}
+	}
+	return true
+}
+
+// A typed original method terminal completes abruptly. Its synthetic END
+// successor is not an executable continuation or a forward-region frontier.
+// Unknown origins, hidden scopes and a normal successor cannot establish this.
+func forwardOriginalMethodExit(n *core.Node) bool {
+	if n == nil || !n.HasOriginPC || n.HideNext != nil || n.IsCatchStart || n.IsTryCatch || n.HasProtectedRange {
+		return false
+	}
+	known := false
+	switch st := n.Statement.(type) {
+	case *statements.ReturnStatement:
+		known = st != nil && st.HasOriginPC && st.OriginPC == n.OriginPC
+	case *statements.CustomStatement:
+		if st != nil {
+			_, thrown := st.SourceThrowOperand()
+			known = thrown && st.HasOriginPC && st.OriginPC == n.OriginPC
+		}
+	}
+	if !known {
+		return false
+	}
+	for _, next := range n.Next {
+		if !IsEndNode(next) || encodedJumpTo(n, next) {
+			return false
+		}
+	}
+	return true
 }
 
 // Adding a one-shot loop must not capture an existing unqualified transfer.
@@ -279,6 +347,11 @@ func finishForwardRegion(manager *RewriteManager, original, start *core.Node) er
 		}
 		seen[n] = true
 		body = append(body, n)
+		// The remaining linear arm can itself end the method. Its END
+		// sentinel is bookkeeping, never a statement or region fall-through.
+		if forwardOriginalMethodExit(n) {
+			break
+		}
 		var normal []*core.Node
 		for _, next := range n.Next {
 			if encodedJumpTo(n, next) {
@@ -288,6 +361,12 @@ func finishForwardRegion(manager *RewriteManager, original, start *core.Node) er
 			} else {
 				normal = append(normal, next)
 			}
+		}
+		// The last statement may complete only by the already encoded
+		// region break (other arms may return/throw). It has no ordinary
+		// fall-through edge, but still reaches this exact region boundary.
+		if len(normal) == 0 && len(n.Next) == 1 && n.Next[0] == region.exit && encodedJumpTo(n, region.exit) {
+			break
 		}
 		if len(normal) != 1 {
 			return fmt.Errorf("forward region has %d normal continuations", len(normal))
