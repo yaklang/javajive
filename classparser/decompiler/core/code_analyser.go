@@ -5673,7 +5673,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 			}
 			sort.Slice(leaves, func(i, j int) bool { return leaves[i].CurrentOffset < leaves[j].CurrentOffset })
 			var factored bool
-			root, built, factored = factorSharedValueTernary(root, built, leafValues[leaves[0]], leafValues[leaves[1]])
+			root, built, factored = factorSharedValueTernary(root, built, leafValues[leaves[0]], leafValues[leaves[1]], d.Work)
 			if !factored {
 				return nil, nil, false, false, false
 			}
