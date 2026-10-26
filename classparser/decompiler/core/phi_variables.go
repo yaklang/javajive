@@ -186,11 +186,13 @@ func (d *Decompiler) unifyReferenceWebs() {
 			// All aliases are retained as objects (existing SlotValues can reference them),
 			// but agree on identity and declaration type before statements are constructed.
 			identity := canon.SolvedWebIdentity
-			if identity == nil && param == nil && len(refs) > 1 {
+			if identity == nil && param == nil && len(stores) > 1 {
 				// Source naming visits sibling scopes independently. The same
 				// solved definition web must keep one binder even when its joined
 				// use lies outside the immediate try/if body. A mutable Id alone
-				// loses that fact as soon as one arm is renamed.
+				// loses that fact as soon as one arm is renamed. The simulator
+				// may already share one ref across all stores; naming clones that
+				// ref for each declaration, so counting aliases misses this join.
 				identity = canon.Id
 			}
 			for ref := range refs {

@@ -117,3 +117,57 @@ func TestReferenceJoinPublishesStableDeclarationIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestReferenceJoinIdentityDoesNotDependOnSimulatorAliasCount(t *testing.T) {
+	for _, kind := range []string{"shared", "distinct", "null first", "three definitions", "foreign owner", "missing operand"} {
+		t.Run(kind, func(t *testing.T) {
+			str := types.NewJavaClass("java.lang.String")
+			ref := values.NewJavaRef(utils.NewRootVariableId(), nil, str)
+			other := ref
+			if kind == "distinct" {
+				other = values.NewJavaRef(utils.NewRootVariableId(), nil, str)
+			}
+			a, b := op(OP_ASTORE_1, 1), op(OP_ASTORE_1, 2)
+			a.stackConsumed = []values.JavaValue{values.NewJavaLiteral("chosen", str)}
+			b.stackConsumed = []values.JavaValue{values.JavaNull}
+			if kind == "null first" {
+				a.stackConsumed, b.stackConsumed = b.stackConsumed, a.stackConsumed
+			}
+			webs := &slotWeb{webOf: map[*OpCode]int{a: 1, b: 1}, entryWeb: map[int]int{}}
+			d := &Decompiler{FunctionContext: &class_context.ClassContext{}, cachedSlotWebs: webs, opCodes: []*OpCode{a, b}, opcodeIdToRef: map[*OpCode][][2]any{a: {{ref, true}}, b: {{other, false}}}}
+			if kind == "three definitions" || kind == "foreign owner" {
+				c := op(OP_ASTORE_1, 3)
+				c.stackConsumed = []values.JavaValue{values.NewJavaLiteral("third", str)}
+				d.opCodes = append(d.opCodes, c)
+				webs.webOf[c] = 1
+				if kind == "foreign owner" {
+					webs.webOf[c] = 2
+				}
+				d.opcodeIdToRef[c] = [][2]any{{ref, false}}
+			}
+			if kind == "missing operand" {
+				b.stackConsumed = nil
+			}
+			d.unifyReferenceWebs()
+			want := kind != "foreign owner" && kind != "missing operand"
+			if (ref.SolvedWebIdentity != nil) != want || (other.SolvedWebIdentity != nil) != want {
+				t.Fatal("join identity depended on alias count or incomplete definitions")
+			}
+			if !want {
+				return
+			}
+			identity := ref.SolvedWebIdentity
+			for _, store := range d.opCodes {
+				bound := d.opcodeIdToRef[store][0][0].(*values.JavaRef)
+				declaration := bound.CloneForSourceDeclaration()
+				if bound.SolvedWebIdentity != identity || declaration.SolvedWebIdentity != identity || bound.Type().String(d.FunctionContext) != "String" {
+					t.Fatal("declaration cloning lost solved ownership or reference type")
+				}
+			}
+			d.unifyReferenceWebs()
+			if ref.SolvedWebIdentity != identity {
+				t.Fatal("second solver round changed naming authority")
+			}
+		})
+	}
+}

@@ -9,10 +9,10 @@ import (
 	"slices"
 )
 
-// An inert literal stack-phi terminal can be shared by outer and inner routing edges.
-// Give this edge its own inert store before dominance-based body collection.
-// Both copies write the same local and join its same original return; neither
-// the RHS nor the terminal continuation can allocate, invoke or throw.
+// An inert literal stack-phi store can be shared by outer and inner routing
+// edges. Give this edge its own store before dominance-based body collection.
+// Both copies write the identical local at the original instruction boundary
+// and reach the same continuation; no continuation effect is copied.
 func splitSharedLiteralPhiStores(manager *RewriteManager, condition *core.Node) {
 	changed := false
 	for _, target := range slices.Clone(condition.Next) {
@@ -52,21 +52,26 @@ func splitSharedLiteralPhiStores(manager *RewriteManager, condition *core.Node) 
 			}
 		}
 		exit := target.Next[0]
-		ret, ok := exit.Statement.(*statements.ReturnStatement)
-		if !ok || ret == nil {
-			continue
+		if !sharedLiteralStoreKeepsOriginalDomain(manager, condition, target, exit) {
+			// Legacy isolated callers without a complete exception table only
+			// admit their existing inert terminal-return certificate.
+			ret, ok := exit.Statement.(*statements.ReturnStatement)
+			if !ok || ret == nil {
+				continue
+			}
+			returned, returnRef := values.UnpackSoltValue(ret.JavaValue).(*values.JavaRef)
+			if !ret.HasOriginPC || !exit.HasOriginPC || ret.OriginPC != exit.OriginPC || exit.HideNext != nil || exit.IsTryCatch || exit.IsCatchStart || exit.IsCircle || exit.IsInCircle || len(exit.EncodedJumps) != 0 || (!returnRef || !values.SameLocal(returned, ref)) || !sameProtectedMembership(manager.RootNode, condition, target) || !sameProtectedMembership(manager.RootNode, target, exit) {
+				continue
+			}
+			terminal := true
+			for _, next := range exit.Next {
+				terminal = terminal && IsEndNode(next)
+			}
+			if !terminal {
+				continue
+			}
 		}
-		returned, returnRef := values.UnpackSoltValue(ret.JavaValue).(*values.JavaRef)
-		if !ret.HasOriginPC || !exit.HasOriginPC || ret.OriginPC != exit.OriginPC || exit.HideNext != nil || exit.IsTryCatch || exit.IsCatchStart || exit.IsCircle || exit.IsInCircle || len(exit.EncodedJumps) != 0 || (!returnRef || !values.SameLocal(returned, ref)) || !sameProtectedMembership(manager.RootNode, condition, target) || !sameProtectedMembership(manager.RootNode, target, exit) {
-			continue
-		}
-		terminal := true
-		for _, next := range exit.Next {
-			terminal = terminal && IsEndNode(next)
-		}
-		if !terminal {
-			continue
-		}
+
 		copy := *assign
 		edge := manager.NewNode(&copy)
 		edge.OriginPC, edge.HasOriginPC = target.OriginPC, target.HasOriginPC
@@ -77,4 +82,24 @@ func splitSharedLiteralPhiStores(manager *RewriteManager, condition *core.Node) 
 	if changed {
 		manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
 	}
+}
+
+// Splitting a single local literal assignment is edge subdivision. The
+// original continuation may perform arbitrary work: it is never copied or
+// moved. A complete original handler table and exact PCs keep the new edge
+// block in the same domain as the original selected store.
+func sharedLiteralStoreKeepsOriginalDomain(manager *RewriteManager, condition, store, continuation *core.Node) bool {
+	if manager == nil || !manager.originalHandlersKnown || condition == nil || store == nil || continuation == nil || !condition.HasOriginPC || !store.HasOriginPC || !continuation.HasOriginPC || condition.OriginPC < 0 || store.OriginPC < 0 || continuation.OriginPC < 0 || condition.OriginPC > 65535 || store.OriginPC > 65535 || continuation.OriginPC > 65535 || len(manager.originalHandlers) > 4096 {
+		return false
+	}
+	if continuation.IsCatchStart || continuation.IsTryCatch || continuation.HideNext != nil {
+		return false
+	}
+	for _, row := range manager.originalHandlers {
+		contains := func(pc int) bool { return pc >= int(row.StartPc) && pc < int(row.EndPc) }
+		if contains(condition.OriginPC) != contains(store.OriginPC) {
+			return false
+		}
+	}
+	return true
 }

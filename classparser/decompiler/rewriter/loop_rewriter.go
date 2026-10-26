@@ -550,7 +550,7 @@ func LoopRewriter(manager *RewriteManager, node *core.Node) error {
 	//	n.AddNext(manager.NewNode(doWhileSt))
 	//}
 	loopNode := manager.NewNode(doWhileSt)
-	circleNode.Replace(loopNode)
+	manager.replaceStructuredNode(circleNode, loopNode)
 	endNodes = lo.Filter(endNodes, func(item *core.Node, index int) bool {
 		return !IsEndNode(item)
 	})

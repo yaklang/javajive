@@ -246,3 +246,59 @@ func TestForwardRegionNormalizesSharedTerminalStoresFirst(t *testing.T) {
 		t.Fatal("edge split changed the outer arm's original assignment")
 	}
 }
+
+func TestForwardRegionExitCanHaveExternalPredecessors(t *testing.T) {
+	m, n := forwardRegionFixture()
+	n[0].AddNext(n[6])
+	m.DominatorMap = GenerateDominatorTree(m.RootNode)
+	materializeForwardRegionExits(m, n[2])
+	region := m.forwardRegions[n[1]]
+	if region == nil || region.exit != n[6] {
+		t.Fatal("outer bypass stole inner region ownership")
+	}
+	if len(n[0].Next) != 2 || n[0].Next[1] != n[6] {
+		t.Fatal("changed external bypass")
+	}
+}
+
+func TestForwardRegionExitTracksStructuredReplacement(t *testing.T) {
+	m, n := forwardRegionFixture()
+	exit := n[6]
+	exit.Statement = &statements.ConditionStatement{Condition: values.NewJavaLiteral(true, types.NewJavaPrimer(types.JavaBoolean))}
+	exit.RemoveAllNext()
+	left, right := m.NewNode(statements.NewExpressionStatement(values.NewJavaLiteral(2, types.NewJavaPrimer(types.JavaInteger)))), m.NewNode(statements.NewExpressionStatement(values.NewJavaLiteral(3, types.NewJavaPrimer(types.JavaInteger))))
+	left.OriginPC, left.HasOriginPC, right.OriginPC, right.HasOriginPC = 61, true, 62, true
+	exit.AddNext(left)
+	exit.AddNext(right)
+	left.AddNext(n[7])
+	right.AddNext(n[7])
+	exit.TrueNode = func() *core.Node { return exit.Next[0] }
+	exit.FalseNode = func() *core.Node { return exit.Next[1] }
+	m.DominatorMap = GenerateDominatorTree(m.RootNode)
+	materializeForwardRegionExits(m, n[2])
+	region := m.forwardRegions[n[1]]
+	if region == nil {
+		t.Fatal("missing region")
+	}
+	if err := IfRewriter(m, exit); err != nil {
+		t.Fatal(err)
+	}
+	if region.exit == exit {
+		t.Fatal("pending region retained the replaced exit")
+	}
+	m.DominatorMap = GenerateDominatorTree(m.RootNode)
+	if err := IfRewriter(m, n[2]); err != nil {
+		t.Fatal(err)
+	}
+	m.DominatorMap = GenerateDominatorTree(m.RootNode)
+	if err := IfRewriter(m, n[1]); err != nil {
+		t.Fatal(err)
+	}
+	wrapper := n[0].Next[0]
+	if len(wrapper.Next) != 1 || wrapper.Next[0] != region.exit {
+		t.Fatal("region lost the structured continuation")
+	}
+	if len(m.forwardRegions) != 0 {
+		t.Fatal("completed region remains pending")
+	}
+}
