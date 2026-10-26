@@ -147,6 +147,17 @@ func narrowBooleanLeaf(value JavaValue) JavaValue {
 	return &booleanStackView{operand: value}
 }
 
+// BooleanLocalDefinitionView preserves the source Boolean store conversion
+// when its definition is folded into a use. Keep the original forwarding cell:
+// later producer rebinding must still reach this consumer without retyping the
+// shared computational word or losing the local's declared Boolean domain.
+func BooleanLocalDefinitionView(value JavaValue) (JavaValue, bool) {
+	if _, valid := BooleanStackConsumerView(value); !valid {
+		return nil, false
+	}
+	return &booleanStackView{operand: value}, true
+}
+
 // A closed operand view gives source-binding visitors the real dependency.
 // Neither a flag nor a closure's alleged capture list establishes this fact.
 // word converts Z to its computational int; the other view narrows I to Z.
