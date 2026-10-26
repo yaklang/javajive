@@ -72,9 +72,7 @@ class ReleaseDriver {public static void main(String[]args){int rows=0;
 					source = strings.NewReplacer("ReleaseBoundary", "CompletionPhase", "ReleaseCell", "Lease", "ReleaseToken", "Instruction", "isPending", "isRetired", "isAborted", "isInvalid", "release()", "finish()", "run(", "evaluate(").Replace(source)
 					owner = "CompletionPhase"
 				}
-				testNativePrivateSetterCompiledFixtureWithPolicies(t, owner, "ReleaseDriver", "96:nested:release:handler-domain:exception-identity\n", func(t *testing.T, debug string) map[string][]byte {
-					return nativeCompileSourceReleaseClasses(t, map[string]string{owner + ".java": source}, debug, "8")
-				}, nil, []string{"normal", "no-source-rewrites"})
+				testAuthoredOwnerAcrossSourceModes(t, source, owner, "ReleaseDriver", "96:nested:release:handler-domain:exception-identity\n")
 			})
 		}
 	}

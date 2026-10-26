@@ -1,7 +1,6 @@
 package javaclassparser
 
 import (
-	"os"
 	"strings"
 	"testing"
 )
@@ -69,7 +68,6 @@ class QueueDriver {
     System.out.println(count+":parameter:backedge:dead-clear:effects");
   }
 }`
-	modern, _ := t04Tools(t)
 	for _, layout := range []string{"wildcard", "raw", "wide", "instance", "renamed", "discard-call", "discard-dup"} {
 		t.Run(layout, func(t *testing.T) {
 			source, owner := fixture, "ParameterQueue"
@@ -106,21 +104,7 @@ class QueueDriver {
     count++;System.out.println(count+`)
 				want = "13:parameter:backedge:dead-clear:effects\n"
 			}
-			for _, profile := range []SourceCompilerProfile{ModernJavac, NativeJavac8} {
-				t.Run(string(profile), func(t *testing.T) {
-					compiler := modern
-					if profile == NativeJavac8 {
-						compiler = os.Getenv("JAVA8_JAVAC")
-						if compiler == "" {
-							t.Fatal("native compiler required")
-						}
-					}
-					compile := func(debug string) map[string][]byte {
-						return compileLambdaParameterMetadataFixture(t, compiler, profile, source, owner, debug, false)
-					}
-					testNativeIndependentCompilerFamilyWithPolicies(t, compile, profile, compiler, []string{owner}, "QueueDriver", want, nil, nil, []string{"normal", "no-source-rewrites"})
-				})
-			}
+			testAuthoredOwnerAcrossSourceModes(t, source, owner, "QueueDriver", want)
 		})
 	}
 }
