@@ -321,20 +321,25 @@ func sameProtectedMembership(root, a, b *core.Node) bool {
 
 // Shared terminal leaves are not necessarily dominated by an inner condition.
 // Split its selected edge before collecting dominated regions, or an abrupt
-// arm can disappear. Preserve the ATHROW operand and original PC; its expression
-// is still evaluated once on the selected path. Opaque custom statements and
-// nonliteral value returns remain outside this narrowly proved transformation.
+// arm can disappear. Preserve the operand and original PC; its expression is
+// still evaluated once on the selected edge. Nonliteral returns additionally
+// require a copy-stable expression and every original exceptional effect to
+// have the same handler domain as the incoming branch.
 func splitSharedTerminalLeaves(manager *RewriteManager, condition *core.Node) {
 	changed := false
 	for _, target := range slices.Clone(condition.Next) {
 		var terminalCopy statements.Statement
 		switch st := target.Statement.(type) {
 		case *statements.ReturnStatement:
-			value := values.UnpackSoltValue(st.JavaValue)
+			if st == nil {
+				continue
+			}
+			value := loopStepOperand(st.JavaValue)
 			_, literal := value.(*values.JavaLiteral)
 			literal = literal || value == values.JavaNull
 			if st.JavaValue == nil || (literal && st.HasOriginPC && target.HasOriginPC &&
-				st.OriginPC == target.OriginPC && sameProtectedMembership(manager.RootNode, condition, target)) {
+				st.OriginPC == target.OriginPC && sameProtectedMembership(manager.RootNode, condition, target)) ||
+				sharedReturnCanFollowEdge(manager, condition, target, st) {
 				copy := *st
 				terminalCopy = &copy
 			}
