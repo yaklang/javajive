@@ -495,7 +495,7 @@ func externalSharedSwitchDefaultContinuation(manager *RewriteManager, owner, tar
 	if manager == nil || owner == nil || target == nil || !owner.HasOriginPC || !target.HasOriginPC || target.OriginPC <= owner.OriginPC ||
 		target.HideNext != nil || target.IsCatchStart || target.IsTryCatch || target.IsCircle || target.IsInCircle && loop == nil ||
 		len(target.EncodedJumps) != 0 || utils.IsDominate(manager.DominatorMap, owner, target) ||
-		!sameProtectedMembership(manager.RootNode, owner, target) {
+		!(sameProtectedMembership(manager.RootNode, owner, target) || sharedReturnOperandProtection(manager, owner, target)) {
 		return false
 	}
 	external := false

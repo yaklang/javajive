@@ -38,6 +38,7 @@ func ParseBytesCode(decompiler *core.Decompiler) (res []statements.Statement, er
 	}
 
 	statementManager := rewriter.NewRootStatementManager(decompiler.RootNode)
+	statementManager.SetOriginalExceptionTable(decompiler.ExceptionTable)
 	statementManager.SetId(decompiler.CurrentId)
 	statementManager.Aggressive = decompiler.Aggressive
 	decompiler.InlineAdjacentLiteralGuardArrays()

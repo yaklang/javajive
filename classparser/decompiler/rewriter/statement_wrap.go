@@ -33,7 +33,9 @@ func sortNodesByID(nodes []*core.Node) []*core.Node {
 }
 
 type RewriteManager struct {
-	loopTransfers map[*core.Node]loopTransfer
+	originalHandlers      []core.HandlerRange
+	originalHandlersKnown bool
+	loopTransfers         map[*core.Node]loopTransfer
 	// Method-local allocation keeps synthetic names deterministic across concurrent requests.
 	syntheticCatchVarCounter int
 	currentNodeId            int
