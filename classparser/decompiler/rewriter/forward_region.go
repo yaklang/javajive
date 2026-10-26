@@ -12,8 +12,9 @@ import (
 )
 
 type forwardRegion struct {
-	exit  *core.Node
-	label string
+	exit         *core.Node
+	label        string
+	protectedEnd *core.Node
 }
 
 type forwardEdge struct{ from, to *core.Node }
@@ -398,6 +399,9 @@ func (manager *RewriteManager) replaceStructuredNode(old, replacement *core.Node
 	for _, region := range manager.forwardRegions {
 		if region.exit == old {
 			region.exit = replacement
+		}
+		if region.protectedEnd == old {
+			region.protectedEnd = replacement
 		}
 	}
 }

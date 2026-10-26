@@ -112,6 +112,7 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 	copy(next, node.Next)
 	tryCatchSt := statements.NewTryCatchStatement(nil, nil)
 	tryNode := manager.NewNode(tryCatchSt)
+	regionStart := tryNode
 	manager.replaceStructuredNode(node, tryNode)
 	tryNode.RemoveAllNext()
 	var endNodes []*core.Node
@@ -134,7 +135,7 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 			bodyNodes = append(bodyNodes, node)
 			var next []*core.Node
 			for _, n := range node.Next {
-				if slices.Contains(manager.DominatorMap[node], n) {
+				if !encodedJumpTo(node, n) && slices.Contains(manager.DominatorMap[node], n) {
 					next = append(next, n)
 				} else {
 					if !visitedSet.Has(n) {
@@ -213,6 +214,9 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 			if stopAt == nil {
 				stopAt = typedLoopTryNormalBoundary(manager, node, next[i])
 			}
+		}
+		if region := manager.forwardRegions[node]; region != nil && region.protectedEnd != nil && !next[i].IsCatchStart {
+			stopAt = region.protectedEnd
 		}
 		body, err := getBody(next[i], stopAt)
 		if err != nil {
@@ -342,6 +346,7 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 		// prefixes and the unprotected tail, without replaying slot names.
 		if declaration != nil {
 			declNode := manager.NewNode(declaration)
+			regionStart = declNode
 			manager.replaceStructuredNode(tryNode, declNode)
 			declNode.RemoveAllNext()
 			declNode.AddNext(tryNode)
@@ -362,5 +367,5 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 	if declaration == nil && len(tail) == 0 {
 		retargetProtectedTryBoundary(manager.TryNodes, node, tryNode)
 	}
-	return nil
+	return finishForwardRegion(manager, node, regionStart)
 }
