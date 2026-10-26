@@ -491,8 +491,9 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 }
 
 func externalSharedSwitchDefaultContinuation(manager *RewriteManager, owner, target *core.Node) bool {
+	loop := sharedSwitchContinuationLoop(manager, owner, target)
 	if manager == nil || owner == nil || target == nil || !owner.HasOriginPC || !target.HasOriginPC || target.OriginPC <= owner.OriginPC ||
-		target.HideNext != nil || target.IsCatchStart || target.IsTryCatch || target.IsCircle || target.IsInCircle ||
+		target.HideNext != nil || target.IsCatchStart || target.IsTryCatch || target.IsCircle || target.IsInCircle && loop == nil ||
 		len(target.EncodedJumps) != 0 || utils.IsDominate(manager.DominatorMap, owner, target) ||
 		!sameProtectedMembership(manager.RootNode, owner, target) {
 		return false
@@ -516,7 +517,7 @@ func externalSharedSwitchDefaultContinuation(manager *RewriteManager, owner, tar
 			}
 			n := ancestors[len(ancestors)-1]
 			ancestors = ancestors[:len(ancestors)-1]
-			if seen[n] {
+			if n == nil || n == loop || seen[n] {
 				continue
 			}
 			seen[n] = true
@@ -524,6 +525,9 @@ func externalSharedSwitchDefaultContinuation(manager *RewriteManager, owner, tar
 				utils.IsDominate(manager.DominatorMap, n, owner) && utils.IsDominate(manager.DominatorMap, n, predecessor) && utils.IsDominate(manager.DominatorMap, n, target) {
 				owned = true
 				break
+			}
+			if len(n.Source) > 1024 {
+				return false
 			}
 			ancestors = append(ancestors, n.Source...)
 		}
@@ -538,31 +542,42 @@ func externalSharedSwitchDefaultContinuation(manager *RewriteManager, owner, tar
 	// Certify the whole normal-exit boundary rather than requiring the outer
 	// conditional to jump here directly. Its other arm may perform effects
 	// before reaching this same original expression. Every switch-owned path
-	// must either reach this boundary or terminate the method; no competing
-	// normal destination, loop transfer or hidden cleanup can be factored out.
-	queue := []*core.Node{owner}
-	seen := map[*core.Node]bool{}
-	for len(queue) != 0 {
-		if len(queue) > 1024 {
+	// must reach this boundary, terminate the method, or continue the exact
+	// enclosing loop. A gray revisit is an unproved cycle, not a closed exit;
+	// a completed revisit is a shared arm and needs no duplicate traversal.
+	states := map[*core.Node]uint8{}
+	var visit func(*core.Node) bool
+	visit = func(source *core.Node) bool {
+		if states[source] != 0 {
+			return states[source] == 2
+		}
+		if source == nil || len(states) >= 256 || len(source.Next) > 1024 || source.HideNext != nil || len(source.EncodedJumps) != 0 || source.IsCatchStart || source.IsTryCatch || source.IsCircle || source.IsInCircle && loop == nil {
 			return false
 		}
-		source := queue[len(queue)-1]
-		queue = queue[:len(queue)-1]
-		if seen[source] {
-			continue
-		}
-		if len(seen) >= 256 || source.HideNext != nil || len(source.EncodedJumps) != 0 || source.IsCatchStart || source.IsTryCatch || source.IsCircle || source.IsInCircle {
-			return false
-		}
-		seen[source] = true
+		states[source] = 1
 		terminal := false
 		switch st := source.Statement.(type) {
 		case *statements.ReturnStatement:
 			terminal = st.HasOriginPC && source.HasOriginPC && st.OriginPC == source.OriginPC
+			if !terminal {
+				return false
+			}
 		case *statements.CustomStatement:
 			terminal = st.ThrownValue != nil && st.HasOriginPC && source.HasOriginPC && st.OriginPC == source.OriginPC
+			if st.ThrownValue != nil && !terminal {
+				return false
+			}
+		}
+		if !terminal && len(source.Next) == 0 {
+			return false
 		}
 		for _, next := range source.Next {
+			// A continue of this exact enclosing loop is an abrupt switch
+			// exit. Preserve the edge for loop lowering; it does not enter
+			// the switch's shared normal continuation.
+			if loop != nil && next == loop && !terminal && utils.IsDominate(manager.DominatorMap, loop, source) {
+				continue
+			}
 			if next == target {
 				if terminal {
 					return false
@@ -572,13 +587,14 @@ func externalSharedSwitchDefaultContinuation(manager *RewriteManager, owner, tar
 			if terminal && IsEndNode(next) {
 				continue
 			}
-			if terminal || !utils.IsDominate(manager.DominatorMap, owner, next) || IsEndNode(next) {
+			if next == nil || terminal || !utils.IsDominate(manager.DominatorMap, owner, next) || IsEndNode(next) || !visit(next) {
 				return false
 			}
-			queue = append(queue, next)
 		}
+		states[source] = 2
+		return true
 	}
-	return true
+	return visit(owner)
 }
 
 // A terminal RETURN shared with a path before the switch is not dominated by

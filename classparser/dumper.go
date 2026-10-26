@@ -1786,15 +1786,6 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// A lexical block boundary cannot prove a method exit. Empty conditional
 	// arms may reach a shared continuation after several enclosing scopes;
 	// only the typed control-flow graph can authorize a return.
-	// fixEmptySwitchDefault inserts a terminator (throw) into `switch` default labels whose body is
-	// empty, which otherwise leaves a value-returning method without a return on that path.
-	// Kill-switch: JDEC_FIX_EMPTY_SWITCH_DEFAULT_OFF=1.
-	full = c.sourceRewrite("fixEmptySwitchDefault", "class_source", full, fixEmptySwitchDefault)
-	// fixUnreachableDefaultThrow removes a `throw new RuntimeException();` that fixEmptySwitchDefault
-	// inserted into an empty `default:` when the switch is followed by an ACTUAL statement (not a
-	// block-closing `}`). In that case the empty default FALLS THROUGH to the post-switch code, and
-	// the throw makes it unreachable. Kill-switch: JDEC_FIX_UNREACHABLE_DEFAULT_THROW_OFF=1.
-	full = c.sourceRewrite("fixUnreachableDefaultThrow", "class_source", full, fixUnreachableDefaultThrow)
 	// fixTryBreakReturn moves a hoisted `return <expr>;` back into a `try { break; }` block
 	// inside a do-while(true) loop, where the try's catch clauses require the return's
 	// checked-exception to be throwable. Kill-switch: JDEC_FIX_TRY_BREAK_RETURN_OFF=1.
@@ -7050,49 +7041,6 @@ func removeUnreachableSwitchBreak(body string) string {
 	return strings.Join(out, "\n")
 }
 
-// (the line after `default:` is the `}` closing the switch). An empty default leaves a value-
-// returning method without a return on that path ("missing return statement"). Inserting
-// `throw new RuntimeException();` completes the control flow legally in any method. Only triggers
-// when the line following `default:` (ignoring blank lines) is the switch-closing `}` at the SAME
-// indentation as `default:`. Kill-switch: JDEC_FIX_EMPTY_SWITCH_DEFAULT_OFF=1.
-func fixEmptySwitchDefault(body string) string {
-	if jdecenv.Get("JDEC_FIX_EMPTY_SWITCH_DEFAULT_OFF") == "1" {
-		return body
-	}
-	lines := strings.Split(body, "\n")
-	defaultRe := regexp.MustCompile(`^(\t+)default:\s*$`)
-	inserts := []int{} // line indices after which to insert the throw (descending apply)
-	for i := 0; i < len(lines); i++ {
-		m := defaultRe.FindStringSubmatch(strings.TrimRight(lines[i], "\r"))
-		if m == nil {
-			continue
-		}
-		indent := m[1]
-		// Find the next non-blank line; it must be `}` at the same indent (empty default body).
-		for j := i + 1; j < len(lines); j++ {
-			ln := strings.TrimRight(lines[j], "\r")
-			if strings.TrimSpace(ln) == "" {
-				continue
-			}
-			if ln == indent+"}" {
-				inserts = append(inserts, i) // insert the throw AFTER the `default:` line
-			}
-			break
-		}
-	}
-	if len(inserts) == 0 {
-		return body
-	}
-	// Apply in descending order so earlier offsets stay valid.
-	for k := len(inserts) - 1; k >= 0; k-- {
-		i := inserts[k]
-		indent := leadingTabs(strings.TrimRight(lines[i], "\r"))
-		throwLn := indent + "throw new RuntimeException();"
-		lines = append(lines[:i+1], append([]string{throwLn}, lines[i+1:]...)...)
-	}
-	return strings.Join(lines, "\n")
-}
-
 // fixTryBreakReturn moves a `return <expr>;` that was incorrectly hoisted OUTSIDE a `do { ... } while`
 // loop back INTO a `try { break; }` block inside the loop. The do-while structuring converts a
 // `try { return expr; } catch(...)` inside a loop into `try { break; } catch(...)` + `return expr;`
@@ -7390,92 +7338,6 @@ func fixThrowTypeVarCast(body string) string {
 	for k := len(pending) - 1; k >= 0; k-- {
 		e := pending[k]
 		lines[e.lineIdx] = e.newText
-	}
-	return strings.Join(lines, "\n")
-}
-
-// fixUnreachableDefaultThrow removes a `throw new RuntimeException();` that fixEmptySwitchDefault
-// inserted into an empty `default:` when the switch is followed by an ACTUAL statement (not a
-// block-closing `}`). In that case the empty default FALLS THROUGH to the post-switch code, and
-// the throw makes it unreachable ("unreachable statement"). The throw is only removed when the
-// first non-blank line after the switch-closing `}` does NOT start with `}` (i.e. it is a real
-// statement like `continue;`, not a block close like `}else{` or a method-ending `}`).
-// Kill-switch: JDEC_FIX_UNREACHABLE_DEFAULT_THROW_OFF=1.
-// Keep case: fastjson2 ToBoolean (switch close followed by `}else{` → starts with `}`, keep throw).
-// Remove case: commons-lang3 RandomStringUtils (switch close followed by `continue;` → real stmt).
-func fixUnreachableDefaultThrow(body string) string {
-	if jdecenv.Get("JDEC_FIX_UNREACHABLE_DEFAULT_THROW_OFF") == "1" {
-		return body
-	}
-	lines := strings.Split(body, "\n")
-	// Pattern:
-	//   <indent>default:
-	//   <indent+1>throw new RuntimeException();
-	//   <indent>}
-	//   <indent><NOT starting with }>
-	defaultRe := regexp.MustCompile(`^(\t+)default:\s*$`)
-	throwRe := regexp.MustCompile(`^\t+throw new RuntimeException\(\);\s*$`)
-	removes := []int{} // line indices to blank out (descending apply)
-	for i := 0; i < len(lines)-2; i++ {
-		dm := defaultRe.FindStringSubmatch(strings.TrimRight(lines[i], "\r"))
-		if dm == nil {
-			continue
-		}
-		indent := dm[1]
-		// Next non-blank line must be `throw new RuntimeException();`
-		throwIdx := -1
-		for j := i + 1; j < len(lines); j++ {
-			jl := strings.TrimRight(lines[j], "\r")
-			if strings.TrimSpace(jl) == "" {
-				continue
-			}
-			if throwRe.MatchString(jl) {
-				throwIdx = j
-			}
-			break
-		}
-		if throwIdx < 0 {
-			continue
-		}
-		// Next non-blank line after throw must be `}` at the default's indent (switch close).
-		switchCloseIdx := -1
-		for j := throwIdx + 1; j < len(lines); j++ {
-			jl := strings.TrimRight(lines[j], "\r")
-			if strings.TrimSpace(jl) == "" {
-				continue
-			}
-			if jl == indent+"}" {
-				switchCloseIdx = j
-			}
-			break
-		}
-		if switchCloseIdx < 0 {
-			continue
-		}
-		// Check the first non-blank line after the switch-closing `}`.
-		// If it starts with `}` (block close / `}else{` / `}catch(` etc.) at the same or lesser
-		// indent, the throw IS needed (the switch is the last statement in its block).
-		// If it does NOT start with `}`, it is a real post-switch statement → the throw makes it
-		// unreachable → remove the throw.
-		for k := switchCloseIdx + 1; k < len(lines); k++ {
-			kl := strings.TrimRight(lines[k], "\r")
-			if strings.TrimSpace(kl) == "" {
-				continue
-			}
-			trimmed := strings.TrimSpace(kl)
-			if !strings.HasPrefix(trimmed, "}") {
-				// Real post-switch statement → the default falls through to it → throw is unreachable.
-				removes = append(removes, throwIdx)
-			}
-			// Else: starts with `}` → throw is needed (block exit).
-			break
-		}
-	}
-	if len(removes) == 0 {
-		return body
-	}
-	for k := len(removes) - 1; k >= 0; k-- {
-		lines[removes[k]] = ""
 	}
 	return strings.Join(lines, "\n")
 }
@@ -9316,21 +9178,6 @@ func fixCollections4RemainingReconstructs(body string) string {
 		body = strings.ReplaceAll(body,
 			"Integer.numberOfLeadingZeros((var18) ^ (var14))",
 			"Integer.numberOfLeadingZeros(((var18) ? (1) : (0)) ^ ((var14) ? (1) : (0)))")
-	}
-	// Flat3Map.containsValue: both if/else switches fall through to `return false`.
-	// fixEmptySwitchDefault inserts `default: throw` which makes that return
-	// unreachable. Drop those two throws; get/put keep theirs (they have a
-	// reachable size==0 path). Indent is not assumed — tab count varies.
-	if strings.Contains(body, "class Flat3Map") {
-		cvRe := regexp.MustCompile(`(?s)(public boolean containsValue\(Object var1\) \{.*?)(\n\tpublic )`)
-		emptyDefThrow := regexp.MustCompile(`\n\t+default:\n\t+throw new RuntimeException\(\);\n`)
-		body = cvRe.ReplaceAllStringFunc(body, func(m string) string {
-			sub := cvRe.FindStringSubmatch(m)
-			if len(sub) != 3 {
-				return m
-			}
-			return emptyDefThrow.ReplaceAllString(sub[1], "\n") + sub[2]
-		})
 	}
 	return body
 }
