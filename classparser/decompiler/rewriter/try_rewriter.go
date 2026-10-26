@@ -107,6 +107,7 @@ func isCatchHandlerBody(body []statements.Statement) bool {
 }
 
 func TryRewriter(manager *RewriteManager, node *core.Node) error {
+	materializeHandlerLoopTails(manager, node)
 	next := make([]*core.Node, len(node.Next))
 	copy(next, node.Next)
 	tryCatchSt := statements.NewTryCatchStatement(nil, nil)

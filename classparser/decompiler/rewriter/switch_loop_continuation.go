@@ -102,10 +102,10 @@ func switchContinuationReachesLatch(start, latch *core.Node) bool {
 	return start != nil && latch != nil && start != latch && visit(start)
 }
 
-// JVM IINC uses both ++/-- and local = local +/- constant in the expression
-// graph. Their proof is the same: a bound int local, a literal int displacement,
-// no throwing operands and no declaration/field/array write. Preserve Java int
-// overflow and the exact displacement instead of guessing a unit step.
+// A loop step may be IINC or an assignment with a computed displacement.
+// A bound int local plus a closed, nonthrowing expression of primitive locals
+// is safe to duplicate on mutually exclusive incoming edges. Preserve Java
+// int overflow, conditional evaluation and the exact displacement.
 func switchLoopLocalStep(node *core.Node) (func() statements.Statement, bool) {
 	if node == nil {
 		return nil, false
@@ -123,7 +123,7 @@ func switchLoopLocalStep(node *core.Node) (func() statements.Statement, bool) {
 			return nil, false
 		}
 		assigned, _ = step.LeftValue.(*values.JavaRef)
-		expr, _ = step.JavaValue.(*values.JavaExpression)
+		expr, _ = loopStepOperand(step.JavaValue).(*values.JavaExpression)
 		if assigned == nil || expr == nil || expr.Op != values.ADD && expr.Op != values.SUB {
 			return nil, false
 		}
@@ -133,7 +133,7 @@ func switchLoopLocalStep(node *core.Node) (func() statements.Statement, bool) {
 	if len(expr.Values) != 2 {
 		return nil, false
 	}
-	local, ok := expr.Values[0].(*values.JavaRef)
+	local, ok := loopStepOperand(expr.Values[0]).(*values.JavaRef)
 	if !ok || local == nil || local.Id == nil || local.IsThis || local.CustomValue != nil || local.StackVar != nil || local.Type() == nil || assigned != nil && assigned != local {
 		return nil, false
 	}
@@ -141,17 +141,15 @@ func switchLoopLocalStep(node *core.Node) (func() statements.Statement, bool) {
 	if !ok || primitive.Name != types.JavaInteger {
 		return nil, false
 	}
-	amount, ok := expr.Values[1].(*values.JavaLiteral)
-	if !ok || amount == nil || amount.Type() == nil {
+	amount := expr.Values[1]
+	if !loopStepPureWord(amount, types.JavaInteger) {
 		return nil, false
 	}
-	word, ok := amount.Data.(int)
-	if !ok || int64(word) < -2147483648 || int64(word) > 2147483647 {
-		return nil, false
-	}
-	amountType, ok := amount.Type().RawType().(*types.JavaPrimer)
-	if !ok || amountType.Name != types.JavaInteger || assigned == nil && word != 1 {
-		return nil, false
+	if assigned == nil {
+		literal, ok := amount.(*values.JavaLiteral)
+		if !ok || literal.Data != int(1) {
+			return nil, false
+		}
 	}
 	return func() statements.Statement {
 		copied := values.NewBinaryExpression(local, amount, expr.Op, expr.Typ)
@@ -160,6 +158,89 @@ func switchLoopLocalStep(node *core.Node) (func() statements.Statement, bool) {
 		}
 		return copied
 	}, true
+}
+
+func loopStepOperand(value values.JavaValue) values.JavaValue {
+	for depth := 0; depth < 16; depth++ {
+		slot, ok := value.(*values.SlotValue)
+		if !ok {
+			return value
+		}
+		if slot == nil {
+			return nil
+		}
+		value = slot.GetValue()
+	}
+	return nil
+}
+
+// Copying a closed primitive expression does not introduce an allocation,
+// unboxing, call, field/array access or exceptional division path. Unknown
+// operators and cyclic/deep graphs fail closed. This is an evaluation proof,
+// not constant folding: the original operands and selected ternary arm remain.
+func loopStepPureWord(value values.JavaValue, want string) bool {
+	remaining := 128
+	primitiveWord := func(value values.JavaValue) bool {
+		if value.Type() == nil {
+			return false
+		}
+		kind, ok := value.Type().RawType().(*types.JavaPrimer)
+		return ok && kind != nil && (kind.Name == types.JavaInteger || kind.Name == types.JavaBoolean)
+	}
+	var visit func(values.JavaValue, int) bool
+	visit = func(value values.JavaValue, depth int) bool {
+		if value == nil || depth > 16 || remaining == 0 {
+			return false
+		}
+		remaining--
+		switch v := value.(type) {
+		case *values.SlotValue:
+			return v != nil && visit(v.GetValue(), depth+1)
+		case *values.JavaRef:
+			return v != nil && v.Id != nil && !v.IsThis && v.CustomValue == nil && v.StackVar == nil && primitiveWord(v)
+		case *values.JavaLiteral:
+			if v == nil || !primitiveWord(v) {
+				return false
+			}
+			switch literal := v.Data.(type) {
+			case bool:
+				return v.Type().RawType().(*types.JavaPrimer).Name == types.JavaBoolean
+			case int:
+				return int64(literal) >= -2147483648 && int64(literal) <= 2147483647
+			}
+		case *values.TernaryExpression:
+			return v != nil && visit(v.Condition, depth+1) && visit(v.TrueValue, depth+1) && visit(v.FalseValue, depth+1) && primitiveWord(v)
+		case *values.JavaExpression:
+			if v == nil || len(v.Values) < 1 || len(v.Values) > 2 {
+				return false
+			}
+			switch v.Op {
+			case values.SUB:
+			case values.Not:
+				if len(v.Values) != 1 {
+					return false
+				}
+			case values.ADD, values.MUL, values.AND, values.OR, values.XOR, values.SHL, values.SHR, values.USHR, values.EQ, values.NEQ, values.LT, values.LTE, values.GT, values.GTE:
+				if len(v.Values) != 2 {
+					return false
+				}
+			default:
+				return false
+			}
+			for _, operand := range v.Values {
+				if !visit(operand, depth+1) {
+					return false
+				}
+			}
+			return primitiveWord(v)
+		}
+		return false
+	}
+	if !visit(value, 0) || value.Type() == nil {
+		return false
+	}
+	kind, ok := value.Type().RawType().(*types.JavaPrimer)
+	return ok && kind != nil && kind.Name == want
 }
 
 // Tail duplication along a direct CFG edge preserves evaluation order even
