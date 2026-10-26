@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestStaticInitializerPrefixRequiresDeclarationAndStoreOrder(t *testing.T) {
+func TestNativeStaticInitializerPrefixRequiresDeclarationAndStoreOrder(t *testing.T) {
 	for _, kind := range []string{"ordered", "inversion", "prior branch", "foreign owner", "descriptor mismatch", "missing origin", "stale store", "repeated field", "reversed physical PC", "protected store", "invalid handler", "duplicate physical receipt", "opaque marker", "cancelled", "scan budget", "allocation budget"} {
 		t.Run(kind, func(t *testing.T) {
 			typ := types.NewJavaClass("java.lang.Object")

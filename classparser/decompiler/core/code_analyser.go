@@ -5665,17 +5665,23 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 			// legacy fallback can also invert short-circuit polarity. A tree
 			// of conditions with two terminal values needs each value only once.
 			if len(leafValues) != 2 {
-				return nil, nil, false, false, false
-			}
-			leaves := make([]*OpCode, 0, 2)
-			for leaf := range leafValues {
-				leaves = append(leaves, leaf)
-			}
-			sort.Slice(leaves, func(i, j int) bool { return leaves[i].CurrentOffset < leaves[j].CurrentOffset })
-			var factored bool
-			root, built, factored = factorSharedValueTernary(root, built, leafValues[leaves[0]], leafValues[leaves[1]], d.Work)
-			if !factored {
-				return nil, nil, false, false, false
+				// More than two values cannot use boolean routing. A closed
+				// condition tree still emits linear source, even when several
+				// mutually exclusive paths select the same terminal producer.
+				if !closedValueDecisionTree(root, built, leafValues, d.Work) {
+					return nil, nil, false, false, false
+				}
+			} else {
+				leaves := make([]*OpCode, 0, 2)
+				for leaf := range leafValues {
+					leaves = append(leaves, leaf)
+				}
+				sort.Slice(leaves, func(i, j int) bool { return leaves[i].CurrentOffset < leaves[j].CurrentOffset })
+				var factored bool
+				root, built, factored = factorSharedValueTernary(root, built, leafValues[leaves[0]], leafValues[leaves[1]], d.Work)
+				if !factored {
+					return nil, nil, false, false, false
+				}
 			}
 		}
 		// Publish only after the complete routing graph has been accepted.
