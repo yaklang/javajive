@@ -3410,7 +3410,9 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// not-yet-visited sibling branch can resolve to the wrong (later) version. Repair only the
 		// unambiguous corruption signal (load opcode category disagrees with the resolved ref) by
 		// walking back to the true reaching definition; correct reads are left untouched.
-		if better := d.reachingSlotVersionOnMismatch(opcode, slot, varRef); better != nil {
+		if parameter := d.originalParameterLoadBinding(opcode, slot); parameter != nil {
+			varRef = parameter
+		} else if better := d.reachingSlotVersionOnMismatch(opcode, slot, varRef); better != nil {
 			varRef = better
 		} else if better := d.reachingSlotVersionGeneral(opcode, slot, varRef); better != nil {
 			// Same-category (e.g. reference-vs-reference) reused-slot corruption that the
