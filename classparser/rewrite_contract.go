@@ -8,9 +8,12 @@ import (
 // Real sourceRewrite rule IDs contracted for T27. Names match dumper.go.
 const (
 	RewriteFixShadowFieldSuperAssign = "fixShadowFieldSuperAssign"
-	RewriteFixEmptySwitchDefault     = "fixEmptySwitchDefault"
 	RewriteFixTryBreakReturn         = "fixTryBreakReturn"
 )
+
+// Deprecated: empty source labels do not prove an exceptional method exit.
+// Retained as an identifier for readers of historical rewrite reports only.
+const RewriteFixEmptySwitchDefault = "fixEmptySwitchDefault"
 
 // RewriteContract describes a narrow production rule: predicates, phase, and
 // whether the Java-lexical shield must wrap the string transform.
@@ -34,16 +37,6 @@ var rewriteContracts = map[string]RewriteContract{
 			return fixShadowFieldSuperAssign(src) != src
 		},
 	},
-	RewriteFixEmptySwitchDefault: {
-		ID:            RewriteFixEmptySwitchDefault,
-		Phase:         "class_source",
-		Preconditions: "tab-indented `default:` whose next non-blank line is `}` at the same indent",
-		Shield:        true,
-		Apply:         fixEmptySwitchDefault,
-		Matches: func(src string) bool {
-			return fixEmptySwitchDefault(src) != src
-		},
-	},
 	RewriteFixTryBreakReturn: {
 		ID:            RewriteFixTryBreakReturn,
 		Phase:         "class_source",
@@ -60,7 +53,6 @@ var rewriteContracts = map[string]RewriteContract{
 func ContractedRewriteIDs() []string {
 	return []string{
 		RewriteFixShadowFieldSuperAssign,
-		RewriteFixEmptySwitchDefault,
 		RewriteFixTryBreakReturn,
 	}
 }
