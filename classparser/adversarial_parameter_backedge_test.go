@@ -70,9 +70,10 @@ class QueueDriver {
   }
 }`
 	modern, _ := t04Tools(t)
-	for _, layout := range []string{"wildcard", "raw", "wide", "instance", "renamed"} {
+	for _, layout := range []string{"wildcard", "raw", "wide", "instance", "renamed", "discard-call", "discard-dup"} {
 		t.Run(layout, func(t *testing.T) {
 			source, owner := fixture, "ParameterQueue"
+			want := "12:parameter:backedge:dead-clear:effects\n"
 			switch layout {
 			case "raw":
 				source = strings.ReplaceAll(source, "drain(QueueNode<?> current)", "drain(QueueNode current)")
@@ -85,6 +86,25 @@ class QueueDriver {
 			case "renamed":
 				source = strings.NewReplacer("ParameterQueue", "DispatchStage", "QueueNode", "Recipient", "QueueLink", "Envelope", "Transfer", "Handoff", "drain", "finish", "current", "recipient").Replace(source)
 				owner = "DispatchStage"
+			case "discard-call", "discard-dup":
+				source = strings.ReplaceAll(source, "public class ParameterQueue {", `public class ParameterQueue {
+  static int clears,sinks; static boolean fail; static QueueNode<?> made;
+  static final RuntimeException FAILURE=new IllegalStateException("same failure");
+  static QueueNode<?> discard(){clears++;if(fail)throw FAILURE;made=new QueueNode<Object>(-123);return made;}
+  static void accept(QueueNode<?> value){sinks++;if(value!=made)throw new AssertionError("lost operand stack value");}`)
+				assignment, sinkCount := "current=discard();", "0"
+				if layout == "discard-dup" {
+					assignment, sinkCount = "accept(current=discard());", "depth+1"
+				}
+				source = strings.ReplaceAll(source, "current=null;", assignment)
+				source = strings.ReplaceAll(source, "ParameterQueue.events.setLength(0);", "ParameterQueue.events.setLength(0);ParameterQueue.clears=0;ParameterQueue.sinks=0;")
+				source = strings.ReplaceAll(source, "count++;", "if(ParameterQueue.clears!=depth+1||ParameterQueue.sinks!="+sinkCount+"||ParameterQueue.made.visits!=0)throw new AssertionError(\"discard effects\");count++;")
+				source = strings.ReplaceAll(source, "System.out.println(count+", `QueueNode<Integer> q=new QueueNode<Integer>(99);q.links=new QueueLink("payload",null);
+    ParameterQueue.events.setLength(0);ParameterQueue.clears=0;ParameterQueue.sinks=0;ParameterQueue.fail=true;
+    Throwable caught=null;try{ParameterQueue.drain(q);}catch(Throwable error){caught=error;}ParameterQueue.fail=false;
+    if(caught!=ParameterQueue.FAILURE||q.visits!=1||q.links!=null||!ParameterQueue.events.toString().equals("V99;")||ParameterQueue.clears!=1||ParameterQueue.sinks!=0)throw new AssertionError("partial effects or exception identity",caught);
+    count++;System.out.println(count+`)
+				want = "13:parameter:backedge:dead-clear:effects\n"
 			}
 			for _, profile := range []SourceCompilerProfile{ModernJavac, NativeJavac8} {
 				t.Run(string(profile), func(t *testing.T) {
@@ -98,7 +118,7 @@ class QueueDriver {
 					compile := func(debug string) map[string][]byte {
 						return compileLambdaParameterMetadataFixture(t, compiler, profile, source, owner, debug, false)
 					}
-					testNativeIndependentCompilerFamilyWithPolicies(t, compile, profile, compiler, []string{owner}, "QueueDriver", "12:parameter:backedge:dead-clear:effects\n", nil, nil, []string{"normal", "no-source-rewrites"})
+					testNativeIndependentCompilerFamilyWithPolicies(t, compile, profile, compiler, []string{owner}, "QueueDriver", want, nil, nil, []string{"normal", "no-source-rewrites"})
 				})
 			}
 		})
