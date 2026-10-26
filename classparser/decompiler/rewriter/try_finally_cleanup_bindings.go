@@ -143,6 +143,15 @@ func finallyCleanupBindingsScoped(scope, owned []statements.Statement, bindings 
 				}
 			case *statements.ExpressionStatement:
 				roots = []values.JavaValue{x.Expression}
+			case *statements.SourceAssertionStatement:
+				condition, call, _, known := x.SourceAssertionProtocol()
+				if !known {
+					return false
+				}
+				// The message is conditional, but its binding still belongs to
+				// this source scope. Children of the sealed allocation expose
+				// constructor operands without following its receiver back edge.
+				roots = []values.JavaValue{condition, call.Object}
 			case *values.JavaExpression:
 				roots = []values.JavaValue{x}
 			case *statements.ReturnStatement:
