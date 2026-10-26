@@ -62,6 +62,11 @@ func testAuthoredOwnerAcrossSourceModes(t *testing.T, source, owner, driver, wan
 								}
 								reconstructed = result.Source
 							}
+							t.Cleanup(func() {
+								if t.Failed() {
+									t.Logf("reconstructed owner (%s):\n%s", policy, reconstructed)
+								}
+							})
 							if strings.Contains(reconstructed, DecompileStubMarker) {
 								t.Fatal("stub in reconstructed owner")
 							}
