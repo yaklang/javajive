@@ -1830,58 +1830,6 @@ func (f *FunctionCallExpression) wildcardArgInvariantAddCast(i int, funcCtx *cla
 	return elemPT.RawClassName
 }
 
-// wildcardConsumerReceiverMethods maps a SINGLE-type-parameter "consumer" interface (a value is fed IN to
-// the sole type-parameter position) to the method(s) that consume it and their argument count. A wildcard-
-// parameterized receiver `X<? super Y>` binds such a method to a capture and rejects the (erased) argument
-// ("Y cannot be converted to CAP#N"); a raw `((X)(recv))` cast makes it an unchecked, behaviour-preserving
-// call. Only single-type-parameter interfaces qualify so the raw cast erases exactly the one captured
-// parameter (Comparator/Collection have dedicated helpers with different semantics). Covers the guava/JDK
-// predicate/consumer family (guava Maps$FilteredEntryMap / $FilteredMapValues `predicate.apply(entry)` on
-// `Predicate<? super Entry<K,V>>`).
-var wildcardConsumerReceiverMethods = map[string]map[string]int{
-	"com.google.common.base.Predicate": {"apply": 1},
-	"java.util.function.Predicate":     {"test": 1},
-	"java.util.function.Consumer":      {"accept": 1},
-}
-
-// wildcardConsumerReceiverRawCast reports whether a `recv.m(x)` call on a wildcard-parameterized
-// single-type-parameter consumer interface (see wildcardConsumerReceiverMethods) must render its RECEIVER
-// as a raw `((X)(recv))` cast. The receiver is e.g. `Predicate<? super Entry<K,V>>`, so `apply` binds to
-// `apply(CAP)` and rejects an argument read at the erased type ("Entry cannot be converted to CAP#N"; guava
-// Maps$FilteredEntryMap:29 `var1.apply(var5)`, $FilteredMapValues `this.predicate.apply(var3)`). Widening
-// the receiver to its raw class makes it an unchecked, behaviour-preserving call. Mirrors
-// collectionAddWildcardReceiverRawCast / comparatorRawReceiverCast. Never fires for a lambda receiver.
-// Returns the raw class name to cast to, or "". Kill-switch JDEC_WILDCARD_CONSUMER_RECV_OFF.
-func (f *FunctionCallExpression) wildcardConsumerReceiverRawCast(funcCtx *class_context.ClassContext) string {
-	if funcCtx.Getenv("JDEC_WILDCARD_CONSUMER_RECV_OFF") != "" || f.IsStatic || f.Object == nil {
-		return ""
-	}
-	if cv, ok := UnpackSoltValue(f.Object).(*CustomValue); ok && cv.Flag == "lambda" {
-		return ""
-	}
-	raw, typeArgs := f.receiverParamTypeArgs(funcCtx)
-	// commons-collections4 Transformer<I,O>.transform: two type args, the INPUT is
-	// `? super E` (capture). Raw `((Transformer)(recv)).transform(x)` is unchecked
-	// transform(Object). Kill-switch is the parent JDEC_WILDCARD_CONSUMER_RECV_OFF.
-	if f.FunctionName == "transform" && len(f.Arguments) == 1 && len(typeArgs) >= 1 &&
-		types.IsWildcardType(typeArgs[0]) &&
-		(raw == "org.apache.commons.collections4.Transformer" || strings.HasSuffix(raw, ".Transformer") || raw == "Transformer") {
-		return raw
-	}
-	methods, ok := wildcardConsumerReceiverMethods[raw]
-	if !ok {
-		return ""
-	}
-	argc, ok := methods[f.FunctionName]
-	if !ok || len(f.Arguments) != argc {
-		return ""
-	}
-	if len(typeArgs) != 1 || !types.IsWildcardType(typeArgs[0]) {
-		return ""
-	}
-	return raw
-}
-
 // superCtorTypeVarArgCast returns the type-variable name to cast the i-th argument of a `super(...)` call
 // to, or "" when no cast is needed. It fires when the SUPERCLASS constructor's i-th parameter is a bare
 // type variable (recovered from the super ctor's generic Signature via SiblingCtorSig) that the subclass
@@ -5121,12 +5069,6 @@ func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext)
 	// A `recv.add(x)`/`recv.offer(x)` on a wildcard `Collection<? super E>` receiver rejects the Object
 	// argument; render a raw `((Collection)(recv))` receiver cast so it becomes an unchecked add(Object).
 	if rawCls := f.collectionAddWildcardReceiverRawCast(funcCtx); rawCls != "" {
-		return fmt.Sprintf("((%s)(%s)).%s(%s)", types.NewJavaClass(rawCls).String(funcCtx), receiverSource(f.Object.String(funcCtx)), functionName, strings.Join(paramStrs, ","))
-	}
-	// A `recv.apply(x)`/`test(x)`/`accept(x)` on a wildcard single-type-param consumer (e.g.
-	// `Predicate<? super Entry<K,V>>`) rejects the erased argument; render a raw `((Predicate)(recv))`
-	// receiver cast so it becomes an unchecked, behaviour-preserving call.
-	if rawCls := f.wildcardConsumerReceiverRawCast(funcCtx); rawCls != "" {
 		return fmt.Sprintf("((%s)(%s)).%s(%s)", types.NewJavaClass(rawCls).String(funcCtx), receiverSource(f.Object.String(funcCtx)), functionName, strings.Join(paramStrs, ","))
 	}
 
