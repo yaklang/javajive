@@ -111,7 +111,7 @@ func (d *Decompiler) unifyReferenceWebs() {
 				if canon == nil {
 					canon = ref
 				}
-				if values.IsNullLiteral(value) {
+				if value == values.JavaNull || values.IsNullLiteral(value) {
 					continue
 				}
 				for _, typ := range webDefinitionTypes(value, refs) {
