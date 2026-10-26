@@ -10,9 +10,10 @@ import (
 // to the source or a later lifetime of the destination slot. The simulator can
 // reuse one JavaRef for both lifetimes. Partition a witnessed copy by the solved
 // definition web before source scopes rename it or dead-store analysis runs.
-// This changes identity only: both sides and every load retain the same exact
-// primitive type. Boolean/narrow domains, handler completions, dynamic capture
-// snapshots and incomplete/multiple-definition webs keep their existing proofs.
+// This changes identity only: the stored operand and destination declaration
+// retain their existing types. Boolean declarations, handler completions,
+// dynamic captures and incomplete/multiple-definition webs keep their existing
+// proofs. Narrow declarations require an exact duplicated-word source below.
 func (d *Decompiler) partitionSharedPrimitiveCopies() {
 	if d == nil || d.getenv("JDEC_LIVEINTERVAL_OFF") != "" || len(d.ExceptionTable) != 0 || len(d.opCodes) > 8192 || len(d.evaluationSnapshots) != 0 || !d.hasMultipleNumericStores() {
 		return
@@ -84,7 +85,15 @@ func (d *Decompiler) partitionSharedPrimitiveCopies() {
 			continue
 		}
 		primitive, ok := ref.Type().RawType().(*types.JavaPrimer)
-		if !ok || primitive == nil || (primitive.Name != types.JavaInteger && primitive.Name != types.JavaLong && primitive.Name != types.JavaFloat && primitive.Name != types.JavaDouble) || !dynamicPrimitiveStore(store.Instr.OpCode, primitive.Name) {
+		if !ok || primitive == nil {
+			continue
+		}
+		category := primitive.Name
+		narrow := category == types.JavaByte || category == types.JavaShort || category == types.JavaChar
+		if narrow {
+			category = types.JavaInteger
+		}
+		if !dynamicPrimitiveStore(store.Instr.OpCode, category) {
 			continue
 		}
 		// A consumer-owned stack-lifetime view can wrap the original LOAD.
@@ -105,12 +114,16 @@ func (d *Decompiler) partitionSharedPrimitiveCopies() {
 			}
 			operand = slot.GetValue()
 		}
-		if load == nil || !dynamicPrimitiveLoad(load.Instr.OpCode, primitive.Name) || GetRetrieveIdx(load) == GetStoreIdx(store) {
+		source, sourceRef := values.UnpackSoltValue(store.stackConsumed[0]).(*values.JavaRef)
+		if !sourceRef || source == nil || source.Id == nil || source.CustomValue != nil || source.StackVar != nil || d.localHasBooleanDescriptorUse(ref) || d.localHasBooleanDescriptorUse(source) {
 			continue
 		}
-		sourceWeb, sourceKnown := webs.webOf[load]
-		source, sourceRef := values.UnpackSoltValue(store.stackConsumed[0]).(*values.JavaRef)
-		if !sourceKnown || sourceWeb == web || !sourceRef || source == nil || source.Id == nil || source.CustomValue != nil || source.StackVar != nil || !isExactPrimer(source.Type(), primitive.Name) || d.localHasBooleanDescriptorUse(ref) || d.localHasBooleanDescriptorUse(source) {
+		if load != nil {
+			sourceWeb, sourceKnown := webs.webOf[load]
+			if narrow || !dynamicPrimitiveLoad(load.Instr.OpCode, category) || GetRetrieveIdx(load) == GetStoreIdx(store) || !sourceKnown || sourceWeb == web || !isExactPrimer(source.Type(), primitive.Name) {
+				continue
+			}
+		} else if !d.duplicatedPrimitiveCopySource(store, source, primitive.Name) {
 			continue
 		}
 		if d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, int64(len(webs.webOf))) != nil {
@@ -126,7 +139,7 @@ func (d *Decompiler) partitionSharedPrimitiveCopies() {
 				break
 			}
 			if isLocalLoadOpcode(op.Instr.OpCode) {
-				if !dynamicPrimitiveLoad(op.Instr.OpCode, primitive.Name) || len(op.stackProduced) != 1 {
+				if !dynamicPrimitiveLoad(op.Instr.OpCode, category) || len(op.stackProduced) != 1 {
 					valid = false
 					break
 				}
@@ -142,4 +155,72 @@ func (d *Decompiler) partitionSharedPrimitiveCopies() {
 			d.bindProvedPrimitiveWeb(webs, web, stores[web], primitive.Name)
 		}
 	}
+}
+
+// DUP materializes one evaluated word for several consumers. A following
+// STORE copies that word into a local lifetime, just as LOAD; STORE does.
+// Keep both the stack temporary and the STORE at their original positions;
+// only the destination's proved def-use web may receive a distinct binder.
+func (d *Decompiler) duplicatedPrimitiveCopySource(store *OpCode, source *values.JavaRef, kind string) bool {
+	if d == nil || store == nil || store.Instr == nil || store.IsCustom || source == nil || source.Type() == nil || len(store.stackConsumed) != 1 || d.semanticCFG == nil || d.semanticCFG.Err != nil {
+		return false
+	}
+	if _, valid := localPostInstructionWidth(store); !valid {
+		return false
+	}
+	g := d.semanticCFG
+	incoming := g.incoming[store]
+	if len(incoming) != 1 || incoming[0] < 0 || incoming[0] >= len(g.Edges) {
+		return false
+	}
+	edge := g.Edges[incoming[0]]
+	duplicate := edge.From
+	if edge.To != store || edge.Kind != EdgeFallthrough || duplicate == nil || duplicate.Instr == nil || duplicate.IsCustom || len(g.outgoing[duplicate]) != 1 || g.outgoing[duplicate][0] != incoming[0] || int(duplicate.CurrentOffset)+1 != int(store.CurrentOffset) {
+		return false
+	}
+	if _, known := g.order[duplicate]; !known {
+		return false
+	}
+	if _, known := g.order[store]; !known {
+		return false
+	}
+	code := OP_DUP
+	if kind == types.JavaLong || kind == types.JavaDouble {
+		code = OP_DUP2
+	}
+	consumed, produced := 1, 2
+	if code == OP_DUP2 {
+		// The simulator first materializes the category-2 word, then pops
+		// that temporary before pushing its two copies. Those bookkeeping
+		// entries must all denote this same cell, never two category-1 words.
+		consumed, produced = 2, 3
+	}
+	if duplicate.Instr.OpCode != code || len(duplicate.Data) != 0 || duplicate.IsWide || len(duplicate.stackProduced) != produced || len(duplicate.stackConsumed) != consumed {
+		return false
+	}
+	infos, converted := d.opcodeIdToRef[duplicate], d.dupConvertedRefValue[duplicate]
+	if len(infos) != 1 || infos[0][0] != source || infos[0][1] != true || len(converted) != 1 || converted[0] != duplicate.stackConsumed[0] {
+		return false
+	}
+	pc, originalCode, known := source.OriginalStackMaterializationWitness(converted[0])
+	if !known || pc != int(duplicate.CurrentOffset) || originalCode != code {
+		return false
+	}
+	// Byte/short/char stack producers are computational ints. Widening
+	// their stored copy to the already declared int preserves its word;
+	// boolean and other conversions require a different proof.
+	primitive, ok := source.Type().RawType().(*types.JavaPrimer)
+	if !ok || primitive == nil || primitive.Name != kind && !(kind == types.JavaInteger && (primitive.Name == types.JavaByte || primitive.Name == types.JavaShort || primitive.Name == types.JavaChar)) {
+		return false
+	}
+	operand := store.stackConsumed[0]
+	if d.stackValueProducers[operand] != duplicate || code == OP_DUP2 && duplicate.stackConsumed[1] != operand {
+		return false
+	}
+	for _, cell := range duplicate.stackProduced {
+		if cell != operand {
+			return false
+		}
+	}
+	return true
 }
