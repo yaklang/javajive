@@ -183,26 +183,14 @@ func asLatchIncExpr(n *core.Node) (*values.JavaExpression, bool) {
 	return e, true
 }
 
-// convertSplitContinueToLatch repairs for-loop `continue` statements that javac compiled as a `goto`
-// to the loop's increment/step node (the latch `i++`) instead of to the loop header. When a loop body
-// has TWO OR MORE early-continue branches that jump to the single bottom-of-body increment (e.g. gson
-// JsonWriter.string / the Repro fixture: `if(c<128){r=arr[c]; if(r==null) continue;} else if(...) ...
-// else continue; <write r>; i++;`), the increment node is the if/else region's post-dominator. Those
-// `goto increment` edges are NOT back-edges to the header, so RebuildLoopNode never redirected them and
-// LoopJmpRewriter's `next == circleNode` continue rule never fires; the edges survive as ordinary
-// fall-through into the increment. IfRewriter then structures the branches as EMPTY (the continue body
-// was just the dropped goto) and the post-if write runs unconditionally over a local that the
-// continue paths never assigned ("variable r might not have been initialized"). The single trailing
-// increment cannot serve every continue path, and a bare `continue` would skip the step and spin.
-//
-// Fix: for each early-continue predecessor P of the latch, splice a PRIVATE copy of the increment plus
-// an explicit `continue` (P -> i++' -> continue -> header), so each path steps then re-tests exactly
-// like the source for-loop, while the latch's own fall-through path is left untouched. circleNode here
-// is the RebuildLoopNode do-while wrapper, so wiring the new continue to it matches the existing
-// `next == circleNode` continue mechanism. Gated to: a single ±1 latch whose ONLY successor is the
-// loop header, with >=2 conditional/jump predecessors AND >=1 fall-through predecessor — so the clean
-// single-continue loop (handled by IfRewriter branch inversion) and loops without a separable step
-// latch are byte-for-byte unchanged. Kill-switch: JDEC_SPLIT_CONTINUE_LATCH_OFF=1.
+// Several early branches may jump to a shared for-loop step rather than its
+// header. If collection treats that step as ordinary fall-through, the branches
+// lose their continue and execute the rest of the body. Subdivide each proved
+// bypass with a private copy of the nonthrowing local update and a continue.
+// Each original path still evaluates the same step once, including computed
+// displacements and Java int overflow. The ordinary tail retains its step.
+// Require at least two bypass predecessors and one normal predecessor, with
+// all copied edges owned by this loop; other loop shapes retain their proofs.
 func convertSplitContinueToLatch(manager *RewriteManager, circleNode *core.Node) {
 	if jdecenv.Get("JDEC_SPLIT_CONTINUE_LATCH_OFF") != "" {
 		return
@@ -211,7 +199,7 @@ func convertSplitContinueToLatch(manager *RewriteManager, circleNode *core.Node)
 		if latch == circleNode {
 			continue
 		}
-		incExpr, ok := asLatchIncExpr(latch)
+		copyStep, ok := switchLoopLocalStep(latch)
 		if !ok {
 			continue
 		}
@@ -243,11 +231,13 @@ func convertSplitContinueToLatch(manager *RewriteManager, circleNode *core.Node)
 			continue
 		}
 		for _, p := range jumpPreds {
-			// Build a FRESH increment expression reusing the latch's variable ref (so RewriteVar renames
-			// it consistently) but not the latch node itself, then an explicit continue to the header.
-			incrNode := manager.NewNode(values.NewBinaryExpression(incExpr.Values[0], incExpr.Values[1], incExpr.Op, incExpr.Typ))
+			// Preserve the step operands and binder, but give this edge its
+			// own statement and sealed transfer to the same loop header.
+			incrNode := manager.NewNode(copyStep())
+			incrNode.OriginPC, incrNode.HasOriginPC = latch.OriginPC, latch.HasOriginPC
 			contNode := manager.NewNode(statements.NewSourceTransferStatement("continue", ""))
 			contNode.IsJmp = true
+			manager.recordLoopTransfer(contNode, circleNode, "continue", p)
 			replaceNextInPlace(p, latch, incrNode)
 			incrNode.AddNext(contNode)
 			contNode.AddNext(circleNode)
