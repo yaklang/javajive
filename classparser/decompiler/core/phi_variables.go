@@ -101,7 +101,8 @@ func (d *Decompiler) unifyReferenceWebs() {
 			}
 			for _, store := range stores {
 				ref := d.opcodeIdToRef[store][0][0].(*values.JavaRef)
-				if (ref.IsParam && ref != param) || len(owners[ref]) != 1 || len(store.stackConsumed) != 1 {
+				parameterAlias := param != nil && param.Id != nil && param.VarUid != "" && ref.Id == param.Id && ref.VarUid == param.VarUid
+				if (ref.IsParam && ref != param && !parameterAlias) || len(owners[ref]) != 1 || len(store.stackConsumed) != 1 {
 					valid = false
 					break
 				}
@@ -198,6 +199,12 @@ func (d *Decompiler) unifyReferenceWebs() {
 				}
 				ref.Id = canon.Id
 				ref.VarUid = canon.VarUid
+				if param != nil && !param.IsThis {
+					// The solved identity denotes the parameter's declaration as
+					// well as its reads and writes. Otherwise declaration recovery
+					// invents a second local with the parameter's source name.
+					ref.IsParam = param.IsParam
+				}
 				if param == nil && identity != nil {
 					ref.SolvedWebIdentity = identity
 				}
