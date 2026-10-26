@@ -111,7 +111,7 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 	copy(next, node.Next)
 	tryCatchSt := statements.NewTryCatchStatement(nil, nil)
 	tryNode := manager.NewNode(tryCatchSt)
-	node.Replace(tryNode)
+	manager.replaceStructuredNode(node, tryNode)
 	tryNode.RemoveAllNext()
 	var endNodes []*core.Node
 	var bodyNodes []*core.Node
@@ -341,7 +341,7 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 		// prefixes and the unprotected tail, without replaying slot names.
 		if declaration != nil {
 			declNode := manager.NewNode(declaration)
-			tryNode.Replace(declNode)
+			manager.replaceStructuredNode(tryNode, declNode)
 			declNode.RemoveAllNext()
 			declNode.AddNext(tryNode)
 		}

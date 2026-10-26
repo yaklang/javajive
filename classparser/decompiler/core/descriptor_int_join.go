@@ -22,7 +22,8 @@ func (d *Decompiler) unifyDescriptorIntJoins() {
 		return
 	}
 	producers := d.originalNumericJoinProducers()
-	if len(producers) == 0 {
+	copyProof := d.numericCopyProvenance(producers)
+	if len(producers) == 0 && copyProof == nil {
 		return
 	}
 	webs := d.slotWebs()
@@ -101,6 +102,21 @@ func (d *Decompiler) unifyDescriptorIntJoins() {
 			if !ok || ref == nil || ref.Id == nil || ref.IsParam || ref.IsThis || ref.CustomValue != nil || ref.StackVar != nil || d.localHasBooleanDescriptorUse(ref) {
 				valid = false
 				break
+			}
+			if copyProof != nil {
+				load, _, bounded := copyProof.operand(store.stackConsumed[0])
+				if !bounded {
+					valid = false
+					break
+				}
+				if load != nil {
+					valid = copyProof.provesStore(store)
+					hasNumericProducer = hasNumericProducer || valid
+					if !valid {
+						break
+					}
+					continue
+				}
 			}
 			switch rhs := safeSeedOperand(store.stackConsumed[0]).(type) {
 			case *values.JavaLiteral:

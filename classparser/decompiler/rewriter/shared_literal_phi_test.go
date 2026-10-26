@@ -111,3 +111,61 @@ func TestSharedBooleanPhiStoreRequiresInertTerminalIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestSharedLiteralPhiKeepsEffectfulContinuationOnce(t *testing.T) {
+	for _, variant := range []string{"integer", "boolean", "handler interval", "unknown table", "cross handler", "missing boundary", "catch continuation", "opaque successor"} {
+		t.Run(variant, func(t *testing.T) {
+			root, external := jumpTestNode("root"), jumpTestNode("external")
+			condition := core.NewNode(&statements.ConditionStatement{})
+			condition.OriginPC, condition.HasOriginPC = 10, true
+			ref := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaPrimer(types.JavaInteger))
+			literal := values.NewJavaLiteral(-37, types.NewJavaPrimer(types.JavaInteger))
+			if variant == "boolean" {
+				ref.ResetVarType(types.NewJavaPrimer(types.JavaBoolean))
+				literal = values.NewJavaLiteral(true, types.NewJavaPrimer(types.JavaBoolean))
+			}
+			assign := statements.NewAssignStatement(ref, literal, false)
+			assign.OriginPC, assign.HasOriginPC = 20, true
+			target := core.NewNode(assign)
+			target.OriginPC, target.HasOriginPC = 20, true
+			call := &values.FunctionCallExpression{}
+			exit := core.NewNode(statements.NewExpressionStatement(call))
+			exit.OriginPC, exit.HasOriginPC = 30, true
+			root.AddNext(condition)
+			root.AddNext(external)
+			condition.AddNext(target)
+			external.AddNext(target)
+			target.AddNext(exit)
+			manager := NewRootStatementManager(root)
+			manager.SetOriginalExceptionTable(nil)
+			switch variant {
+			case "handler interval":
+				manager.SetOriginalExceptionTable([]*core.ExceptionTableEntry{{StartPc: 10, EndPc: 25, HandlerPc: 40}})
+			case "unknown table":
+				manager.originalHandlersKnown = false
+			case "cross handler":
+				manager.SetOriginalExceptionTable([]*core.ExceptionTableEntry{{StartPc: 15, EndPc: 25, HandlerPc: 40}})
+			case "missing boundary":
+				condition.HasOriginPC = false
+			case "catch continuation":
+				exit.IsCatchStart = true
+			case "opaque successor":
+				exit.HideNext = external
+			}
+			manager.DominatorMap = GenerateDominatorTree(root)
+			splitSharedLiteralPhiStores(manager, condition)
+			want := variant == "integer" || variant == "boolean" || variant == "handler interval"
+			if (condition.Next[0] != target) != want {
+				t.Fatalf("split=%v want=%v", condition.Next[0] != target, want)
+			}
+			if !want {
+				return
+			}
+			edge := condition.Next[0]
+			copied := edge.Statement.(*statements.AssignStatement)
+			if copied == assign || copied.JavaValue != literal || copied.LeftValue != ref || copied.OriginPC != 20 || len(edge.Next) != 1 || edge.Next[0] != exit || external.Next[0] != target || exit.Statement.(*statements.ExpressionStatement).Expression != call {
+				t.Fatal("store identity, original path or continuation effect changed")
+			}
+		})
+	}
+}

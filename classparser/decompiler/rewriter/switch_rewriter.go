@@ -696,7 +696,7 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 	keyMap := caseMap.Keys()
 	node.RemoveAllNext()
 	switchNode := manager.NewNode(switchStatement)
-	node.Replace(switchNode)
+	manager.replaceStructuredNode(node, switchNode)
 	if node.MergeNode != nil {
 		node.RemoveNext(node.MergeNode)
 		switchNode.AddNext(node.MergeNode)

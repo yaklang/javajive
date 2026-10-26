@@ -61,28 +61,53 @@ func materializeForwardRegionExits(manager *RewriteManager, condition *core.Node
 	if len(frontier) < 2 {
 		return
 	}
+	// The continuation may also have predecessors outside this decision
+	// (for example an enclosing guard's false arm). Its immediate dominator
+	// is then too broad. Find the smallest ancestor containing this decision
+	// and every non-exit frontier, and prove that region independently.
+	parent := map[*core.Node]*core.Node{}
+	work := 65536
+	for ancestor, children := range manager.DominatorMap {
+		for _, child := range children {
+			work--
+			if work < 0 || child == nil || parent[child] != nil {
+				return
+			}
+			parent[child] = ancestor
+		}
+	}
+	tried := map[*core.Node]bool{}
 	for _, edge := range frontier {
 		exit := edge.to
+		if tried[exit] {
+			continue
+		}
+		tried[exit] = true
 		var owner *core.Node
-		for candidate, children := range manager.DominatorMap {
-			if slices.Contains(children, exit) {
+		for candidate, depth := parent[condition], 0; candidate != nil && depth < 1024; candidate, depth = parent[candidate], depth+1 {
+			if _, raw := candidate.Statement.(*statements.ConditionStatement); !raw {
+				continue
+			}
+			other, contains := false, true
+			for _, e := range frontier {
+				work--
+				if work < 0 {
+					return
+				}
+				if e.to != exit {
+					other = true
+					contains = contains && utils2.IsDominate(manager.DominatorMap, candidate, e.to)
+				}
+			}
+			if other && contains {
 				owner = candidate
 				break
 			}
 		}
-		if owner == nil || owner == condition || !utils2.IsDominate(manager.DominatorMap, owner, condition) {
+		if owner == nil || !closedForwardRegion(manager, owner, exit) {
 			continue
 		}
-		if _, ok := owner.Statement.(*statements.ConditionStatement); !ok {
-			continue
-		}
-		other := false
-		for _, e := range frontier {
-			other = other || e.to != exit && utils2.IsDominate(manager.DominatorMap, owner, e.to)
-		}
-		if !other || !closedForwardRegion(manager, owner, exit) {
-			continue
-		}
+
 		region := manager.forwardRegions[owner]
 		if region != nil && region.exit != exit {
 			continue
@@ -272,7 +297,7 @@ func finishForwardRegion(manager *RewriteManager, original, start *core.Node) er
 	block := statements.NewDoWhileStatement(values.NewJavaLiteral(false, types.NewJavaPrimer(types.JavaBoolean)), core.NodesToStatements(body))
 	block.Label = region.label
 	wrapper := manager.NewNode(block)
-	start.Replace(wrapper)
+	manager.replaceStructuredNode(start, wrapper)
 	if manager.RootNode == start {
 		manager.RootNode = wrapper
 	}
@@ -282,5 +307,18 @@ func finishForwardRegion(manager *RewriteManager, original, start *core.Node) er
 	}
 	wrapper.AddNext(region.exit)
 	retargetProtectedIfBoundary(manager.TryNodes, start, wrapper)
+	delete(manager.forwardRegions, original)
 	return nil
+}
+
+// Pending region exits name graph identities, so every structured replacement
+// must retarget those identities together with the incoming CFG edges. The
+// source break label still names the same lexical region and is unchanged.
+func (manager *RewriteManager) replaceStructuredNode(old, replacement *core.Node) {
+	old.Replace(replacement)
+	for _, region := range manager.forwardRegions {
+		if region.exit == old {
+			region.exit = replacement
+		}
+	}
 }

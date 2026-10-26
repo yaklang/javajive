@@ -61,7 +61,7 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	originNodeStatement := ifNode.Statement
 
 	ifStatementNode := manager.NewNode(ifStatement)
-	ifNode.Replace(ifStatementNode)
+	manager.replaceStructuredNode(ifNode, ifStatementNode)
 	checkIsEndNode := func(node1, node2 *core.Node) bool {
 		if node1 == nil || node2 == nil {
 			return false
