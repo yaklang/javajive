@@ -35,6 +35,7 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	splitSharedFallthroughExpression(manager, ifNode)
 	splitSharedLiteralPhiStores(manager, ifNode)
 	splitSharedTerminalLeaves(manager, ifNode)
+	materializeProtectedNormalExit(manager, ifNode)
 	// Normalize shared edge blocks first. A shared terminal store can look
 	// like a second region exit until its selected edge has its own owner.
 	materializeForwardRegionExits(manager, ifNode)
@@ -70,6 +71,9 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 		core.WalkGraph[*core.Node](node1, func(node *core.Node) ([]*core.Node, error) {
 			var next []*core.Node
 			for _, n := range node.Next {
+				if encodedJumpTo(node, n) {
+					continue
+				}
 				if slices.Contains(manager.DominatorMap[node], n) {
 					next = append(next, n)
 				}
@@ -132,7 +136,7 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 			sts = append(sts, node)
 			var next []*core.Node
 			for _, n := range node.Next {
-				if slices.Contains(manager.DominatorMap[node], n) {
+				if !encodedJumpTo(node, n) && slices.Contains(manager.DominatorMap[node], n) {
 					next = append(next, n)
 				} else {
 					endNodes = append(endNodes, n)
