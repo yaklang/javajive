@@ -194,7 +194,7 @@ func closedForwardRegion(manager *RewriteManager, owner, exit *core.Node) bool {
 			if !sameDomain(n) {
 				return false
 			}
-		case *statements.IfStatement, *statements.DoWhileStatement, *statements.WhileStatement:
+		case *statements.IfStatement, *statements.DoWhileStatement, *statements.WhileStatement, *statements.TryCatchStatement:
 			if !forwardBlockKeepsTransferBindings(n.Statement, 0, 0, &statementBudget) {
 				return false
 			}
@@ -318,6 +318,25 @@ func forwardBlockKeepsTransferBindings(st statements.Statement, loops, depth int
 		return x != nil && x.ConditionValue != nil && block(x.Body, loops+1)
 	case *statements.WhileStatement:
 		return x != nil && x.ConditionValue != nil && block(x.Body, loops+1)
+	case *statements.TryCatchStatement:
+		// The complete protected statement stays atomic: only its enclosing
+		// lexical block changes. A new loop must not capture an unqualified
+		// transfer in either the original body or any original handler.
+		if x == nil || len(x.Exception) == 0 || len(x.Exception) > 32 || len(x.Exception) != len(x.CatchBodies) || len(x.Handlers) != len(x.Exception) || !block(x.TryBody, loops) {
+			return false
+		}
+		for i, handler := range x.Handlers {
+			if x.Exception[i] == nil || handler.EntryPC < 0 || handler.EntryPC > 65535 {
+				return false
+			}
+			if _, valid := canonicalHandlerRanges(handler.ProtectedRanges); !valid {
+				return false
+			}
+			if !block(x.CatchBodies[i], loops) {
+				return false
+			}
+		}
+		return true
 	case *statements.CustomStatement:
 		if _, label, ok := x.SourceTransferProtocol(); ok {
 			return label != "" || loops > 0
