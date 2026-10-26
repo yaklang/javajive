@@ -691,6 +691,9 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 	if source, committed, err := c.standaloneEnumSwitchSource(); committed || err != nil {
 		return source, err
 	}
+	if source, committed, err := c.standaloneAnonymousSource(); committed || err != nil {
+		return source, err
+	}
 	// accessFlagsVerbose := c.obj.AccessFlagsVerbose
 	accessFlagsToCode := c.obj.AccessFlagsToCode
 
