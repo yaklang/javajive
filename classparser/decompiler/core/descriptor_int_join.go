@@ -15,7 +15,14 @@ import (
 // Only original typed producers and integer literals supply domain evidence;
 // mutable local types, names and inferred expression types do not.
 func (d *Decompiler) unifyDescriptorIntJoins() {
-	if d == nil || d.getenv("JDEC_LIVEINTERVAL_OFF") != "" || len(d.ExceptionTable) != 0 || len(d.evaluationSnapshots) != 0 || len(d.opCodes) > 8192 {
+	if d == nil || d.getenv("JDEC_LIVEINTERVAL_OFF") != "" || len(d.evaluationSnapshots) != 0 || len(d.opCodes) > 8192 {
+		return
+	}
+	// Handler joins need the frozen exceptional graph: a throwing
+	// producer contributes its INPUT local state to a catch edge. The
+	// mutable source graph cannot establish which stores reach that use.
+	// Canonicalizing a complete web changes no evaluations or handler ranges.
+	if len(d.ExceptionTable) != 0 && (d.semanticCFG == nil || d.semanticCFG.Err != nil || len(d.semanticCFG.Nodes) > 8192) {
 		return
 	}
 	if d.Work != nil && (d.Work.Charge(workbudget.CounterGraphScans, int64(len(d.opCodes)+len(d.invokeFuncCall))) != nil || d.Work.CheckAlloc(int64(len(d.opCodes)+len(d.invokeFuncCall))*192) != nil) {
@@ -27,7 +34,7 @@ func (d *Decompiler) unifyDescriptorIntJoins() {
 		return
 	}
 	webs := d.slotWebs()
-	if webs == nil {
+	if webs == nil || (d.semanticCFG != nil && d.semanticCFG.Err != nil) {
 		return
 	}
 	decoded, entries, incremented := map[*OpCode]bool{}, map[int]bool{}, map[int]bool{}
