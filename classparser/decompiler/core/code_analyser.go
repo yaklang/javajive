@@ -7216,6 +7216,10 @@ func (d *Decompiler) ParseStatement() error {
 	uidToPairs.ForEach(func(uid string, pairs []*VarFoldRule) bool {
 		ref := uidToRef[uid]
 		val := foldDefinitionValue(ref)
+		// An unproved declaration conversion retains its explicit store.
+		if val == ref {
+			return true
+		}
 		attr := d.delRefUserAttr[ref.VarUid]
 		if slices.Contains(disRefUid, ref.VarUid) {
 			d.tracef("var-fold", "skip disabled ref=%s pairs=%d", traceRef(ref, d.FunctionContext), len(pairs))

@@ -4,6 +4,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/workbudget"
 	"reflect"
 )
 
@@ -32,6 +33,7 @@ func (d *Decompiler) lowerClosedStackPhi(merge *OpCode, conditions []*OpCode, sl
 	region := map[*OpCode]bool{}
 	pending := []*OpCode{root}
 	effect := false
+	snapshotCount := 0
 	for len(pending) > 0 {
 		n := pending[len(pending)-1]
 		pending = pending[:len(pending)-1]
@@ -43,6 +45,22 @@ func (d *Decompiler) lowerClosedStackPhi(merge *OpCode, conditions []*OpCode, sl
 			return false
 		}
 		region[n] = true
+		// Planned evaluation snapshots are real source definitions, even
+		// though the original factory is not a JVM local-store opcode.
+		// Removing their branch conditions would leave the temporary uses
+		// outside their defining arm (or attach them to an earlier guard).
+		// Keep those statements and write the selected result on each edge.
+		snapshots := d.evaluationSnapshots[n]
+		snapshotCount += len(snapshots)
+		if snapshotCount > 512 || (len(snapshots) > 0 && d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, int64(len(snapshots))) != nil) {
+			return false
+		}
+		for _, snapshot := range snapshots {
+			if snapshot.Ref == nil || snapshot.Ref.Id == nil || snapshot.Value == nil || snapshot.OriginPC != int(n.CurrentOffset) {
+				return false
+			}
+			effect = true
+		}
 		for _, entry := range d.ExceptionTable {
 			if n.CurrentOffset >= entry.StartPc && n.CurrentOffset < entry.EndPc {
 				return false

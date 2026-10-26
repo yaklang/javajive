@@ -8,7 +8,7 @@ import (
 )
 
 func TestEffectfulStackPhiRequiresClosedForwardRegion(t *testing.T) {
-	for _, kind := range []string{"valid", "field store", "static store", "pure pop", "outside entry", "back edge", "handler", "protected effect", "extra stack word", "conditional predecessor", "missing simulation"} {
+	for _, kind := range []string{"valid", "field store", "static store", "snapshot operand", "snapshot result", "snapshot missing ref", "snapshot missing value", "snapshot other PC", "snapshot overflow", "pure pop", "outside entry", "back edge", "handler", "protected effect", "extra stack word", "conditional predecessor", "missing simulation"} {
 		t.Run(kind, func(t *testing.T) {
 			merge := &OpCode{CurrentOffset: 40, Instr: &Instruction{OpCode: OP_ARETURN}}
 			root := &OpCode{CurrentOffset: 1, Instr: &Instruction{OpCode: OP_IFEQ}}
@@ -26,8 +26,27 @@ func TestEffectfulStackPhiRequiresClosedForwardRegion(t *testing.T) {
 			right.StackEntry = newStackItem(NewEmptyStackEntry(), b)
 			slot := values.NewSlotValue(a, a.Type())
 			d := &Decompiler{opcodeToSimulateStack: map[*OpCode]*StackSimulationImpl{merge: NewStackSimulation(NewEmptyStackEntry(), nil, utils.NewRootVariableId())}}
-			accepted := kind == "valid" || kind == "field store" || kind == "static store"
+			accepted := kind == "valid" || kind == "field store" || kind == "static store" || kind == "snapshot operand" || kind == "snapshot result"
 			switch kind {
+			case "snapshot operand", "snapshot result", "snapshot missing ref", "snapshot missing value", "snapshot other PC", "snapshot overflow":
+				pop.Instr.OpCode = OP_INVOKEDYNAMIC
+				ref := values.NewJavaRef(utils.NewRootVariableId(), b, typ)
+				snapshot := EvaluationSnapshot{Ref: ref, Value: b, OriginPC: 10, Operand: kind == "snapshot operand"}
+				switch kind {
+				case "snapshot missing ref":
+					snapshot.Ref = nil
+				case "snapshot missing value":
+					snapshot.Value = nil
+				case "snapshot other PC":
+					snapshot.OriginPC = 9
+				}
+				d.evaluationSnapshots = map[*OpCode][]EvaluationSnapshot{pop: {snapshot}}
+				if kind == "snapshot overflow" {
+					d.evaluationSnapshots[pop] = make([]EvaluationSnapshot, 513)
+					for i := range d.evaluationSnapshots[pop] {
+						d.evaluationSnapshots[pop][i] = snapshot
+					}
+				}
 			case "field store":
 				pop.Instr.OpCode = OP_PUTFIELD
 			case "static store":

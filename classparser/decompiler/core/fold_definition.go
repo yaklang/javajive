@@ -1,6 +1,9 @@
 package core
 
-import "github.com/yaklang/javajive/classparser/decompiler/core/values"
+import (
+	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+)
 
 // foldDefinitionValue returns only this variable's defining expression. An
 // alias is a read of the already computed value. Never follow an intervening
@@ -14,6 +17,12 @@ func foldDefinitionValue(ref *values.JavaRef) values.JavaValue {
 		return ref
 	}
 	if cv, ok := ref.Val.(*values.CustomValue); ok && cv.Flag == "param_placeholder" {
+		return ref
+	}
+	if isExactPrimer(ref.WebDeclType, types.JavaBoolean) {
+		if view, valid := values.BooleanLocalDefinitionView(ref.Val); valid {
+			return view
+		}
 		return ref
 	}
 	return ref.Val
