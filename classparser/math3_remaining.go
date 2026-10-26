@@ -75,14 +75,6 @@ func fixMath3RemainingReconstructs(body string) string {
 		body = strings.ReplaceAll(body, "var4.getKey()", "(Integer)(var4.getKey())")
 		body = strings.ReplaceAll(body, "(Integer)((Integer)(var4.getKey()))", "(Integer)(var4.getKey())")
 	}
-	if strings.Contains(body, "class RectangularCholeskyDecomposition") {
-		body = strings.Replace(body, "var14 = var11;", "var10 = var11;", 1)
-		body = strings.Replace(body, "if ((var8) != ((var10_1) != (0)))", "if ((var8) != (var10))", 1)
-		body = strings.Replace(body, "var6[var8] = var6[var10_1];", "var6[var8] = var6[var10];", 1)
-		body = strings.Replace(body, "var6[var10_1] = var11;", "var6[var10] = var11;", 1)
-		body = strings.Replace(body, "var5[var8] = var5[var10_1];", "var5[var8] = var5[var10];", 1)
-		body = strings.Replace(body, "var5[var10_1] = var12_1;", "var5[var10] = var12_1;", 1)
-	}
 	if strings.Contains(body, "class AVLTree$Node") {
 		body = strings.ReplaceAll(body, "Comparable var1 = this.element;", "T var1 = this.element;")
 	}
@@ -138,17 +130,6 @@ func fixMath3RemainingReconstructs(body string) string {
 		body = strings.ReplaceAll(body,
 			"(T)((T)(this.this$0.getStepSize()))",
 			"(T)(this.this$0.getStepSize())")
-	}
-	if strings.Contains(body, "class ResizableDoubleArray") {
-		filled := "ResizableDoubleArray var2 = this;\n\t\t\t\tsynchronized(this){\n\t\t\t\t\tResizableDoubleArray var3 = ((ResizableDoubleArray)(var1));\n\t\t\t\t\treturn ((this.numElements) == (var3.numElements)) && ((this.startIndex) == (var3.startIndex));\n\t\t\t\t}"
-		body = strings.Replace(body,
-			"ResizableDoubleArray var2 = this;\n\t\t\t\tsynchronized(this){\n\n\t\t\t\t}\n\t\t\t\treturn false;",
-			filled,
-			1)
-		body = strings.Replace(body,
-			"ResizableDoubleArray var2 = this;\n\t\t\t\tsynchronized(this){\n\n\t\t\t\t}",
-			filled,
-			1)
 	}
 	return body
 }

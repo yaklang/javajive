@@ -137,7 +137,7 @@ func TestAdversarialPoissonBoolAsDoubleIsLoadBearing(t *testing.T) {
 // generic effect/exception and declaration-permutation JVM tests exercise the
 // behavior independently, including renamed controls and Precision mode.
 func TestAdversarialMathInitializationAndDecisionsNeedNoNamedRepair(t *testing.T) {
-	for _, name := range []string{"SymmLQ$State", "Erf"} {
+	for _, name := range []string{"SymmLQ$State", "Erf", "RectangularCholeskyDecomposition"} {
 		t.Run(name, func(t *testing.T) {
 			raw, err := os.ReadFile("testdata/regression/" + name + ".class")
 			if err != nil {
@@ -175,5 +175,26 @@ func TestMathRemainingKeepsRawConstructorBinding(t *testing.T) {
 	got := fixMath3RemainingReconstructs(in)
 	if !strings.Contains(got, "new Array2DRowFieldMatrix(matrix.getData())") || strings.Contains(got, "new Array2DRowFieldMatrix<T>") {
 		t.Fatal(got)
+	}
+}
+
+func TestAdversarialMathSourceNamesCannotAuthorizeValueRewrites(t *testing.T) {
+	// Both are valid programs. A library-like class name supplies no evidence
+	// that an assignment should target another local, or that a false result
+	// should become a field comparison. Renaming must not change either body.
+	programs := []string{
+		"class RectangularCholeskyDecomposition { int choose(int var11) { int var10 = 1; int var14 = 2; var14 = var11; return 100 * var10 + var14; } }",
+		"class ResizableDoubleArray { int numElements, startIndex; boolean same(Object var1) {\n\t\t\t\tResizableDoubleArray var2 = this;\n\t\t\t\tsynchronized(this){\n\n\t\t\t\t}\n\t\t\t\treturn false;\n} }",
+	}
+	for _, program := range programs {
+		for _, renamed := range []bool{false, true} {
+			text := program
+			if renamed {
+				text = strings.NewReplacer("RectangularCholeskyDecomposition", "LocalTransfer", "ResizableDoubleArray", "MonitorResult").Replace(text)
+			}
+			if got := fixMath3RemainingReconstructs(text); got != text {
+				t.Errorf("class name changed program values (renamed=%v):\n%s", renamed, got)
+			}
+		}
 	}
 }
