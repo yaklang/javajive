@@ -185,6 +185,7 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 		first := d.opcodeIdToRef[stores[0]][0][0].(*values.JavaRef)
 		seedType := first.Type()
 		singletonConflict := false
+		protectedExit := false
 		if len(stores) == 1 {
 			// A later disjoint single-definition web owns a distinct lifetime,
 			// even when its type is identical to the earlier variable's type.
@@ -243,11 +244,25 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 				seedType = unreadType
 				singletonConflict = true
 			}
+			// A single definition can escape the lexical try body without a
+			// phi. Give that complete web its own identity before source scopes
+			// rename it; an equal-typed later slot lifetime is not its owner.
+			// Null can seed the shared pending-completion binder of duplicated
+			// finally paths. It is not evidence of an independent object lifetime;
+			// leave that source constraint to the completion/seed protocol.
+			protectedExit = handlersKnown && !handlerCopies[w] && value != nil &&
+				values.UnpackSoltValue(value) != values.JavaNull && !values.IsNullLiteral(values.UnpackSoltValue(value)) &&
+				values.ReferenceTypeDescriptor(definedType, d.FunctionContext) != "" &&
+				d.closedProtectedReferenceExit(webs, w, stores[0])
+			if protectedExit {
+				seedType = definedType
+				singletonConflict = true
+			}
 			if !singletonConflict {
 				continue
 			}
 		}
-		conflict := parameterConflict
+		conflict := parameterConflict || protectedExit
 		distinct := map[*values.JavaRef]bool{}
 		for _, op := range stores {
 			r := d.opcodeIdToRef[op][0][0].(*values.JavaRef)
@@ -262,6 +277,12 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 		id.SetName(first.Id.String())
 		canon := values.NewJavaRef(id, nil, seedType.Copy())
 		canon.SolvedWebIdentity = id
+		if protectedExit {
+			// A single original definition also owns its source receipt.
+			// Enum selectors and other consumers recheck the exact STORE seed;
+			// a fresh binder must retain that seed, not just its inferred type.
+			canon.Val = stores[0].stackConsumed[0]
+		}
 		if singletonConflict || parameterConflict {
 			// ResetValue must not write a load's stale DFS snapshot back into
 			// the freshly owned declaration while rebinding its use sites.
