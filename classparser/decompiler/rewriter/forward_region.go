@@ -144,12 +144,16 @@ func materializeForwardRegionExits(manager *RewriteManager, condition *core.Node
 // transfers cannot be swallowed by this new lexical scope. The proof makes
 // no assumptions about local names, values, branch polarity or arm effects.
 func closedForwardRegion(manager *RewriteManager, owner, exit *core.Node) bool {
-	if manager == nil || !manager.originalHandlersKnown || owner == nil || exit == nil || !owner.HasOriginPC || !exit.HasOriginPC || exit.IsCatchStart || IsEndNode(exit) {
+	if manager == nil || !manager.originalHandlersKnown || owner == nil || exit == nil || !owner.HasOriginPC || exit.IsCatchStart || IsEndNode(exit) {
+		return false
+	}
+	if _, ok := forwardEntryPC(manager, exit); !ok {
 		return false
 	}
 	remaining := 65536
 	sameDomain := func(n *core.Node) bool {
-		if n == nil || !n.HasOriginPC || n.OriginPC < 0 || n.OriginPC > 65535 || owner.OriginPC < 0 || owner.OriginPC > 65535 {
+		pc, known := forwardEntryPC(manager, n)
+		if !known || owner.OriginPC < 0 || owner.OriginPC > 65535 {
 			return false
 		}
 		remaining -= len(manager.originalHandlers) + 1
@@ -158,7 +162,7 @@ func closedForwardRegion(manager *RewriteManager, owner, exit *core.Node) bool {
 		}
 		for _, row := range manager.originalHandlers {
 			contains := func(pc int) bool { return pc >= int(row.StartPc) && pc < int(row.EndPc) }
-			if contains(n.OriginPC) != contains(owner.OriginPC) {
+			if contains(pc) != contains(owner.OriginPC) {
 				return false
 			}
 		}
