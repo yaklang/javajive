@@ -1000,7 +1000,26 @@ func (s *SlotValue) ResetValue(val JavaValue) {
 	if val == nil {
 		return
 	}
-	if ref, ok := val.(*JavaRef); ok && ref != nil && ref.WebDeclType != nil {
+	// A fold can forward another stack-use cell rather than its leaf. The
+	// cell adds no definition or type constraint: look through it before
+	// deciding whether this provisional type may update the producer. In
+	// particular, a first-arm type cannot overwrite a solved phi merely
+	// because one more LOAD/copy forwarding cell was inserted.
+	leaf := val
+	for depth := 0; ; depth++ {
+		forwarded, ok := leaf.(*SlotValue)
+		if !ok {
+			break
+		}
+		if forwarded == nil || depth >= 512 {
+			return
+		}
+		leaf = forwarded.GetValue()
+	}
+	if leaf == nil {
+		return
+	}
+	if ref, ok := leaf.(*JavaRef); ok && ref != nil && ref.WebDeclType != nil {
 		// A late reaching-definition rebind selects this solved local. The
 		// SlotValue's DFS-era temporary type is not another definition and
 		// must not overwrite the local's complete declaration constraints.
@@ -1009,9 +1028,9 @@ func (s *SlotValue) ResetValue(val JavaValue) {
 	// Folding changes the expression represented by this slot, not the JVM
 	// descriptor of a call, checkcast or allocation. A provisional branch type
 	// must not overwrite the instruction's reference type through a shared wrapper.
-	switch val.(type) {
+	switch leaf.(type) {
 	case *FunctionCallExpression, *CastExpression, *NewExpression:
-		if typ := val.Type(); typ != nil {
+		if typ := leaf.Type(); typ != nil {
 			if _, primitive := typ.RawType().(*types.JavaPrimer); !primitive {
 				return
 			}
@@ -1020,7 +1039,7 @@ func (s *SlotValue) ResetValue(val JavaValue) {
 	// Both the value's type and the slot's temp type can be nil under incomplete stack
 	// simulation (e.g. a reused slot whose type was never committed). ResetTypeRef
 	// dereferences its argument, so skip the propagation when either side is nil.
-	if t := val.Type(); t != nil && s.TmpType != nil {
+	if t := leaf.Type(); t != nil && s.TmpType != nil {
 		t.ResetTypeRef(s.TmpType)
 	}
 }
