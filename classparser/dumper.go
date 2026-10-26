@@ -4614,6 +4614,10 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			// countConstructorFieldAssignments).
 			ctorFieldAssignCount := countConstructorFieldAssignments(statementList, funcCtx.ClassName)
 			instanceHoistCandidates := inertConstructorFieldPrefix(statementList, funcCtx.ClassName)
+			var staticHoistCandidates map[*statements.AssignStatement]bool
+			if funcCtx.FunctionName == "<clinit>" && !classStaticInitializersMustHoist {
+				staticHoistCandidates = c.orderedStaticInitializerPrefix(codeAttr, statementList)
+			}
 			initializerPrefix, initializerErr := c.nativeAnonymousOwnerInitializerPrefix(statementList)
 			if initializerErr != nil {
 				return nil, initializerErr
@@ -4759,7 +4763,7 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 					} else if v, ok := ret.LeftValue.(*values.JavaClassMember); ok && ret.JavaValue != nil {
 						if (funcCtx.FunctionName == "<clinit>" && classStaticInitializersMustHoist) || v.Name == funcCtx.ClassName {
 							if _, ok := finalFieldMap[v.Member]; ok {
-								if rhs := values.ErasedFactoryAssignmentView(ret.JavaValue, values.SourceFieldType(funcCtx, ret.LeftValue), funcCtx).String(funcCtx); staticHoistAllowedHere && canHoistFieldValueInitializer(ret.JavaValue, rhs) && finalInitializerKeepsStatus[v.Member] &&
+								if rhs := values.ErasedFactoryAssignmentView(ret.JavaValue, values.SourceFieldType(funcCtx, ret.LeftValue), funcCtx).String(funcCtx); staticHoistAllowedHere && (funcCtx.FunctionName != "<clinit>" || classStaticInitializersMustHoist || staticHoistCandidates[ret]) && canHoistFieldValueInitializer(ret.JavaValue, rhs) && finalInitializerKeepsStatus[v.Member] &&
 									(!EnableFieldInitHoistGuard || (ctorFieldAssignCount[v.Member] <= 1 && crossCtorStoreOK(fieldStoreTotal, v.Member))) {
 									foundFieldInit = true
 									c.fieldDefaultValue[v.Member] = rhs
