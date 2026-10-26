@@ -7,8 +7,9 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
-// A byte/short/char/int invocation produces a computational int, even when a
-// sibling definition is the literal zero. Preserve that complete reaching web
+// A byte/short/char/int invocation or decoded integer arithmetic produces a
+// computational int, even when a sibling definition is the literal zero/one.
+// Preserve that complete reaching web
 // as one numeric declaration. Inferring each branch separately can turn the
 // zero arm into boolean and disconnect the other arm from the joined reads.
 // Only original typed producers and integer literals supply domain evidence;
@@ -109,12 +110,17 @@ func (d *Decompiler) unifyDescriptorIntJoins() {
 
 // The numeric result witness belongs to the decoded producer, rather than a
 // mutable local type. Calls and fields use their original descriptor; typed
-// array reads use the opcode category. BALOAD is ambiguous between byte[] and
-// boolean[], so it cannot alone establish a numeric source domain.
+// array reads use the opcode category. Arithmetic must retain the decoded
+// operation's exact result and operand identities. BALOAD and bitwise boolean
+// operations cannot alone establish a numeric source domain.
 func (d *Decompiler) originalNumericJoinProducers() map[values.JavaValue]bool {
 	result := map[values.JavaValue]bool{}
 	for _, op := range d.opCodes {
 		if op == nil || op.Instr == nil {
+			continue
+		}
+		if expression, proved := originalIntArithmeticResult(op); proved {
+			result[expression] = true
 			continue
 		}
 		switch op.Instr.OpCode {
@@ -160,6 +166,53 @@ func (d *Decompiler) originalNumericJoinProducers() map[values.JavaValue]bool {
 		}
 	}
 	return result
+}
+
+// This is a result-category proof, not an expression rewrite. The original
+// operation (including division/remainder traps) stays at the original store.
+// Requiring the simulator's exact produced value prevents a similarly shaped
+// expression or a mutable inferred local type from supplying numeric evidence.
+func originalIntArithmeticResult(op *OpCode) (*values.JavaExpression, bool) {
+	if op == nil || op.Instr == nil || op.IsCustom || len(op.stackProduced) != 1 || len(op.stackConsumed) != 2 {
+		return nil, false
+	}
+	operator := ""
+	switch op.Instr.OpCode {
+	case OP_IADD:
+		operator = values.ADD
+	case OP_ISUB:
+		operator = values.SUB
+	case OP_IMUL:
+		operator = values.MUL
+	case OP_IDIV:
+		operator = values.DIV
+	case OP_IREM:
+		operator = values.REM
+	case OP_ISHL:
+		operator = values.SHL
+	case OP_ISHR:
+		operator = values.SHR
+	case OP_IUSHR:
+		operator = values.USHR
+	default:
+		return nil, false
+	}
+	expression, ok := safeSeedOperand(op.stackProduced[0]).(*values.JavaExpression)
+	if !ok || expression == nil || expression.Op != operator || len(expression.Values) != 2 || !isExactPrimer(expression.Type(), types.JavaInteger) {
+		return nil, false
+	}
+	for index, operand := range expression.Values {
+		if operand == nil || op.stackConsumed[1-index] == nil || values.OriginalStackLifetimeUse(operand) != values.OriginalStackLifetimeUse(op.stackConsumed[1-index]) {
+			return nil, false
+		}
+	}
+	if operator == values.DIV || operator == values.REM {
+		pc, originalOp, descriptor, known := expression.OriginalIntegerTrap()
+		if !known || pc != int(op.CurrentOffset) || originalOp != operator || descriptor != "I" {
+			return nil, false
+		}
+	}
+	return expression, true
 }
 func numericJoinDescriptor(descriptor string) bool {
 	switch descriptor {

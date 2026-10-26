@@ -64,7 +64,7 @@ func TestNormalizedBooleanWebRequiresClosedDefinitionsAndBooleanUses(t *testing.
 }
 
 func TestNormalizedBooleanWebJoinsSplitSourceNamesWithoutCrossWebMutation(t *testing.T) {
-	for _, kind := range []string{"split", "already boolean seed", "noncanonical", "numeric use", "foreign store", "foreign load", "missing load", "unreplaceable load", "missing definition"} {
+	for _, kind := range []string{"split", "already boolean seed", "conditional", "nested conditional", "noncanonical arm", "missing condition", "cyclic conditional", "noncanonical", "numeric use", "foreign store", "foreign load", "missing load", "unreplaceable load", "missing definition"} {
 		t.Run(kind, func(t *testing.T) {
 			integer := types.NewJavaPrimer(types.JavaInteger)
 			first := values.NewJavaRef(utils.NewRootVariableId(), nil, integer.Copy())
@@ -79,6 +79,20 @@ func TestNormalizedBooleanWebJoinsSplitSourceNamesWithoutCrossWebMutation(t *tes
 			webs := &slotWeb{webOf: map[*OpCode]int{seed: 1, store: 1, load: 1}, entryWeb: map[int]int{}}
 			d := &Decompiler{cachedSlotWebs: webs, opCodes: []*OpCode{seed, store, load, branch}, opcodeIdToRef: map[*OpCode][][2]any{seed: {{first, true}}, store: {{second, true}}}}
 			switch kind {
+			case "conditional", "nested conditional", "noncanonical arm", "missing condition", "cyclic conditional":
+				condition := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaPrimer(types.JavaBoolean))
+				choice := values.NewTernaryExpression(condition, one, zero)
+				store.stackConsumed[0] = choice
+				switch kind {
+				case "nested conditional":
+					choice.FalseValue = values.NewTernaryExpression(condition, zero, one)
+				case "noncanonical arm":
+					choice.FalseValue = values.NewJavaLiteral(2, integer)
+				case "missing condition":
+					choice.Condition = nil
+				case "cyclic conditional":
+					choice.FalseValue = choice
+				}
 			case "already boolean seed":
 				zero.JavaType = types.NewJavaPrimer(types.JavaBoolean)
 			case "noncanonical":
@@ -100,7 +114,7 @@ func TestNormalizedBooleanWebJoinsSplitSourceNamesWithoutCrossWebMutation(t *tes
 			}
 			d.restoreNormalizedBooleanWebs()
 			got := d.opcodeIdToRef[seed][0][0].(*values.JavaRef)
-			want := kind == "split" || kind == "already boolean seed"
+			want := kind == "split" || kind == "already boolean seed" || kind == "conditional" || kind == "nested conditional"
 			if (got != first) != want {
 				t.Fatalf("joined=%v want=%v", got != first, want)
 			}
