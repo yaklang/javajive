@@ -50,9 +50,21 @@ func (d *Decompiler) unifyDescriptorIntJoins() {
 			groups[web] = append(groups[web], op)
 		}
 	}
+	// A structuring pass may remove an increment from the mutable list.
+	// Its original read/write still constrains source lifetime ownership.
+	if d.semanticCFG != nil {
+		for _, op := range d.semanticCFG.Nodes {
+			if op != nil && op.Instr != nil && op.Instr.OpCode == OP_IINC {
+				incremented[GetStoreIdx(op)] = true
+			}
+		}
+	}
 	for _, web := range order {
 		stores := groups[web]
-		if entries[web] || len(stores) < 2 || incremented[GetStoreIdx(stores[0])] {
+		if entries[web] || len(stores) < 2 {
+			continue
+		}
+		if slot := GetStoreIdx(stores[0]); incremented[slot] && !d.originalIncrementsOutsideWeb(webs, web, slot) {
 			continue
 		}
 		if d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, int64(len(stores)+len(webs.webOf))) != nil {
