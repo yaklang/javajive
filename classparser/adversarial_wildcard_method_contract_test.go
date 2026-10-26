@@ -41,9 +41,7 @@ class ContractDriver {public static void main(String[]args){int rows=0;
 	for _, spelling := range []string{"Transformer", "Callback"} {
 		t.Run(spelling, func(t *testing.T) {
 			source := strings.ReplaceAll(fixture, "Transformer", spelling)
-			testNativePrivateSetterCompiledFixtureWithPolicies(t, "WildcardContractOwner", "ContractDriver", "16:wildcard:throws:effects:identity\n", func(t *testing.T, debug string) map[string][]byte {
-				return nativeCompileSourceReleaseClasses(t, map[string]string{"WildcardContractOwner.java": source}, debug, "8")
-			}, nil, []string{"normal", "no-source-rewrites"})
+			testAuthoredOwnerAcrossSourceModes(t, source, "WildcardContractOwner", "ContractDriver", "16:wildcard:throws:effects:identity\n")
 		})
 	}
 }
