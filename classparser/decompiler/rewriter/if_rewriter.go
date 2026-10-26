@@ -35,6 +35,9 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	splitSharedFallthroughExpression(manager, ifNode)
 	splitSharedLiteralPhiStores(manager, ifNode)
 	splitSharedTerminalLeaves(manager, ifNode)
+	// Normalize shared edge blocks first. A shared terminal store can look
+	// like a second region exit until its selected edge has its own owner.
+	materializeForwardRegionExits(manager, ifNode)
 	err := CalcEnd(manager.DominatorMap, ifNode)
 	if err != nil {
 		return err
@@ -199,7 +202,7 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	markEncodedJumps(ifStatementNode, ifBodyNodes)
 	retargetProtectedIfBoundary(manager.TryNodes, ifNode, ifStatementNode)
 
-	return nil
+	return finishForwardRegion(manager, ifNode, ifStatementNode)
 }
 
 // A loop edge already expressed by continue/break is an abrupt exit, just

@@ -36,6 +36,7 @@ type RewriteManager struct {
 	originalHandlers      []core.HandlerRange
 	originalHandlersKnown bool
 	loopTransfers         map[*core.Node]loopTransfer
+	forwardRegions        map[*core.Node]*forwardRegion
 	// Method-local allocation keeps synthetic names deterministic across concurrent requests.
 	syntheticCatchVarCounter int
 	currentNodeId            int
