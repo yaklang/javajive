@@ -10,7 +10,7 @@ import (
 
 // Exercise the actual public policies and production archive path. An unused
 // environment toggle is not evidence that legacy source recovery was disabled.
-func testAuthoredOwnerAcrossSourceModes(t *testing.T, source, owner, driver, want string) {
+func testAuthoredOwnerAcrossSourceModes(t *testing.T, source, owner, driver, want string, regeneratedChildren ...string) {
 	t.Helper()
 	modern, java := t04Tools(t)
 	for _, profile := range []SourceCompilerProfile{ModernJavac, NativeJavac8} {
@@ -29,7 +29,11 @@ func testAuthoredOwnerAcrossSourceModes(t *testing.T, source, owner, driver, wan
 					files := compileLambdaParameterMetadataFixture(t, compiler, profile, source, owner, debug, false)
 					writeClasses := func(dir string, omitTarget bool) {
 						for name, raw := range files {
-							if omitTarget && name == owner+".class" {
+							regenerated := name == owner+".class"
+							for _, child := range regeneratedChildren {
+								regenerated = regenerated || name == child+".class"
+							}
+							if omitTarget && regenerated {
 								continue
 							}
 							if err := os.WriteFile(filepath.Join(dir, name), raw, 0600); err != nil {
@@ -92,6 +96,15 @@ func testAuthoredOwnerAcrossSourceModes(t *testing.T, source, owner, driver, wan
 							}
 							if got, expected := nativeAnonymousAccessorShape(t, rebuilt), nativeAnonymousAccessorShape(t, files[owner+".class"]); got != expected {
 								t.Fatalf("accessor ABI:\n%s\n%s", got, expected)
+							}
+							for _, child := range regeneratedChildren {
+								raw, err := os.ReadFile(filepath.Join(out, child+".class"))
+								if err != nil {
+									t.Fatal(err)
+								}
+								if got, expected := nativeBinaryShape(t, raw), nativeBinaryShape(t, files[child+".class"]); got != expected {
+									t.Fatalf("regenerated child %s ABI:\n%s\n%s", child, got, expected)
+								}
 							}
 						})
 					}
