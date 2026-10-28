@@ -118,7 +118,7 @@ func TestForwardRegionRetainsSharedWorkAndBypassPolarity(t *testing.T) {
 }
 
 func TestForwardRegionRejectsIncompleteOrEscapingGraphs(t *testing.T) {
-	for _, name := range []string{"foreign entry", "cycle", "dead end", "competing terminal", "hidden edge", "catch entry", "protected wrapper", "unknown handler table", "different handler", "interior handler", "missing owner origin", "missing exit origin", "missing effect origin", "opaque leaf", "unqualified break", "unqualified continue", "opaque structured leaf", "too many nodes", "handler work limit"} {
+	for _, name := range []string{"foreign entry", "cycle", "dead end", "competing terminal", "hidden edge", "catch entry", "pending try dispatch", "protected wrapper", "unknown handler table", "different handler", "interior handler", "missing owner origin", "missing exit origin", "missing effect origin", "opaque leaf", "unqualified break", "unqualified continue", "opaque structured leaf", "too many nodes", "handler work limit"} {
 		t.Run(name, func(t *testing.T) {
 			m, n := forwardRegionFixture()
 			root, owner, inner, work, exit := n[0], n[1], n[2], n[5], n[6]
@@ -135,6 +135,8 @@ func TestForwardRegionRejectsIncompleteOrEscapingGraphs(t *testing.T) {
 				work.HideNext = exit
 			case "catch entry":
 				work.IsCatchStart = true
+			case "pending try dispatch":
+				work.IsTryCatch = true
 			case "protected wrapper":
 				work.HasProtectedRange = true
 			case "unknown handler table":

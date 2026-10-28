@@ -71,6 +71,8 @@ type Node struct {
 	// catch entry: this specific handler spans other protected starts.
 	SharedProtectedHandler bool
 	IsTryCatch             bool
+	// Set only after every original dispatch row has an explicit try region.
+	tryDispatchLowered *loweredTryDispatch
 	// IsCatchStart marks a node that is the entry of an exception handler (catch / finally-desugar)
 	// block, set when the try node is built from the exception table. TryRewriter uses it to classify
 	// a try node's successors structurally instead of inferring the handler from its body's first

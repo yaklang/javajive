@@ -7593,6 +7593,8 @@ func (d *Decompiler) ParseStatement() error {
 	}
 	err = WalkGraph[*Node](d.RootNode, func(node *Node) ([]*Node, error) {
 		if node.IsTryCatch {
+			node.tryDispatchLowered = nil
+			var loweredRegions []*Node
 			// A switch predecessor can enter several distinct protected regions.
 			// Keep their start identities separate instead of attaching every
 			// handler to the last TryNode written onto that predecessor.
@@ -7690,6 +7692,7 @@ func (d *Decompiler) ParseStatement() error {
 					tryNode.Id = statementsIndex
 					tryNode.ProtectedStartPC, tryNode.ProtectedEndPC = int(start), endIndex
 					tryNode.HasProtectedRange = true
+					loweredRegions = append(loweredRegions, tryNode)
 					var soleHandler *CatchNode
 					handlerRows := 0
 					for _, info := range catchInfos {
@@ -7769,6 +7772,7 @@ func (d *Decompiler) ParseStatement() error {
 				// 	tryNode.AddSource(n)
 				// }
 			}
+			node.recordLoweredTryDispatch(loweredRegions, d.ExceptionTable, d.getenv("JDEC_TRY_JUMP_ANCHOR_OFF") == "")
 		}
 		return node.Next, nil
 	})
