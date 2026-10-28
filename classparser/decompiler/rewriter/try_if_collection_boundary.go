@@ -23,11 +23,22 @@ func typedProtectedIfCollectionStops(manager *RewriteManager, condition *core.No
 		return stops
 	}
 	for _, region := range manager.TryNodes {
-		if region == nil || !region.HasProtectedRange || condition.OriginPC < region.ProtectedStartPC ||
-			condition.OriginPC >= region.ProtectedEndPC || !utils2.IsDominate(manager.DominatorMap, region, condition) {
+		if region == nil || !region.HasProtectedRange || !utils2.IsDominate(manager.DominatorMap, region, condition) {
 			continue
 		}
-		inside := func(pc int) bool { return pc >= region.ProtectedStartPC && pc < region.ProtectedEndPC }
+		ranges := [][2]int{{region.ProtectedStartPC, region.ProtectedEndPC}}
+		pending := manager.forwardRegions[region]
+		if pending != nil && len(pending.protectedRanges) != 0 {
+			ranges = pending.protectedRanges
+		}
+		inside := func(pc int) bool { return finallyContains(ranges, pc) }
+		if !inside(condition.OriginPC) {
+			continue
+		}
+		if pending != nil && pending.protectedEnd != nil && finallyCoveredValue(st.Condition, inside) {
+			stops[pending.protectedEnd] = true
+			continue
+		}
 		if !finallyCoveredValue(st.Condition, inside) {
 			continue
 		}
@@ -35,7 +46,9 @@ func typedProtectedIfCollectionStops(manager *RewriteManager, condition *core.No
 			if start == nil || start.IsCatchStart {
 				continue
 			}
-			if end := typedEarlyReturnNormalFrontier(region, start, region.Next, manager.DominatorMap); end != nil {
+			if end := typedSharedResumeBoundary(manager, region, start); end != nil {
+				stops[end] = true
+			} else if end := typedEarlyReturnNormalFrontier(region, start, region.Next, manager.DominatorMap); end != nil {
 				stops[end] = true
 			} else if end := typedTryNormalBoundary(region, start, region.Next, manager.DominatorMap); end != nil {
 				stops[end] = true

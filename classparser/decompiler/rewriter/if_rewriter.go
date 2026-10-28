@@ -35,6 +35,7 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	splitSharedFallthroughExpression(manager, ifNode)
 	splitSharedLiteralPhiStores(manager, ifNode)
 	splitSharedTerminalLeaves(manager, ifNode)
+	materializeProtectedCommitExit(manager, ifNode)
 	materializeProtectedNormalExit(manager, ifNode)
 	// Normalize shared edge blocks first. A shared terminal store can look
 	// like a second region exit until its selected edge has its own owner.

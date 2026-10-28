@@ -279,7 +279,7 @@ func switchCaseHasOnlyJumpEntries(node, candidate *core.Node, cases *omap.Ordere
 // bodies. A label remains a label (real fall-through); terminal returns were
 // already isolated above. Only switch-owned predecessors become break leaves.
 func externalSharedSwitchContinuation(manager *RewriteManager, owner *core.Node, starts []*core.Node) *core.Node {
-	if owner == nil || !owner.HasOriginPC || len(starts) > 256 {
+	if manager == nil || owner == nil || !owner.HasOriginPC || len(starts) > 256 {
 		return nil
 	}
 	labels := map[*core.Node]bool{}
@@ -307,6 +307,16 @@ func externalSharedSwitchContinuation(manager *RewriteManager, owner *core.Node,
 				return nil
 			}
 			candidate = target
+		}
+	}
+	// Two escaping cases do not make an enclosing loop's update the join of
+	// this switch. Compare nearest natural-loop owners independently: an
+	// inner switch must keep its value join before the outer continuation.
+	if candidate != nil && (len(manager.WhileNode) != 0 || owner.IsInCircle || candidate.IsInCircle) {
+		loop, known := nearestSwitchContinuationLoop(manager, owner)
+		other, otherKnown := nearestSwitchContinuationLoop(manager, candidate)
+		if !known || !otherKnown || loop != other || loop == nil && (owner.IsInCircle || candidate.IsInCircle) {
+			return nil
 		}
 	}
 	return candidate
