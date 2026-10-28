@@ -111,12 +111,12 @@ func (d *Decompiler) unifyDescriptorIntJoins() {
 				break
 			}
 			if copyProof != nil {
-				load, _, bounded := copyProof.operand(store.stackConsumed[0])
+				load, rhs, bounded := copyProof.operand(store.stackConsumed[0])
 				if !bounded {
 					valid = false
 					break
 				}
-				if load != nil {
+				if load != nil || copyProof.bitwise[rhs] != nil {
 					valid = copyProof.provesStore(store)
 					hasNumericProducer = hasNumericProducer || valid
 					if !valid {
@@ -145,11 +145,15 @@ func (d *Decompiler) unifyDescriptorIntJoins() {
 
 // The numeric result witness belongs to the decoded producer, rather than a
 // mutable local type. Calls and fields use their original descriptor; typed
-// array reads use the opcode category. Arithmetic must retain the decoded
-// operation's exact result and operand identities. BALOAD and bitwise boolean
-// operations cannot alone establish a numeric source domain.
+// array reads use the opcode category or a proved byte[] origin. Arithmetic
+// must retain the decoded operation's exact result and operand identities.
+// BALOAD and bitwise boolean
+// operations cannot alone establish a numeric source domain. Their complete
+// operand provenance must also be discharged.
 func (d *Decompiler) originalNumericJoinProducers() map[values.JavaValue]bool {
 	result := map[values.JavaValue]bool{}
+	var arrays *byteArrayProvenance
+	arraysInitialized := false
 	for _, op := range d.opCodes {
 		if op == nil || op.Instr == nil {
 			continue
@@ -174,6 +178,14 @@ func (d *Decompiler) originalNumericJoinProducers() map[values.JavaValue]bool {
 			_, ret, err := callbinding.Descriptor(call.Descriptor)
 			if err == nil && numericJoinDescriptor(ret) {
 				result[call] = true
+			}
+		case OP_BALOAD:
+			if !arraysInitialized {
+				arrays = d.byteArrayProvenance()
+				arraysInitialized = true
+			}
+			if value := arrays.numericRead(op); value != nil {
+				result[value] = true
 			}
 		case OP_IALOAD, OP_CALOAD, OP_SALOAD:
 			if len(op.stackProduced) != 1 {
