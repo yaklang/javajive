@@ -82,6 +82,10 @@ func (d *Decompiler) restoreNormalizedBooleanWebs() {
 					if value != nil && (value.Op == values.AND || value.Op == values.OR || value.Op == values.XOR) {
 						pending = append(pending, value.Values...)
 					}
+				case *values.TernaryExpression:
+					if value != nil {
+						pending = append(pending, value.TrueValue, value.FalseValue)
+					}
 				default:
 					if operand, known := values.BooleanStackWordOperand(v); known {
 						pending = append(pending, operand)
@@ -197,9 +201,11 @@ func (d *Decompiler) restoreNormalizedBooleanWebs() {
 			continue
 		}
 		seed := false
+		domainWork := 0
 		var normalized func(values.JavaValue, int) bool
 		normalized = func(v values.JavaValue, depth int) bool {
-			if v == nil || depth > 32 {
+			domainWork++
+			if v == nil || depth > 32 || domainWork > 4096 {
 				return false
 			}
 			original := values.OriginalStackLifetimeUse(v)
@@ -244,6 +250,13 @@ func (d *Decompiler) restoreNormalizedBooleanWebs() {
 			}
 			if operand, known := values.BooleanStackWordOperand(v); known {
 				return normalized(operand, depth+1)
+			}
+			// The selected value, not the predicate's operands, determines
+			// the result domain. Both arms must be closed 0/1 values. Keep
+			// the original conditional and its effects; only its joined
+			// local's declaration/loads are canonicalized below.
+			if choice, ok := v.(*values.TernaryExpression); ok {
+				return choice != nil && choice.Condition != nil && normalized(choice.TrueValue, depth+1) && normalized(choice.FalseValue, depth+1)
 			}
 			if e, ok := v.(*values.JavaExpression); ok && len(e.Values) == 2 && (e.Op == values.AND || e.Op == values.OR || e.Op == values.XOR) {
 				return normalized(e.Values[0], depth+1) && normalized(e.Values[1], depth+1)
@@ -344,6 +357,13 @@ func (d *Decompiler) restoreNormalizedBooleanWebs() {
 				for r := range names {
 					r.ResetVarType(types.NewJavaPrimer(types.JavaBoolean))
 					r.WebDeclType = r.Type().Copy()
+					// A consistent simulator ref can still be declared in sibling
+					// source scopes. Preserve the proved multi-definition identity
+					// through naming, just as for numeric/reference joins; otherwise
+					// one arm can be renamed away from its joined return.
+					if len(definitions) > 1 {
+						r.SolvedWebIdentity = r.Id
+					}
 				}
 			}
 		}

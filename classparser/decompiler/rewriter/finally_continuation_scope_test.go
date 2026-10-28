@@ -102,3 +102,57 @@ func TestFinallySourceScopeRequiresActualBinderUses(t *testing.T) {
 		t.Fatal("source scope followed a value history instead of the actual use")
 	}
 }
+
+func TestFinallySourceScopeMovesBareDeclarationWithRetainedOriginalStore(t *testing.T) {
+	for _, scenario := range []string{"bare", "initializing", "nested original store", "missing store receipt", "missing declaration receipt", "changed seed", "changed source type", "fake bare initializer", "duplicate declaration", "metadata-only store"} {
+		t.Run(scenario, func(t *testing.T) {
+			tr, store, tail := finallyScopeFixture()
+			ref := store.LeftValue.(*values.JavaRef)
+			seed := layerTestCall(10)
+			seed.Descriptor = "()Ljava/lang/Object;"
+			seed.FuncType = types.NewJavaFuncType(seed.Descriptor, nil, types.NewJavaClass("java.lang.Object"))
+			store.JavaValue, ref.Val, ref.WebDeclType = seed, seed, nil
+			if scenario != "missing declaration receipt" {
+				ref.MarkOriginalLocalDeclaration(10, 2, seed)
+			}
+			if scenario != "missing store receipt" {
+				store.MarkOriginalLocalStore(10, 2)
+			}
+			declaration := &statements.AssignStatement{LeftValue: ref, IsDeclare: true}
+			if scenario != "initializing" {
+				store.IsFirst = false
+				tr.TryBody = append([]statements.Statement{declaration}, tr.TryBody...)
+			}
+			switch scenario {
+			case "nested original store":
+				tr.TryBody[1] = statements.NewIfStatement(values.NewJavaLiteral(true, types.NewJavaPrimer(types.JavaBoolean)), []statements.Statement{store}, nil)
+			case "changed seed":
+				store.JavaValue = values.JavaNull
+			case "changed source type":
+				ref.ResetVarType(types.NewJavaClass("java.lang.String"))
+			case "fake bare initializer":
+				declaration.JavaValue = seed
+			case "duplicate declaration":
+				copy := *declaration
+				tr.TryBody = append([]statements.Statement{&copy}, tr.TryBody...)
+			case "metadata-only store":
+				tr.EntryInitializers = append(tr.EntryInitializers, store)
+				tr.TryBody = append(tr.TryBody[:1:1], tr.TryBody[2:]...)
+			}
+			before := slices.Clone(tr.TryBody)
+			prefix, prologue, known := finallyContinuationDeclarationScope(tr, []statements.Statement{tail}, nil)
+			want := scenario == "bare" || scenario == "initializing" || scenario == "nested original store"
+			if known != want || !slices.Equal(before, tr.TryBody) {
+				t.Fatalf("scope=%v want=%v or changed original tree", known, want)
+			}
+			if want {
+				if len(prologue) != 1 || prologue[0].(*statements.AssignStatement).LeftValue != ref || !finallyContinuationKeepsLexicalBindings([]statements.Statement{prefix}, []statements.Statement{tail}) {
+					t.Fatal("declaration move lost original binding")
+				}
+				if store.JavaValue != seed || store.OriginPC != 10 {
+					t.Fatal("initializer moved or changed")
+				}
+			}
+		})
+	}
+}

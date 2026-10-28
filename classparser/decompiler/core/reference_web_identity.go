@@ -43,11 +43,11 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 	parameterSlots := map[*values.JavaRef]int{}
 	parameterPartitions := map[int]int{}
 	decoded := map[*OpCode]bool{}
+	parameters := d.parameterWebRefs(webs)
 	for _, op := range d.opCodes {
 		decoded[op] = true
 	}
 	if len(d.ExceptionTable) == 0 && len(d.evaluationSnapshots) == 0 && len(d.opCodes) <= 8192 {
-		parameters := d.parameterWebRefs(webs)
 		for slot, web := range webs.entryWeb {
 			if ref := parameters[web]; ref != nil && ref.IsParam && !ref.IsThis {
 				parameterSlots[ref] = slot
@@ -185,6 +185,7 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 		first := d.opcodeIdToRef[stores[0]][0][0].(*values.JavaRef)
 		seedType := first.Type()
 		singletonConflict := false
+		protectedExit := false
 		if len(stores) == 1 {
 			// A later disjoint single-definition web owns a distinct lifetime,
 			// even when its type is identical to the earlier variable's type.
@@ -223,11 +224,45 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 				seedType = definedType
 				singletonConflict = true
 			}
+			// Even the first definition may own no reads at all. Keeping its
+			// simulator ref shared with a later live web prevents that web from
+			// unifying with a loop-carried parameter. Give the unread definition
+			// its own binder; retain its RHS and evaluation position unchanged.
+			parameterJoin := false
+			for owner := range owners[first] {
+				if p := parameters[owner]; owner != w && p != nil && p.IsParam && !p.IsThis {
+					parameterJoin = true
+				}
+			}
+			unreadType := definedType
+			if value != nil && (values.UnpackSoltValue(value) == values.JavaNull || values.IsNullLiteral(values.UnpackSoltValue(value))) {
+				unreadType = seedType
+			}
+			if !singletonConflict && parameterJoin && value != nil &&
+				values.ReferenceTypeDescriptor(unreadType, d.FunctionContext) != "" &&
+				d.completeUnreadReferenceDefinition(webs, w, stores[0]) {
+				seedType = unreadType
+				singletonConflict = true
+			}
+			// A single definition can escape the lexical try body without a
+			// phi. Give that complete web its own identity before source scopes
+			// rename it; an equal-typed later slot lifetime is not its owner.
+			// Null can seed the shared pending-completion binder of duplicated
+			// finally paths. It is not evidence of an independent object lifetime;
+			// leave that source constraint to the completion/seed protocol.
+			protectedExit = handlersKnown && !handlerCopies[w] && value != nil &&
+				values.UnpackSoltValue(value) != values.JavaNull && !values.IsNullLiteral(values.UnpackSoltValue(value)) &&
+				values.ReferenceTypeDescriptor(definedType, d.FunctionContext) != "" &&
+				d.closedProtectedReferenceExit(webs, w, stores[0])
+			if protectedExit {
+				seedType = definedType
+				singletonConflict = true
+			}
 			if !singletonConflict {
 				continue
 			}
 		}
-		conflict := parameterConflict
+		conflict := parameterConflict || protectedExit
 		distinct := map[*values.JavaRef]bool{}
 		for _, op := range stores {
 			r := d.opcodeIdToRef[op][0][0].(*values.JavaRef)
@@ -242,6 +277,12 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 		id.SetName(first.Id.String())
 		canon := values.NewJavaRef(id, nil, seedType.Copy())
 		canon.SolvedWebIdentity = id
+		if protectedExit {
+			// A single original definition also owns its source receipt.
+			// Enum selectors and other consumers recheck the exact STORE seed;
+			// a fresh binder must retain that seed, not just its inferred type.
+			canon.Val = stores[0].stackConsumed[0]
+		}
 		if singletonConflict || parameterConflict {
 			// ResetValue must not write a load's stale DFS snapshot back into
 			// the freshly owned declaration while rebinding its use sites.
@@ -288,6 +329,53 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 			d.varUserMap.Set(canon, moved)
 		}
 	}
+}
+
+// Absence of a simulated use is not proof that a definition is unread. Require
+// a singleton definition web and a complete original access inventory for its
+// physical slot. Handler and capture protocols carry additional source-binder
+// constraints and do not acquire this permission from an ordinary local web.
+func (d *Decompiler) completeUnreadReferenceDefinition(webs *slotWeb, web int, store *OpCode) bool {
+	if len(d.ExceptionTable) != 0 || len(d.evaluationSnapshots) != 0 {
+		return false
+	}
+	nodes := d.opCodes
+	if d.semanticCFG != nil {
+		nodes = d.semanticCFG.Nodes
+	}
+	if len(nodes) > 8192 || d.Work != nil && (d.Work.Charge(workbudget.CounterGraphScans, int64(len(nodes)+len(webs.webOf))) != nil || d.Work.CheckAlloc(int64(len(nodes))*128) != nil) {
+		return false
+	}
+	for _, entry := range webs.entryWeb {
+		if entry == web {
+			return false
+		}
+	}
+	for op, owner := range webs.webOf {
+		if owner == web && op != store {
+			return false
+		}
+	}
+	slot, found := GetStoreIdx(store), false
+	if slot < 0 {
+		return false
+	}
+	for _, op := range nodes {
+		if op == nil || op.Instr == nil {
+			return false
+		}
+		found = found || op == store
+		access := LocalAccessOf(op.Instr.OpCode)
+		if access.Read && GetRetrieveIdx(op) < 0 || access.Write && GetStoreIdx(op) < 0 {
+			return false
+		}
+		if access.Read && GetRetrieveIdx(op) == slot || access.Write && GetStoreIdx(op) == slot {
+			if _, known := webs.webOf[op]; !known {
+				return false
+			}
+		}
+	}
+	return found
 }
 
 // A new binder may replace an overwritten parameter only for a fully decoded

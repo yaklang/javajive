@@ -205,8 +205,10 @@ func (d *Decompiler) bindProvedPrimitiveWeb(webs *slotWeb, web int, stores []*Op
 	canon.SolvedWebIdentity = canon.Id
 	// Preserve definitions even if a stale simulator ref appears single-use.
 	d.disFoldRef = append(d.disFoldRef, canon)
+	displaced := map[*values.JavaRef]bool{}
 	for i, store := range stores {
 		old := d.opcodeIdToRef[store][0][0].(*values.JavaRef)
+		displaced[old] = displaced[old] || d.opcodeIdToRef[store][0][1] == true
 		d.disFoldRef = append(d.disFoldRef, old)
 		d.opcodeIdToRef[store][0] = [2]any{canon, i == 0}
 	}
@@ -236,5 +238,36 @@ func (d *Decompiler) bindProvedPrimitiveWeb(webs *slotWeb, web int, stores []*Op
 			return true
 		})
 	}
+	d.preserveSplitPrimitiveDeclarations(displaced)
 	return canon
+}
+
+// Extracting a web can remove a shared simulator ref's only declaration.
+// Its remaining stores/loads still belong to the old identity and must retain
+// storage of their own. Transfer only a displaced declaration to an existing
+// residual store; lexical placement later widens that declaration if needed.
+// No RHS, load binding, type or evaluation position changes here. In particular
+// a read-only orphan cannot acquire a fabricated definition or initializer.
+func (d *Decompiler) preserveSplitPrimitiveDeclarations(displaced map[*values.JavaRef]bool) {
+	for _, infos := range d.opcodeIdToRef {
+		for _, info := range infos {
+			if ref, ok := info[0].(*values.JavaRef); ok && info[1] == true {
+				delete(displaced, ref)
+			}
+		}
+	}
+	for _, op := range d.opCodes {
+		if op == nil || op.Instr == nil || !isLocalStoreOpcode(op.Instr.OpCode) || len(op.stackConsumed) != 1 {
+			continue
+		}
+		infos := d.opcodeIdToRef[op]
+		if len(infos) != 1 {
+			continue
+		}
+		ref, ok := infos[0][0].(*values.JavaRef)
+		if ok && displaced[ref] {
+			d.opcodeIdToRef[op][0][1] = true
+			delete(displaced, ref)
+		}
+	}
 }

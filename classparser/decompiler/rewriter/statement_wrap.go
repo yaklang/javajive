@@ -33,7 +33,11 @@ func sortNodesByID(nodes []*core.Node) []*core.Node {
 }
 
 type RewriteManager struct {
-	loopTransfers map[*core.Node]loopTransfer
+	originalHandlers      []core.HandlerRange
+	originalHandlersKnown bool
+	loopTransfers         map[*core.Node]loopTransfer
+	forwardRegions        map[*core.Node]*forwardRegion
+	forwardEntries        map[*core.Node]forwardEntry
 	// Method-local allocation keeps synthetic names deterministic across concurrent requests.
 	syntheticCatchVarCounter int
 	currentNodeId            int
@@ -1008,6 +1012,8 @@ func (s *RewriteManager) Rewrite() error {
 		return err
 	}
 	s.DominatorMap = GenerateDominatorTree(s.RootNode)
+	partitionSharedLoopLatches(s)
+	partitionSharedLoopSteps(s)
 	nodeToRewriter := map[*core.Node]rewriterFunc{}
 	keyNodes := []*core.Node{}
 	for _, node := range s.WhileNode {
@@ -1042,7 +1048,7 @@ func (s *RewriteManager) Rewrite() error {
 		}
 		s.DominatorMap = GenerateDominatorTree(s.RootNode)
 	}
-	order := s.TopologicalSortReverse(keyNodes)
+	order := protectedSiblingRewriteOrder(s, s.TopologicalSortReverse(keyNodes))
 	loopJmpRewriterRecoed := map[*core.Node]struct{}{}
 	processed := map[*core.Node]struct{}{}
 	for i := 0; i < len(order); i++ {

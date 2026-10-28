@@ -7,25 +7,34 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
-// A byte/short/char/int invocation produces a computational int, even when a
-// sibling definition is the literal zero. Preserve that complete reaching web
+// A byte/short/char/int invocation or decoded integer arithmetic produces a
+// computational int, even when a sibling definition is the literal zero/one.
+// Preserve that complete reaching web
 // as one numeric declaration. Inferring each branch separately can turn the
 // zero arm into boolean and disconnect the other arm from the joined reads.
 // Only original typed producers and integer literals supply domain evidence;
 // mutable local types, names and inferred expression types do not.
 func (d *Decompiler) unifyDescriptorIntJoins() {
-	if d == nil || d.getenv("JDEC_LIVEINTERVAL_OFF") != "" || len(d.ExceptionTable) != 0 || len(d.evaluationSnapshots) != 0 || len(d.opCodes) > 8192 {
+	if d == nil || d.getenv("JDEC_LIVEINTERVAL_OFF") != "" || len(d.evaluationSnapshots) != 0 || len(d.opCodes) > 8192 {
+		return
+	}
+	// Handler joins need the frozen exceptional graph: a throwing
+	// producer contributes its INPUT local state to a catch edge. The
+	// mutable source graph cannot establish which stores reach that use.
+	// Canonicalizing a complete web changes no evaluations or handler ranges.
+	if len(d.ExceptionTable) != 0 && (d.semanticCFG == nil || d.semanticCFG.Err != nil || len(d.semanticCFG.Nodes) > 8192) {
 		return
 	}
 	if d.Work != nil && (d.Work.Charge(workbudget.CounterGraphScans, int64(len(d.opCodes)+len(d.invokeFuncCall))) != nil || d.Work.CheckAlloc(int64(len(d.opCodes)+len(d.invokeFuncCall))*192) != nil) {
 		return
 	}
 	producers := d.originalNumericJoinProducers()
-	if len(producers) == 0 {
+	copyProof := d.numericCopyProvenance(producers)
+	if len(producers) == 0 && copyProof == nil {
 		return
 	}
 	webs := d.slotWebs()
-	if webs == nil {
+	if webs == nil || (d.semanticCFG != nil && d.semanticCFG.Err != nil) {
 		return
 	}
 	decoded, entries, incremented := map[*OpCode]bool{}, map[int]bool{}, map[int]bool{}
@@ -49,9 +58,21 @@ func (d *Decompiler) unifyDescriptorIntJoins() {
 			groups[web] = append(groups[web], op)
 		}
 	}
+	// A structuring pass may remove an increment from the mutable list.
+	// Its original read/write still constrains source lifetime ownership.
+	if d.semanticCFG != nil {
+		for _, op := range d.semanticCFG.Nodes {
+			if op != nil && op.Instr != nil && op.Instr.OpCode == OP_IINC {
+				incremented[GetStoreIdx(op)] = true
+			}
+		}
+	}
 	for _, web := range order {
 		stores := groups[web]
-		if entries[web] || len(stores) < 2 || incremented[GetStoreIdx(stores[0])] {
+		if entries[web] || len(stores) < 2 {
+			continue
+		}
+		if slot := GetStoreIdx(stores[0]); incremented[slot] && !d.originalIncrementsOutsideWeb(webs, web, slot) {
 			continue
 		}
 		if d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, int64(len(stores)+len(webs.webOf))) != nil {
@@ -89,6 +110,21 @@ func (d *Decompiler) unifyDescriptorIntJoins() {
 				valid = false
 				break
 			}
+			if copyProof != nil {
+				load, rhs, bounded := copyProof.operand(store.stackConsumed[0])
+				if !bounded {
+					valid = false
+					break
+				}
+				if load != nil || copyProof.bitwise[rhs] != nil {
+					valid = copyProof.provesStore(store)
+					hasNumericProducer = hasNumericProducer || valid
+					if !valid {
+						break
+					}
+					continue
+				}
+			}
 			switch rhs := safeSeedOperand(store.stackConsumed[0]).(type) {
 			case *values.JavaLiteral:
 				word, integer := rhs.Data.(int)
@@ -109,12 +145,25 @@ func (d *Decompiler) unifyDescriptorIntJoins() {
 
 // The numeric result witness belongs to the decoded producer, rather than a
 // mutable local type. Calls and fields use their original descriptor; typed
-// array reads use the opcode category. BALOAD is ambiguous between byte[] and
-// boolean[], so it cannot alone establish a numeric source domain.
+// array reads use the opcode category or a proved byte[] origin. Arithmetic
+// must retain the decoded operation's exact result and operand identities.
+// BALOAD and bitwise boolean
+// operations cannot alone establish a numeric source domain. Their complete
+// operand provenance must also be discharged.
 func (d *Decompiler) originalNumericJoinProducers() map[values.JavaValue]bool {
 	result := map[values.JavaValue]bool{}
+	var arrays *byteArrayProvenance
+	arraysInitialized := false
 	for _, op := range d.opCodes {
 		if op == nil || op.Instr == nil {
+			continue
+		}
+		if expression, proved := originalIntArithmeticResult(op); proved {
+			result[expression] = true
+			continue
+		}
+		if expression, proved := originalIntNegationResult(op); proved {
+			result[expression] = true
 			continue
 		}
 		switch op.Instr.OpCode {
@@ -129,6 +178,14 @@ func (d *Decompiler) originalNumericJoinProducers() map[values.JavaValue]bool {
 			_, ret, err := callbinding.Descriptor(call.Descriptor)
 			if err == nil && numericJoinDescriptor(ret) {
 				result[call] = true
+			}
+		case OP_BALOAD:
+			if !arraysInitialized {
+				arrays = d.byteArrayProvenance()
+				arraysInitialized = true
+			}
+			if value := arrays.numericRead(op); value != nil {
+				result[value] = true
 			}
 		case OP_IALOAD, OP_CALOAD, OP_SALOAD:
 			if len(op.stackProduced) != 1 {
@@ -159,7 +216,54 @@ func (d *Decompiler) originalNumericJoinProducers() map[values.JavaValue]bool {
 			}
 		}
 	}
-	return result
+	return d.extendNumericStackProducers(result)
+}
+
+// This is a result-category proof, not an expression rewrite. The original
+// operation (including division/remainder traps) stays at the original store.
+// Requiring the simulator's exact produced value prevents a similarly shaped
+// expression or a mutable inferred local type from supplying numeric evidence.
+func originalIntArithmeticResult(op *OpCode) (*values.JavaExpression, bool) {
+	if op == nil || op.Instr == nil || op.IsCustom || len(op.stackProduced) != 1 || len(op.stackConsumed) != 2 {
+		return nil, false
+	}
+	operator := ""
+	switch op.Instr.OpCode {
+	case OP_IADD:
+		operator = values.ADD
+	case OP_ISUB:
+		operator = values.SUB
+	case OP_IMUL:
+		operator = values.MUL
+	case OP_IDIV:
+		operator = values.DIV
+	case OP_IREM:
+		operator = values.REM
+	case OP_ISHL:
+		operator = values.SHL
+	case OP_ISHR:
+		operator = values.SHR
+	case OP_IUSHR:
+		operator = values.USHR
+	default:
+		return nil, false
+	}
+	expression, ok := safeSeedOperand(op.stackProduced[0]).(*values.JavaExpression)
+	if !ok || expression == nil || expression.Op != operator || len(expression.Values) != 2 || !isExactPrimer(expression.Type(), types.JavaInteger) {
+		return nil, false
+	}
+	for index, operand := range expression.Values {
+		if operand == nil || op.stackConsumed[1-index] == nil || values.OriginalStackLifetimeUse(operand) != values.OriginalStackLifetimeUse(op.stackConsumed[1-index]) {
+			return nil, false
+		}
+	}
+	if operator == values.DIV || operator == values.REM {
+		pc, originalOp, descriptor, known := expression.OriginalIntegerTrap()
+		if !known || pc != int(op.CurrentOffset) || originalOp != operator || descriptor != "I" {
+			return nil, false
+		}
+	}
+	return expression, true
 }
 func numericJoinDescriptor(descriptor string) bool {
 	switch descriptor {

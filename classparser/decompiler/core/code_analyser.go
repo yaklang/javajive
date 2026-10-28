@@ -75,6 +75,7 @@ type Decompiler struct {
 	branchArrayCalls      []branchArrayCall
 	branchArrayLeaves     []branchArrayLeaf
 	valueTernaryMerges    map[*values.TernaryExpression]*OpCode
+	factoredValueRoutes   map[*values.TernaryExpression]factoredValueRoute
 	// refToCreatingStore records, per *JavaRef pointer, the FIRST local-store opcode whose simulation
 	// created that ref (isFirst=true). It lets the boolean-copy merge deterministically recover the
 	// store that defined a slot's current ref without scanning opcodeIdToRef (a map whose iteration
@@ -699,12 +700,12 @@ func isLiteralIntOne(v values.JavaValue) bool {
 
 // tryFoldPostIncDec recognizes the post-increment / post-decrement idiom for a field or static
 // whose stored value is `old (+|-) 1`, where `old` (the loaded field value) was duplicated on the
-// stack via dup/dup_x1 and is reused as the expression result. When the value currently on top of
-// the stack is exactly that same `old` object, the putfield/putstatic is the post-inc/dec of the
-// field, so we return the folded `old++` / `old--` expression. The caller replaces the bare old
+// stack via dup/dup_x1 and is reused as the expression result. The retained word must be exactly
+// that same `old` object and its original field/receiver must match the write destination.
+// Only then is putfield/putstatic the post-inc/dec of that field. The caller replaces the bare old
 // value on the stack with this expression and drops the standalone assignment, keeping
 // ternary/expression branches side-effect-free so the structuring pass can fold them.
-func (d *Decompiler) tryFoldPostIncDec(stack StackSimulation, storedValue values.JavaValue) (values.JavaValue, bool) {
+func (d *Decompiler) tryFoldPostIncDec(stack StackSimulation, storedValue, destination values.JavaValue, member *values.JavaClassMember) (values.JavaValue, bool) {
 	expr, ok := UnpackSoltValue(storedValue).(*values.JavaExpression)
 	if !ok || len(expr.Values) != 2 {
 		return nil, false
@@ -724,6 +725,10 @@ func (d *Decompiler) tryFoldPostIncDec(stack StackSimulation, storedValue values
 	if UnpackSoltValue(top) != UnpackSoltValue(expr.Values[0]) {
 		return nil, false
 	}
+	target := originalPostFieldTarget(top, destination, member)
+	if target == nil {
+		return nil, false
+	}
 	// Suppress the temporary that dup/dup_x1 created to carry the old value, if any, so its
 	// assignment statement is not emitted into the (ternary/expression) branch.
 	if ref, ok := UnpackSoltValue(top).(*values.JavaRef); ok {
@@ -734,7 +739,6 @@ func (d *Decompiler) tryFoldPostIncDec(stack StackSimulation, storedValue values
 		op = DEC
 	}
 	// Render against the real field reference (this.f / Class.f), not the synthetic temporary.
-	target := GetRealValue(UnpackSoltValue(top))
 	return values.NewBinaryExpression(target, expr.Values[1], op, target.Type()), true
 }
 
@@ -3410,7 +3414,9 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// not-yet-visited sibling branch can resolve to the wrong (later) version. Repair only the
 		// unambiguous corruption signal (load opcode category disagrees with the resolved ref) by
 		// walking back to the true reaching definition; correct reads are left untouched.
-		if better := d.reachingSlotVersionOnMismatch(opcode, slot, varRef); better != nil {
+		if parameter := d.originalParameterLoadBinding(opcode, slot); parameter != nil {
+			varRef = parameter
+		} else if better := d.reachingSlotVersionOnMismatch(opcode, slot, varRef); better != nil {
 			varRef = better
 		} else if better := d.reachingSlotVersionGeneral(opcode, slot, varRef); better != nil {
 			// Same-category (e.g. reference-vs-reference) reused-slot corruption that the
@@ -4374,7 +4380,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		index := Convert2bytesToInt(opcode.Data)
 		staticVal := d.constantPoolGetter(int(index))
 		value := runtimeStackSimulation.Pop().(values.JavaValue)
-		if selfOp, ok := d.tryFoldPostIncDec(runtimeStackSimulation, value); ok {
+		if selfOp, ok := d.tryFoldPostIncDec(runtimeStackSimulation, value, staticVal, staticVal.(*values.JavaClassMember)); ok {
 			// static field post-increment/decrement reused as a value: drop the bare old
 			// value left by dup and push `field++` / `field--` instead.
 			runtimeStackSimulation.Pop()
@@ -4388,7 +4394,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		staticVal := d.constantPoolGetter(int(index))
 		value := runtimeStackSimulation.Pop().(values.JavaValue)
 		field := values.NewRefMember(runtimeStackSimulation.Pop().(values.JavaValue), staticVal.(*values.JavaClassMember).Member, staticVal.(*values.JavaClassMember).JavaType)
-		if selfOp, ok := d.tryFoldPostIncDec(runtimeStackSimulation, value); ok {
+		if selfOp, ok := d.tryFoldPostIncDec(runtimeStackSimulation, value, field, staticVal.(*values.JavaClassMember)); ok {
 			// instance field post-increment/decrement reused as a value (dup_x1 idiom): drop
 			// the bare old value and push `field++` / `field--` so the surrounding ternary or
 			// expression branch stays side-effect-free and can be structured.
@@ -5665,17 +5671,24 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 			// legacy fallback can also invert short-circuit polarity. A tree
 			// of conditions with two terminal values needs each value only once.
 			if len(leafValues) != 2 {
-				return nil, nil, false, false, false
-			}
-			leaves := make([]*OpCode, 0, 2)
-			for leaf := range leafValues {
-				leaves = append(leaves, leaf)
-			}
-			sort.Slice(leaves, func(i, j int) bool { return leaves[i].CurrentOffset < leaves[j].CurrentOffset })
-			var factored bool
-			root, built, factored = factorSharedValueTernary(root, built, leafValues[leaves[0]], leafValues[leaves[1]])
-			if !factored {
-				return nil, nil, false, false, false
+				// More than two values cannot use boolean routing. A closed
+				// condition tree still emits linear source, even when several
+				// mutually exclusive paths select the same terminal producer.
+				if !closedValueDecisionTree(root, built, leafValues, d.Work) {
+					return nil, nil, false, false, false
+				}
+			} else {
+				leaves := make([]*OpCode, 0, 2)
+				for leaf := range leafValues {
+					leaves = append(leaves, leaf)
+				}
+				sort.Slice(leaves, func(i, j int) bool { return leaves[i].CurrentOffset < leaves[j].CurrentOffset })
+				var factored bool
+				root, built, factored = factorSharedValueTernary(root, built, leafValues[leaves[0]], leafValues[leaves[1]], d.Work)
+				if !factored {
+					return nil, nil, false, false, false
+				}
+				d.recordFactoredValueRoute(root, rootNode, leaves[0], leaves[1])
 			}
 		}
 		// Publish only after the complete routing graph has been accepted.
@@ -6442,6 +6455,7 @@ func (d *Decompiler) ParseStatement() error {
 	d.restoreNormalizedBooleanWebs()
 	d.restoreExceptionDeclarationSeeds()
 	d.restoreOptionalSupplierDefinitionViews()
+	d.restoreStandaloneIncrementBindings()
 	protectedStores, protectedEdges, err := d.lowerProtectedStackStores()
 	if err != nil {
 		return err
@@ -7210,6 +7224,10 @@ func (d *Decompiler) ParseStatement() error {
 	uidToPairs.ForEach(func(uid string, pairs []*VarFoldRule) bool {
 		ref := uidToRef[uid]
 		val := foldDefinitionValue(ref)
+		// An unproved declaration conversion retains its explicit store.
+		if val == ref {
+			return true
+		}
 		attr := d.delRefUserAttr[ref.VarUid]
 		if slices.Contains(disRefUid, ref.VarUid) {
 			d.tracef("var-fold", "skip disabled ref=%s pairs=%d", traceRef(ref, d.FunctionContext), len(pairs))
@@ -7580,6 +7598,8 @@ func (d *Decompiler) ParseStatement() error {
 	}
 	err = WalkGraph[*Node](d.RootNode, func(node *Node) ([]*Node, error) {
 		if node.IsTryCatch {
+			node.tryDispatchLowered = nil
+			var loweredRegions []*Node
 			// A switch predecessor can enter several distinct protected regions.
 			// Keep their start identities separate instead of attaching every
 			// handler to the last TryNode written onto that predecessor.
@@ -7677,6 +7697,7 @@ func (d *Decompiler) ParseStatement() error {
 					tryNode.Id = statementsIndex
 					tryNode.ProtectedStartPC, tryNode.ProtectedEndPC = int(start), endIndex
 					tryNode.HasProtectedRange = true
+					loweredRegions = append(loweredRegions, tryNode)
 					var soleHandler *CatchNode
 					handlerRows := 0
 					for _, info := range catchInfos {
@@ -7756,6 +7777,7 @@ func (d *Decompiler) ParseStatement() error {
 				// 	tryNode.AddSource(n)
 				// }
 			}
+			node.recordLoweredTryDispatch(loweredRegions, d.ExceptionTable, d.getenv("JDEC_TRY_JUMP_ANCHOR_OFF") == "")
 		}
 		return node.Next, nil
 	})

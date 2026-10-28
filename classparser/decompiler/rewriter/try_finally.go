@@ -660,6 +660,20 @@ func (p *finallyCleanupComparison) statement(rows []core.HandlerRange, a, b stat
 		return true
 	}
 	switch x := a.(type) {
+	case *statements.SourceAssertionStatement:
+		y, ok := b.(*statements.SourceAssertionStatement)
+		if !ok {
+			return false
+		}
+		// Source assertion lowering retains a sealed conditional failure
+		// packet. Compare its condition, allocation, constructor/arguments and
+		// throw as one ordered effect tree; never match rendered assert text.
+		// Both copies must be wholly outside every enclosing handler range.
+		xc, xi, xp, xknown := x.SourceAssertionProtocol()
+		yc, yi, yp, yknown := y.SourceAssertionProtocol()
+		return xknown && yknown && outside(xp) && outside(yp) &&
+			sameFinallyEffectValue(rows, xc, yc, excluded, depth) &&
+			sameFinallyEffectValue(rows, xi.Object, yi.Object, excluded, depth)
 	case *statements.ExpressionStatement:
 		y, ok := b.(*statements.ExpressionStatement)
 		return ok && x != nil && y != nil && (sameUnprotectedTryCall(rows, x.Expression, y.Expression, excluded...) || sameFinallyEffectValue(rows, x.Expression, y.Expression, excluded, depth))

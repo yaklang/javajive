@@ -49,7 +49,7 @@ func TestAdversarialMonitorFactoryAndNegationKeepOriginalDomains(t *testing.T) {
 						}
 						return nativeCompileDebugClasses(t, source, debug)
 					}
-					testNativeIndependentCompilerFamilyWithPolicies(t, compile, compiler.profile, compiler.javac, []string{owner}, "BoundaryDriver", "640:monitor-domains:nested-finally:failure-overrides:values\n", nil, nil, []string{"normal"}, nativeLexicalExactSignatures)
+					testNativeIndependentCompilerFamilyWithPolicies(t, compile, compiler.profile, compiler.javac, []string{owner}, "BoundaryDriver", "640:monitor-domains:nested-finally:failure-overrides:values\n", nil, nil, []string{"normal", "no-source-rewrites", "no-core-cleanups"}, nativeLexicalExactSignatures)
 				})
 			}
 		}

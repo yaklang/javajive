@@ -567,6 +567,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	if source, committed, err := c.standaloneEnumSwitchSource(); committed || err != nil {
 		return source, err
 	}
+	if source, committed, err := c.standaloneAnonymousSource(); committed || err != nil {
+		return source, err
+	}
 	// accessFlagsVerbose := c.obj.AccessFlagsVerbose
 	accessFlagsToCode := c.obj.AccessFlagsToCode
 
@@ -1765,35 +1768,17 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// protocol. Unproved mapping arrays and integer dispatch remain intact:
 	// source spelling cannot establish initializer effects, artifact ownership
 	// or the compiler's numbered-helper namespace.
-	// fixLambdaLoopCapture runs FIRST: it inserts final-copies for loop-reassigned captured vars
-	// and rewrites lambda-body reads to the copy. After this, the original variable is no longer
-	// read inside the lambda, so initProximateSplitSlotDecl (next) can safely default-initialize it
-	// (the lambda-capture skip won't fire for a var whose reads were already rewritten to the copy).
-	// Kill-switch: JDEC_LAMBDA_LOOP_CAPTURE_COPY_OFF=1.
+	// Capture snapshots require stable source bindings. Definite assignment
+	// is established by original reaching definitions, not guessed defaults.
 	full = c.sourceRewrite("fixLambdaLoopCapture", "class_source", full, func(source string) string {
 		return fixLambdaLoopCaptureWithStableBindings(source, c.completedLambdaStableSourceBindings(source, methods))
 	})
-	// Run the split-slot definite-assignment init on the FULL class text (all methods merged).
-	// This overcomes the chunked-sourceCode limitation where the per-method init couldn't see
-	// assignments in other method blocks. Kill-switch: JDEC_INIT_PROX_SPLIT_OFF=1.
-	full = c.sourceRewrite("initProximateSplitSlotDecl", "class_source", full, initProximateSplitSlotDecl)
 	// removeUnreachableSwitchBreak drops `break;` after a nested switch whose default throws/returns.
 	// Kill-switch: JDEC_RM_UNREACHABLE_BREAK_OFF=1.
 	full = c.sourceRewrite("removeUnreachableSwitchBreak", "class_source", full, removeUnreachableSwitchBreak)
-	// fixMissingReturn inserts `return null;` after a no-op empty-if (`if(cond){};`) that follows a
-	// switch-closing `}`, when the enclosing block does not otherwise terminate (the CFA-targeted
-	// pattern that produces "missing return statement" in deep switch/if chains). Kill-switch:
-	// JDEC_FIX_MISSING_RETURN_OFF=1.
-	full = c.sourceRewrite("fixMissingReturn", "class_source", full, fixMissingReturn)
-	// fixEmptySwitchDefault inserts a terminator (throw) into `switch` default labels whose body is
-	// empty, which otherwise leaves a value-returning method without a return on that path.
-	// Kill-switch: JDEC_FIX_EMPTY_SWITCH_DEFAULT_OFF=1.
-	full = c.sourceRewrite("fixEmptySwitchDefault", "class_source", full, fixEmptySwitchDefault)
-	// fixUnreachableDefaultThrow removes a `throw new RuntimeException();` that fixEmptySwitchDefault
-	// inserted into an empty `default:` when the switch is followed by an ACTUAL statement (not a
-	// block-closing `}`). In that case the empty default FALLS THROUGH to the post-switch code, and
-	// the throw makes it unreachable. Kill-switch: JDEC_FIX_UNREACHABLE_DEFAULT_THROW_OFF=1.
-	full = c.sourceRewrite("fixUnreachableDefaultThrow", "class_source", full, fixUnreachableDefaultThrow)
+	// A lexical block boundary cannot prove a method exit. Empty conditional
+	// arms may reach a shared continuation after several enclosing scopes;
+	// only the typed control-flow graph can authorize a return.
 	// fixTryBreakReturn moves a hoisted `return <expr>;` back into a `try { break; }` block
 	// inside a do-while(true) loop, where the try's catch clauses require the return's
 	// checked-exception to be throwable. Kill-switch: JDEC_FIX_TRY_BREAK_RETURN_OFF=1.
@@ -2219,6 +2204,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	if !c.publishConstructorLowering(full, methods) {
 		return "", fmt.Errorf("constructor lowering source publication is not closed")
 	}
+	c.recordStandaloneAssertionMembers(full)
 	return full, nil
 }
 
@@ -4615,6 +4601,10 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			// countConstructorFieldAssignments).
 			ctorFieldAssignCount := countConstructorFieldAssignments(statementList, funcCtx.ClassName)
 			instanceHoistCandidates := inertConstructorFieldPrefix(statementList, funcCtx.ClassName)
+			var staticHoistCandidates map[*statements.AssignStatement]bool
+			if funcCtx.FunctionName == "<clinit>" && !classStaticInitializersMustHoist {
+				staticHoistCandidates = c.orderedStaticInitializerPrefix(codeAttr, statementList)
+			}
 			initializerPrefix, initializerErr := c.nativeAnonymousOwnerInitializerPrefix(statementList)
 			if initializerErr != nil {
 				return nil, initializerErr
@@ -4760,7 +4750,7 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 					} else if v, ok := ret.LeftValue.(*values.JavaClassMember); ok && ret.JavaValue != nil {
 						if (funcCtx.FunctionName == "<clinit>" && classStaticInitializersMustHoist) || v.Name == funcCtx.ClassName {
 							if _, ok := finalFieldMap[v.Member]; ok {
-								if rhs := values.ErasedFactoryAssignmentView(ret.JavaValue, values.SourceFieldType(funcCtx, ret.LeftValue), funcCtx).String(funcCtx); staticHoistAllowedHere && canHoistFieldValueInitializer(ret.JavaValue, rhs) && finalInitializerKeepsStatus[v.Member] &&
+								if rhs := values.ErasedFactoryAssignmentView(ret.JavaValue, values.SourceFieldType(funcCtx, ret.LeftValue), funcCtx).String(funcCtx); staticHoistAllowedHere && (funcCtx.FunctionName != "<clinit>" || classStaticInitializersMustHoist || staticHoistCandidates[ret]) && canHoistFieldValueInitializer(ret.JavaValue, rhs) && finalInitializerKeepsStatus[v.Member] &&
 									(!EnableFieldInitHoistGuard || (ctorFieldAssignCount[v.Member] <= 1 && crossCtorStoreOK(fieldStoreTotal, v.Member))) {
 									foundFieldInit = true
 									c.fieldDefaultValue[v.Member] = rhs
@@ -6074,197 +6064,6 @@ func addMissingGeneratedLocalDecls(body, params, receiverType string, methodRetu
 	return "\n" + strings.Join(lines, "") + strings.TrimPrefix(body, "\n")
 }
 
-// initProximateSplitSlotDecl initializes bare `Type varN;` declarations (no initializer) to
-// `Type varN = null;` when a dead-store `Object varM;` sibling exists within a small line window
-// (proximity gate). This repairs the definite-assignment error from a split slot (String in the
-// if-branch, Object in the else-branch) WITHOUT attempting a structural variable merge.
-//
-// The proximity gate (≤ maxLines apart) is the key safety mechanism: it ensures the Object
-// dead-store is in the SAME if/else block as the bare declaration, not in an unrelated part of the
-// method. Canonical case: fastjson2 JSON.copyTo — `String var16;` (line 4351) + `Object var17;`
-// (line 4358, 7 lines apart). Kill-switch: JDEC_INIT_PROX_SPLIT_OFF=1.
-func initProximateSplitSlotDecl(body string) string {
-	if jdecenv.Get("JDEC_INIT_PROX_SPLIT_OFF") == "1" {
-		return body
-	}
-	dbg := jdecenv.Get("JDEC_INIT_PROX_SPLIT_DBG") == "1"
-	const maxLines = 10 // max line distance between bare decl and Object dead-store sibling
-	lines := strings.Split(body, "\n")
-	// Pre-collect all Object dead-store declaration line numbers.
-	type objDecl struct {
-		name string
-		line int
-	}
-	var objDecls []objDecl
-	for i, ln := range lines {
-		// Match `Object varM;` at any indentation.
-		m := objDeclLineRe.FindStringSubmatch(strings.TrimRight(ln, "\r"))
-		if m != nil {
-			varM := m[1]
-			// Check if varM is a dead store (never read in the full body).
-			if !hasReadInBody(body, varM) {
-				objDecls = append(objDecls, objDecl{name: varM, line: i})
-			}
-		}
-	}
-	// Do NOT early-return when there are no Object dead stores: the primitive/reference gates
-	// below (and the method-scoped capture check) handle bare slot-split declarations with no
-	// Object sibling. Returning here would leave them uninitialized.
-	if dbg {
-		fmt.Fprintf(os.Stderr, "[PROX] %d Object dead stores\n", len(objDecls))
-	}
-	// For each bare `Type varN;` declaration (var and lv scoped locals), decide whether to default-
-	// initialize it to repair a definite-assignment error.
-	bareDeclRe := regexp.MustCompile(`^(\t+)([A-Za-z_$][\w$.<>\[\]?, ]*?)\s+((?:var|lv)\d+(?:_\d+)*)\s*(=\s*null\s*)?;(\s*)$`)
-	for i, ln := range lines {
-		lnClean := strings.TrimRight(ln, "\r")
-		m := bareDeclRe.FindStringSubmatch(lnClean)
-		if m == nil {
-			continue
-		}
-		indent := m[1]
-		declType := strings.TrimSpace(m[2])
-		varN := m[3]
-		// m[4] is the optional `= null` group, m[5] is the trailing whitespace.
-		trailing := m[5]
-		// Skip Java keywords that look like type tokens (throw, return, new, etc.).
-		switch declType {
-		case "throw", "return", "new", "if", "else", "for", "while", "do", "switch", "case",
-			"break", "continue", "try", "catch", "finally", "synchronized", "assert":
-			continue
-		}
-		// Determine the initializer value based on type.
-		initVal := "null"
-		isPrimitive := false
-		switch declType {
-		case "int", "long", "short", "byte":
-			initVal = "0"
-			isPrimitive = true
-		case "double":
-			initVal = "0.0"
-			isPrimitive = true
-		case "float":
-			initVal = "0.0F"
-			isPrimitive = true
-		case "char":
-			initVal = "'\\0'"
-			isPrimitive = true
-		case "boolean":
-			initVal = "false"
-			isPrimitive = true
-		}
-		// varN must be read somewhere (has a non-assignment use), within the same method.
-		if !hasReadInBodyMethod(lines, varN, i) {
-			continue
-		}
-		// Lambda-capture safety: if varN is READ inside a lambda body that is DEEPER than this
-		// declaration's scope AND it is assigned ≥1 time elsewhere, initializing it would create a
-		// second assignment (the init + the reassignment), breaking the capture ("local variables
-		// referenced from a lambda expression must be final or effectively final"). Skip — the
-		// final-copy pass (fixLambdaLoopCapture) handles loop-reassigned captures separately.
-		// Method-local to avoid cross-method false captures from varN name reuse.
-		if countAssignTargetsMethod(lines, varN, i) >= 1 && nameCapturedByLambdaMethod(lines, varN, i) {
-			// The variable is captured by a lambda and assigned ≥1 time. If the declaration has an
-			// `= null` initializer, removing it makes the variable effectively-final (only the later
-			// reassignment remains), which allows the lambda capture to compile. This is safe when
-			// countAssignTargetsMethod == 1 (single reassignment after the null init).
-			if trailing == "" && strings.Contains(lnClean, "= null;") && countAssignTargetsMethod(lines, varN, i) == 1 {
-				if dbg {
-					fmt.Fprintf(os.Stderr, "[PROX] STRIP null-init %s %s: captured + single reassign → effectively-final\n", declType, varN)
-				}
-				lines[i] = indent + declType + " " + varN + ";"
-				continue
-			}
-			if dbg {
-				fmt.Fprintf(os.Stderr, "[PROX] SKIP %s %s: captured by deeper lambda + assigned\n", declType, varN)
-			}
-			continue
-		}
-		// Gate: the declaration should be initialized only when it is NOT definitely assigned on all
-		// paths before its first read.
-		// (a) Proximity: an Object dead-store sibling is nearby (the split-slot signature), OR
-		// (b) the bare decl is immediately followed by an if/else chain that LACKS a final else
-		//     (one branch may not assign → not definitely assigned — exclude the bare `Object`
-		//     widened-split form whose bare shape is intentional under JDEC_REF_SLOT_NULL_REASSIGN_MERGE_OFF), OR
-		// (c) a primitive assigned ≥1 time and read (multi-branch chain, primitives are safe), OR
-		// (d) a reference type assigned ≥2 times (multi-branch chain).
-		found := false
-		for _, od := range objDecls {
-			if abs(i-od.line) <= maxLines {
-				found = true
-				break
-			}
-		}
-		// `Object` bare declarations: when JDEC_REF_SLOT_NULL_REASSIGN_MERGE_OFF is set, the
-		// null-reassign split intentionally leaves a widened-split `Object varN;` whose bare shape is
-		// load-bearing (the merge is proven load-bearing by that bare form). Do not initialize Object
-		// decls in that mode. Otherwise (default), Object bare decls that are conditionally assigned
-		// and read are real DA errors and must be initialized.
-		skipObject := declType == "Object" && jdecenv.Get("JDEC_REF_SLOT_NULL_REASSIGN_MERGE_OFF") == "1"
-		if !found && !skipObject && chainLacksFinalElse(lines, i, varN) {
-			found = true
-		}
-		if !found && isPrimitive && countAssignTargetsMethod(lines, varN, i) >= 1 {
-			found = true
-		}
-		// Reference types: a single conditional assignment (inside an `if`/`try`) read later, or a
-		// use-before-def reorder artifact, both leave the variable possibly-uninitialized. The
-		// lambda-capture skip above prevents breaking finality.
-		if !found && !isPrimitive && !skipObject && countAssignTargetsMethod(lines, varN, i) >= 1 {
-			found = true
-		}
-		if !found {
-			continue
-		}
-		// Initialize: `Type varN;` → `Type varN = <initVal>;`
-		if dbg {
-			fmt.Fprintf(os.Stderr, "[PROX] INIT %s %s = %s; (line=%d)\n", declType, varN, initVal, i)
-		}
-		lines[i] = indent + declType + " " + varN + " = " + initVal + ";" + trailing
-	}
-	return strings.Join(lines, "\n")
-}
-
-var objDeclLineRe = regexp.MustCompile(`^\t+Object\s+(var\d+(?:_\d+)?)\s*;`)
-
-func abs(x int) int {
-	if x < 0 {
-		return -x
-	}
-	return x
-}
-
-// hasReadInBody reports whether name appears as a READ (not declaration, not assignment target)
-// anywhere in body.
-func hasReadInBody(body, name string) bool {
-	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
-	locs := re.FindAllStringIndex(body, -1)
-	for _, loc := range locs {
-		before := body[:loc[0]]
-		after := body[loc[1]:]
-		// Skip declarations: preceded by a type token on the same line.
-		lineStart := strings.LastIndex(before, "\n") + 1
-		lineBefore := strings.TrimSpace(before[lineStart:])
-		if lineBefore != "" {
-			c := lineBefore[len(lineBefore)-1]
-			// A declaration is preceded by a type token ending in an identifier char, ], >, or ?.
-			// NOT ')' — that would match casts like `(Type) (varN)`.
-			// But a control keyword (return/throw/if/...) ending in a word char is NOT a type —
-			// `return varN`, `throw varN`, `if (varN` are READS.
-			if (isWordByteDump(c) || c == ']' || c == '>' || c == '?') && !prevTokenIsControlKeyword(lineBefore) {
-				continue
-			}
-		}
-		// Skip assignment targets: followed by `=` but not `==`.
-		afterTrim := strings.TrimLeft(after, " \t")
-		if strings.HasPrefix(afterTrim, "=") && !strings.HasPrefix(afterTrim, "==") {
-			continue
-		}
-		return true
-	}
-	return false
-}
-
 func isWordByteDump(b byte) bool {
 	return b == '_' || b == '$' || (b >= '0' && b <= '9') ||
 		(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
@@ -6290,50 +6089,6 @@ func prevTokenIsControlKeyword(lineBefore string) bool {
 		return true
 	}
 	return false
-}
-
-// lambdaDepthPerLine computes, for each line, the number of LAMBDA bodies (blocks introduced by
-// `-> {`) currently open. This is NOT general brace depth — only `-> {` lambda blocks count.
-func lambdaDepthPerLine(lines []string) []int {
-	depths := make([]int, len(lines))
-	depth := 0
-	var lambdaStarts []int
-	for i, raw := range lines {
-		ln := strings.TrimRight(raw, "\r")
-		arrowBraceIdxs := map[int]bool{}
-		for k := 0; k+1 < len(ln); k++ {
-			if ln[k] == '-' && ln[k+1] == '>' {
-				for m := k + 2; m < len(ln); m++ {
-					if ln[m] == '{' {
-						arrowBraceIdxs[m] = true
-						break
-					}
-					if ln[m] != ' ' && ln[m] != '\t' {
-						break
-					}
-				}
-			}
-		}
-		for j := 0; j < len(ln); j++ {
-			switch ln[j] {
-			case '{':
-				depth++
-				if arrowBraceIdxs[j] {
-					lambdaStarts = append(lambdaStarts, depth)
-				}
-			case '}':
-				depth--
-				if depth < 0 {
-					depth = 0
-				}
-				for len(lambdaStarts) > 0 && depth < lambdaStarts[len(lambdaStarts)-1] {
-					lambdaStarts = lambdaStarts[:len(lambdaStarts)-1]
-				}
-			}
-		}
-		depths[i] = len(lambdaStarts)
-	}
-	return depths
 }
 
 // methodOrInitBlockStart reports whether ln opens a method/ctor body OR a static/instance
@@ -6457,185 +6212,6 @@ func isMethodOrInitBlockStart(ln string) bool {
 			return false
 		}
 		return true
-	}
-	return false
-}
-
-// body DEEPER than the declaration's lambda depth, within the enclosing method body only.
-func nameCapturedByLambdaMethod(lines []string, name string, declLineIdx int) bool {
-	ms, me := methodBodyRange(lines, declLineIdx)
-	if ms < 0 {
-		return false
-	}
-	sub := lines[ms:me]
-	depths := lambdaDepthPerLine(sub)
-	subDeclIdx := declLineIdx - ms
-	if subDeclIdx < 0 || subDeclIdx >= len(depths) {
-		return false
-	}
-	declDepth := depths[subDeclIdx]
-	nameRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
-	for i, raw := range sub {
-		ln := strings.TrimRight(raw, "\r")
-		if depths[i] <= declDepth {
-			continue
-		}
-		for _, loc := range nameRe.FindAllStringIndex(ln, -1) {
-			before := ln[:loc[0]]
-			after := ln[loc[1]:]
-			bTrim := strings.TrimRight(before, " \t")
-			aTrim := strings.TrimLeft(after, " \t")
-			if strings.Contains(after, "->") &&
-				len(bTrim) > 0 && (bTrim[len(bTrim)-1] == '(' || bTrim[len(bTrim)-1] == ',') &&
-				(len(aTrim) > 0 && (aTrim[0] == ')' || aTrim[0] == ',')) {
-				continue
-			}
-			lineBefore := strings.TrimSpace(before)
-			if lineBefore != "" {
-				c := lineBefore[len(lineBefore)-1]
-				if (isWordByteDump(c) || c == ']' || c == '>' || c == '?') && !prevTokenIsControlKeyword(lineBefore) {
-					continue
-				}
-			}
-			if strings.HasPrefix(aTrim, "=") && !strings.HasPrefix(aTrim, "==") {
-				continue
-			}
-			return true
-		}
-	}
-	return false
-}
-
-// countAssignTargetsMethod counts assignment targets for name within the enclosing method body.
-func countAssignTargetsMethod(lines []string, name string, declLineIdx int) int {
-	ms, me := methodBodyRange(lines, declLineIdx)
-	if ms < 0 {
-		return countAssignTargets(strings.Join(lines, "\n"), name)
-	}
-	return countAssignTargets(strings.Join(lines[ms:me], "\n"), name)
-}
-
-// hasReadInBodyMethod reports whether name appears as a READ within the enclosing method body.
-func hasReadInBodyMethod(lines []string, name string, declLineIdx int) bool {
-	ms, me := methodBodyRange(lines, declLineIdx)
-	if ms < 0 {
-		return hasReadInBody(strings.Join(lines, "\n"), name)
-	}
-	return hasReadInBody(strings.Join(lines[ms:me], "\n"), name)
-}
-
-// chainLacksFinalElse reports whether the bare declaration at declIdx is immediately followed by an
-// if/else chain whose deepest else has NO final-else block — a path on which varN is never assigned
-// (would trigger "might not have been initialized"). Handles the dumper's nested `}else{ if(){} }`
-// rendering. While descending, if the else body assigns varN unconditionally before any inner if,
-// the chain has full coverage (returns false).
-func chainLacksFinalElse(lines []string, declIdx int, varN string) bool {
-	if declIdx < 0 || declIdx+1 >= len(lines) {
-		return false
-	}
-	declIndent := leadingTabs(strings.TrimRight(lines[declIdx], "\r"))
-	if declIndent == "" {
-		return false
-	}
-	ifLine := -1
-	for j := declIdx + 1; j < len(lines); j++ {
-		ln := strings.TrimRight(lines[j], "\r")
-		if strings.TrimSpace(ln) == "" {
-			continue
-		}
-		trim := strings.TrimSpace(ln)
-		if strings.HasPrefix(trim, "if ") || strings.HasPrefix(trim, "if(") {
-			ifLine = j
-			break
-		}
-		ind := leadingTabs(ln)
-		if len(ind) <= len(declIndent) {
-			return false
-		}
-	}
-	if ifLine < 0 {
-		return false
-	}
-	cur := ifLine
-	for cur < len(lines) {
-		ifIndent := leadingTabs(strings.TrimRight(lines[cur], "\r"))
-		depth := 0
-		blockEnd := -1
-		for k := cur; k < len(lines); k++ {
-			ln := strings.TrimRight(lines[k], "\r")
-			for b := 0; b < len(ln); b++ {
-				switch ln[b] {
-				case '{':
-					depth++
-				case '}':
-					depth--
-				}
-			}
-			if depth <= 0 && k > cur {
-				blockEnd = k
-				break
-			}
-		}
-		if blockEnd < 0 {
-			return false
-		}
-		elseLine := -1
-		for k := blockEnd + 1; k < len(lines); k++ {
-			ln := strings.TrimRight(lines[k], "\r")
-			if strings.TrimSpace(ln) == "" {
-				continue
-			}
-			elseLine = k
-			break
-		}
-		if elseLine < 0 {
-			return true
-		}
-		elseLn := strings.TrimRight(lines[elseLine], "\r")
-		elseTrim := strings.TrimSpace(elseLn)
-		elseInd := leadingTabs(elseLn)
-		if !(strings.HasPrefix(elseTrim, "}else{") || strings.HasPrefix(elseTrim, "} else {") ||
-			strings.HasPrefix(elseTrim, "}else ") || strings.HasPrefix(elseTrim, "} else")) {
-			if len(elseInd) <= len(ifIndent) {
-				return true
-			}
-			return false
-		}
-		hasInnerIf := false
-		varNAssignedBeforeInnerIf := false
-		elseDepth := 0
-		started := false
-		for k := elseLine; k < len(lines); k++ {
-			ln := strings.TrimRight(lines[k], "\r")
-			depthBeforeLine := elseDepth
-			for b := 0; b < len(ln); b++ {
-				switch ln[b] {
-				case '{':
-					elseDepth++
-					started = true
-				case '}':
-					elseDepth--
-				}
-			}
-			trim := strings.TrimSpace(ln)
-			if started && depthBeforeLine > 0 && (strings.HasPrefix(trim, "if ") || strings.HasPrefix(trim, "if(")) {
-				hasInnerIf = true
-				cur = k
-				break
-			}
-			if started && depthBeforeLine > 0 && assignTargetIs(ln, varN) {
-				varNAssignedBeforeInnerIf = true
-			}
-			if started && elseDepth <= 0 && k > elseLine {
-				break
-			}
-		}
-		if varNAssignedBeforeInnerIf {
-			return false
-		}
-		if !hasInnerIf {
-			return false
-		}
 	}
 	return false
 }
@@ -7044,49 +6620,6 @@ func removeUnreachableSwitchBreak(body string) string {
 	return strings.Join(out, "\n")
 }
 
-// (the line after `default:` is the `}` closing the switch). An empty default leaves a value-
-// returning method without a return on that path ("missing return statement"). Inserting
-// `throw new RuntimeException();` completes the control flow legally in any method. Only triggers
-// when the line following `default:` (ignoring blank lines) is the switch-closing `}` at the SAME
-// indentation as `default:`. Kill-switch: JDEC_FIX_EMPTY_SWITCH_DEFAULT_OFF=1.
-func fixEmptySwitchDefault(body string) string {
-	if jdecenv.Get("JDEC_FIX_EMPTY_SWITCH_DEFAULT_OFF") == "1" {
-		return body
-	}
-	lines := strings.Split(body, "\n")
-	defaultRe := regexp.MustCompile(`^(\t+)default:\s*$`)
-	inserts := []int{} // line indices after which to insert the throw (descending apply)
-	for i := 0; i < len(lines); i++ {
-		m := defaultRe.FindStringSubmatch(strings.TrimRight(lines[i], "\r"))
-		if m == nil {
-			continue
-		}
-		indent := m[1]
-		// Find the next non-blank line; it must be `}` at the same indent (empty default body).
-		for j := i + 1; j < len(lines); j++ {
-			ln := strings.TrimRight(lines[j], "\r")
-			if strings.TrimSpace(ln) == "" {
-				continue
-			}
-			if ln == indent+"}" {
-				inserts = append(inserts, i) // insert the throw AFTER the `default:` line
-			}
-			break
-		}
-	}
-	if len(inserts) == 0 {
-		return body
-	}
-	// Apply in descending order so earlier offsets stay valid.
-	for k := len(inserts) - 1; k >= 0; k-- {
-		i := inserts[k]
-		indent := leadingTabs(strings.TrimRight(lines[i], "\r"))
-		throwLn := indent + "throw new RuntimeException();"
-		lines = append(lines[:i+1], append([]string{throwLn}, lines[i+1:]...)...)
-	}
-	return strings.Join(lines, "\n")
-}
-
 // fixTryBreakReturn moves a `return <expr>;` that was incorrectly hoisted OUTSIDE a `do { ... } while`
 // loop back INTO a `try { break; }` block inside the loop. The do-while structuring converts a
 // `try { return expr; } catch(...)` inside a loop into `try { break; } catch(...)` + `return expr;`
@@ -7220,76 +6753,6 @@ func fixTryBreakReturn(body string) string {
 		lines[f.returnIdx] = ""
 	}
 	return strings.Join(lines, "\n")
-}
-
-// fixMissingReturn inserts `return null;` after a no-op empty-if statement (`if (cond){};`) that
-// immediately follows a switch-closing `}` whose switch had a `default:` clause. This is the
-// control-flow pattern that produces "missing return statement" in deep switch/if chains: javac
-// does not treat a non-constant String-switch (hashCode-based) as definitely-terminating even with
-// a `default: return`, so execution can fall through to the post-switch `if(cond){};` and then to
-// the end of the enclosing block without a return. Inserting `return null;` after that empty-if
-// completes the path. The insertion is reachable only on the not-definitely-returned path, so it
-// never creates an unreachable-statement error. Kill-switch: JDEC_FIX_MISSING_RETURN_OFF=1.
-//
-// enclosingReturnsReference reports whether the method/ctor/init-block containing line idx has a
-// declared return type that is a reference type (not primitive, not void, not a constructor). Used
-// to gate `return null;` insertions. Scans backward for a method/init-block signature line.
-func enclosingReturnsReference(lines []string, idx int) bool {
-	for k := idx; k >= 0; k-- {
-		ln := strings.TrimRight(lines[k], "\r")
-		if !isMethodOrInitBlockStart(ln) {
-			continue
-		}
-		trim := strings.TrimSpace(ln)
-		// Static/instance init block: no return type (void-equivalent for our purposes).
-		compact := strings.Join(strings.Fields(trim), "")
-		if compact == "static{" {
-			return false
-		}
-		// Method signature `<type> <name>(...) {` or `<mods> <type> <name>(...) {`. Extract the
-		// token before the method name (the return type).
-		paren := strings.Index(trim, "(")
-		if paren < 0 {
-			return true // can't tell — allow (constructor treated as reference-safe, harmless)
-		}
-		head := strings.TrimSpace(trim[:paren])
-		fields := strings.Fields(head)
-		if len(fields) == 0 {
-			return true
-		}
-		mods := map[string]bool{
-			"public": true, "private": true, "protected": true, "static": true,
-			"final": true, "synchronized": true, "native": true, "strictfp": true,
-			"abstract": true, "default": true,
-		}
-		var toks []string
-		for _, f := range fields {
-			if !mods[f] {
-				toks = append(toks, f)
-			}
-		}
-		// Constructor: only the class name remains after stripping modifiers (`public Foo(`).
-		if len(toks) <= 1 {
-			return false
-		}
-		// The return type is the token BEFORE the method name.
-		retType := toks[len(toks)-2]
-		// An array type (`byte[]`, `Object[]`) is always a reference type — `return null;` is legal.
-		if strings.Contains(retType, "[") {
-			return true
-		}
-		// Strip generics for the primitive check.
-		base := retType
-		if p := strings.IndexAny(base, "<"); p >= 0 {
-			base = base[:p]
-		}
-		switch base {
-		case "void", "int", "long", "short", "byte", "double", "float", "char", "boolean":
-			return false
-		}
-		return true
-	}
-	return false
 }
 
 // fixThrowTypeVarCast adds the `(T)` cast to `throw <var>;` inside a method whose `throws` clause
@@ -7454,308 +6917,6 @@ func fixThrowTypeVarCast(body string) string {
 	for k := len(pending) - 1; k >= 0; k-- {
 		e := pending[k]
 		lines[e.lineIdx] = e.newText
-	}
-	return strings.Join(lines, "\n")
-}
-
-// fixUnreachableDefaultThrow removes a `throw new RuntimeException();` that fixEmptySwitchDefault
-// inserted into an empty `default:` when the switch is followed by an ACTUAL statement (not a
-// block-closing `}`). In that case the empty default FALLS THROUGH to the post-switch code, and
-// the throw makes it unreachable ("unreachable statement"). The throw is only removed when the
-// first non-blank line after the switch-closing `}` does NOT start with `}` (i.e. it is a real
-// statement like `continue;`, not a block close like `}else{` or a method-ending `}`).
-// Kill-switch: JDEC_FIX_UNREACHABLE_DEFAULT_THROW_OFF=1.
-// Keep case: fastjson2 ToBoolean (switch close followed by `}else{` → starts with `}`, keep throw).
-// Remove case: commons-lang3 RandomStringUtils (switch close followed by `continue;` → real stmt).
-func fixUnreachableDefaultThrow(body string) string {
-	if jdecenv.Get("JDEC_FIX_UNREACHABLE_DEFAULT_THROW_OFF") == "1" {
-		return body
-	}
-	lines := strings.Split(body, "\n")
-	// Pattern:
-	//   <indent>default:
-	//   <indent+1>throw new RuntimeException();
-	//   <indent>}
-	//   <indent><NOT starting with }>
-	defaultRe := regexp.MustCompile(`^(\t+)default:\s*$`)
-	throwRe := regexp.MustCompile(`^\t+throw new RuntimeException\(\);\s*$`)
-	removes := []int{} // line indices to blank out (descending apply)
-	for i := 0; i < len(lines)-2; i++ {
-		dm := defaultRe.FindStringSubmatch(strings.TrimRight(lines[i], "\r"))
-		if dm == nil {
-			continue
-		}
-		indent := dm[1]
-		// Next non-blank line must be `throw new RuntimeException();`
-		throwIdx := -1
-		for j := i + 1; j < len(lines); j++ {
-			jl := strings.TrimRight(lines[j], "\r")
-			if strings.TrimSpace(jl) == "" {
-				continue
-			}
-			if throwRe.MatchString(jl) {
-				throwIdx = j
-			}
-			break
-		}
-		if throwIdx < 0 {
-			continue
-		}
-		// Next non-blank line after throw must be `}` at the default's indent (switch close).
-		switchCloseIdx := -1
-		for j := throwIdx + 1; j < len(lines); j++ {
-			jl := strings.TrimRight(lines[j], "\r")
-			if strings.TrimSpace(jl) == "" {
-				continue
-			}
-			if jl == indent+"}" {
-				switchCloseIdx = j
-			}
-			break
-		}
-		if switchCloseIdx < 0 {
-			continue
-		}
-		// Check the first non-blank line after the switch-closing `}`.
-		// If it starts with `}` (block close / `}else{` / `}catch(` etc.) at the same or lesser
-		// indent, the throw IS needed (the switch is the last statement in its block).
-		// If it does NOT start with `}`, it is a real post-switch statement → the throw makes it
-		// unreachable → remove the throw.
-		for k := switchCloseIdx + 1; k < len(lines); k++ {
-			kl := strings.TrimRight(lines[k], "\r")
-			if strings.TrimSpace(kl) == "" {
-				continue
-			}
-			trimmed := strings.TrimSpace(kl)
-			if !strings.HasPrefix(trimmed, "}") {
-				// Real post-switch statement → the default falls through to it → throw is unreachable.
-				removes = append(removes, throwIdx)
-			}
-			// Else: starts with `}` → throw is needed (block exit).
-			break
-		}
-	}
-	if len(removes) == 0 {
-		return body
-	}
-	for k := len(removes) - 1; k >= 0; k-- {
-		lines[removes[k]] = ""
-	}
-	return strings.Join(lines, "\n")
-}
-
-// fixMissingReturn inserts `return null;` after a no-op empty-if statement (`if (cond){};`) when
-// the enclosing block (which the empty-if is the last statement of, evidenced by the next non-blank
-// line being a `}` at the same-or-shallower indent) contains a `switch` with a `default:` clause.
-// This is the control-flow pattern that produces "missing return statement" in deep switch/if
-// chains: javac does not treat a non-constant String-switch (hashCode-based) as definitely-
-// terminating even with a `default: return`, so execution can fall through to the end of the
-// enclosing block without a return. Inserting `return null;` after the empty-if completes the
-// path. The insertion is reachable only on the not-definitely-returned path, so it never creates
-// an unreachable-statement error. Kill-switch: JDEC_FIX_MISSING_RETURN_OFF=1.
-func fixMissingReturn(body string) string {
-	if jdecenv.Get("JDEC_FIX_MISSING_RETURN_OFF") == "1" {
-		return body
-	}
-	lines := strings.Split(body, "\n")
-	emptyIfRe := regexp.MustCompile(`^(\t+)if \([^;]*\)\{\};\s*$`)
-	// emptyThenElseRe matches an if-else whose THEN branch is empty (just `{` on its own line) and
-	// whose ELSE branch follows immediately. This is the control-flow pattern where the bytecode's
-	// `if(cond) goto L` has no statements in the taken branch, but the else branch ends with `return`,
-	// leaving the method without a return on the empty-then path → "missing return statement"
-	// (spring ASM ClassReader.readStream `if (var6 == 1) { } else { ... return var7_1; }`).
-	emptyThenElseRe := regexp.MustCompile(`^(\t+)if \([^;]*\)\{\s*$`)
-	type insertSite struct {
-		at     int // insert AFTER this line index
-		indent string
-	}
-	var sites []insertSite
-	for i := 0; i < len(lines); i++ {
-		ln := strings.TrimRight(lines[i], "\r")
-		// Pattern 1: `if (cond){};` (no-op empty-if, switch-based).
-		m := emptyIfRe.FindStringSubmatch(ln)
-		if m != nil {
-			indent := m[1]
-			// The next non-blank line must be a `}` at a shallower indent (the block ends right after
-			// the empty-if), confirming the empty-if is the last statement of its block.
-			next := -1
-			for j := i + 1; j < len(lines); j++ {
-				if strings.TrimSpace(strings.TrimRight(lines[j], "\r")) == "" {
-					continue
-				}
-				next = j
-				break
-			}
-			if next < 0 {
-				continue
-			}
-			nextLn := strings.TrimRight(lines[next], "\r")
-			nextTrim := strings.TrimSpace(nextLn)
-			if nextTrim != "}" {
-				continue
-			}
-			nextIndent := leadingTabs(nextLn)
-			if len(nextIndent) >= len(indent) {
-				continue // the `}` is not shallower — not a block-end
-			}
-			// Scan backward within the enclosing block (same indent or deeper) for a `default:` label,
-			// which indicates a switch with a default lives in this block. Stop at a shallower indent
-			// (block boundary).
-			sawDefault := false
-			for k := i - 1; k >= 0; k-- {
-				lk := strings.TrimRight(lines[k], "\r")
-				if strings.TrimSpace(lk) == "" {
-					continue
-				}
-				kind := leadingTabs(lk)
-				if len(kind) < len(indent) {
-					break // left the enclosing block
-				}
-				tk := strings.TrimSpace(lk)
-				if tk == "default:" || strings.HasPrefix(tk, "default:") {
-					sawDefault = true
-					break
-				}
-			}
-			if !sawDefault {
-				continue
-			}
-			// Only apply when the enclosing method returns a reference type — `return null;` is invalid
-			// for primitive/void returns. Scan backward for the method/init-block signature.
-			if !enclosingReturnsReference(lines, i) {
-				continue
-			}
-			sites = append(sites, insertSite{at: i, indent: indent})
-			continue
-		}
-		// Pattern 2: `if (cond) {` with empty then + `else { ... return ...; }` — the else branch
-		// ends with a return but the then branch has none, leaving the method without a return on
-		// the then path. Insert `return null;` inside the empty then branch.
-		m2 := emptyThenElseRe.FindStringSubmatch(ln)
-		if m2 != nil {
-			indent := m2[1]
-			// The next non-blank line must be `}` (closing the empty then), possibly combined with `else`.
-			next := -1
-			for j := i + 1; j < len(lines); j++ {
-				if strings.TrimSpace(strings.TrimRight(lines[j], "\r")) == "" {
-					continue
-				}
-				next = j
-				break
-			}
-			if next < 0 {
-				continue
-			}
-			nextLn := strings.TrimRight(lines[next], "\r")
-			nextTrim := strings.TrimSpace(nextLn)
-			// The then-closing `}` may be on its own line OR combined with `else` as `}else{`.
-			if nextTrim != "}" && !strings.HasPrefix(nextTrim, "}else") && !strings.HasPrefix(nextTrim, "} else") {
-				continue
-			}
-			// If the `}` is combined with else, the else starts on the same line; otherwise find the
-			// else on the next non-blank line.
-			elseIdx := -1
-			if strings.HasPrefix(nextTrim, "}else") || strings.HasPrefix(nextTrim, "} else") {
-				elseIdx = next
-			} else {
-				for j := next + 1; j < len(lines); j++ {
-					tej := strings.TrimRight(lines[j], "\r")
-					if strings.TrimSpace(tej) == "" {
-						continue
-					}
-					elseIdx = j
-					break
-				}
-			}
-			if elseIdx < 0 {
-				continue
-			}
-			elseLn := strings.TrimSpace(strings.TrimRight(lines[elseIdx], "\r"))
-			if !strings.HasPrefix(elseLn, "}") || !strings.Contains(elseLn, "else") {
-				continue
-			}
-			// The else branch must end with a `return` statement (scan forward for the matching `}`).
-			// Start with depth=1 (the else's `{` opens the block) and scan from the line AFTER elseIdx
-			// so the `}` that closes the then-branch (in `}else{`) does not corrupt the count.
-			depth := 1
-			hasReturn := false
-			elseEnd := -1
-			for j := elseIdx + 1; j < len(lines); j++ {
-				lj := strings.TrimRight(lines[j], "\r")
-				for b := 0; b < len(lj); b++ {
-					switch lj[b] {
-					case '{':
-						depth++
-					case '}':
-						depth--
-						if depth == 0 {
-							elseEnd = j
-							break
-						}
-					}
-				}
-				if depth == 0 {
-					break
-				}
-			}
-			if elseEnd >= 0 {
-				for k := elseIdx; k <= elseEnd; k++ {
-					lk := strings.TrimRight(lines[k], "\r")
-					if strings.Contains(lk, "return ") || strings.Contains(lk, "return;") {
-						hasReturn = true
-						break
-					}
-				}
-			}
-			if !hasReturn {
-				continue
-			}
-			// Only apply when the if-else is the LAST statement of its enclosing block: the next
-			// non-blank line after the else's closing `}` must be a block-end marker — `}` (block end)
-			// or `}catch`/`}finally` (try block end, the if-else is the last statement in a try body,
-			// as in spring ASM ClassReader.readStream). If there are more statements after the if-else,
-			// inserting `return null;` would make them unreachable (fastjson2 ValueFilter.of has
-			// `return l2;` after the if-else).
-			if elseEnd < 0 || elseEnd+1 >= len(lines) {
-				continue
-			}
-			afterElse := -1
-			for j := elseEnd + 1; j < len(lines); j++ {
-				if strings.TrimSpace(strings.TrimRight(lines[j], "\r")) == "" {
-					continue
-				}
-				afterElse = j
-				break
-			}
-			if afterElse < 0 {
-				continue
-			}
-			afterLn := strings.TrimRight(lines[afterElse], "\r")
-			afterTrim := strings.TrimSpace(afterLn)
-			if afterTrim != "}" &&
-				!strings.HasPrefix(afterTrim, "}catch") && !strings.HasPrefix(afterTrim, "} catch") &&
-				!strings.HasPrefix(afterTrim, "}finally") && !strings.HasPrefix(afterTrim, "} finally") {
-				continue // more statements follow the if-else — inserting return would be unreachable
-			}
-			afterIndent := leadingTabs(afterLn)
-			if len(afterIndent) > len(indent) {
-				continue // the `}` is deeper — not the enclosing block end
-			}
-			// Only apply when the enclosing method returns a reference type.
-			if !enclosingReturnsReference(lines, i) {
-				continue
-			}
-			// Insert `return null;` inside the empty then branch (after the `if (cond) {` line).
-			sites = append(sites, insertSite{at: i, indent: indent + "\t"})
-		}
-	}
-	if len(sites) == 0 {
-		return body
-	}
-	for k := len(sites) - 1; k >= 0; k-- {
-		s := sites[k]
-		retLn := s.indent + "return null;"
-		lines = append(lines[:s.at+1], append([]string{retLn}, lines[s.at+1:]...)...)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -9596,21 +8757,6 @@ func fixCollections4RemainingReconstructs(body string) string {
 		body = strings.ReplaceAll(body,
 			"Integer.numberOfLeadingZeros((var18) ^ (var14))",
 			"Integer.numberOfLeadingZeros(((var18) ? (1) : (0)) ^ ((var14) ? (1) : (0)))")
-	}
-	// Flat3Map.containsValue: both if/else switches fall through to `return false`.
-	// fixEmptySwitchDefault inserts `default: throw` which makes that return
-	// unreachable. Drop those two throws; get/put keep theirs (they have a
-	// reachable size==0 path). Indent is not assumed — tab count varies.
-	if strings.Contains(body, "class Flat3Map") {
-		cvRe := regexp.MustCompile(`(?s)(public boolean containsValue\(Object var1\) \{.*?)(\n\tpublic )`)
-		emptyDefThrow := regexp.MustCompile(`\n\t+default:\n\t+throw new RuntimeException\(\);\n`)
-		body = cvRe.ReplaceAllStringFunc(body, func(m string) string {
-			sub := cvRe.FindStringSubmatch(m)
-			if len(sub) != 3 {
-				return m
-			}
-			return emptyDefThrow.ReplaceAllString(sub[1], "\n") + sub[2]
-		})
 	}
 	return body
 }

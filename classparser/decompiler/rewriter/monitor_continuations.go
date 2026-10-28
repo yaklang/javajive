@@ -2,6 +2,7 @@ package rewriter
 
 import (
 	"fmt"
+	"reflect"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
@@ -21,7 +22,11 @@ func originalMonitorContinuations(tr *statements.TryCatchStatement, owner int) (
 	if !originalMonitorHandlerClosed(tr, owner) {
 		return nil, nil, nil, false
 	}
-	p := monitorContinuationProof{owner: owner, rows: tr.Handlers[0].ProtectedRanges, remaining: 1024}
+	label, valid := freshMonitorContinuationLabel(tr.TryBody, owner)
+	if !valid {
+		return nil, nil, nil, false
+	}
+	p := monitorContinuationProof{label: label, owner: owner, rows: tr.Handlers[0].ProtectedRanges, remaining: 1024}
 	p.tag = values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaPrimer(types.JavaInteger))
 	p.tag.Id.SetName(fmt.Sprintf("jdec$monitor$exit$%d", owner))
 	body, open, valid := p.partition(tr.TryBody, 0)
@@ -33,11 +38,19 @@ func originalMonitorContinuations(tr *statements.TryCatchStatement, owner int) (
 		condition := values.NewBinaryExpression(p.tag, values.NewJavaLiteral(i, p.tag.Type()), values.EQ, types.NewJavaPrimer(types.JavaBoolean))
 		continuation = []statements.Statement{statements.NewIfStatement(condition, p.tails[i], continuation)}
 	}
-	return []statements.Statement{statements.NewDeclareStatement(p.tag)}, body, continuation, true
+	// A release closes only its selected path. Preserve that abrupt edge
+	// even when a containing conditional also has still-held paths. Recording
+	// its tag alone would let the closed path execute a later shared suffix.
+	// The existing domain proof permits transfers only within owned inner
+	// loops/switches, so this one-shot region cannot capture an outer transfer.
+	region := statements.NewDoWhileStatement(values.NewJavaLiteral(false, types.NewJavaPrimer(types.JavaBoolean)), body)
+	region.Label = p.label
+	return []statements.Statement{statements.NewDeclareStatement(p.tag)}, []statements.Statement{region}, continuation, true
 }
 
 type monitorContinuationProof struct {
 	owner, remaining int
+	label            string
 	rows             [][2]int
 	tag              *values.JavaRef
 	tails            [][]statements.Statement
@@ -71,7 +84,7 @@ func (p *monitorContinuationProof) partition(input []statements.Statement, depth
 				store := statements.NewAssignStatement(p.tag, values.NewJavaLiteral(len(p.tails), p.tag.Type()), false)
 				store.HasOriginPC, store.OriginPC = true, pc
 				p.tails = append(p.tails, append([]statements.Statement{}, input[i+1:]...))
-				return append(out, store), false, true
+				return append(out, store, statements.NewSourceTransferStatement("break", p.label)), false, true
 			}
 			if x.Data != nil || x.Flag != "start" && x.Flag != "end" {
 				return nil, false, false
@@ -291,4 +304,55 @@ func monitorContinuationScope(held []statements.Statement, tails [][]statements.
 		}
 	}
 	return true
+}
+
+// Source labels occupy their own lexical namespace. Allocate a fresh target
+// from the complete bounded input tree; existing inner-loop labels and
+// explicit transfer destinations must retain their original binding.
+func freshMonitorContinuationLabel(body []statements.Statement, owner int) (string, bool) {
+	if len(body) > 2048 {
+		return "", false
+	}
+	labels := map[string]bool{}
+	seen := map[statements.Statement]bool{}
+	pending := append([]statements.Statement(nil), body...)
+	remaining := 2048
+	for len(pending) > 0 {
+		remaining--
+		if remaining < 0 || len(pending) > 2048 {
+			return "", false
+		}
+		st := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if st == nil || reflect.ValueOf(st).Kind() == reflect.Ptr && reflect.ValueOf(st).IsNil() {
+			return "", false
+		}
+		if seen[st] {
+			continue
+		}
+		seen[st] = true
+		switch x := st.(type) {
+		case *statements.DoWhileStatement:
+			labels[x.Label] = true
+		case *statements.CustomStatement:
+			labels[x.LoopTargetLabel] = true
+		}
+		for _, child := range childStatementLists(st) {
+			if len(*child) > 2048-len(pending) {
+				return "", false
+			}
+			pending = append(pending, (*child)...)
+		}
+	}
+	base := fmt.Sprintf("jdec$monitor$body$%d", owner)
+	for i := 0; i <= len(labels); i++ {
+		candidate := base
+		if i > 0 {
+			candidate = fmt.Sprintf("%s$%d", base, i)
+		}
+		if !labels[candidate] {
+			return candidate, true
+		}
+	}
+	return "", false
 }
