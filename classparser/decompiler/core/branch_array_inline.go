@@ -282,6 +282,9 @@ func (d *Decompiler) branchArraySelectedSourceArm(tern *values.TernaryExpression
 	if d == nil || tern == nil || d.semanticCFG == nil || allocation == nil {
 		return nil, nil
 	}
+	if _, factored := d.factoredValueRoutes[tern]; factored {
+		return d.factoredArraySourceArm(tern, call, allocation)
+	}
 	var branch *OpCode
 	for _, op := range d.opCodes {
 		if op != nil && op.Id == tern.ConditionFromOp {
