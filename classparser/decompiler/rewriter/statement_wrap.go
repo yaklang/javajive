@@ -1013,6 +1013,7 @@ func (s *RewriteManager) Rewrite() error {
 	}
 	s.DominatorMap = GenerateDominatorTree(s.RootNode)
 	partitionSharedLoopLatches(s)
+	partitionSharedLoopSteps(s)
 	nodeToRewriter := map[*core.Node]rewriterFunc{}
 	keyNodes := []*core.Node{}
 	for _, node := range s.WhileNode {
