@@ -12,9 +12,10 @@ import (
 )
 
 type forwardRegion struct {
-	exit         *core.Node
-	label        string
-	protectedEnd *core.Node
+	exit            *core.Node
+	label           string
+	protectedEnd    *core.Node
+	protectedRanges [][2]int
 }
 
 type forwardEdge struct{ from, to *core.Node }
@@ -160,15 +161,29 @@ func closedForwardRegion(manager *RewriteManager, owner, exit *core.Node) bool {
 		if remaining < 0 {
 			return false
 		}
+		// javac can split one handler's interval around an unprotected GOTO.
+		// Domain identity is the ordered exception dispatch, not row identity.
+		// Keep table order: overlapping catches with reversed precedence are
+		// different domains even when they contain the same handlers.
+		var current, original [][2]uint16
 		for _, row := range manager.originalHandlers {
-			contains := func(pc int) bool { return pc >= int(row.StartPc) && pc < int(row.EndPc) }
-			if contains(pc) != contains(owner.OriginPC) {
+			if row.StartPc >= row.EndPc {
 				return false
 			}
+			if pc >= int(row.StartPc) && pc < int(row.EndPc) {
+				current = append(current, [2]uint16{row.HandlerPc, row.CatchType})
+			}
+			if owner.OriginPC >= int(row.StartPc) && owner.OriginPC < int(row.EndPc) {
+				original = append(original, [2]uint16{row.HandlerPc, row.CatchType})
+			}
 		}
-		return true
+		return slices.Equal(current, original)
 	}
-	if !sameDomain(exit) {
+	// The boundary is not emitted inside the new block. A proved typed-try
+	// continuation may therefore lie outside this domain; the existing try
+	// collector must also stop there. Every included node still needs the
+	// owner's complete dispatch domain and the closed-region proof below.
+	if !sameDomain(exit) && !typedProtectedIfCollectionStops(manager, owner)[exit] {
 		return false
 	}
 	state := map[*core.Node]uint8{}

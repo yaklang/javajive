@@ -3,6 +3,7 @@ package rewriter
 import (
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"slices"
 )
 
@@ -35,7 +36,7 @@ func typedTryNormalBoundary(region, start *core.Node, successors []*core.Node, d
 		return nil
 	}
 	ranges, valid := canonicalHandlerRanges(rows)
-	if !valid || len(ranges) != 1 || ranges[0] != [2]int{region.ProtectedStartPC, region.ProtectedEndPC} {
+	if !valid || !typedTryHandlerRangesMatch(region, handler, ranges) {
 		return nil
 	}
 	candidate := region.ProtectedEnd
@@ -95,6 +96,9 @@ func typedTryNormalBoundary(region, start *core.Node, successors []*core.Node, d
 	if conditional && !typedOutsideFrontierClosed(candidate, outside) {
 		return nil
 	}
+	if len(ranges) > 1 && !typedSplitNormalBoundaryClosed(start, candidate, ranges) {
+		return nil
+	}
 	// ProtectedEnd can be an obsolete node after graph rewrites. Its original
 	// pointer is evidence only while an actual normal CFG path still reaches it.
 	queue := []*core.Node{start}
@@ -112,6 +116,33 @@ func typedTryNormalBoundary(region, start *core.Node, successors []*core.Node, d
 		queue = append(queue, n.Next...)
 	}
 	return nil
+}
+
+// A shared typed catch can cover disjoint intervals separated by nonthrowing
+// transfers. The decoded row on this region and the full shared-handler packet
+// must agree with the catch's ranges. Gaps remain unprotected; the boundary's
+// whole effect tree is checked against every interval by the caller.
+func typedTryHandlerRangesMatch(region, handler *core.Node, ranges [][2]int) bool {
+	if len(ranges) == 1 && ranges[0] == [2]int{region.ProtectedStartPC, region.ProtectedEndPC} {
+		return true
+	}
+	if !region.SharedProtectedHandler || len(region.SharedProtectedRanges) < 2 || len(region.SharedProtectedRanges) > 32 ||
+		handler == nil || !handler.HasOriginPC || handler.CatchHandler == nil || handler.OriginPC != handler.CatchHandler.EntryPC {
+		return false
+	}
+	var rows [][2]int
+	found := false
+	var catchType uint16
+	for _, row := range region.SharedProtectedRanges {
+		if row.CatchType == 0 || int(row.HandlerPc) != handler.OriginPC || catchType != 0 && catchType != row.CatchType {
+			return false
+		}
+		catchType = row.CatchType
+		rows = append(rows, [2]int{int(row.StartPc), int(row.EndPc)})
+		found = found || int(row.StartPc) == region.ProtectedStartPC && int(row.EndPc) == region.ProtectedEndPC
+	}
+	canonical, valid := canonicalHandlerRanges(rows)
+	return found && valid && slices.Equal(canonical, ranges)
 }
 
 // Match the exact ownership rule used by TryRewriter's body collector. Merely
@@ -191,4 +222,71 @@ func typedStructuredHandlerTerminates(branch *statements.IfStatement) bool {
 		return false
 	}
 	return terminates(branch, 0)
+}
+
+// A split handler can have several normal frontiers. Merely reaching the
+// first row's end does not authorize collecting another unprotected tail
+// inside its catch. Only one complete normal frontier grants this boundary;
+// the two-frontier planner separately preserves an outside commit and skip.
+func typedSplitNormalBoundaryClosed(start, end *core.Node, ranges [][2]int) bool {
+	state := map[*core.Node]uint8{}
+	inside := func(pc int) bool { return finallyContains(ranges, pc) }
+	var visit func(*core.Node) bool
+	visit = func(n *core.Node) bool {
+		if n == end {
+			return true
+		}
+		if n == nil || len(state) >= 512 || n.HideNext != nil || n.IsCatchStart || n.HasPendingTryDispatch() || n.HasProtectedRange || len(n.EncodedJumps) != 0 {
+			return false
+		}
+		if state[n] != 0 {
+			return state[n] == 2
+		}
+		state[n] = 1
+		switch st := n.Statement.(type) {
+		case *statements.ConditionStatement:
+			if st == nil || !n.HasOriginPC || !inside(n.OriginPC) || len(n.Next) != 2 || !finallyCoveredValue(st.Condition, inside) {
+				return false
+			}
+		case *statements.GOTOStatement:
+			if len(n.Next) != 1 {
+				return false
+			}
+		case *values.JavaExpression:
+			if !finallyCoveredValue(st, inside) {
+				return false
+			}
+		default:
+			p := handlerLayerProof{remaining: 512, active: map[statements.Statement]bool{}, strictRanges: func(rows [][2]int) bool {
+				nested, valid := canonicalHandlerRanges(rows)
+				if !valid {
+					return false
+				}
+				for _, row := range nested {
+					contained := false
+					for _, outer := range ranges {
+						contained = contained || row[0] >= outer[0] && row[1] <= outer[1]
+					}
+					if !contained {
+						return false
+					}
+				}
+				return true
+			}}
+			if !p.block([]statements.Statement{n.Statement}, inside, 0) {
+				return false
+			}
+		}
+		if len(n.Next) == 0 && !forwardOriginalMethodExit(n) {
+			return false
+		}
+		for _, next := range n.Next {
+			if !visit(next) {
+				return false
+			}
+		}
+		state[n] = 2
+		return true
+	}
+	return visit(start)
 }

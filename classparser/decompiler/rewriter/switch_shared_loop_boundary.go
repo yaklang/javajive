@@ -9,9 +9,9 @@ import (
 // back to the same recorded natural-loop wrapper before treating a node as
 // part of its body. Choose the nearest owner independently for both nodes so
 // an inner-loop exit cannot borrow an outer loop's continue permission.
-func sharedSwitchContinuationLoop(manager *RewriteManager, owner, target *core.Node) *core.Node {
+func nearestSwitchContinuationLoop(manager *RewriteManager, node *core.Node) (*core.Node, bool) {
 	if manager == nil || !manager.LoopRegionReducible || len(manager.WhileNode) > 64 {
-		return nil
+		return nil, false
 	}
 	inside := func(start, loop *core.Node) (bool, bool) {
 		if start == nil || loop == nil || len(loop.Next) != 1 || start == loop || !utils.IsDominate(manager.DominatorMap, loop, start) {
@@ -39,28 +39,31 @@ func sharedSwitchContinuationLoop(manager *RewriteManager, owner, target *core.N
 		}
 		return false, true
 	}
-	nearest := func(node *core.Node) *core.Node {
-		var result *core.Node
-		for _, loop := range manager.WhileNode {
-			member, complete := inside(node, loop)
-			// An unfinished inner-loop search must not grant permission to
-			// treat its continue as belonging to an outer loop.
-			if !complete {
-				return nil
-			}
-			if !member {
-				continue
-			}
-			if result == nil || utils.IsDominate(manager.DominatorMap, result, loop) {
-				result = loop
-			} else if !utils.IsDominate(manager.DominatorMap, loop, result) {
-				return nil
-			}
+
+	var result *core.Node
+	for _, loop := range manager.WhileNode {
+		member, complete := inside(node, loop)
+		// An unfinished inner-loop search must not grant permission to
+		// treat its continue as belonging to an outer loop.
+		if !complete {
+			return nil, false
 		}
-		return result
+		if !member {
+			continue
+		}
+		if result == nil || utils.IsDominate(manager.DominatorMap, result, loop) {
+			result = loop
+		} else if !utils.IsDominate(manager.DominatorMap, loop, result) {
+			return nil, false
+		}
 	}
-	loop := nearest(owner)
-	if loop == nil || loop != nearest(target) || target == loop.Next[0] {
+	return result, true
+}
+
+func sharedSwitchContinuationLoop(manager *RewriteManager, owner, target *core.Node) *core.Node {
+	loop, known := nearestSwitchContinuationLoop(manager, owner)
+	other, otherKnown := nearestSwitchContinuationLoop(manager, target)
+	if !known || !otherKnown || loop == nil || loop != other || target == loop.Next[0] {
 		return nil
 	}
 	return loop

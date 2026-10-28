@@ -134,3 +134,77 @@ func TestExternalSwitchContinuationRequiresUniqueForwardNonLabelJoin(t *testing.
 		})
 	}
 }
+
+func TestExternalSwitchJoinKeepsNearestLoopOwner(t *testing.T) {
+	for _, variant := range []string{"same loop", "outer update", "after loop", "irreducible", "missing loop witness", "oversized loop set", "unfinished search", "unrelated nested loop"} {
+		t.Run(variant, func(t *testing.T) {
+			root := jumpTestNode("root")
+			outer := core.NewNode(&statements.DoWhileStatement{})
+			outerTest := jumpTestNode("outer test")
+			inner := core.NewNode(&statements.DoWhileStatement{})
+			innerTest := jumpTestNode("inner test")
+			owner := core.NewNode(&statements.MiddleStatement{Flag: "switch"})
+			first, second, third := jumpTestNode("first"), jumpTestNode("second"), jumpTestNode("third")
+			target, join := jumpTestNode("shared tail"), jumpTestNode("value join")
+			owner.HasOriginPC, owner.OriginPC = true, 10
+			target.HasOriginPC, target.OriginPC = true, 40
+			owner.IsInCircle, target.IsInCircle = true, true
+			root.AddNext(outer)
+			outer.AddNext(outerTest)
+			outerTest.AddNext(inner)
+			inner.AddNext(innerTest)
+			innerTest.AddNext(owner)
+			innerTest.AddNext(target)
+			owner.AddNext(first)
+			owner.AddNext(second)
+			owner.AddNext(third)
+			first.AddNext(target)
+			second.AddNext(target)
+			third.AddNext(join)
+			join.AddNext(inner)
+			target.AddNext(inner)
+			m := NewRootStatementManager(root)
+			m.WhileNode = []*core.Node{outer, inner}
+			m.LoopRegionReducible = true
+			want := variant == "same loop"
+			switch variant {
+			case "outer update":
+				target.ReplaceNext(inner, outer)
+			case "after loop":
+				target.ReplaceNext(inner, core.NewNode(&statements.ReturnStatement{}))
+			case "irreducible":
+				m.LoopRegionReducible = false
+			case "missing loop witness":
+				m.WhileNode = nil
+			case "oversized loop set":
+				for len(m.WhileNode) < 65 {
+					m.WhileNode = append(m.WhileNode, inner)
+				}
+			case "unfinished search":
+				join.RemoveNext(inner)
+				cursor := join
+				for i := 0; i < 257; i++ {
+					next := jumpTestNode("step")
+					cursor.AddNext(next)
+					cursor = next
+				}
+				cursor.AddNext(inner)
+				target.ReplaceNext(inner, outer)
+			case "unrelated nested loop":
+				sibling := core.NewNode(&statements.DoWhileStatement{})
+				outerTest.AddNext(sibling)
+				sibling.AddNext(target)
+				target.ReplaceNext(inner, sibling)
+				m.WhileNode = append(m.WhileNode, sibling)
+			}
+			m.DominatorMap = GenerateDominatorTree(root)
+			got := externalSharedSwitchContinuation(m, owner, []*core.Node{first, second, third})
+			if (got == target) != want || !want && got != nil {
+				t.Fatalf("continuation=%p want=%v", got, want)
+			}
+			if first.Next[0] != target || second.Next[0] != target || third.Next[0] != join {
+				t.Fatal("proof mutated original paths")
+			}
+		})
+	}
+}
