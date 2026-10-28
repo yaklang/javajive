@@ -337,10 +337,13 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 	// unsorted order makes merge-node selection (and the whole post-switch structuring) non-deterministic.
 	endNodes = sortNodesByID(utils2.NewSet[*core.Node](endNodes).List())
 	if len(endNodes) > 1 {
-		// A switch with multiple merge targets is a known structuring limitation.
-		// Instead of failing, pick the first end node as the merge point. Extra end
-		// nodes become break targets. This avoids forcing the method into a stub.
-		endNodes = endNodes[:1]
+		// Multiple joins can be a normal case continuation followed by the
+		// enclosing loop step. Allocation IDs are unrelated to that order.
+		if first := firstSwitchJoin(manager, node, endNodes); first != nil {
+			endNodes = []*core.Node{first}
+		} else {
+			endNodes = endNodes[:1]
+		}
 	}
 	var mergeNode *core.Node
 	if len(endNodes) == 1 {
