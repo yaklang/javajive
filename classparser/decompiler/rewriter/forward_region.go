@@ -178,7 +178,7 @@ func closedForwardRegion(manager *RewriteManager, owner, exit *core.Node) bool {
 		if n == exit {
 			return true
 		}
-		if n == nil || len(state) >= 1024 || n.HideNext != nil || n.IsCatchStart || n.IsTryCatch || n.HasProtectedRange || (n != owner && !utils2.IsDominate(manager.DominatorMap, owner, n)) {
+		if n == nil || len(state) >= 1024 || n.HideNext != nil || n.IsCatchStart || n.HasPendingTryDispatch() || n.HasProtectedRange || (n != owner && !utils2.IsDominate(manager.DominatorMap, owner, n)) {
 			return false
 		}
 		if state[n] != 0 {
@@ -266,7 +266,7 @@ func closedForwardRegion(manager *RewriteManager, owner, exit *core.Node) bool {
 // successor is not an executable continuation or a forward-region frontier.
 // Unknown origins, hidden scopes and a normal successor cannot establish this.
 func forwardOriginalMethodExit(n *core.Node) bool {
-	if n == nil || !n.HasOriginPC || n.HideNext != nil || n.IsCatchStart || n.IsTryCatch || n.HasProtectedRange {
+	if n == nil || !n.HasOriginPC || n.HideNext != nil || n.IsCatchStart || n.HasPendingTryDispatch() || n.HasProtectedRange {
 		return false
 	}
 	known := false
