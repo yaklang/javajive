@@ -23,13 +23,17 @@ import (
 
 var (
 	// Fix ON: both arms assign ONE boolean variable, read in scope and definitely assigned.
-	// Tolerate the default-initializer form (`boolean var1 = false;`) added by initProximateSplitSlotDecl.
+	// Accept the joined declaration with or without an original false seed.
 	boolSiblingArmOnRe = regexp.MustCompile(`boolean var1(?:\s*=\s*false)?;`)
 	// Fix OFF: the merge read splits to a phantom `Object var1 = null` -- the recompile blocker.
 	boolSiblingArmOffRe = regexp.MustCompile(`Object var1 = null;`)
 )
 
 func TestBoolSiblingArmMergeIsLoadBearing(t *testing.T) {
+	// Isolate this earlier merge from the independent closed-domain Boolean
+	// web solver. Both ON/OFF assertions remain required; a second correct
+	// solver must not turn the negative measurement into a false failure.
+	t.Setenv("JDEC_ORIG14_REMAINING_OFF", "1")
 	seed, err := os.ReadFile("testdata/regression/BoolSiblingArmSeed.class")
 	if err != nil {
 		t.Fatalf("read BoolSiblingArmSeed seed: %v", err)
