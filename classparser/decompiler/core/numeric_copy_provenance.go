@@ -20,6 +20,7 @@ type numericCopyProvenance struct {
 	ambiguous         map[values.JavaValue]bool
 	producers         map[values.JavaValue]bool
 	remaining         int
+	bitwise           map[values.JavaValue]*OpCode
 }
 
 func (d *Decompiler) numericCopyProvenance(producers map[values.JavaValue]bool) *numericCopyProvenance {
@@ -29,7 +30,7 @@ func (d *Decompiler) numericCopyProvenance(producers map[values.JavaValue]bool) 
 	if d.Work != nil && (d.Work.Charge(workbudget.CounterGraphScans, int64(len(d.semanticCFG.Nodes)+len(d.opCodes))) != nil || d.Work.CheckAlloc(int64(len(d.semanticCFG.Nodes)+len(d.opCodes))*128) != nil) {
 		return nil
 	}
-	p := &numericCopyProvenance{d: d, original: map[*OpCode]bool{}, decoded: map[*OpCode]bool{}, loads: map[values.JavaValue]*OpCode{}, ambiguous: map[values.JavaValue]bool{}, producers: producers, remaining: 65536}
+	p := &numericCopyProvenance{d: d, original: map[*OpCode]bool{}, decoded: map[*OpCode]bool{}, loads: map[values.JavaValue]*OpCode{}, ambiguous: map[values.JavaValue]bool{}, producers: producers, remaining: 65536, bitwise: map[values.JavaValue]*OpCode{}}
 	for _, op := range d.semanticCFG.Nodes {
 		if op == nil || op.Instr == nil {
 			return nil
@@ -41,6 +42,10 @@ func (d *Decompiler) numericCopyProvenance(producers map[values.JavaValue]bool) 
 			return nil
 		}
 		p.decoded[op] = true
+		if x := originalIntBitwiseResult(op); x != nil {
+			p.ambiguous[x] = p.ambiguous[x] || p.bitwise[x] != nil
+			p.bitwise[x] = op
+		}
 		if dynamicPrimitiveLoad(op.Instr.OpCode, types.JavaInteger) && len(op.stackProduced) == 1 {
 			cell := op.stackProduced[0]
 			if cell != nil && !(reflect.ValueOf(cell).Kind() == reflect.Ptr && reflect.ValueOf(cell).IsNil()) {
@@ -137,12 +142,21 @@ func (p *numericCopyProvenance) provesStore(store *OpCode) bool {
 	if p == nil || !p.known(store) || !originalIntLocalPacket(store, false) || len(store.stackConsumed) != 1 {
 		return false
 	}
-	load, _, valid := p.operand(store.stackConsumed[0])
-	if !valid || load == nil {
+	return p.provesOperand(store.stackConsumed[0])
+}
+
+// Copies and bitwise operations form one bounded dependency graph. Every
+// reachable input must be a numeric producer or integer constant, with at
+// least one genuine numeric seed. Boolean parameters, unknown leaves and
+// unseeded cycles cannot acquire an integer domain from an inferred type.
+func (p *numericCopyProvenance) provesOperand(initial values.JavaValue) bool {
+	if p == nil {
 		return false
 	}
 	pending := []*OpCode{}
 	seen := map[*OpCode]bool{}
+	operands := []values.JavaValue{}
+	seenBits := map[*OpCode]bool{}
 	witness, seed := false, false
 	// Direct values are only leaves of original STOREs. A LOAD must always
 	// discharge its frozen inputs, even if its current view resembles a leaf.
@@ -174,16 +188,35 @@ func (p *numericCopyProvenance) provesStore(store *OpCode) bool {
 			witness = witness || word != 0 && word != 1
 			return true
 		}
+		if bits := p.bitwise[value]; bits != nil {
+			if !p.known(bits) || originalIntBitwiseResult(bits) != value {
+				return false
+			}
+			if !seenBits[bits] {
+				seenBits[bits] = true
+				operands = append(operands, bits.stackConsumed...)
+			}
+			return true
+		}
 		if p.producers[value] {
 			witness, seed = true, true
 			return true
 		}
 		return false
 	}
-	if !acceptOperand(store.stackConsumed[0]) {
+	if !acceptOperand(initial) {
 		return false
 	}
-	for len(pending) > 0 {
+	for len(pending) > 0 || len(operands) > 0 {
+		if len(operands) > 0 {
+			value := operands[len(operands)-1]
+			operands = operands[:len(operands)-1]
+			if !acceptOperand(value) {
+				return false
+			}
+			continue
+		}
+
 		if !p.charge(1) {
 			return false
 		}
