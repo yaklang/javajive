@@ -357,6 +357,13 @@ func (d *Decompiler) restoreNormalizedBooleanWebs() {
 				for r := range names {
 					r.ResetVarType(types.NewJavaPrimer(types.JavaBoolean))
 					r.WebDeclType = r.Type().Copy()
+					// A consistent simulator ref can still be declared in sibling
+					// source scopes. Preserve the proved multi-definition identity
+					// through naming, just as for numeric/reference joins; otherwise
+					// one arm can be renamed away from its joined return.
+					if len(definitions) > 1 {
+						r.SolvedWebIdentity = r.Id
+					}
 				}
 			}
 		}

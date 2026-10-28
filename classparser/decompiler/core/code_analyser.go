@@ -700,12 +700,12 @@ func isLiteralIntOne(v values.JavaValue) bool {
 
 // tryFoldPostIncDec recognizes the post-increment / post-decrement idiom for a field or static
 // whose stored value is `old (+|-) 1`, where `old` (the loaded field value) was duplicated on the
-// stack via dup/dup_x1 and is reused as the expression result. When the value currently on top of
-// the stack is exactly that same `old` object, the putfield/putstatic is the post-inc/dec of the
-// field, so we return the folded `old++` / `old--` expression. The caller replaces the bare old
+// stack via dup/dup_x1 and is reused as the expression result. The retained word must be exactly
+// that same `old` object and its original field/receiver must match the write destination.
+// Only then is putfield/putstatic the post-inc/dec of that field. The caller replaces the bare old
 // value on the stack with this expression and drops the standalone assignment, keeping
 // ternary/expression branches side-effect-free so the structuring pass can fold them.
-func (d *Decompiler) tryFoldPostIncDec(stack StackSimulation, storedValue values.JavaValue) (values.JavaValue, bool) {
+func (d *Decompiler) tryFoldPostIncDec(stack StackSimulation, storedValue, destination values.JavaValue, member *values.JavaClassMember) (values.JavaValue, bool) {
 	expr, ok := UnpackSoltValue(storedValue).(*values.JavaExpression)
 	if !ok || len(expr.Values) != 2 {
 		return nil, false
@@ -725,6 +725,10 @@ func (d *Decompiler) tryFoldPostIncDec(stack StackSimulation, storedValue values
 	if UnpackSoltValue(top) != UnpackSoltValue(expr.Values[0]) {
 		return nil, false
 	}
+	target := originalPostFieldTarget(top, destination, member)
+	if target == nil {
+		return nil, false
+	}
 	// Suppress the temporary that dup/dup_x1 created to carry the old value, if any, so its
 	// assignment statement is not emitted into the (ternary/expression) branch.
 	if ref, ok := UnpackSoltValue(top).(*values.JavaRef); ok {
@@ -735,7 +739,6 @@ func (d *Decompiler) tryFoldPostIncDec(stack StackSimulation, storedValue values
 		op = DEC
 	}
 	// Render against the real field reference (this.f / Class.f), not the synthetic temporary.
-	target := GetRealValue(UnpackSoltValue(top))
 	return values.NewBinaryExpression(target, expr.Values[1], op, target.Type()), true
 }
 
@@ -4377,7 +4380,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		index := Convert2bytesToInt(opcode.Data)
 		staticVal := d.constantPoolGetter(int(index))
 		value := runtimeStackSimulation.Pop().(values.JavaValue)
-		if selfOp, ok := d.tryFoldPostIncDec(runtimeStackSimulation, value); ok {
+		if selfOp, ok := d.tryFoldPostIncDec(runtimeStackSimulation, value, staticVal, staticVal.(*values.JavaClassMember)); ok {
 			// static field post-increment/decrement reused as a value: drop the bare old
 			// value left by dup and push `field++` / `field--` instead.
 			runtimeStackSimulation.Pop()
@@ -4391,7 +4394,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		staticVal := d.constantPoolGetter(int(index))
 		value := runtimeStackSimulation.Pop().(values.JavaValue)
 		field := values.NewRefMember(runtimeStackSimulation.Pop().(values.JavaValue), staticVal.(*values.JavaClassMember).Member, staticVal.(*values.JavaClassMember).JavaType)
-		if selfOp, ok := d.tryFoldPostIncDec(runtimeStackSimulation, value); ok {
+		if selfOp, ok := d.tryFoldPostIncDec(runtimeStackSimulation, value, field, staticVal.(*values.JavaClassMember)); ok {
 			// instance field post-increment/decrement reused as a value (dup_x1 idiom): drop
 			// the bare old value and push `field++` / `field--` so the surrounding ternary or
 			// expression branch stays side-effect-free and can be structured.
