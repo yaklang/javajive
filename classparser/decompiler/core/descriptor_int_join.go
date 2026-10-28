@@ -158,6 +158,10 @@ func (d *Decompiler) originalNumericJoinProducers() map[values.JavaValue]bool {
 			result[expression] = true
 			continue
 		}
+		if expression, proved := originalIntNegationResult(op); proved {
+			result[expression] = true
+			continue
+		}
 		switch op.Instr.OpCode {
 		case OP_INVOKEVIRTUAL, OP_INVOKESTATIC, OP_INVOKESPECIAL, OP_INVOKEINTERFACE:
 			call := d.invokeFuncCall[op]
@@ -200,7 +204,7 @@ func (d *Decompiler) originalNumericJoinProducers() map[values.JavaValue]bool {
 			}
 		}
 	}
-	return result
+	return d.extendNumericStackProducers(result)
 }
 
 // This is a result-category proof, not an expression rewrite. The original
