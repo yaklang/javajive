@@ -75,6 +75,7 @@ type Decompiler struct {
 	branchArrayCalls      []branchArrayCall
 	branchArrayLeaves     []branchArrayLeaf
 	valueTernaryMerges    map[*values.TernaryExpression]*OpCode
+	factoredValueRoutes   map[*values.TernaryExpression]factoredValueRoute
 	// refToCreatingStore records, per *JavaRef pointer, the FIRST local-store opcode whose simulation
 	// created that ref (isFirst=true). It lets the boolean-copy merge deterministically recover the
 	// store that defined a slot's current ref without scanning opcodeIdToRef (a map whose iteration
@@ -5684,6 +5685,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 				if !factored {
 					return nil, nil, false, false, false
 				}
+				d.recordFactoredValueRoute(root, rootNode, leaves[0], leaves[1])
 			}
 		}
 		// Publish only after the complete routing graph has been accepted.
