@@ -956,7 +956,17 @@ func isStdlibNestedDottedPackage(pkg string) bool {
 func (f *ClassContext) ShortTypeName(name string) string {
 	if f.DeclarationSourceName != nil {
 		if source, known := f.DeclarationSourceName(name); known {
-			return source
+			// A flat sibling is emitted as its own top-level unit literally
+			// named `Outer$Inner` and its source name is that same binary
+			// spelling. Returning it verbatim would force a package-qualified
+			// reference whose package root a field may obscure (JLS 6.5.5.1),
+			// which no source can spell. Fall through to the ordinary
+			// same-package shortening so the reference uses the flat simple
+			// name, exactly like every other unit in the emitted family. A
+			// nested source spelling (Outer.Inner) is still returned as is.
+			if source != strings.ReplaceAll(name, "/", ".") {
+				return source
+			}
 		}
 	}
 	pkg, className := SplitPackageClassName(name)
