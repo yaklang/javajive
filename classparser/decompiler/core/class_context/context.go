@@ -52,9 +52,6 @@ type ClassContext struct {
 	// declaration initializers, including forward/self reads during circular
 	// initialization. It never changes invocation or lexical-owner binding.
 	QualifiedStaticFields bool
-	// QualifyAllTypes keeps non-java.lang names fully qualified. Descriptor
-	// rendering uses it to preserve annotation type identity without imports.
-	QualifyAllTypes bool
 	// Lexical member declarations shadow imported, same-package and java.lang
 	// simple type names. Bind external types explicitly in their actual scope.
 	// LexicalClassName is the current source member declaration, supplied only
@@ -981,9 +978,6 @@ func (f *ClassContext) ShortTypeName(name string) string {
 		if src, ok := binaryNestedNameToSource(className); ok {
 			dotted = src
 		}
-	}
-	if f.QualifyAllTypes && pkg != "java.lang" {
-		return pkg + "." + dotted
 	}
 	first := strings.SplitN(dotted, ".", 2)[0]
 	if f.LexicalTypeNames[first] || f.IsTypeParam(first) {

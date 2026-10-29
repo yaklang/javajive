@@ -53,13 +53,17 @@ package sample;
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The annotated package declaration may spell the annotation through the
+	// single-type import that follows it (imports are compilation-unit scoped),
+	// so assert the annotation identity and value rather than one spelling.
 	for _, want := range []string{
 		"package sample;",
 		"@Deprecated",
-		`@marks.PkgMark(namespace="http://example.test/rm")`,
+		`PkgMark(namespace="http://example.test/rm")`,
+		"marks.PkgMark",
 	} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("package-info source missing %q\n%s", want, got)
+			t.Fatalf("package-info source missing %q\n--- OUTPUT ---\n%s\n--- END ---", want, got)
 		}
 	}
 	if strings.Contains(got, "class package-info") {

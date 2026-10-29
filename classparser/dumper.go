@@ -876,11 +876,16 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 		}
 	}
 	c.sourceDeclarationAccessKnown = true
-	// module-info / package-info are synthetic descriptor pseudo-classes; their internal
-	// name is not a legal Java identifier, so emitting `class package-info {}` is not Java.
-	// package-info annotations belong on the package declaration itself.
-	if rawClassName == "module-info" || rawClassName == "package-info" {
-		return c.renderSyntheticDescriptor(rawClassName, packageName)
+	// Module declarations require a separate JPMS reconstruction contract.
+	// Package descriptors are rendered below with their actual annotations.
+	if rawClassName == "module-info" {
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("// decompiled from a synthetic %s descriptor\n", rawClassName))
+		out := sb.String()
+		if err := c.ensureOutput(int64(len(out))); err != nil {
+			return "", err
+		}
+		return out, nil
 	}
 	supperClassName := c.obj.GetSupperClassName()
 	supperClassName = strings.Replace(supperClassName, "/", ".", -1)
@@ -3454,57 +3459,6 @@ func (c *ClassObjectDumper) annotationElementDefaultClause(method *MemberInfo) s
 		return " default " + val
 	}
 	return ""
-}
-
-func (c *ClassObjectDumper) renderSyntheticDescriptor(rawClassName, packageName string) (string, error) {
-	if rawClassName == "module-info" {
-		out := "// decompiled from a synthetic module-info descriptor\n"
-		if err := c.ensureOutput(int64(len(out))); err != nil {
-			return "", err
-		}
-		return out, nil
-	}
-	c.FuncCtx = &class_context.ClassContext{
-		Env:                 c.getenv,
-		Work:                c.Work,
-		ClassName:           "package-info",
-		PackageName:         packageName,
-		QualifyAllTypes:     true,
-		StaticMethodImports: class_context.NewStaticMethodImports(),
-	}
-	var sb strings.Builder
-	for _, info := range c.obj.Attributes {
-		annos, ok := info.(*RuntimeVisibleAnnotationsAttribute)
-		if !ok {
-			continue
-		}
-		for _, annotation := range annos.Annotations {
-			res, err := c.DumpAnnotation(annotation)
-			if err != nil {
-				return "", err
-			}
-			// Marker and zero-pair normal annotations are equivalent (JLS 9.7.2).
-			// Prefer the shorter marker spelling; either form is legal Java.
-			if strings.HasSuffix(res, "()") && !strings.Contains(strings.TrimSuffix(res, "()"), "(") {
-				res = strings.TrimSuffix(res, "()")
-			}
-			sb.WriteString(res)
-			sb.WriteByte('\n')
-		}
-	}
-	if packageName != "" {
-		sb.WriteString("package ")
-		sb.WriteString(packageName)
-		sb.WriteString(";\n")
-	}
-	if sb.Len() == 0 {
-		sb.WriteString("// decompiled from a synthetic package-info descriptor\n")
-	}
-	out := sb.String()
-	if err := c.ensureOutput(int64(len(out))); err != nil {
-		return "", err
-	}
-	return out, nil
 }
 
 func (c *ClassObjectDumper) DumpAnnotation(anno *AnnotationAttribute) (string, error) {
