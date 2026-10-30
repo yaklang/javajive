@@ -143,6 +143,18 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) bool {
 	// tableswitch/lookupswitch are supported through switchFixup below (their targets live in
 	// parsed absolute-offset fields, which are remapped once the new offsets are known), and wide
 	// branches (goto_w/jsr_w) reuse the same fixup list as the 2-byte forms.
+	//
+	// JDEC_JSR_WIDE_INLINE_OFF=1 restores the pre-fix bail: methods that mix jsr with a switch or a
+	// wide branch keep the original bytecode and degrade to the existing stub.
+	if os.Getenv("JDEC_JSR_WIDE_INLINE_OFF") != "" {
+		for _, op := range ops {
+			switch op.Instr.OpCode {
+			case OP_JSR_W, OP_GOTO_W, OP_TABLESWITCH, OP_LOOKUPSWITCH:
+				bail("contains jsr_w/goto_w/switch (JDEC_JSR_WIDE_INLINE_OFF)")
+				return false
+			}
+		}
+	}
 
 	// origTarget resolves every branch (if*/goto/goto_w/jsr/jsr_w) to the opcode it jumps to,
 	// using the ORIGINAL offsets (still intact: nothing has been mutated yet).
