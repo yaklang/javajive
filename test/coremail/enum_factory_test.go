@@ -1,74 +1,13 @@
-// Package coremail_test holds public-entry regression witnesses for source preparation.
 package coremail_test
 
 import (
-	"archive/zip"
 	parser "github.com/yaklang/javajive/classparser"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func tool(t *testing.T, name string) string {
-	t.Helper()
-	p, err := exec.LookPath(name)
-	if err != nil {
-		t.Fatalf("required test tool %s: %v", name, err)
-	}
-	return p
-}
-func command(t *testing.T, exe string, args ...string) string {
-	t.Helper()
-	out, err := exec.Command(exe, args...).CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s %v: %v\n%s", exe, args, err, out)
-	}
-	return string(out)
-}
-func readFile(t *testing.T, p string) []byte {
-	t.Helper()
-	b, err := os.ReadFile(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return b
-}
-func put(t *testing.T, p string, raw []byte) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(p, raw, 0600); err != nil {
-		t.Fatal(err)
-	}
-}
-func archive(t *testing.T, dir string, entries map[string][]byte) string {
-	t.Helper()
-	p := filepath.Join(dir, "fixture.jar")
-	f, err := os.Create(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	z := zip.NewWriter(f)
-	for n, b := range entries {
-		w, e := z.Create(n)
-		if e != nil {
-			t.Fatal(e)
-		}
-		if _, e = w.Write(b); e != nil {
-			t.Fatal(e)
-		}
-	}
-	if err = z.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err = f.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return p
-}
 func utf8(t *testing.T, obj *parser.ClassObject, i uint16) string {
 	t.Helper()
 	u, ok := obj.ConstantPool[i-1].(*parser.ConstantUtf8Info)
