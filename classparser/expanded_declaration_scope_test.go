@@ -77,6 +77,40 @@ func TestExpandedLooseClassDecompiles(t *testing.T) {
 	}
 }
 
+// A directory source has no container archive, so ExpandedZipFS must take the
+// directory branch. 9012988 restored decompilation there after an earlier
+// change returned raw bytes; this witness locks both ReadFile and Open without
+// requiring a JDK.
+func TestExpandedDirectoryClassReadDecompiles(t *testing.T) {
+	seed, err := os.ReadFile(filepath.Join("testdata", "regression", "SignatureAttribute.class"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := filesys.NewVirtualFs()
+	base.AddFile("sample/Subject.class", string(seed))
+	wrapped := MaybeWrapExpandedArchiveFS(base, false)
+	fs, ok := wrapped.(*ExpandedZipFS)
+	if !ok {
+		t.Fatalf("class-only directory was not wrapped: %T", wrapped)
+	}
+	src, err := fs.ReadFile("sample/Subject.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(src, []byte("class SignatureAttribute")) || bytes.Contains(src, []byte("decompile dump failed")) {
+		t.Fatalf("directory class was not decompiled: %q", src[:min(120, len(src))])
+	}
+	opened, err := fs.Open("sample/Subject.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.Close()
+	fromOpen, err := io.ReadAll(opened)
+	if err != nil || !bytes.Equal(fromOpen, src) {
+		t.Fatalf("Open differs from ReadFile: %v", err)
+	}
+}
+
 // A dependency in WEB-INF/lib belongs to this WAR's declaration namespace,
 // not to every unrelated application next to it. The target itself always wins.
 func TestExpandedWarSiblingDeclarations(t *testing.T) {
