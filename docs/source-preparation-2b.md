@@ -1,6 +1,6 @@
 # Source-preparation fixes (Coremail / EKP, 2B)
 
-Status at 2026-10-22T22:50:00+08:00: **not full-project acceptance**. Local branch only; the operator explicitly deferred push and remote module pinning. Yaklang's local filesystem replace remains uncommitted.
+Status at 2026-10-30T18:30:00+08:00: **not full-project acceptance**. Local branch only; the operator explicitly deferred push and remote module pinning. Yaklang's local filesystem replace remains uncommitted. Aggregate numbers and per-round witnesses are registered in [`classparser/CODEC_TODO.md` §6](../classparser/CODEC_TODO.md).
 
 ## Correctness boundary
 
@@ -27,9 +27,11 @@ ENUM-01 accepts **only** `0x0009` or `0x0019`. All original opcode, constant-poo
 
 ## Evidence and remaining failures
 
-Full-project baseline: `/mnt/data/scan-outputs/coremail-java-recheck-20261022-2008/`, exit 1, 41765 checked, 249 refusal/empty units, 1634 stub methods. EKP has not yet been run.
+Full-project baseline (2026-10-22, evidence directory removed by the 2026-10-29 cleanup): exit 1, 41765 checked, 249 refusal/empty units, 1634 stub methods. EKP has not yet been run.
 
-2B replay evidence: `/mnt/data/scan-outputs/java-2b-20261022-2207/`.
+Current full-project run (2026-10-29, branch `69bac5b`): `/mnt/data/scan-outputs/coremail-full-20261029/` — 41765 checked, 0 decompiler refusals, 0 empty units, 0 syntax failures, 672 stub methods (526 files), exit 1.
+
+2B replay evidence: `/mnt/data/scan-outputs/java-2b-20261022-2207/` (removed by the 2026-10-29 cleanup; the counts below are preserved from that run).
 
 * Before ENUM-01, replay of all 249 baseline failures: 45 emitted / 204 refused.
 * After ENUM-01: 149 emitted / 100 refused. All 149 emitted units passed Yaklang `FrontendRaw`; failure-comment units are reported separately, not counted as reconstructed Java.
@@ -47,13 +49,17 @@ Toolchain verified from the official Adoptium API at 2026-10-22T22:43:33+08:00: 
 JDK21 recheck: all three gate exit files are **0** under `gate-javajive/`: `classparser-jdk21-exit` (10.992s), `core-public-jdk21-exit` (all `decompiler/core/...` packages plus `test/coremail`, public roundtrip 6.358s), `race-jdk21-exit` (classparser 13.092s + core 1.060s). Tests were run through the workspace `scripts/ssa-test.sh` with explicit isolated YAKIT_HOME/TMPDIR, GOMAXPROCS=4/GOGC=100/GOMEMLIMIT=12GiB. This is the relevant regression set, not the entire repository's historical corpus suite.
 Source: https://api.adoptium.net/v3/assets/latest/21/hotspot?architecture=x64&image_type=jdk&os=linux&vendor=eclipse . Download checksum is checked before extraction.
 
-## Local commits (not pushed)
+Local re-verification at 2026-10-30 with the same archive (`d7f5d5cf865a2902b70ff549b97586a7d3f234e016f041ab447ea740c7d66d1c`): the new kill-switch/seed witnesses and `test/coremail` pass with JDK 21.0.13+9. Hosts without `javac` now skip these witnesses (`t.Skip`) instead of failing.
 
-* `4ffc225` — jsr wide-branch/switch regression coverage (JSR-01).
-* `0f10b63` — archive declaration scope, loose class preparation and scratch lifetime (ARCH-01/02, MEM-01).
-* `7660aa9` — package descriptor annotations (PKG-01).
-* `a0eccb5` — denotable same-package names under package shadowing (NAME-01).
-* `a036083` — exact historical final enum factory variation (ENUM-01).
+## Branch state (not pushed)
+
+Branch `fix/decompiler/coremail-stub-recovery`, based on `origin/main` `520d723`.
+The branch was rebased after the 2026-10-22 draft, so the five hashes quoted
+there no longer identify it and are no longer ancestors of HEAD. The
+authoritative list is `git log --oneline origin/main..HEAD`.
+
+Latest measured revision for the aggregate numbers above: `69bac5b`. Follow-up
+commits only add witnesses, a default-off kill-switch, and documentation.
 
 No remote publication or Yaklang dependency replacement is authorized yet. Continue testing with the shared local repository.
 
