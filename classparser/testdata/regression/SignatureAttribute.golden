@@ -1,0 +1,5 @@
+# J2B prefix increment: bare operand, no extra parenthesis layer.
++charAt(++var6)
+-charAt(++(var6))
+# A case label that declares a local needs a block (JLS 14.11).
++/case 84:\n\{\n\t+int var4/

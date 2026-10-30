@@ -1,0 +1,5 @@
+# Prefix increment/decrement operands are bare, including inside indexes and comparisons.
++var6[++var7]
+-var6[++(var7)]
++(--var11)
+-(--(var11))
