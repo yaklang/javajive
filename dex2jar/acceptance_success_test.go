@@ -26,9 +26,7 @@ func TestAcceptedRawDEXCorpus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(raw) < 8 || string(raw[:8]) != "dex\n035\x00" {
-		t.Fatalf("fixture magic = %q", raw[:min(len(raw), 8)])
-	}
+	assertDEXHeader(t, raw)
 
 	first, report, err := dex2jar.DexToJar(raw, dex2jar.Options{})
 	if err != nil {
@@ -93,8 +91,15 @@ func TestAcceptedMultidexAPKCorpus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("APKToJar: %v", err)
 	}
-	if !bytes.Equal(first, second) {
-		t.Fatal("DexToJar and APKToJar produced different JAR bytes")
+	third, thirdReport, err := dex2jar.DexToJar(apk, dex2jar.Options{})
+	if err != nil {
+		t.Fatalf("second DexToJar(APK): %v", err)
+	}
+	if !bytes.Equal(first, second) || !bytes.Equal(first, third) {
+		t.Fatal("APK conversion is not byte-for-byte deterministic across entry points")
+	}
+	if thirdReport != report {
+		t.Fatalf("repeated report = %#v, want %#v", thirdReport, report)
 	}
 	if report != secondReport {
 		t.Fatalf("reports differ: %#v and %#v", report, secondReport)
@@ -148,9 +153,36 @@ func assertAPKEntries(t *testing.T, apk []byte, want []string) {
 	names := make([]string, len(reader.File))
 	for index, file := range reader.File {
 		names[index] = file.Name
+		if file.Name == "classes.dex" || file.Name == "classes2.dex" {
+			stream, err := file.Open()
+			if err != nil {
+				t.Fatalf("open %s: %v", file.Name, err)
+			}
+			data, readErr := io.ReadAll(stream)
+			closeErr := stream.Close()
+			if readErr != nil || closeErr != nil {
+				t.Fatalf("read %s: %v / %v", file.Name, readErr, closeErr)
+			}
+			assertDEXHeader(t, data)
+		}
 	}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("APK entries = %v, want %v", names, want)
+	}
+}
+
+func assertDEXHeader(t *testing.T, data []byte) {
+	t.Helper()
+	if len(data) < 32 || string(data[:8]) != "dex\n035\x00" {
+		t.Fatalf("DEX magic = %q", data[:min(len(data), 8)])
+	}
+	wantSignature := sha1.Sum(data[32:])
+	if !bytes.Equal(data[12:32], wantSignature[:]) {
+		t.Fatal("DEX SHA-1 signature does not match contents")
+	}
+	wantChecksum := adler32.Checksum(data[12:])
+	if got := binary.LittleEndian.Uint32(data[8:12]); got != wantChecksum {
+		t.Fatalf("DEX Adler-32 = %08x, want %08x", got, wantChecksum)
 	}
 }
 
