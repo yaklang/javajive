@@ -28,6 +28,8 @@ func main() {
 	switch cmd {
 	case "decompile", "dec":
 		err = cmdDecompile(args)
+	case "dex2jar", "d2j":
+		err = cmdDexToJar(args)
 	case "classinfo", "info":
 		err = cmdClassInfo(args)
 	case "serial", "ser":
@@ -54,7 +56,8 @@ Usage:
   javajive <command> [arguments]
 
 Commands:
-  decompile   Decompile .class/.jar/.war/.zip or a directory into Java source
+	  decompile   Decompile Java artifacts or the strict DEX 035 subset into Java source
+	  dex2jar     Convert the strict DEX 035 subset in a DEX/APK to a deterministic JAR
   classinfo   Print the structure of a .class file (version, fields, methods)
   serial      Java serialization tools (subcommands: tojson, fromjson)
   version     Print the javajive version
@@ -70,7 +73,12 @@ Run "javajive <command> -h" for command-specific options.
 
 func cmdDecompile(args []string) error {
 	fs := newFlagSet("decompile")
-	out := fs.String("o", "", "output file (for a .class) or directory (for archives/dirs); default: stdout / <input>.src")
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), "usage: javajive decompile [-o out] <file|dir>")
+		fmt.Fprintln(fs.Output(), "Decompile .class, archive, DEX, APK, or directory input; DEX/APK defaults to <input>.src.")
+		fs.PrintDefaults()
+	}
+	out := fs.String("o", "", "output file (for a .class) or directory (for archives/DEX/APK/dirs); default: stdout / <input>.src")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -98,6 +106,16 @@ func cmdDecompile(args []string) error {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "decompiled archive %q -> %q\n", input, dst)
+		return nil
+	case ".dex", ".apk":
+		dst := *out
+		if dst == "" {
+			dst = input + ".src"
+		}
+		if err := jj.DecompileDEXFile(input, dst, jj.DexOptions{}); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "decompiled DEX input %q -> %q\n", input, dst)
 		return nil
 	default:
 		data, err := os.ReadFile(input)
@@ -146,6 +164,33 @@ func decompileDir(dir, out string) error {
 		}
 		return os.WriteFile(dst, []byte(src), 0o644)
 	})
+}
+
+// ---------------------------------------------------------------------------
+// dex2jar
+// ---------------------------------------------------------------------------
+
+func cmdDexToJar(args []string) error {
+	fs := newFlagSet("dex2jar")
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), "usage: javajive dex2jar -o output.jar input.dex|input.apk")
+		fmt.Fprintln(fs.Output(), "Convert the strict DEX 035 subset in a raw DEX or APK to a deterministic JAR.")
+		fs.PrintDefaults()
+	}
+	out := fs.String("o", "", "output JAR path (required)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 || *out == "" {
+		return fmt.Errorf("dex2jar requires -o <output.jar> and one input path\nusage: javajive dex2jar -o output.jar input.dex|input.apk")
+	}
+	report, err := jj.DexFileToJar(fs.Arg(0), *out, jj.DexOptions{})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "converted %q -> %q (%d DEX files, %d classes, %d/%d methods translated, %d warnings)\n",
+		fs.Arg(0), *out, report.DEXFiles, report.Classes, report.TranslatedMethods, report.Methods, report.Warnings)
+	return nil
 }
 
 // ---------------------------------------------------------------------------

@@ -23,10 +23,12 @@ package javajive
 import (
 	"encoding/hex"
 	"os"
+	"path/filepath"
 	"strings"
 
 	classparser "github.com/yaklang/javajive/classparser"
 	"github.com/yaklang/javajive/classparser/jarwar"
+	nativedex "github.com/yaklang/javajive/dex2jar"
 	yserx "github.com/yaklang/javajive/serialization"
 )
 
@@ -42,6 +44,12 @@ type ClassObject = classparser.ClassObject
 
 // JavaSerializable is one node of a parsed Java serialization stream.
 type JavaSerializable = yserx.JavaSerializable
+
+// DexOptions controls native DEX/APK translation.
+type DexOptions = nativedex.Options
+
+// DexReport summarizes a successful native DEX/APK translation.
+type DexReport = nativedex.Report
 
 // ---------------------------------------------------------------------------
 // Decompilation
@@ -88,6 +96,34 @@ func DecompileWithResolver(classBytes []byte, resolve func(internalName string) 
 // and writes the resulting .java files into the dst directory tree.
 func DecompileArchive(src, dst string) error {
 	return jarwar.AutoDecompile(src, dst)
+}
+
+// DexToJar converts raw DEX or APK bytes into a deterministic JAR.
+func DexToJar(input []byte, options DexOptions) ([]byte, DexReport, error) {
+	return nativedex.DexToJar(input, options)
+}
+
+// DexFileToJar converts a raw DEX or APK file and replaces dst only after the
+// complete JAR has been written to a temporary file in the same directory.
+func DexFileToJar(src, dst string, options DexOptions) (DexReport, error) {
+	return nativedex.DexFileToJar(src, dst, options)
+}
+
+// DecompileDEXFile converts a raw DEX or APK through a private temporary JAR,
+// decompiles that archive into dst, and always removes the temporary JAR.
+// Archive decompilation may write part of dst before returning an error.
+func DecompileDEXFile(src, dst string, options DexOptions) error {
+	tempDir, err := os.MkdirTemp("", "javajive-dex-decompile-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tempDir)
+
+	jarPath := filepath.Join(tempDir, "classes.jar")
+	if _, err := DexFileToJar(src, jarPath, options); err != nil {
+		return err
+	}
+	return DecompileArchive(jarPath, dst)
 }
 
 // ---------------------------------------------------------------------------

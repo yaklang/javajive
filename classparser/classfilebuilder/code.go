@@ -1,0 +1,560 @@
+package classfilebuilder
+
+import (
+	"fmt"
+	"math"
+)
+
+// Label is an opaque symbolic bytecode position. Labels belong to one Code.
+type Label struct {
+	owner *Code
+	id    int
+}
+
+type instructionKind byte
+
+const (
+	kindSimple instructionKind = iota
+	kindByte
+	kindShort
+	kindCP
+	kindLocal
+	kindIInc
+	kindLDC
+	kindBranch
+	kindInvokeInterface
+)
+
+type instruction struct {
+	kind       instructionKind
+	op         Opcode
+	arg        int
+	arg2       int
+	target     *Label
+	wideBranch bool
+	expanded   bool
+}
+
+type codeNode struct {
+	label *Label
+	insn  *instruction
+}
+
+type exceptionHandler struct {
+	start, end, handler *Label
+	catchType           uint16
+}
+
+// Code is a symbolic Code attribute assembler. It is not safe for concurrent
+// mutation. Errors are sticky and returned by Class.Bytes.
+type Code struct {
+	pool      *ConstantPool
+	nodes     []codeNode
+	nextLabel int
+	handlers  []exceptionHandler
+	err       error
+	maxStack  *uint16
+	maxLocals *uint16
+}
+
+func newCode(pool *ConstantPool) *Code { return &Code{pool: pool} }
+
+func (c *Code) fail(format string, args ...any) {
+	if c.err == nil {
+		c.err = fmt.Errorf(format, args...)
+	}
+}
+
+// NewLabel creates an unbound label.
+func (c *Code) NewLabel() *Label {
+	label := &Label{owner: c, id: c.nextLabel}
+	c.nextLabel++
+	return label
+}
+
+// Mark binds label at the current bytecode position. A label may be bound once.
+func (c *Code) Mark(label *Label) *Code {
+	if !c.validLabel(label) {
+		return c
+	}
+	for _, node := range c.nodes {
+		if node.label == label {
+			c.fail("label %d is already bound", label.id)
+			return c
+		}
+	}
+	c.nodes = append(c.nodes, codeNode{label: label})
+	return c
+}
+
+func (c *Code) validLabel(label *Label) bool {
+	if label == nil {
+		c.fail("nil label")
+		return false
+	}
+	if label.owner != c {
+		c.fail("label %d belongs to another Code", label.id)
+		return false
+	}
+	return true
+}
+
+// Emit appends an operandless JVM instruction.
+func (c *Code) Emit(op Opcode) *Code {
+	if _, ok := simpleEffect(op); !ok {
+		c.fail("opcode 0x%02x is not an operandless supported instruction", byte(op))
+		return c
+	}
+	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindSimple, op: op}})
+	return c
+}
+
+// Byte appends a supported instruction with one signed or unsigned byte
+// operand: BIPUSH or NEWARRAY.
+func (c *Code) Byte(op Opcode, operand int) *Code {
+	switch op {
+	case BIPUSH:
+		if operand < math.MinInt8 || operand > math.MaxInt8 {
+			c.fail("BIPUSH operand %d is outside signed byte range", operand)
+			return c
+		}
+	case NEWARRAY:
+		if operand < 4 || operand > 11 {
+			c.fail("NEWARRAY atype %d is invalid", operand)
+			return c
+		}
+	default:
+		c.fail("opcode 0x%02x does not take a one-byte operand", byte(op))
+		return c
+	}
+	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindByte, op: op, arg: operand}})
+	return c
+}
+
+// Short appends SIPUSH with a signed 16-bit operand.
+func (c *Code) Short(op Opcode, operand int) *Code {
+	if op != SIPUSH {
+		c.fail("opcode 0x%02x does not take a signed short operand", byte(op))
+		return c
+	}
+	if operand < math.MinInt16 || operand > math.MaxInt16 {
+		c.fail("SIPUSH operand %d is outside signed short range", operand)
+		return c
+	}
+	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindShort, op: op, arg: operand}})
+	return c
+}
+
+// CP appends a supported instruction with a u2 constant-pool operand.
+func (c *Code) CP(op Opcode, index uint16) *Code {
+	entry, err := c.pool.entry(index)
+	if err != nil {
+		c.fail("opcode 0x%02x: %v", byte(op), err)
+		return c
+	}
+	valid := false
+	switch op {
+	case GETSTATIC, PUTSTATIC, GETFIELD, PUTFIELD:
+		valid = entry.tag == cpFieldref
+	case INVOKEVIRTUAL, INVOKESPECIAL, INVOKESTATIC:
+		// Major version 49 predates interface static/default methods; these
+		// opcodes therefore require CONSTANT_Methodref.
+		valid = entry.tag == cpMethodref
+	case NEW, ANEWARRAY, CHECKCAST, INSTANCEOF:
+		valid = entry.tag == cpClass
+	}
+	if !valid {
+		c.fail("opcode 0x%02x cannot use constant pool index %d (tag %d)", byte(op), index, entry.tag)
+		return c
+	}
+	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindCP, op: op, arg: int(index)}})
+	return c
+}
+
+// InvokeInterface appends invokeinterface. The count byte is derived from the
+// descriptor and includes the receiver.
+func (c *Code) InvokeInterface(index uint16) *Code {
+	entry, err := c.pool.entry(index)
+	if err != nil {
+		c.fail("invokeinterface: %v", err)
+		return c
+	}
+	if entry.tag != cpInterfaceMethodref {
+		c.fail("invokeinterface requires InterfaceMethodref, got tag %d at index %d", entry.tag, index)
+		return c
+	}
+	args, _, err := methodDescriptorWords(entry.text)
+	if err != nil {
+		c.fail("invokeinterface descriptor %q: %v", entry.text, err)
+		return c
+	}
+	if args+1 > math.MaxUint8 {
+		c.fail("invokeinterface argument word count %d exceeds 255", args+1)
+		return c
+	}
+	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindInvokeInterface, op: INVOKEINTERFACE, arg: int(index), arg2: args + 1}})
+	return c
+}
+
+// Load appends a typed local load, selecting compact or WIDE encoding.
+func (c *Code) Load(kind LocalKind, index uint16) *Code {
+	op, ok := localOpcode(kind, true)
+	if !ok {
+		c.fail("invalid local kind %d", kind)
+		return c
+	}
+	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindLocal, op: op, arg: int(index), arg2: localWidth(kind)}})
+	return c
+}
+
+// Store appends a typed local store, selecting compact or WIDE encoding.
+func (c *Code) Store(kind LocalKind, index uint16) *Code {
+	op, ok := localOpcode(kind, false)
+	if !ok {
+		c.fail("invalid local kind %d", kind)
+		return c
+	}
+	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindLocal, op: op, arg: int(index), arg2: localWidth(kind)}})
+	return c
+}
+
+// IInc appends iinc, selecting WIDE when either operand requires it.
+func (c *Code) IInc(index uint16, delta int16) *Code {
+	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindIInc, op: IINC, arg: int(index), arg2: int(delta)}})
+	return c
+}
+
+// LDC appends ldc or ldc_w according to the final constant-pool index.
+func (c *Code) LDC(index uint16) *Code {
+	entry, err := c.pool.entry(index)
+	if err != nil {
+		c.fail("ldc: %v", err)
+		return c
+	}
+	if entry.tag != cpInteger && entry.tag != cpString && entry.tag != cpClass {
+		c.fail("ldc does not support constant pool tag %d at index %d", entry.tag, index)
+		return c
+	}
+	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindLDC, op: LDC, arg: int(index)}})
+	return c
+}
+
+// Branch appends goto or a supported conditional branch. Goto is widened to
+// goto_w as needed; long conditionals are expanded to inverse-if + goto_w.
+func (c *Code) Branch(op Opcode, target *Label) *Code {
+	if !c.validLabel(target) {
+		return c
+	}
+	if op != GOTO && !isConditional(op) {
+		c.fail("opcode 0x%02x is not a supported branch", byte(op))
+		return c
+	}
+	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindBranch, op: op, target: target}})
+	return c
+}
+
+// Catch adds an exception-table entry. catchClass is an internal class name;
+// use an empty string for a finally/all-exceptions handler. The protected range
+// is [start,end), and all labels must be bound before assembly.
+func (c *Code) Catch(start, end, handler *Label, catchClass string) *Code {
+	if len(c.handlers) >= math.MaxUint16 {
+		c.fail("exception_table_length exceeds 65535")
+		return c
+	}
+	if !c.validLabel(start) || !c.validLabel(end) || !c.validLabel(handler) {
+		return c
+	}
+	var catchType uint16
+	if catchClass != "" {
+		if err := validateInternalName(catchClass); err != nil {
+			c.fail("catch type %q: %v", catchClass, err)
+			return c
+		}
+		var err error
+		catchType, err = c.pool.Class(catchClass)
+		if err != nil {
+			c.fail("catch type %q: %v", catchClass, err)
+			return c
+		}
+	}
+	c.handlers = append(c.handlers, exceptionHandler{start: start, end: end, handler: handler, catchType: catchType})
+	return c
+}
+
+// SetMaxStack requires the calculated maximum stack to equal value.
+func (c *Code) SetMaxStack(value uint16) *Code { c.maxStack = &value; return c }
+
+// SetMaxLocals requires value to be at least the descriptor/local-instruction
+// requirement. This permits reserving otherwise unused locals explicitly.
+func (c *Code) SetMaxLocals(value uint16) *Code { c.maxLocals = &value; return c }
+
+func localOpcode(kind LocalKind, load bool) (Opcode, bool) {
+	loads := [...]Opcode{ILOAD, LLOAD, FLOAD, DLOAD, ALOAD}
+	stores := [...]Opcode{ISTORE, LSTORE, FSTORE, DSTORE, ASTORE}
+	if int(kind) >= len(loads) {
+		return 0, false
+	}
+	if load {
+		return loads[kind], true
+	}
+	return stores[kind], true
+}
+
+func localWidth(kind LocalKind) int {
+	if kind == LongLocal || kind == DoubleLocal {
+		return 2
+	}
+	return 1
+}
+
+func isConditional(op Opcode) bool {
+	return op >= IFEQ && op <= IF_ACMPNE || op == IFNULL || op == IFNONNULL
+}
+
+func inverseConditional(op Opcode) Opcode {
+	if op >= IFEQ && op <= IFLE {
+		return IFEQ + ((op - IFEQ) ^ 1)
+	}
+	if op >= IF_ICMPEQ && op <= IF_ACMPNE {
+		return IF_ICMPEQ + ((op - IF_ICMPEQ) ^ 1)
+	}
+	if op == IFNULL {
+		return IFNONNULL
+	}
+	return IFNULL
+}
+
+func (i *instruction) size() int {
+	switch i.kind {
+	case kindSimple:
+		return 1
+	case kindByte:
+		return 2
+	case kindShort, kindCP:
+		return 3
+	case kindLocal:
+		if i.arg <= 3 {
+			return 1
+		}
+		if i.arg <= math.MaxUint8 {
+			return 2
+		}
+		return 4
+	case kindIInc:
+		if i.arg <= math.MaxUint8 && i.arg2 >= math.MinInt8 && i.arg2 <= math.MaxInt8 {
+			return 3
+		}
+		return 6
+	case kindLDC:
+		if i.arg <= math.MaxUint8 {
+			return 2
+		}
+		return 3
+	case kindBranch:
+		if i.expanded {
+			return 8
+		}
+		if i.wideBranch {
+			return 5
+		}
+		return 3
+	case kindInvokeInterface:
+		return 5
+	default:
+		return 0
+	}
+}
+
+type assembledCode struct {
+	bytes               []byte
+	maxStack, maxLocals uint16
+	handlers            []assembledHandler
+}
+
+type assembledHandler struct {
+	start, end, handler uint16
+	catchType           uint16
+}
+
+func (c *Code) assemble(descriptor string, access uint16) (*assembledCode, error) {
+	if c == nil {
+		return nil, fmt.Errorf("nil Code")
+	}
+	if c.err != nil {
+		return nil, c.err
+	}
+	labelPC, insnPC, codeLength, err := c.layout()
+	if err != nil {
+		return nil, err
+	}
+	if codeLength == 0 {
+		return nil, fmt.Errorf("Code attribute has empty code")
+	}
+	if codeLength > 65535 {
+		return nil, fmt.Errorf("code_length %d exceeds 65535", codeLength)
+	}
+	maxStack, maxLocals, err := c.calculateFrames(descriptor, access, labelPC, insnPC)
+	if err != nil {
+		return nil, err
+	}
+	if c.maxStack != nil && *c.maxStack != maxStack {
+		return nil, fmt.Errorf("explicit max_stack %d does not equal calculated %d", *c.maxStack, maxStack)
+	}
+	if c.maxLocals != nil {
+		if *c.maxLocals < maxLocals {
+			return nil, fmt.Errorf("explicit max_locals %d is less than required %d", *c.maxLocals, maxLocals)
+		}
+		maxLocals = *c.maxLocals
+	}
+	out := &byteWriter{data: make([]byte, 0, codeLength)}
+	insnIndex := 0
+	for _, node := range c.nodes {
+		if node.insn == nil {
+			continue
+		}
+		pc := insnPC[insnIndex]
+		if err := c.writeInstruction(out, node.insn, pc, labelPC); err != nil {
+			return nil, err
+		}
+		insnIndex++
+	}
+	if len(out.data) != codeLength {
+		return nil, fmt.Errorf("internal assembler length mismatch: wrote %d, laid out %d", len(out.data), codeLength)
+	}
+	handlers := make([]assembledHandler, len(c.handlers))
+	for i, handler := range c.handlers {
+		start, ok1 := labelPC[handler.start]
+		end, ok2 := labelPC[handler.end]
+		entry, ok3 := labelPC[handler.handler]
+		if !ok1 || !ok2 || !ok3 {
+			return nil, fmt.Errorf("exception table entry %d contains an unbound label", i)
+		}
+		if start >= end {
+			return nil, fmt.Errorf("exception table entry %d has empty or reversed range [%d,%d)", i, start, end)
+		}
+		if end > codeLength || entry >= codeLength {
+			return nil, fmt.Errorf("exception table entry %d is outside code_length %d", i, codeLength)
+		}
+		handlers[i] = assembledHandler{uint16(start), uint16(end), uint16(entry), handler.catchType}
+	}
+	return &assembledCode{bytes: out.data, maxStack: maxStack, maxLocals: maxLocals, handlers: handlers}, nil
+}
+
+func (c *Code) layout() (map[*Label]int, []int, int, error) {
+	for pass := 0; pass <= len(c.nodes)+1; pass++ {
+		labelPC := make(map[*Label]int)
+		insnPC := make([]int, 0)
+		pc := 0
+		for _, node := range c.nodes {
+			if node.label != nil {
+				labelPC[node.label] = pc
+			} else if node.insn != nil {
+				insnPC = append(insnPC, pc)
+				pc += node.insn.size()
+			}
+		}
+		changed := false
+		insnIndex := 0
+		for _, node := range c.nodes {
+			insn := node.insn
+			if insn == nil {
+				continue
+			}
+			if insn.kind == kindBranch {
+				target, ok := labelPC[insn.target]
+				if !ok {
+					return nil, nil, 0, fmt.Errorf("branch at instruction %d targets unbound label %d", insnIndex, insn.target.id)
+				}
+				offset := target - insnPC[insnIndex]
+				if offset < math.MinInt16 || offset > math.MaxInt16 {
+					if insn.op == GOTO && !insn.wideBranch {
+						insn.wideBranch, changed = true, true
+					} else if isConditional(insn.op) && !insn.expanded {
+						insn.expanded, changed = true, true
+					}
+				}
+			}
+			insnIndex++
+		}
+		if !changed {
+			return labelPC, insnPC, pc, nil
+		}
+	}
+	return nil, nil, 0, fmt.Errorf("branch layout did not converge")
+}
+
+func (c *Code) writeInstruction(out *byteWriter, i *instruction, pc int, labels map[*Label]int) error {
+	switch i.kind {
+	case kindSimple:
+		out.u1(byte(i.op))
+	case kindByte:
+		out.u1(byte(i.op))
+		out.u1(byte(i.arg))
+	case kindShort:
+		out.u1(byte(i.op))
+		out.i2(int16(i.arg))
+	case kindCP:
+		out.u1(byte(i.op))
+		out.u2(uint16(i.arg))
+	case kindLocal:
+		if i.arg <= 3 {
+			compactBase := map[Opcode]byte{
+				ILOAD: 0x1a, LLOAD: 0x1e, FLOAD: 0x22, DLOAD: 0x26, ALOAD: 0x2a,
+				ISTORE: 0x3b, LSTORE: 0x3f, FSTORE: 0x43, DSTORE: 0x47, ASTORE: 0x4b,
+			}[i.op]
+			out.u1(compactBase + byte(i.arg))
+		} else if i.arg <= math.MaxUint8 {
+			out.u1(byte(i.op))
+			out.u1(byte(i.arg))
+		} else {
+			out.u1(byte(WIDE))
+			out.u1(byte(i.op))
+			out.u2(uint16(i.arg))
+		}
+	case kindIInc:
+		if i.arg <= math.MaxUint8 && i.arg2 >= math.MinInt8 && i.arg2 <= math.MaxInt8 {
+			out.u1(byte(IINC))
+			out.u1(byte(i.arg))
+			out.u1(byte(int8(i.arg2)))
+		} else {
+			out.u1(byte(WIDE))
+			out.u1(byte(IINC))
+			out.u2(uint16(i.arg))
+			out.i2(int16(i.arg2))
+		}
+	case kindLDC:
+		if i.arg <= math.MaxUint8 {
+			out.u1(byte(LDC))
+			out.u1(byte(i.arg))
+		} else {
+			out.u1(byte(LDC_W))
+			out.u2(uint16(i.arg))
+		}
+	case kindBranch:
+		target := labels[i.target]
+		if i.expanded {
+			out.u1(byte(inverseConditional(i.op)))
+			out.i2(8)
+			out.u1(byte(GOTO_W))
+			out.i4(int32(target - (pc + 3)))
+		} else if i.wideBranch {
+			out.u1(byte(GOTO_W))
+			out.i4(int32(target - pc))
+		} else {
+			offset := target - pc
+			if offset < math.MinInt16 || offset > math.MaxInt16 {
+				return fmt.Errorf("internal short branch overflow: %d", offset)
+			}
+			out.u1(byte(i.op))
+			out.i2(int16(offset))
+		}
+	case kindInvokeInterface:
+		out.u1(byte(INVOKEINTERFACE))
+		out.u2(uint16(i.arg))
+		out.u1(byte(i.arg2))
+		out.u1(0)
+	default:
+		return fmt.Errorf("unknown internal instruction kind %d", i.kind)
+	}
+	return nil
+}
