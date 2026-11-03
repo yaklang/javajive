@@ -124,7 +124,7 @@ func assertExternalCorpusDiagnostic(t *testing.T, err error, entry, class, metho
 	if diagnostic.Err == nil || diagnostic.Err.Error() != reason {
 		t.Fatalf("diagnostic reason = %v, want %q", diagnostic.Err, reason)
 	}
-	if got := externalCorpusReasonCategory(reason); got != reasonCategory {
+	if got := externalCorpusReasonCategory(diagnostic.Err.Error()); got != reasonCategory {
 		t.Fatalf("diagnostic reason category = %q, want %q", got, reasonCategory)
 	}
 }
