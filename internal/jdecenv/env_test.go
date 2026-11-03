@@ -6,6 +6,21 @@ import (
 	"time"
 )
 
+func TestCaptureProcessSeesSetenv(t *testing.T) {
+	t.Setenv("JDEC_CAPTURE_PROCESS", "once")
+	snap := CaptureProcess()
+	if snap["JDEC_CAPTURE_PROCESS"] != "once" {
+		t.Fatalf("snapshot missed host env: %q", snap["JDEC_CAPTURE_PROCESS"])
+	}
+	t.Setenv("JDEC_CAPTURE_PROCESS", "later")
+	if snap["JDEC_CAPTURE_PROCESS"] != "once" {
+		t.Fatal("snapshot followed a later Setenv")
+	}
+	if Get("JDEC_CAPTURE_PROCESS") != "later" {
+		t.Fatal("unbound Get stopped reading the live environment")
+	}
+}
+
 func TestLookupPreservesExplicitSnapshotAndLivePolicy(t *testing.T) {
 	t.Setenv("JDEC_LOOKUP", "host")
 	live := Lookup()

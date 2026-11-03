@@ -16,6 +16,119 @@ type nativeEnumBackingSource struct {
 	packet      core.RegeneratedStaticArray
 }
 
+// nativeEnumReadOnlyArrayIteration certifies that a non-factory read of the
+// compiler's backing array cannot observe the difference between the shared
+// array and the clone factory's copy: the reference must be stored into one
+// local immediately, and every later load of that local must be consumed
+// directly by arraylength or aaload. A store, a call, a field write or a return
+// of the reference needs a different operand position and is refused.
+func nativeEnumRefLocal(op *core.OpCode, write bool) (int, bool) {
+	if op == nil || op.Instr == nil {
+		return 0, false
+	}
+	code := op.Instr.OpCode
+	switch code {
+	case core.OP_ASTORE, core.OP_ASTORE_0, core.OP_ASTORE_1, core.OP_ASTORE_2, core.OP_ASTORE_3:
+		if !write {
+			return 0, false
+		}
+	case core.OP_ALOAD, core.OP_ALOAD_0, core.OP_ALOAD_1, core.OP_ALOAD_2, core.OP_ALOAD_3:
+		if write {
+			return 0, false
+		}
+	default:
+		return 0, false
+	}
+	slot := core.GetRetrieveIdx(op)
+	if write {
+		slot = core.GetStoreIdx(op)
+	}
+	return slot, slot >= 0
+}
+
+func nativeEnumReadOnlyArrayIteration(ops []*core.OpCode, readIndex int) bool {
+	if readIndex < 0 || readIndex+1 >= len(ops) {
+		return false
+	}
+	// javac binds the array with either astore or astore_<n>. A wide store is
+	// the same slot contract; anything else leaves the reference on the stack.
+	local, stored := nativeEnumRefLocal(ops[readIndex+1], true)
+	if !stored || readIndex+3 >= len(ops) {
+		return false
+	}
+	// Check null before any observable work. Calling values() on a not-yet-
+	// initialized backing array throws at clone(), whereas a bare getstatic
+	// only yields null. Requiring the original immediate arraylength preserves
+	// exception priority in reentrant initialization as well as ordinary calls.
+	firstLoad, loaded := nativeEnumRefLocal(ops[readIndex+2], false)
+	if !loaded || firstLoad != local || !nativeEnumOpcode(ops[readIndex+3], core.OP_ARRAYLENGTH) {
+		return false
+	}
+	loads := 0
+	for i, op := range ops {
+		slot, loaded := nativeEnumRefLocal(op, false)
+		if !loaded || slot != local {
+			continue
+		}
+		// arraylength consumes the reference directly. aaload consumes it under
+		// one int index. javac's for-each is `aload; iload; aaload`, so the index
+		// may sit between the load and aaload. Anything that could pop, copy or
+		// pass the reference (a call, a store, a return, another reference) is
+		// not an int producer and is refused.
+		if !nativeEnumArrayLoadIsLocal(ops, i) {
+			return false
+		}
+		loads++
+	}
+	// A dead store is not an iteration. Require a proved consumer so values()
+	// replaces a real read, not an unused reference.
+	return loads > 0
+}
+
+// nativeEnumArrayLoadIsLocal reports whether ops[loadIndex], an aload of the
+// backing array, is consumed by arraylength or by aaload under a straight-line
+// int index. The array reference stays at stack depth 1 until that consumer.
+func nativeEnumArrayLoadIsLocal(ops []*core.OpCode, loadIndex int) bool {
+	depth := 1
+	for j := loadIndex + 1; j < len(ops) && j <= loadIndex+8; j++ {
+		op := ops[j]
+		if nativeEnumOpcode(op, core.OP_ARRAYLENGTH) && depth == 1 {
+			return true
+		}
+		if nativeEnumOpcode(op, core.OP_AALOAD) && depth == 2 {
+			return true
+		}
+		delta, inputs, ok := nativeEnumIntProducer(op)
+		if !ok || depth-1 < inputs {
+			return false
+		}
+		depth += delta
+		if depth < 1 || depth > 4 {
+			return false
+		}
+	}
+	return false
+}
+
+func nativeEnumIntProducer(op *core.OpCode) (delta, inputs int, valid bool) {
+	if op == nil || op.Instr == nil {
+		return 0, 0, false
+	}
+	switch op.Instr.OpCode {
+	case core.OP_ICONST_M1, core.OP_ICONST_0, core.OP_ICONST_1, core.OP_ICONST_2, core.OP_ICONST_3, core.OP_ICONST_4, core.OP_ICONST_5,
+		core.OP_BIPUSH, core.OP_SIPUSH,
+		core.OP_ILOAD, core.OP_ILOAD_0, core.OP_ILOAD_1, core.OP_ILOAD_2, core.OP_ILOAD_3:
+		return 1, 0, true
+	case core.OP_INEG:
+		return 0, 1, true
+	case core.OP_IADD, core.OP_ISUB, core.OP_IMUL, core.OP_IDIV, core.OP_IREM,
+		core.OP_IAND, core.OP_IOR, core.OP_IXOR, core.OP_ISHL, core.OP_ISHR, core.OP_IUSHR:
+		return -1, 2, true
+	default:
+		return 0, 0, false
+	}
+}
+
 // Source regenerates a fresh array of constants in declaration order. A clone
 // factory proves only copying, not the order or identity of the array copied.
 // Certify its unique original producer and every use of its erased field. The
@@ -61,9 +174,14 @@ func (c *ClassObjectDumper) nativeEnumBackingArrayProtocol(initializations map[s
 		return fail("factory or initializer")
 	}
 	backingName, nk := sourceBridgeUTF8(obj, backing.NameIndex)
-	if !nk || backingName != "$VALUES" {
+	// values() already selected the unique private static final synthetic
+	// self-array (flags 0x101a, no attributes). Javac spells that field
+	// $VALUES, but an obfuscator can rename it. The later packet proof, not
+	// the spelling, certifies the constant order. Source regenerates $VALUES.
+	if !nk || backingName == "" {
 		return fail("compiler backing declaration")
 	}
+	c.enumSyntheticBackingField = backingName
 	constants := []string{}
 	for _, f := range obj.Fields {
 		if f == nil || !nativeProofWork(c.Work, 1) {
@@ -116,10 +234,23 @@ func (c *ClassObjectDumper) nativeEnumBackingArrayProtocol(initializations map[s
 					return fail("backing field identity")
 				}
 				if nativeEnumOpcode(op, core.OP_GETSTATIC) {
-					if method != factory || i != 0 || readCount != 0 {
+					if method == factory {
+						if i != 0 || readCount != 0 {
+							return fail("source-erased backing field escapes its generated factory")
+						}
+						readCount++
+						continue
+					}
+					// A hand-written method may iterate the shared array instead of
+					// calling the clone factory. That is expressible through the
+					// factory only when the original cannot observe the difference:
+					// the reference is bound to one local and every use of that local
+					// is arraylength or aaload, so no store, call, return or field
+					// write can see the shared array.
+					if !nativeEnumReadOnlyArrayIteration(ops, i) {
 						return fail("source-erased backing field escapes its generated factory")
 					}
-					readCount++
+					continue
 				} else {
 					if method != initializer || storeIndex != -1 {
 						return fail("multiple or non-initializer backing writes")

@@ -279,6 +279,7 @@ func (z *JarFS) nativeMemberIndependentEntry(obj *ClassObject) *nativeMemberCach
 	if !bound || snap == nil {
 		snap = snapshotJDECEnv()
 	}
+	snap = jdecPolicyMap(snap)
 	if snap["JDEC_NATIVE_MEMBER_OFF"] != "" {
 		return nil
 	}

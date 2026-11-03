@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/yaklang/javajive/internal/log"
+	"github.com/yaklang/javajive/internal/utils"
 )
 
 // Enum constant-body CROSS-CLASS folding.
@@ -60,10 +63,10 @@ func (c *ClassObjectDumper) foldEnumConstantBodies(isEnum bool) (map[string]stri
 	c.sourceFlatEnumPackets = nil
 	c.sourceFlatEnumPacketSeal = nil
 	if !isEnum || c.foldSiblingResolver == nil || c.getenv("JDEC_NO_ENUM_FOLD") != "" {
-		return nil, nil
+		return c.renamedEnumBodies(nil)
 	}
 	if native, known := c.foldNativeEnumConstantBodies(); known {
-		return native, nil
+		return c.renamedEnumBodies(native)
 	}
 	// Source spelling is a projection: a nested declaration can be printed
 	// with its lexical name, a flattened binary name, or an assignment cast.
@@ -99,6 +102,12 @@ func (c *ClassObjectDumper) foldEnumConstantBodies(isEnum bool) (map[string]stri
 		// empty body. It retains the distinct class and inherited dispatch.
 		proof := flatEnumConstantBodyProof(c.obj, plan, bodyOrdinal, bridges, resolve, c.Work)
 		if proof == nil {
+			// Renamed top-level constant bodies have no anonymous Owner$N
+			// identity. renamedEnumBodies folds them from the proved
+			// field-to-body map after this native pass.
+			if _, renamed := c.enumProvedConstantBodies[plan.constant]; renamed {
+				continue
+			}
 			return nil, fmt.Errorf("enum fold: original constructor or class initializer for %s is unproved", plan.constant)
 		}
 		body := c.renderFoldedConstantObjectWithProof(proof.object, proof.object.GetClassName(), proof)
@@ -107,7 +116,106 @@ func (c *ClassObjectDumper) foldEnumConstantBodies(isEnum bool) (map[string]stri
 		}
 		out[plan.constant] = body
 	}
+	return c.renamedEnumBodies(out)
+}
+
+func (c *ClassObjectDumper) renamedEnumBodies(out map[string]string) (map[string]string, error) {
+	if len(c.enumProvedConstantBodies) == 0 {
+		return out, nil
+	}
+	if c.foldSiblingResolver == nil || c.getenv("JDEC_NO_ENUM_FOLD") != "" {
+		return nil, fmt.Errorf("enum regeneration: renamed constant-specific body was proved but not folded")
+	}
+	if out == nil {
+		out = map[string]string{}
+	}
+	for field, internal := range c.enumProvedConstantBodies {
+		data, ok := c.foldSiblingResolver(internal)
+		if !ok || len(data) == 0 {
+			return nil, fmt.Errorf("enum regeneration: renamed constant-specific body was proved but not folded")
+		}
+		simple := internal
+		if slash := strings.LastIndexByte(internal, '/'); slash >= 0 {
+			simple = internal[slash+1:]
+		}
+		body := c.renderFoldedConstantBody(data, simple)
+		if body == "" || strings.Contains(body, DecompileStubMarker) {
+			return nil, fmt.Errorf("enum regeneration: renamed constant-specific body did not render")
+		}
+		out[field] = body
+	}
 	return out, nil
+}
+
+func (c *ClassObjectDumper) renderFoldedConstantBody(data []byte, subSimple string) (result string) {
+	defer func() {
+		if e := recover(); e != nil {
+			log.Warnf("enum fold: render of %s panicked: %v", subSimple, utils.ErrorStack(e))
+			result = ""
+		}
+	}()
+	subObj, err := c.parseResolved(data)
+	if err != nil {
+		return ""
+	}
+	return c.renderRenamedConstantObject(subObj, subSimple)
+}
+
+// renderRenamedConstantObject renders a proved renamed constant body. Unlike
+// the native Owner$N path there is no member-family identity, so the validated
+// synthetic (String,int) constructor is removed from the rendered text after
+// the renamedEnumConstantBody proof checked its exact forwarding shape.
+func (c *ClassObjectDumper) renderRenamedConstantObject(subObj *ClassObject, subSimple string) (result string) {
+	child := NewClassObjectDumper(subObj)
+	child.options = c.options
+	child.Work = c.Work
+	child.report = c.report
+	child.sourceInnerClassBody = true
+	// Keep original declaration lookup without enabling recursive source folding.
+	child.archiveDeclarationResolver = c.foldSiblingResolver
+	child.nativeMemberLookup = c.nativeMemberLookup
+	child.declarationResolver = c.declarationResolver
+	if p := c.nativeMemberRoot; p != nil && p.enumConstants[subObj.GetClassName()] != nil {
+		child.nativeMemberRoot = p
+		child.nativeEnumConstantCurrent = p.enumConstants[subObj.GetClassName()]
+		child.nativeOuterContext = c.FuncCtx
+	}
+	src, err := child.DumpClass()
+	if err != nil || src == "" || child.nativeEnumConstantCurrent != nil && (child.sourceDegraded || len(child.constructorBoundaryHelpers) > 0 || len(child.interfaceInitializerHelpers) > 0 || child.privateNestOwnPlan != nil && len(child.privateNestOwnPlan.bridges) > 0) {
+		return ""
+	}
+	if c.FuncCtx != nil {
+		for _, imp := range javaExtractImports(src) {
+			c.FuncCtx.Import(imp)
+		}
+	}
+	body, known := javaClassBodyContentKnown(src)
+	if !known {
+		return ""
+	}
+	if child.nativeEnumConstantCurrent == nil {
+		body = javaRemoveConstructors(body, subSimple)
+	}
+	body = strings.Trim(body, "\n")
+	if strings.TrimSpace(body) == "" {
+		if child.nativeEnumConstantCurrent != nil {
+			return " {}"
+		}
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(" {\n")
+	for _, line := range strings.Split(body, "\n") {
+		if strings.TrimSpace(line) == "" {
+			b.WriteString("\n")
+			continue
+		}
+		b.WriteString("\t")
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	b.WriteString("\t}")
+	return b.String()
 }
 
 func (c *ClassObjectDumper) renderFoldedConstantObject(subObj *ClassObject, subSimple string) (result string) {

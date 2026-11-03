@@ -64,14 +64,82 @@ func nativeEnumArrayHelperName(obj *ClassObject, work *workbudget.Budget) (strin
 func nativeEnumValuesFactoryBacking(obj *ClassObject, method *MemberInfo, work *workbudget.Budget) *MemberInfo {
 	return nativeEnumValuesFactoryBackingWithParameterNames(obj, method, work, false)
 }
+
+// A source factory must be public and static. ACC_FINAL is legal on a static
+// method and older javac emitted values() with it (javap 0x0019, e.g. CXF
+// MessageFormatType); requiring exactly 0x0009 rejected those valid enums.
+func nativeEnumFactoryMethodFlags(flags uint16) bool {
+	return flags == 0x0009 || flags == 0x0019
+}
+
 func nativeEnumValuesFactoryBackingWithParameterNames(obj *ClassObject, method *MemberInfo, work *workbudget.Budget, allowNames bool) *MemberInfo {
-	if obj == nil || method == nil || method.AccessFlags != 9 || !nativeEnumOriginalFrameCapacity(method, 1, 0) {
+	if obj == nil || method == nil || !nativeEnumFactoryMethodFlags(method.AccessFlags) || !nativeEnumOriginalFrameCapacity(method, 1, 0) {
 		return nil
 	}
 	name := obj.GetClassName()
 	array := "[L" + name + ";"
 	ops, known := nativeEnumMethodOpsWithParameterNames(obj, method, work, allowNames)
-	if !known || len(ops) != 4 || !nativeEnumOpcode(ops[0], core.OP_GETSTATIC) || !nativeEnumMemberOperand(obj, ops[1], core.OP_INVOKEVIRTUAL, array, "clone", "()Ljava/lang/Object;") || !nativeEnumOpcode(ops[2], core.OP_CHECKCAST) || !nativeEnumClassOperand(obj, ops[2], array) || !nativeEnumOpcode(ops[3], core.OP_ARETURN) {
+	if !known {
+		return nil
+	}
+	// Eclipse ECJ copies ENUM$VALUES with System.arraycopy instead of clone().
+	if backing := nativeEnumArrayCopyValuesBacking(obj, ops, work); backing != nil {
+		return backing
+	}
+	if len(ops) != 4 || !nativeEnumOpcode(ops[0], core.OP_GETSTATIC) || !nativeEnumMemberOperand(obj, ops[1], core.OP_INVOKEVIRTUAL, array, "clone", "()Ljava/lang/Object;") || !nativeEnumOpcode(ops[2], core.OP_CHECKCAST) || !nativeEnumClassOperand(obj, ops[2], array) || !nativeEnumOpcode(ops[3], core.OP_ARETURN) {
+		return nil
+	}
+	member := constructorMotionMember(obj, ops[0], core.OP_GETSTATIC)
+	if member == nil || member.Name != name || member.Description != array || !nativeEnumMemberOperand(obj, ops[0], core.OP_GETSTATIC, name, member.Member, array) {
+		return nil
+	}
+	var backing *MemberInfo
+	for _, field := range obj.Fields {
+		if field == nil || !nativeProofWork(work, 1) {
+			return nil
+		}
+		fieldName, nk := sourceBridgeUTF8(obj, field.NameIndex)
+		descriptor, dk := sourceBridgeUTF8(obj, field.DescriptorIndex)
+		if !nk || !dk {
+			return nil
+		}
+		if fieldName == member.Member && descriptor == array {
+			if backing != nil || field.AccessFlags != 0x101a || len(field.Attributes) != 0 {
+				return nil
+			}
+			backing = field
+		}
+	}
+	return backing
+}
+
+// nativeEnumArrayCopyValuesBacking accepts ECJ's values() body:
+// getstatic, dup, astore_0, iconst_0, aload_0, arraylength, dup, istore_1,
+// anewarray, dup, astore_2, iconst_0, iload_1, System.arraycopy, aload_2, areturn.
+// The copy is a fresh array. The shared ENUM$VALUES reference is not returned.
+func nativeEnumArrayCopyValuesBacking(obj *ClassObject, ops []*core.OpCode, work *workbudget.Budget) *MemberInfo {
+	if obj == nil || len(ops) != 16 {
+		return nil
+	}
+	name := obj.GetClassName()
+	array := "[L" + name + ";"
+	if !nativeEnumOpcode(ops[0], core.OP_GETSTATIC) ||
+		!nativeEnumOpcode(ops[1], core.OP_DUP) ||
+		!nativeEnumOpcode(ops[2], core.OP_ASTORE_0) ||
+		!nativeEnumOpcode(ops[3], core.OP_ICONST_0) ||
+		!nativeEnumOpcode(ops[4], core.OP_ALOAD_0) ||
+		!nativeEnumOpcode(ops[5], core.OP_ARRAYLENGTH) ||
+		!nativeEnumOpcode(ops[6], core.OP_DUP) ||
+		!nativeEnumOpcode(ops[7], core.OP_ISTORE_1) ||
+		!nativeEnumOpcode(ops[8], core.OP_ANEWARRAY) ||
+		!nativeEnumClassOperand(obj, ops[8], name) ||
+		!nativeEnumOpcode(ops[9], core.OP_DUP) ||
+		!nativeEnumOpcode(ops[10], core.OP_ASTORE_2) ||
+		!nativeEnumOpcode(ops[11], core.OP_ICONST_0) ||
+		!nativeEnumOpcode(ops[12], core.OP_ILOAD_1) ||
+		!nativeEnumMemberOperand(obj, ops[13], core.OP_INVOKESTATIC, "java/lang/System", "arraycopy", "(Ljava/lang/Object;ILjava/lang/Object;II)V") ||
+		!nativeEnumOpcode(ops[14], core.OP_ALOAD_2) ||
+		!nativeEnumOpcode(ops[15], core.OP_ARETURN) {
 		return nil
 	}
 	member := constructorMotionMember(obj, ops[0], core.OP_GETSTATIC)
@@ -102,7 +170,7 @@ func nativeEnumValueOfFactoryProof(obj *ClassObject, method *MemberInfo, work *w
 	return nativeEnumValueOfFactoryProofWithParameterNames(obj, method, work, false)
 }
 func nativeEnumValueOfFactoryProofWithParameterNames(obj *ClassObject, method *MemberInfo, work *workbudget.Budget, allowNames bool) bool {
-	if obj == nil || method == nil || method.AccessFlags != 9 || !nativeEnumOriginalFrameCapacity(method, 2, 1) {
+	if obj == nil || method == nil || !nativeEnumFactoryMethodFlags(method.AccessFlags) || !nativeEnumOriginalFrameCapacity(method, 2, 1) {
 		return false
 	}
 	name := obj.GetClassName()
@@ -463,12 +531,12 @@ func nativeEnumDeclarationSynthesis(obj *ClassObject, resolve func(string) (*Cla
 		}
 		switch {
 		case n == "values" && d == "()"+array:
-			if valuesMethod != nil || method.AccessFlags != 9 {
+			if valuesMethod != nil || !nativeEnumFactoryMethodFlags(method.AccessFlags) {
 				return nil
 			}
 			valuesMethod = method
 		case n == "valueOf" && d == "(Ljava/lang/String;)"+descriptor:
-			if valueOf != nil || method.AccessFlags != 9 {
+			if valueOf != nil || !nativeEnumFactoryMethodFlags(method.AccessFlags) {
 				return nil
 			}
 			valueOf = method

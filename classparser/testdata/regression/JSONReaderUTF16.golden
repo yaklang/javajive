@@ -1,0 +1,5 @@
+# Prefix increment in a condition and an array index is bare.
++if ((++var2) >= (this.end)){
+-if ((++(var2)) >= (this.end)){
++int var7 = var1[++var3];
+-int var7 = var1[++(var3)];

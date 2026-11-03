@@ -13,6 +13,7 @@ package jdecenv
 import (
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -87,6 +88,22 @@ func Get(key string) string {
 	return os.Getenv(key)
 }
 
+// CaptureProcess copies the process environment once. A decompile worker
+// passes it to Run so later Type() lookups read the map instead of os.Getenv.
+// Unbound Lookup() stays live; this snapshot is taken at the start of one class.
+func CaptureProcess() map[string]string {
+	env := os.Environ()
+	snap := make(map[string]string, len(env))
+	for _, kv := range env {
+		i := strings.IndexByte(kv, '=')
+		if i <= 0 {
+			continue
+		}
+		snap[kv[:i]] = kv[i+1:]
+	}
+	return snap
+}
+
 // Lookup captures the policy at a synchronous rendering/analysis boundary.
 // Snapshot lookups stay closed to the host and to nested requests; an unbound
 // or live-sentinel lookup continues to read the live process environment. Hot
@@ -149,11 +166,6 @@ func pop(id uint64) {
 	byGid.Store(id, n)
 	atomic.AddInt32(&liveBinds, -1)
 }
-
-// gid identifies this goroutine for the ambient snapshot stack. It parses
-// runtime.Stack once per Get when a frame is bound. Hot reconstructors must
-// use ClassContext.Getenv / Decompiler.getenv (explicit policy), not Get.
-func gid() uint64 { return gidFromStack() }
 
 func gidFromStack() uint64 {
 	var buf [64]byte

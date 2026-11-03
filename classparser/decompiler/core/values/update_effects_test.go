@@ -46,8 +46,12 @@ func TestUpdateIntrinsicsPreserveEffectsAndLocalDependencies(t *testing.T) {
 				if op == DEC {
 					token = "--"
 				}
+				// An increment target is an lvalue, so a parenthesis layer around it is
+				// redundant and the Java frontends that consume this source reject it
+				// (`++(x)` is not an lvalue). Prefix and postfix therefore spell the
+				// operand identically; only the operator position differs.
 				if prefix {
-					want = token + "(" + want + ")"
+					want = token + want
 				} else {
 					want += token
 				}

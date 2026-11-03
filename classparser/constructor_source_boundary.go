@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
@@ -236,6 +237,7 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 	calls := map[int]*values.FunctionCallExpression{}
 	remaining := 1024
 	last := -1
+	var prefixCalls []*values.FunctionCallExpression
 	for _, st := range p.prefix {
 		expr, ok := st.(*statements.ExpressionStatement)
 		if !ok || expr == nil {
@@ -249,6 +251,7 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 		if !ok || call == nil || !call.HasOriginPC || call.OriginPC <= last || call.OriginPC >= p.pc || !constructorBoundaryValue(expr.Expression, allowed, map[values.JavaValue]bool{}, calls, &remaining) {
 			return nil, fmt.Errorf("unproved constructor prefix effect ordering")
 		}
+		prefixCalls = append(prefixCalls, call)
 		last = call.OriginPC
 	}
 	for _, arg := range p.delegate.Arguments {
@@ -326,6 +329,58 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 	helperBody = c.wrapCheckedEscapeBody(helperBody)
 	p.helpers = append(p.helpers, &dumpedMethods{methodName: helperName, code: "private static " + formalHeader + ret + " " + helperName + "(" + strings.Join(declarations, ",") + ") {" + helperBody + "}", bodyCode: helperBody, checkedEscape: true})
 	return p, nil
+}
+
+// A dead local store may disappear, but its invocation must still run before
+// super and before argument evaluation. Only admit a sealed original reference
+// store whose slot is never read or rewritten in this straight-line constructor.
+func (c *ClassObjectDumper) constructorPrefixCall(st statements.Statement, decoder *core.Decompiler) *values.FunctionCallExpression {
+	if expr, ok := st.(*statements.ExpressionStatement); ok && expr != nil {
+		call, _ := values.UnpackSoltValue(expr.Expression).(*values.FunctionCallExpression)
+		return call
+	}
+	assign, ok := st.(*statements.AssignStatement)
+	if !ok || assign == nil || assign.IsDeclare || assign.ArrayMember != nil || decoder == nil {
+		return nil
+	}
+	ref, ok := assign.LeftValue.(*values.JavaRef)
+	if !ok || ref == nil {
+		return nil
+	}
+	call, ok := assign.JavaValue.(*values.FunctionCallExpression)
+	if !ok || call == nil || !call.IsStatic || call.Kind != values.InvokeStatic || !call.HasOriginPC {
+		return nil
+	}
+	pc, slot, known := ref.OriginalLocalDeclaration(call)
+	if !known || pc != call.OriginPC+3 || slot < 0 {
+		return nil
+	}
+	store := decoder.OpcodeByPC(uint16(pc))
+	if store == nil || store.Instr == nil || core.GetStoreIdx(store) != slot {
+		return nil
+	}
+	opcode := store.Instr.OpCode
+	if opcode != core.OP_ASTORE && (opcode < core.OP_ASTORE_0 || opcode > core.OP_ASTORE_3) {
+		return nil
+	}
+	params, result, err := callbinding.Descriptor(call.Descriptor)
+	if err != nil || len(params) != len(call.Arguments) || len(result) == 0 || (result[0] != 'L' && result[0] != '[') {
+		return nil
+	}
+	for _, op := range decoder.Opcodes() {
+		if op == nil || op.Instr == nil || !nativeProofWork(c.Work, 1) {
+			return nil
+		}
+		code := op.Instr.OpCode
+		if code >= core.OP_IFEQ && code <= core.OP_LOOKUPSWITCH || code == core.OP_IFNULL || code == core.OP_IFNONNULL || code == core.OP_GOTO_W || code == core.OP_JSR_W {
+			return nil
+		}
+		access := core.LocalAccessOf(code)
+		if (access.Read && core.GetRetrieveIdx(op) == slot) || (access.Write && core.GetStoreIdx(op) == slot && op != store) {
+			return nil
+		}
+	}
+	return call
 }
 
 func constructorOriginalInvoke(decoder *core.Decompiler, call *values.FunctionCallExpression, get func(int) values.JavaValue) bool {

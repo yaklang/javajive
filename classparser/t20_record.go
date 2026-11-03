@@ -55,6 +55,42 @@ func stashDumper(c *ClassObjectDumper) {
 	}
 }
 
+// releaseClassDumpScratch drops the per-class reconstruction scratch once
+// DumpClass has returned its source. The maps are only a lookup for the dump
+// that is still on the stack; leaving every dumper there retains its
+// invocation-metadata cache for the rest of the process.
+func releaseClassDumpScratch(obj *ClassObject) {
+	if obj == nil {
+		return
+	}
+	dumpersByObj.Delete(obj)
+	recordWorkByObj.Delete(obj)
+	patternWorkByObj.Delete(obj)
+}
+
+func releaseAllClassDumpScratch() {
+	dumpersByObj.Range(func(key, _ any) bool {
+		dumpersByObj.Delete(key)
+		return true
+	})
+	recordWorkByObj.Range(func(key, _ any) bool {
+		recordWorkByObj.Delete(key)
+		return true
+	})
+	patternWorkByObj.Range(func(key, _ any) bool {
+		patternWorkByObj.Delete(key)
+		return true
+	})
+}
+
+func classDumpScratchCount() int {
+	n := 0
+	dumpersByObj.Range(func(_, _ any) bool { n++; return true })
+	recordWorkByObj.Range(func(_, _ any) bool { n++; return true })
+	patternWorkByObj.Range(func(_, _ any) bool { n++; return true })
+	return n
+}
+
 func dumperFor(obj *ClassObject) *ClassObjectDumper {
 	if obj == nil {
 		return nil

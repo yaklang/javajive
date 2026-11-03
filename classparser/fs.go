@@ -43,10 +43,24 @@ type JarFS struct {
 	nativeAnonymousCache      map[string]*nativeAnonymousCacheEntry
 	nativeAnonymousBytes      int64
 	*filesys.ZipFS
-	jarCache            *utils.SafeMapWithKey[string, *filesys.UnifiedFS]
-	recursiveParse      bool // 是否递归解析嵌套的jar文件，默认为true
-	archive             *archiveFSState
-	declarationResolver func(string) ([]byte, bool)
+	jarCache             *utils.SafeMapWithKey[string, *filesys.UnifiedFS]
+	recursiveParse       bool // 是否递归解析嵌套的jar文件，默认为true
+	archive              *archiveFSState
+	declarationResolver  func(string) ([]byte, bool)
+	retainUnprovedSource bool
+}
+
+// SetRetainUnprovedSource keeps original members when a javac source certificate
+// fails. Nested archives created afterwards inherit it. The default refuses.
+func (z *JarFS) SetRetainUnprovedSource(enabled bool) {
+	if z != nil {
+		z.retainUnprovedSource = enabled
+	}
+}
+
+// RetainsUnprovedSource reports the analysis-source policy for this archive.
+func (z *JarFS) RetainsUnprovedSource() bool {
+	return z != nil && z.retainUnprovedSource
 }
 
 var _ fs.FS = (*JarFS)(nil)
@@ -131,6 +145,14 @@ func NewJarFSWithOptions(zipFs *filesys.ZipFS, recursiveParse bool) *JarFS {
 // `Outer$N.class` from the folded enum source on recompile. Gated by JDEC_NO_ENUM_FOLD so it can be
 // disabled for load-bearing regression and to fall back to the exact per-class behavior.
 func (z *JarFS) decompileClassBytes(name string, data []byte) []byte {
+	if _, bound := jdecenv.Current(); !bound {
+		var out []byte
+		_ = jdecenv.Run(jdecenv.CaptureProcess(), func() error {
+			out = z.decompileClassBytes(name, data)
+			return nil
+		})
+		return out
+	}
 	lower := strings.ToLower(name)
 	if !strings.HasSuffix(lower, ".class") && !strings.HasSuffix(lower, ".raw") {
 		return data
@@ -174,6 +196,7 @@ func (z *JarFS) decompileClassBytes(name string, data []byte) []byte {
 	d.options.sourceFieldMetadata = z.sourceFieldMetadata
 	d.options.sourceConstructorLowering = z.sourceConstructorLowering
 	d.options.sourceLambdaMetadata = z.sourceLambdaMetadata
+	d.options.RetainUnprovedSource = z.retainUnprovedSource
 	if path.Clean(name) == cf.GetClassName()+".class" {
 		d.nativeMemberLookup = z.nativeMemberLookup
 	}
@@ -377,6 +400,7 @@ func (z *JarFS) getNestedJarFS(jarPath string) (*filesys.UnifiedFS, error) {
 	nestedJarFS := NewJarFSWithOptions(nestedZipFS, z.recursiveParse)
 	nestedJarFS.targetSourceVersion = z.targetSourceVersion
 	nestedJarFS.sourceCompiler = z.sourceCompiler
+	nestedJarFS.retainUnprovedSource = z.retainUnprovedSource
 	nestedJarFS.declarationResolver = z.declarationResolver
 	if z.archive != nil && z.archive.active {
 		nestedJarFS.archive = z.archive.nestedState()
@@ -471,12 +495,15 @@ type ExpandedZipFS struct {
 	jarReleaseSelection *jarReleaseSelection
 	jarReleaseBinding   *filesys.ZipFS
 
-	underlying     fi.FileSystem
-	zipFS          *filesys.ZipFS // optional container (zip root); nil for local directories
-	recursiveParse bool
-	jarCache       *utils.SafeMapWithKey[string, *filesys.UnifiedFS]
-	zipCache       *utils.SafeMapWithKey[string, *filesys.ZipFS]
-	archive        *archiveFSState
+	declarationsMu       sync.Mutex
+	declarations         map[string]*archiveDeclarationScope
+	underlying           fi.FileSystem
+	zipFS                *filesys.ZipFS // optional container (zip root); nil for local directories
+	recursiveParse       bool
+	retainUnprovedSource bool
+	jarCache             *utils.SafeMapWithKey[string, *filesys.UnifiedFS]
+	zipCache             *utils.SafeMapWithKey[string, *filesys.ZipFS]
+	archive              *archiveFSState
 }
 
 var _ fi.FileSystem = (*ExpandedZipFS)(nil)
@@ -532,6 +559,8 @@ func (e *ExpandedZipFS) GetJarFS(jarPath string) (*filesys.UnifiedFS, error) {
 	}
 
 	jarFS := NewJarFSWithOptions(zipFS, e.recursiveParse)
+	jarFS.retainUnprovedSource = e.retainUnprovedSource
+	jarFS.declarationResolver = e.archiveDeclarationResolver(jarPath)
 	if e.archive != nil && e.archive.active {
 		jarFS.archive = e.archive.nestedState()
 	}
@@ -689,10 +718,32 @@ func (e *ExpandedZipFS) ReadFile(name string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	var raw []byte
 	if e.zipFS != nil {
 		return e.readSelectedJarEntry(chosen)
 	}
-	return e.underlying.ReadFile(chosen)
+	raw, err = e.underlying.ReadFile(chosen)
+	if err != nil || !strings.EqualFold(path.Ext(name), ".class") {
+		return raw, err
+	}
+	cf, err := Parse(raw)
+	if err != nil {
+		return nil, err
+	}
+	d := NewClassObjectDumper(cf)
+	d.options.RetainUnprovedSource = e.retainUnprovedSource
+	logical := cf.GetClassName() + ".class"
+	if normalized := normalizeArchivePath(name); strings.HasSuffix(normalized, logical) {
+		root := strings.TrimSuffix(normalized, logical)
+		if root == "" {
+			root = "."
+		}
+		d.declarationResolver = func(owner string) ([]byte, bool) {
+			return e.resolveDeclarationScope("directory:"+root, e.underlying, root, owner)
+		}
+	}
+	source, err := d.DumpClass()
+	return []byte(source), err
 }
 
 func (e *ExpandedZipFS) readFileFromArchive(name string) ([]byte, error) {
@@ -793,11 +844,18 @@ func (e *ExpandedZipFS) Open(name string) (fs.File, error) {
 		}
 		return memfile.New(raw), nil
 	}
+	if strings.EqualFold(path.Ext(name), ".class") {
+		data, readErr := e.ReadFile(name)
+		if readErr != nil {
+			return nil, readErr
+		}
+		return memfile.New(data), nil
+	}
 	return e.underlying.Open(chosen)
 }
 
 func (e *ExpandedZipFS) OpenFile(name string, flag int, perm os.FileMode) (fs.File, error) {
-	if e.zipFS == nil && !isArchivePath(name) {
+	if e.zipFS == nil && !isArchivePath(name) && !strings.EqualFold(path.Ext(name), ".class") {
 		return e.underlying.OpenFile(name, flag, perm)
 	}
 	return e.Open(name)

@@ -63,6 +63,7 @@ func (z *JarFS) nativeAnonymousSourceTransaction(cf *ClassObject, independent bo
 	if !bound || snap == nil {
 		snap = snapshotJDECEnv()
 	}
+	snap = jdecPolicyMap(snap)
 	policy, _ := json.Marshal(snap)
 	key := owner + "\x00" + string(policy)
 	if independent {

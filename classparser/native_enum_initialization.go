@@ -2,6 +2,10 @@ package javaclassparser
 
 import (
 	"fmt"
+	"strings"
+	"unicode"
+	"unicode/utf8"
+
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/frametransfer"
@@ -10,8 +14,8 @@ import (
 )
 
 type nativeEnumConstantAllocation struct {
-	constant, allocatedClass, descriptor string
-	ordinal, newPC, invokePC, storePC    int
+	constant, sourceName, allocatedClass, descriptor string
+	ordinal, newPC, invokePC, storePC                int
 }
 
 // Source erases the hidden name/ordinal, so they must be the original field's
@@ -146,6 +150,7 @@ func (c *ClassObjectDumper) nativeEnumConstantInitializationsWithDeclarations(re
 	}
 	result := map[string]nativeEnumConstantAllocation{}
 	allocationOwners := map[int]string{}
+	claimedSourceNames := map[string]string{}
 	records := map[uint16]ssabuild.InstructionValues{}
 	for _, record := range fn.Instructions {
 		records[record.PC] = record
@@ -190,9 +195,26 @@ func (c *ClassObjectDumper) nativeEnumConstantInitializationsWithDeclarations(re
 			nk = false
 		}
 		originalOrdinal, ok := nativeEnumOriginalInt(obj, ordinalOp)
-		if !nk || literal != store.Member || !ok || originalOrdinal != ordinal {
+		if !nk || !ok || originalOrdinal != ordinal {
 			return fail("hidden name or ordinal differs from its source declaration")
 		}
+		sourceName := store.Member
+		// JLS 8.9.1 makes the enum constant identifier both the implicit field
+		// name and the string passed to Enum.<init>. A renamed ACC_ENUM field
+		// whose ldc string differs cannot be that one identifier. When the
+		// string is a free denotable identifier, emit it as the constant and
+		// keep the bytecode field as a static alias of that constant. An
+		// undenotable or colliding string stays refused; it is not suppression.
+		if literal != store.Member {
+			if !enumHiddenNameDenotable(obj, literal, store.Member, ordinals, claimedSourceNames) {
+				return fail("hidden name or ordinal differs from its source declaration")
+			}
+			sourceName = literal
+		}
+		if prev, seen := claimedSourceNames[sourceName]; seen && prev != store.Member {
+			return fail("hidden name or ordinal differs from its source declaration")
+		}
+		claimedSourceNames[sourceName] = store.Member
 		if !nativeEnumMemberOperand(obj, ops[uint16(plan.invokePC)], core.OP_INVOKESPECIAL, plan.allocatedClass, "<init>", plan.descriptor) || !nativeEnumMemberOperand(obj, ops[record.PC], core.OP_PUTSTATIC, owner, store.Member, self) {
 			return fail("constant-pool operand tags")
 		}
@@ -202,11 +224,35 @@ func (c *ClassObjectDumper) nativeEnumConstantInitializationsWithDeclarations(re
 				return fail("constant-specific declaration")
 			}
 			enclosing, method, known := originalAnonymousOwner(body)
-			if !known || enclosing != owner || method != "" {
-				return fail("constant-specific enclosing identity")
+			if known && enclosing == owner && method == "" {
+				// Anonymous Owner$N identity. Folding uses that binary name.
+			} else {
+				marker, descriptor, proved := c.renamedEnumConstantBody(body)
+				if !proved {
+					return fail("constant-specific enclosing identity")
+				}
+				if c.enumConstantBodyMarker == "" {
+					if marker != body.GetClassName() {
+						return fail("constant-specific enclosing identity")
+					}
+					c.enumConstantBodyMarker = marker
+				} else if marker != c.enumConstantBodyMarker {
+					return fail("constant-specific enclosing identity")
+				}
+				if c.enumProvedConstantBodies == nil {
+					c.enumProvedConstantBodies = map[string]string{}
+				}
+				if existing, duplicate := c.enumProvedConstantBodies[store.Member]; duplicate && existing != body.GetClassName() {
+					return fail("constant-specific enclosing identity")
+				}
+				c.enumProvedConstantBodies[store.Member] = body.GetClassName()
+				if c.enumMarkerDescriptors == nil {
+					c.enumMarkerDescriptors = map[string]bool{}
+				}
+				c.enumMarkerDescriptors[descriptor] = true
 			}
 		}
-		plan.constant, plan.ordinal, plan.storePC = store.Member, ordinal, int(record.PC)
+		plan.constant, plan.sourceName, plan.ordinal, plan.storePC = store.Member, sourceName, ordinal, int(record.PC)
 		result[store.Member] = plan
 		allocationOwners[plan.newPC] = store.Member
 	}
@@ -277,4 +323,63 @@ func (c *ClassObjectDumper) nativeEnumConstantInitializationsWithDeclarations(re
 		return fail("constant headers are bypassed, unreachable or repeated")
 	}
 	return result, nil
+}
+
+// enumHiddenNameDenotable reports whether literal can be the source enum
+// constant while field remains a same-typed static alias. JLS 8.1.4 forbids
+// a non-enum class from extending Enum, so the split declaration is the
+// source form that keeps both the hidden name and the bytecode field.
+func enumHiddenNameDenotable(obj *ClassObject, literal, field string, fields map[string]int, claimed map[string]string) bool {
+	if obj == nil || literal == field || !enumSourceIdentifier(literal) || !enumSourceIdentifier(field) {
+		return false
+	}
+	if _, exists := fields[literal]; exists {
+		return false
+	}
+	if prev, seen := claimed[literal]; seen && prev != field {
+		return false
+	}
+	simple := obj.GetClassName()
+	if i := strings.LastIndex(simple, "/"); i >= 0 {
+		simple = simple[i+1:]
+	}
+	if literal == simple || field == simple {
+		return false
+	}
+	for _, method := range obj.Methods {
+		if method == nil {
+			return false
+		}
+		name, ok := sourceBridgeUTF8(obj, method.NameIndex)
+		if !ok || name == literal {
+			return false
+		}
+	}
+	return true
+}
+
+func enumSourceIdentifier(s string) bool {
+	if s == "" || isJavaKeyword(s) {
+		return false
+	}
+	// JLS 3.8 / 3.9 restricted identifiers that javac rejects as enum constants.
+	switch s {
+	case "_", "yield", "record", "sealed", "permits":
+		return false
+	}
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			return false
+		}
+		if i == 0 {
+			if !unicode.IsLetter(r) && r != '_' && r != '$' {
+				return false
+			}
+		} else if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' && r != '$' {
+			return false
+		}
+		i += size
+	}
+	return true
 }

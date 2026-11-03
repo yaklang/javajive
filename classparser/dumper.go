@@ -84,11 +84,15 @@ type ClassObjectDumper struct {
 	nativeCaptureTypes                    map[string]types.JavaType
 	nativeOuterContext                    *class_context.ClassContext
 
-	options       DecompileOptions
-	report        *DecompileResult
-	rewriteSeen   map[string]bool
-	Work          *workbudget.Budget
-	diagTruncated bool
+	options DecompileOptions
+	report  *DecompileResult
+	// Survives releaseClassDumpScratch. Completion hooks run after DumpClass
+	// returns, when the scratch maps are already gone.
+	recordReconstructionOK  bool
+	patternReconstructionOK bool
+	rewriteSeen             map[string]bool
+	Work                    *workbudget.Budget
+	diagTruncated           bool
 	// Set by actual degraded output, never by scanning user literals/comments.
 	sourceDegraded         bool
 	overloadFamilyUnproven bool
@@ -157,8 +161,29 @@ type ClassObjectDumper struct {
 	// DISJOINT scopes (safe to share names). Top-level lambdas (depth 1) keep `l<i>`, so the common
 	// case is byte-for-byte unchanged. See DumpMethodWithInitialId. Kill-switch:
 	// JDEC_LAMBDA_PARAM_SCOPE_OFF=1 restores the flat `l<i>` naming.
-	lambdaDepth                    int
-	fieldDefaultValue              map[string]string
+	lambdaDepth       int
+	fieldDefaultValue map[string]string
+	// enumConstantSourceName maps a bytecode ACC_ENUM field to the distinct
+	// denotable Enum name string. Empty means the field name is the constant.
+	enumConstantSourceName map[string]string
+	// enumSyntheticBackingField is the values() array proved by the enum
+	// protocol. Source regenerates it as $VALUES, so the original spelling is
+	// not emitted.
+	enumSyntheticBackingField string
+	// descriptorSourceProjection renders a flattened class with missing lexical
+	// generic metadata from its original physical descriptors, retaining bridges
+	// which a raw supertype cannot regenerate from generic source.
+	descriptorSourceProjection bool
+	// renderEnumAsClass keeps an ACC_ENUM type's fields and methods when its
+	// constant headers are not the javac new/invokespecial protocol. The enum
+	// keyword is dropped so the original bodies can be parsed as a class.
+	renderEnumAsClass bool
+	// enumProvedConstantBodies maps a bytecode constant field to the renamed
+	// class that holds its body. enumMarkerDescriptors are the synthetic
+	// access bridges those bodies call; source regenerates both.
+	enumProvedConstantBodies       map[string]string
+	enumConstantBodyMarker         string
+	enumMarkerDescriptors          map[string]bool
 	interfaceInitializerHelpers    []*dumpedMethods
 	interfaceLambdaInitializer     *interfaceLambdaInitializerReceipt
 	constructorBoundaryHelpers     []*dumpedMethods
@@ -452,40 +477,30 @@ func extractDescriptorClassNames(s string) []string {
 	return out
 }
 
-func (c *ClassObjectDumper) computeSamePkgFQNames() map[string]bool {
-	if c.getenv("JDEC_SAMEPKG_FQ_OFF") != "" {
-		return nil
-	}
+// forEachReferencedTypeName visits every referenced type of this class. (1)
+// CONSTANT_Class entries (new/checkcast/instanceof/method+field owners),
+// stripping any array descriptor prefix. (2) EVERY Utf8 entry: method/field
+// descriptors and generic Signatures embed referenced types as
+// `L<binary-name>;` (or `L<binary-name><...>` in a signature), and a
+// same-package type used ONLY as a method return/parameter (e.g. the return
+// type of an inherited or cross-class method) appears there but NOT as a
+// CONSTANT_Class -- the fastjson2 FieldWriter clash is exactly this shape.
+// Scanning both is a superset; over-inclusion only ever FQ-qualifies a
+// same-package name that also genuinely occurs in another package, which is
+// always legal Java. (3) A zero catch type supplies Throwable even when no CP
+// class references it. Nested types keep their `$` (binary) spelling.
+func (c *ClassObjectDumper) forEachReferencedTypeName(visit func(binary string)) {
 	if c.obj == nil || c.obj.ConstantPoolManager == nil {
-		return nil
+		return
 	}
-	pkgsBySimple := map[string]map[string]struct{}{}
 	record := func(binary string) {
 		// binary is a slash-separated internal name (no leading L / trailing ;), possibly nested
 		// (Outer$Inner). It must carry a package ('/') for a cross-package clash to be possible.
 		if binary == "" || !strings.Contains(binary, "/") {
 			return
 		}
-		dotted := strings.ReplaceAll(binary, "/", ".")
-		pkg, simple := class_context.SplitPackageClassName(dotted)
-		if simple == "" {
-			return
-		}
-		simple = class_context.SafeIdentifier(simple)
-		m := pkgsBySimple[simple]
-		if m == nil {
-			m = map[string]struct{}{}
-			pkgsBySimple[simple] = m
-		}
-		m[pkg] = struct{}{}
+		visit(binary)
 	}
-	// (1) CONSTANT_Class entries (new/checkcast/instanceof/method+field owners), stripping any array
-	// descriptor prefix. (2) EVERY Utf8 entry: method/field descriptors and generic Signatures embed
-	// referenced types as `L<binary-name>;` (or `L<binary-name><...>` in a signature), and a
-	// same-package type used ONLY as a method return/parameter (e.g. the return type of an inherited
-	// or cross-class method) appears there but NOT as a CONSTANT_Class -- the fastjson2 FieldWriter
-	// clash is exactly this shape. Scanning both is a superset; over-inclusion only ever FQ-qualifies a
-	// same-package name that also genuinely occurs in another package, which is always legal Java.
 	for _, ci := range c.obj.ConstantPool {
 		switch e := ci.(type) {
 		case *ConstantClassInfo:
@@ -510,7 +525,6 @@ func (c *ClassObjectDumper) computeSamePkgFQNames() map[string]bool {
 			}
 		}
 	}
-	// A zero catch type supplies Throwable even when no CP class references it.
 	for _, method := range c.obj.Methods {
 		for _, attribute := range method.Attributes {
 			if code, ok := attribute.(*CodeAttribute); ok && code != nil {
@@ -522,6 +536,73 @@ func (c *ClassObjectDumper) computeSamePkgFQNames() map[string]bool {
 			}
 		}
 	}
+}
+
+// computeTypeRefsBySimple returns every referenced binary name per simple type
+// name, for simple names with more than one owner. class_context uses it to
+// pick which owner must take the single-type import when several referenced
+// types share one simple name and one of them cannot be spelled fully
+// qualified. Constant-pool based, so body render order cannot change it.
+// Kill-switch: JDEC_CROSSPKG_IMPORT_OWNER_OFF=1.
+func (c *ClassObjectDumper) computeTypeRefsBySimple() map[string][]string {
+	if c.getenv("JDEC_CROSSPKG_IMPORT_OWNER_OFF") != "" {
+		return nil
+	}
+	bySimple := map[string]map[string]struct{}{}
+	c.forEachReferencedTypeName(func(binary string) {
+		dotted := strings.ReplaceAll(binary, "/", ".")
+		_, simple := class_context.SplitPackageClassName(dotted)
+		if simple == "" {
+			return
+		}
+		simple = class_context.SafeIdentifier(simple)
+		set := bySimple[simple]
+		if set == nil {
+			set = map[string]struct{}{}
+			bySimple[simple] = set
+		}
+		set[binary] = struct{}{}
+	})
+	out := map[string][]string{}
+	for simple, set := range bySimple {
+		if len(set) < 2 {
+			continue
+		}
+		names := make([]string, 0, len(set))
+		for binary := range set {
+			names = append(names, binary)
+		}
+		sort.Strings(names)
+		out[simple] = names
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (c *ClassObjectDumper) computeSamePkgFQNames() map[string]bool {
+	if c.getenv("JDEC_SAMEPKG_FQ_OFF") != "" {
+		return nil
+	}
+	if c.obj == nil || c.obj.ConstantPoolManager == nil {
+		return nil
+	}
+	pkgsBySimple := map[string]map[string]struct{}{}
+	c.forEachReferencedTypeName(func(binary string) {
+		dotted := strings.ReplaceAll(binary, "/", ".")
+		pkg, simple := class_context.SplitPackageClassName(dotted)
+		if simple == "" {
+			return
+		}
+		simple = class_context.SafeIdentifier(simple)
+		m := pkgsBySimple[simple]
+		if m == nil {
+			m = map[string]struct{}{}
+			pkgsBySimple[simple] = m
+		}
+		m[pkg] = struct{}{}
+	})
 	out := map[string]bool{}
 	for simple, pkgs := range pkgsBySimple {
 		_, hasOwn := pkgs[c.PackageName]
@@ -551,10 +632,53 @@ func (c *ClassObjectDumper) computeSamePkgFQNames() map[string]bool {
 	return out
 }
 
-func (c *ClassObjectDumper) DumpClass() (string, error) {
+func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
+	// Type() asks for JDEC_* on every call. An unbound dump used os.Getenv
+	// and the process env lock serialized every decompile worker. Copy the
+	// environment once for this class. A caller that already bound a snapshot
+	// keeps it; EnterLive below is only for that nested case.
+	if c != nil && c.options.EnvSnapshot == nil {
+		if _, bound := jdecenv.Current(); !bound {
+			snap := jdecenv.CaptureProcess()
+			c.options.EnvSnapshot = snap
+			defer func() { c.options.EnvSnapshot = nil }()
+			_ = jdecenv.Run(snap, func() error {
+				rendered, dumpError = c.DumpClass()
+				return nil
+			})
+			return rendered, dumpError
+		}
+	}
+	if projected := c.descriptorProjectionWithoutEnclosingMethod(); projected != nil {
+		original := c.obj
+		originalProjection := c.descriptorSourceProjection
+		c.obj, c.descriptorSourceProjection = projected, true
+		defer func() {
+			c.obj, c.descriptorSourceProjection = original, originalProjection
+			if dumpError == nil {
+				rendered = "// Generic Signature projection omitted: EnclosingMethod is absent; original executable descriptors and Code are retained.\n" + rendered
+			}
+		}()
+	}
 	// The omitted profile is the public modern-javac alias. Legacy Dump and
 	// archive callers must enter the same proof/emission path as options APIs.
 	c.options.SourceCompiler = c.options.SourceCompiler.effective()
+	if c != nil && c.obj != nil {
+		obj := c.obj
+		defer func() {
+			if v, ok := recordWorkByObj.Load(obj); ok {
+				w := v.(*recordWork)
+				c.recordReconstructionOK = w.complete
+				if dumpError == nil && rendered != "" && w.layout != nil {
+					rendered = sanitizeRecordSource(rendered, w)
+				}
+			}
+			if v, ok := patternWorkByObj.Load(obj); ok {
+				c.patternReconstructionOK = v.(*patternWork).complete
+			}
+			releaseClassDumpScratch(obj)
+		}()
+	}
 	if c.options.EnvSnapshot == nil {
 		// Nested legacy Dump (Dump/Decompile inside DecompileWithOptions) must
 		// push a live-env sentinel and restore the outer snapshot. A top-level
@@ -600,10 +724,28 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	if isEnum {
 		initializations, err := c.nativeEnumConstantInitializations()
 		if err != nil {
+			// Groovy and other non-javac enums assign constants through a runtime
+			// call, not new+invokespecial. Refusing drops the whole class. When the
+			// caller asked to keep unproved source, render the original members as
+			// a class that extends Enum instead of substituting javac's protocol.
+			if !c.options.RetainUnprovedSource || isRequestWorkError(err) {
+				return "", err
+			}
+			c.renderEnumAsClass = true
+			isEnum = false
+			nonClassKeyword = false
+		} else if err := c.nativeEnumBackingArrayProtocol(initializations); err != nil {
 			return "", err
-		}
-		if err := c.nativeEnumBackingArrayProtocol(initializations); err != nil {
-			return "", err
+		} else {
+			c.enumConstantSourceName = nil
+			for field, plan := range initializations {
+				if plan.sourceName != "" && plan.sourceName != field {
+					if c.enumConstantSourceName == nil {
+						c.enumConstantSourceName = map[string]string{}
+					}
+					c.enumConstantSourceName[field] = plan.sourceName
+				}
+			}
 		}
 	}
 
@@ -611,8 +753,8 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	//	return "", utils.Error("accessFlagsVerbose is empty")
 	//}
 	accessFlags := accessFlagsToCode
-	if syntheticEnumSubclass {
-		// Drop the `enum` keyword so the synthetic subclass renders as a normal class.
+	if syntheticEnumSubclass || c.renderEnumAsClass {
+		// Drop the `enum` keyword so the type renders as a normal class.
 		accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "enum", ""))
 	}
 	name := c.obj.GetClassName()
@@ -756,12 +898,13 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		c.ClassName = packageName + "." + identityName
 	}
 	funcCtx := &class_context.ClassContext{
-		Env:                 c.getenv,
-		Work:                c.Work,
-		ClassName:           c.ClassName,
-		SupperClassName:     supperClassName,
-		PackageName:         c.PackageName,
-		StaticMethodImports: class_context.NewStaticMethodImports(),
+		Env:                  c.getenv,
+		Work:                 c.Work,
+		ClassName:            c.ClassName,
+		SupperClassName:      supperClassName,
+		PackageName:          c.PackageName,
+		StaticMethodImports:  class_context.NewStaticMethodImports(),
+		RetainUnprovedSource: c.options.RetainUnprovedSource,
 	}
 	if outer := c.nativeOuterContext; outer != nil {
 		funcCtx.StaticMethodImports = outer.StaticMethodImports
@@ -818,6 +961,15 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			funcCtx.SamePkgFQNames[name] = true
 		}
 	}
+	// Precompute every simple type name with more than one referenced owner, so
+	// ClassContext can decide which owner must take the single-type import when
+	// one of them cannot be spelled fully qualified. Constant-pool based, so the
+	// decision cannot depend on body render order. Kill-switch:
+	// JDEC_CROSSPKG_IMPORT_OWNER_OFF=1.
+	funcCtx.TypeRefsBySimple = c.computeTypeRefsBySimple()
+	// The backing-array protocol proved this enum's compiler array field. Source
+	// regenerates it, so its read-only uses render through the clone factory.
+	funcCtx.EnumSyntheticBackingField = c.enumSyntheticBackingField
 	if err := c.consultResolverForCancel(); err != nil {
 		return "", err
 	}
@@ -1605,7 +1757,14 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			}
 			var enumPackets []enumLambdaConstantPacket
 			for idx, enumSimple := range enumFields {
-				constStr := enumSimple.annotations + enumSimple.fieldName
+				spelling := enumSimple.fieldName
+				ann := enumSimple.annotations
+				if src := c.enumConstantSourceName[enumSimple.fieldName]; src != "" {
+					// The hidden name is the constant. Annotations stay on the
+					// bytecode field, which is emitted as the alias below.
+					spelling, ann = src, ""
+				}
+				constStr := ann + spelling
 				if args := c.enumConstantArgs(enumSimple.fieldName); args != "" {
 					constStr += "(" + args + ")"
 				}
@@ -1632,6 +1791,21 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			}
 			if !c.bindFlatEnumPublicationPackets(enumPackets) {
 				return ""
+			}
+			for _, enumSimple := range enumFields {
+				src := c.enumConstantSourceName[enumSimple.fieldName]
+				if src == "" {
+					continue
+				}
+				attrsB.WriteString("\t")
+				attrsB.WriteString(enumSimple.annotations)
+				attrsB.WriteString("public static final ")
+				attrsB.WriteString(className)
+				attrsB.WriteString(" ")
+				attrsB.WriteString(enumSimple.fieldName)
+				attrsB.WriteString(" = ")
+				attrsB.WriteString(src)
+				attrsB.WriteString(";\n")
 			}
 			if isEnum && len(enumFields) == 0 && (len(ordinaryFields) > 0 || len(methods) > 0) {
 				// Java requires a separator before enum body declarations when the constant list is empty:
@@ -2054,7 +2228,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	full = c.sourceRewrite("fixEnumNoArgCtorThisAfterLocals", "class_source", full, fixEnumNoArgCtorThisAfterLocals)
 	full = c.sourceRewrite("fixCtorNPECheckBeforeThis", "class_source", full, fixCtorNPECheckBeforeThis)
 	full = c.sourceRewrite("fixCtorDelegationArgumentSpills", "class_source", full, fixCtorDelegationArgumentSpills)
-	full = c.sourceRewrite("fixEnumClinitIllegalNew", "class_source", full, fixEnumClinitIllegalNew)
+	backingField := c.enumSyntheticBackingField
+	full = c.sourceRewrite("fixEnumClinitIllegalNew", "class_source", full, func(source string) string {
+		return stripEnumBackingAssignment(fixEnumClinitIllegalNew(source), backingField)
+	})
 	full = c.sourceRewrite("fixBareNestedImports", "class_source", full, fixBareNestedImports)
 	full = c.sourceRewrite("fixHardjarShapes", "class_source", full, fixHardjarShapes)
 	// boolean local used as `*`/`+` operand. Kill-switch: JDEC_BOOL_ARITH_OPERAND_OFF=1.
@@ -2262,7 +2439,11 @@ func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
 		// The spelling alone is legal for a user field. Only the original
 		// generated self-array has the compiler's backing-field identity.
 		originalDescriptor, _ := sourceBridgeUTF8(c.obj, field.DescriptorIndex)
-		if genuineEnum && name == "$VALUES" && field.AccessFlags == 0x101a && originalDescriptor == "[L"+c.obj.GetClassName()+";" {
+		backingSpelling := c.enumSyntheticBackingField
+		if backingSpelling == "" {
+			backingSpelling = "$VALUES"
+		}
+		if genuineEnum && name == backingSpelling && field.AccessFlags == 0x101a && originalDescriptor == "[L"+c.obj.GetClassName()+";" {
 			continue
 		}
 		if c.recordSkipFields[name] {
@@ -4141,7 +4322,14 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 		var parameterNamesKnown bool
 		originalParameterNames, parameterNamesKnown = c.originalOrdinaryMethodParameterNames(method, descriptor)
 		if !parameterNamesKnown {
-			return nil, fmt.Errorf("unproved original ordinary parameter names")
+			if c.Work != nil && c.Work.Check() != nil {
+				return nil, c.Work.Check()
+			}
+			// Analysis output keeps the member. Slot names are not a source certificate.
+			if !c.options.RetainUnprovedSource {
+				return nil, fmt.Errorf("unproved original ordinary parameter names")
+			}
+			originalParameterNames = nil
 		}
 	}
 	if !isLambda {
@@ -4370,7 +4558,13 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 				var namesBound bool
 				parameterNameBinding, namesBound = c.bindOrdinaryMethodParameterNames(method, descriptor, originalParameterNames, samParams)
 				if !namesBound {
-					return nil, fmt.Errorf("unproved original parameter entry identities")
+					if c.Work != nil && c.Work.Check() != nil {
+						return nil, c.Work.Check()
+					}
+					// The retain path already dropped the unproved table. Slot names stay.
+					if !c.options.RetainUnprovedSource || originalParameterNames != nil {
+						return nil, fmt.Errorf("unproved original parameter entry identities")
+					}
 				}
 			}
 			// A lambda body is emitted as an arrow expression `(Type p0, Type p1) -> ...`
@@ -4937,15 +5131,16 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 					getBody := func(caseItems []*statements.CaseItem) string {
 						var res []string
 						for _, st := range caseItems {
+							body := statements.SwitchCaseSource(st.Body, statementListToString(st.Body))
 							if st.IsDefault {
-								res = append(res, c.GetTabString()+fmt.Sprintf("default:\n%s", statementListToString(st.Body)))
+								res = append(res, c.GetTabString()+fmt.Sprintf("default:\n%s", body))
 								continue
 							}
 							label := fmt.Sprintf("%d", st.IntValue)
 							if projected {
 								label = names[st.IntValue]
 							}
-							res = append(res, c.GetTabString()+fmt.Sprintf("case %s:\n%s", label, statementListToString(st.Body)))
+							res = append(res, c.GetTabString()+fmt.Sprintf("case %s:\n%s", label, body))
 						}
 						return strings.Join(res, "\n")
 					}
@@ -5484,8 +5679,10 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			writeBlock,
 		}
 	case "<clinit>":
+		// JVM access flags on <clinit> are not Java modifiers. Emitting them
+		// produced `private static {`, which is not a static initializer.
 		writerSeq = []func(io.Writer){
-			writeAccessFlags,
+			func(buffer io.Writer) { methodSourceBuffer.WriteString("static ") },
 			writeBlock,
 		}
 	default:
@@ -7760,6 +7957,20 @@ func fixMissingReturn(body string) string {
 	return strings.Join(lines, "\n")
 }
 
+// isMovableCheckedCall reports a statement that is itself a checked reflection
+// call. Nested if/catch headers can mention getMethod in a condition; those
+// lines are not calls and must stay where they are.
+func isMovableCheckedCall(line string, re *regexp.Regexp) bool {
+	trim := strings.TrimSpace(line)
+	if trim == "" || strings.HasPrefix(trim, "if ") || strings.HasPrefix(trim, "if(") ||
+		strings.HasPrefix(trim, "}") || strings.HasPrefix(trim, "catch") || strings.HasPrefix(trim, "try") ||
+		strings.HasPrefix(trim, "else") || strings.HasPrefix(trim, "for") || strings.HasPrefix(trim, "while") ||
+		strings.HasPrefix(trim, "return") || strings.HasPrefix(trim, "throw") || strings.HasPrefix(trim, "//") {
+		return false
+	}
+	return re.MatchString(trim)
+}
+
 // fixTryCatchExceptionPlacement detects the pattern where exception-throwing calls (getDeclaredConstructor,
 // newInstance, etc.) are rendered OUTSIDE a try block, while the catch clause lists those exception types.
 // It moves the calls into the inner try body so javac sees them as caught.
@@ -7803,25 +8014,54 @@ func fixTryCatchExceptionPlacement(body string) string {
 				break
 			}
 		}
-		// Collect the if-body lines (at ifIndent + 1 tab).
-		bodyIndent := ifIndent + "\t"
+		// The if header already opened a brace. Count until it closes, so a
+		// same-line `}else{` ends the then-body instead of being treated as more
+		// body (that used to delete the header of a nested if and leave its else
+		// attached to catch).
+		depth := 0
+		for _, ch := range lnClean {
+			switch ch {
+			case '{':
+				depth++
+			case '}':
+				depth--
+			}
+		}
+		if depth <= 0 {
+			continue
+		}
 		var ifBodyLines []int
 		closingBrace := -1
-		for j := i + 1; j < len(lines) && j < i+20; j++ {
+		for j := i + 1; j < len(lines) && j < i+80; j++ {
 			jl := strings.TrimRight(lines[j], "\r")
-			if strings.TrimSpace(jl) == "}" && strings.HasPrefix(jl, ifIndent) && !strings.HasPrefix(jl, bodyIndent) {
-				closingBrace = j
+			ifBodyLines = append(ifBodyLines, j)
+			for _, ch := range jl {
+				switch ch {
+				case '{':
+					depth++
+				case '}':
+					depth--
+					if depth == 0 {
+						closingBrace = j
+					}
+				}
+				if closingBrace >= 0 {
+					break
+				}
+			}
+			if closingBrace >= 0 {
+				ifBodyLines = ifBodyLines[:len(ifBodyLines)-1]
 				break
 			}
-			ifBodyLines = append(ifBodyLines, j)
 		}
 		if closingBrace < 0 || len(ifBodyLines) == 0 {
 			continue
 		}
-		// Check if any if-body line has a throwing call.
+		// Check if any if-body line has a throwing call. A nested if condition
+		// that merely mentions getMethod is not a call to move.
 		hasThrowingCall := false
 		for _, idx := range ifBodyLines {
-			if throwingCallRe.MatchString(lines[idx]) {
+			if isMovableCheckedCall(lines[idx], throwingCallRe) {
 				hasThrowingCall = true
 				break
 			}
@@ -7863,7 +8103,7 @@ func fixTryCatchExceptionPlacement(body string) string {
 		var newIfBody []string
 		for _, idx := range ifBodyLines {
 			jl := strings.TrimRight(lines[idx], "\r")
-			if throwingCallRe.MatchString(jl) {
+			if isMovableCheckedCall(jl, throwingCallRe) {
 				// Re-indent to innerTryIndent + 1 tab.
 				trimmed := strings.TrimLeft(jl, "\t")
 				throwingLines = append(throwingLines, innerTryIndent+"\t"+trimmed)
@@ -13178,6 +13418,9 @@ func (c *ClassObjectDumper) dumpStubMethod(method *MemberInfo, name, descriptor,
 // isGenuineEnum reports whether this class is a real `enum` declaration (ACC_ENUM and a
 // direct java.lang.Enum supertype), as opposed to a synthetic enum-constant subclass.
 func (c *ClassObjectDumper) isGenuineEnum() bool {
+	if c.renderEnumAsClass {
+		return false
+	}
 	if !slices.Contains(c.obj.AccessFlagsVerbose, "enum") {
 		return false
 	}
@@ -13448,6 +13691,11 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		}
 		if genuineEnum {
 			regenerated, err := nativeEnumRegeneratedMethod(c.obj, method, name, descriptor, c.Work)
+			if err != nil && c.options.RetainUnprovedSource && !isRequestWorkError(err) && name == "valueOf" && strings.Contains(err.Error(), "does not implement the source compiler protocol") {
+				// Keep the handwritten lookup. Deleting it would leave javac's implicit
+				// factory, which is a different method. The explicit body is real source.
+				regenerated, err = false, nil
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -13480,22 +13728,27 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		// plus a synthetic `Object build()`). Suppress them so the output mirrors the original
 		// source. CFR and Vineflower suppress bridge methods as well.
 		if isBridgeMethod(method.AccessFlags) {
-			if inherited := c.inheritedBridgeSource(method); inherited != nil {
-				// Several wide descriptors can share the same narrow super
-				// target. They need one source override; javac regenerates the
-				// complete bridge group from its inherited declarations.
-				duplicate := false
-				for _, emitted := range result {
-					if emitted.inheritedBridge != nil && emitted.methodName == inherited.methodName && emitted.descriptor == inherited.descriptor && emitted.code == inherited.code {
-						duplicate = true
-						break
+			if c.keepDescriptorProjectionBridge(method) {
+				// The physical bridge is required by the descriptor projection;
+				// fall through and dump it below.
+			} else {
+				if inherited := c.inheritedBridgeSource(method); inherited != nil {
+					// Several wide descriptors can share the same narrow super
+					// target. They need one source override; javac regenerates the
+					// complete bridge group from its inherited declarations.
+					duplicate := false
+					for _, emitted := range result {
+						if emitted.inheritedBridge != nil && emitted.methodName == inherited.methodName && emitted.descriptor == inherited.descriptor && emitted.code == inherited.code {
+							duplicate = true
+							break
+						}
+					}
+					if !duplicate {
+						result = append(result, inherited)
 					}
 				}
-				if !duplicate {
-					result = append(result, inherited)
-				}
+				continue
 			}
-			continue
 		}
 		// if name != "isSymlink" {
 		// 	continue
@@ -13571,7 +13824,7 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 			// Graceful degradation: an un-decompilable method body must not fail the whole
 			// class. Emit a stub method (correct signature, throwing body) so the rest of
 			// the class still decompiles.
-			log.Warnf("decompile method %s%s failed, emitting stub: %v", name, descriptor, err)
+			log.Warnf("decompile method %s%s failed, emitting stub: %v class=%s", name, descriptor, err, c.obj.GetClassName())
 			stub := c.dumpStubMethod(method, name, descriptor, err.Error())
 			if stub == nil {
 				// even the signature could not be derived; drop the method to keep output valid

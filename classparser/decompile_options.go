@@ -100,6 +100,13 @@ type DecompileOptions struct {
 	// executable lowering authority. Copied lexical child options do not match.
 	reconstructionPhysicalRoot *ClassObject
 
+	// RetainUnprovedSource keeps the original member when a javac source
+	// certificate fails but the bytecode still has a body or a unique target.
+	// Analyzers that only parse the text use it. It does not make the text
+	// recompilable and it does not replace a refused body with a compiler factory.
+	// The default remains an explicit refusal.
+	RetainUnprovedSource bool
+
 	// EnableShadowIR builds a read-only MethodIR snapshot after SemanticCFG.
 	// The old printer remains the default source path. Default false.
 	EnableShadowIR bool

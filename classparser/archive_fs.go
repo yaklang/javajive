@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/yaklang/javajive/internal/filesys"
 	fi "github.com/yaklang/javajive/internal/filesys/filesys_interface"
@@ -116,9 +117,9 @@ func MaybeWrapExpandedArchiveFS(fs fi.FileSystem, recursiveParse bool) fi.FileSy
 		if info.IsDir() {
 			return nil
 		}
-		if isArchiveFile(path) {
+		if isArchiveFile(path) || strings.EqualFold(filepath.Ext(path), ".class") {
 			hasArchive = true
-			return filepath.SkipAll
+			return filesys.SkipAll
 		}
 		return nil
 	}))
@@ -127,6 +128,19 @@ func MaybeWrapExpandedArchiveFS(fs fi.FileSystem, recursiveParse bool) fi.FileSy
 	}
 
 	return NewExpandedZipFSWithOptions(fs, extractZipFSFromFS(fs), recursiveParse)
+}
+
+// SetRetainUnprovedSource keeps original members when a javac source certificate
+// fails. Jar filesystems opened afterwards inherit it. The default refuses.
+func (e *ExpandedZipFS) SetRetainUnprovedSource(enabled bool) {
+	if e != nil {
+		e.retainUnprovedSource = enabled
+	}
+}
+
+// RetainsUnprovedSource reports the analysis-source policy for this tree.
+func (e *ExpandedZipFS) RetainsUnprovedSource() bool {
+	return e != nil && e.retainUnprovedSource
 }
 
 func extractZipFSFromFS(fs fi.FileSystem) *filesys.ZipFS {

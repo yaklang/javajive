@@ -312,6 +312,8 @@ iso 把每个扁平单元单独编译, 以下失败是方法学产物, 在 tree(
 | `JDEC_NO_ENUM_SWITCH_FOLD` | enum-switch `$SwitchMap` 折回 |
 | `JDEC_NO_ENUM_FOLD` | enum 常量体子类内联 |
 | `JDEC_GENERIC_INFER_OFF` | JDK 泛型方法返回实例化 |
+| `JDEC_CROSSPKG_IMPORT_OWNER_OFF` | 跨包同名简单类型 owner 索引(`computeTypeRefsBySimple`): 按常量池统计每个简单名的全部 owner; 简单名冲突且某 owner 无法全限定(包根被类型遮蔽, JLS 6.5.5.1)时, 用单类型 import 绑定该 owner。置位后不建索引, 静态目标回到修复前的拒绝。承重 `TestCrossPackageImportOwnerIsLoadBearing`(ON 产出 `import cn.mailtech.utils.g;`, OFF 回到 `decompile dump failed`) |
+| `JDEC_JSR_WIDE_INLINE_OFF` | 恢复 jsr 内联前的保守退出: 含 `jsr_w`/`goto_w`/`tableswitch`/`lookupswitch` 的方法不内联, 保留原字节码并退化为既有 stub。默认开启宽目标支持(4 字节相对偏移 + switch 绝对目标重映射)。承重 `TestJSRWideInlineIsLoadBearing`(OFF 时 jsr 残存, 窄 `jsr` 仍内联) |
 
 ### 六典型规模 jar dump 重构
 | 开关 | 作用域 |
@@ -342,3 +344,70 @@ iso 把每个扁平单元单独编译, 以下失败是方法学产物, 在 tree(
 3. 配承重测试(ON/OFF 断言)+ 回归种子(`testdata/regression/*.class` + `.golden`)。
 4. 全量 `go test ./...` 全绿; 确定性测试(逐类 SHA-256)不得变红; 基准 `syntax=0` 硬断言不得触发。
 5. 安全契约: 永不输出不可解析的 Java; 宁可带标记 stub 也不输出"看似对实则错"; 不 panic。
+
+---
+
+## 6. Coremail 2B 轮次登记 (2026-10-22 ~ 2026-10-30)
+
+分支 `fix/decompiler/coremail-stub-recovery`。逐条见证、规格修正与遗留失败见
+[`docs/source-preparation-2b.md`](../docs/source-preparation-2b.md)。
+
+### 6.1 全量口径 (coremail 全量 41765 个输入)
+
+| 时间点 | 输入 | 拒绝/空单元 | stub 方法 | syntax 失败 |
+|---|---:|---:|---:|---:|
+| 2026-10-22 基线 | 41765 | 249 | 1634 | 0 |
+| 2026-10-29 分支 `69bac5b` | 41765 | 0 | 672 | 0 |
+
+证据: `/mnt/data/scan-outputs/coremail-full-20261029/verification.json`
+(`files=41765`, `checked=41765`, `materialization_errors=0`, `decompiler_refusals=0`,
+`empty_units=0`, `syntax_failures=0`, `stub_methods=672`, `stub_files=526`, `frontend_failures=0`)。
+该轮进程退出码为 1, stub 未清零, 故**不是**全项目验收。
+
+### 6.2 本轮根因 / 修复点 / 见证
+
+| ID | 根因 | 修复点 | 见证 |
+|---|---|---|---|
+| JSR-01 | 含 `tableswitch`/`lookupswitch`/`goto_w`/`jsr_w` 的方法直接放弃 jsr 内联 | 宽分支按 4 字节相对偏移解析; switch 绝对目标在偏移重写后重映射。开关 `JDEC_JSR_WIDE_INLINE_OFF` | `TestInlineJSRAcrossSwitchAndWideBranches`, `TestJSRWideInlineIsLoadBearing`, `TestBranchAbsoluteTargetKeepsWideOffset` |
+| ARCH-01 | 同一部署的兄弟 JAR 声明字节不可见; 不同 WAR 不应共享声明命名空间 | 按部署作用域解析声明; 缺失兄弟仍拒绝 | `TestExpandedWarSiblingDeclarations` |
+| ARCH-02 | 目录型代码源的 `.class` 读回原始字节, 不再反编译 | `ExpandedZipFS` 目录分支重新走 `DumpClass` | `TestExpandedDirectoryClassReadDecompiles`(无 JDK 也运行) |
+| MEM-01 | dumper/record/pattern 全局 scratch 在 `DumpClass` 后残留调用元数据 | 每个类快照并释放 scratch | `TestExpandedLooseClassDecompiles`(scratch 计数), `ReleasePreparationCaches` |
+| PKG-01 | 合成 package-info 在注解发出前返回 | 发布前比对注解值图 | `TestPackageInfoKeepsRuntimeAnnotations` |
+| NAME-01 | 同包类型被值遮蔽的包根导致非法 static import 回退 | 用已证明的原声明生成 cast 调用 | `TestSamePackageStaticCallSurvivesPackageNameShadow` |
+| NAME-02 | 扁平兄弟声明被渲染成二进制拼写 `a.ci$a.a(x)` | 源名等于二进制点号名时走同包简称 | `TestFlatSiblingOwnerUsesSpellableSamePackageSimpleName` |
+| NAME-03 | 跨包同名简单类型中, 无法全限定的 owner 未被单类型 import 绑定 | 常量池统计 owner, 冲突时让不可拼写者赢得简单名。开关 `JDEC_CROSSPKG_IMPORT_OWNER_OFF` | `TestCrossPackageSimpleNameClashImportsUnnameableOwner`, `TestCrossPackageImportOwnerIsLoadBearing` |
+| ENUM-01 | 精确 `0x0009` 检查拒绝历史 `public static final` 枚举工厂 (`0x0019`) | 接受 `0x0019`; synchronized 仍拒绝 | `TestNativeEnumAcceptsFinalValuesFactory`, `TestLegacyFinalEnumFactoryRoundTrip`, `TestEnumFactoryRejectsSynchronizedProtocol` |
+| ENUM-02 | 混淆后 ACC_ENUM 字段名与 `Enum` 构造名不符, `$VALUES` 未拼出 | 以隐藏名作常量, 字节码字段作静态别名 | `TestHiddenEnumNameKeepsAliasAndName`, `TestHiddenEnumNameRejectsKeywordAndDuplicate` |
+| ENUM-03 | 常量体类被改名并删除 `InnerClasses`/`EnclosingMethod` | 用 Java 8 访问桥与 null-marker super 调用识别, 折叠回常量体 | `TestRenamedEnumConstantBody*` |
+| ENUM-04 | ECJ `values()` 数组拷贝形态未被接受 | 接受该拷贝; 非枚举子类仍拒绝 | `TestECJEnumValuesArrayCopyDecompiles` |
+| SYNTAX-01 | `case` 标签后直接声明局部变量 | 每个 case 包块(空 case 也包, 不影响贯穿) | `TestSwitchCaseDeclarationIsBlocked`, 种子 `SignatureAttribute.golden` |
+| SYNTAX-02 | multi-catch 被当成局部声明 | 不声明 union 类型 | `TestMultiCatchLocalAssignCollapses`, `TestECJMultiCatchLocalIsNotADeclaration` |
+| SYNTAX-03 | 前缀自增渲染成 `++(x)`, yaklang 前端拒绝 | 仅对标识符/成员链/下标链去括号 | `TestIncrementOperandDropsOnlyRedundantLvalueParens`, 种子 `Dfp.golden`, `JSONReaderUTF16.golden` |
+| CRASH-01 | 循环 `ReplaceVar` 与三元遍历无限递归 | 访问计数/深度上限/循环检测 | `TestReplaceVarCyclicTernaryTerminates`, `TestPolyFunctionalDefinitionCyclicTernaryTerminates` |
+| FALLBACK-01 | javac 源码证书失败时整类拒绝 | opt-in `RetainUnprovedSource`: 仅保留可解析成员; 默认路径仍拒绝 | `TestRetained*`, `TestRenamedEnumConstantBodyRejectsNonEnumSubclass` |
+| PERF-01 | `jdecenv` 每次 `Get` 用 `runtime.Stack` 取 goid; null 字面量用 `fmt.Sprint` 判断 | 校准一次 g 偏移后直接读; 指针比较 | `TestGoidFastMatchesStack`, `TestCaptureProcessSeesSetenv` |
+
+### 6.3 A/B kill-switch delta (2026-10-30 实跑)
+
+命令: `PROFILE_JAR=<jar> KILL_SWITCH=<switch> go test -run TestJarRecompileDelta -v -timeout 25m ./test/cross/`
+(JDK 21.0.13+9)。`delta(OFF-ON) = OFF 的 decErr - ON 的 decErr`。
+
+| 开关 | codec | gson | jsoup | snakeyaml | fastjson2 |
+|---|---:|---:|---:|---:|---:|
+| `JDEC_CROSSPKG_IMPORT_OWNER_OFF` | 0 (106 units) | 0 (183) | 0 (148) | 0 (231) | 0 (681) |
+| `JDEC_JSR_WIDE_INLINE_OFF` | 0 (106) | 0 (183) | 0 (148) | 0 (231) | 未运行 |
+
+ON 基准 decErr: codec 19, gson 9, jsoup 19, snakeyaml 7, fastjson2 236。
+两个开关的 delta 均为 0：目标形态（宽 jsr/跨包同名遮蔽）在这 4 个现代 jar 中不出现，
+所以它们既不治本也不回归；它们的作用只由 §6.2 的 javac 夹具见证。
+
+### 6.4 本轮未完成 / 未验证
+
+- 多数修复未配 `JDEC_*` kill-switch: 仅 JSR-01 与 NAME-03 有开关; 其余为窄条件判断、循环保护或 opt-in 选项。
+- `JDEC_CROSSPKG_IMPORT_OWNER_OFF` 在 465 个回归种子上无可观测差异; 唯一见证是 `javac` 夹具。
+- 旧证据目录已在 2026-10-29 清理中删除, 现行引用见 6.1 与 `docs/source-preparation-2b.md`。
+- `testdata/regression/nondeterministic_enum_structuring.class` 在基线 `origin/main` 与本分支都失败
+  (`original constant initialization is unproved: constant-specific declaration`), 因此
+  `TestDecompileSyntaxRegression` 本轮仍红; 见 `docs/source-preparation-2b.md` 的遗留失败段。
+- 全量 `go test ./classparser/` 在本机 28 分钟超时, 且需要 `javac8` 的对抗用例在只有 JDK 21 的
+  机器上失败 (`actual javac8 required`); 这是环境与基线问题, 不是本轮改动引入。

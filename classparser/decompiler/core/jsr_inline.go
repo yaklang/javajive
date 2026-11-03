@@ -4,6 +4,7 @@ import (
 	"os"
 
 	"github.com/yaklang/javajive/internal/log"
+	"github.com/yaklang/javajive/internal/omap"
 )
 
 func init() {
@@ -46,12 +47,23 @@ type jsrSubroutine struct {
 	local    int // the return-address local slot
 }
 
-// branchTarget records a branch instruction in the rewritten list whose 2-byte relative operand
-// must be recomputed once final offsets are assigned. target is the destination opcode pointer,
-// which must end up in the rewritten list.
+// branchTarget records a branch instruction in the rewritten list whose relative operand
+// (2 bytes for if*/goto, 4 bytes for goto_w/jsr_w) must be recomputed once final offsets are
+// assigned. target is the destination opcode pointer, which must end up in the rewritten list.
 type branchTarget struct {
 	op     *OpCode
 	target *OpCode
+}
+
+// switchFixup records a tableswitch/lookupswitch in the rewritten list. Switch case and default
+// targets are stored as ABSOLUTE bytecode offsets on the opcode (not in Data), so inlining must
+// remap each one to the new offset of its target opcode. Data keeps its original bytes: the
+// analysis reads the parsed fields below, and the operand length is unchanged, so the offset
+// space stays consistent.
+type switchFixup struct {
+	op            *OpCode
+	caseTargets   map[int]*OpCode
+	defaultTarget *OpCode
 }
 
 // inlineJSRSubroutines rewrites d.opCodes (and d.ExceptionTable) to remove jsr/ret when the
@@ -128,26 +140,35 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) bool {
 	}
 
 	// Bail on instruction forms whose offsets we cannot safely recompute in index space:
-	//   - jsr_w/goto_w use a 4-byte operand that ScanJmp reads with the 2-byte helper anyway.
-	//   - tableswitch/lookupswitch store ABSOLUTE targets in SwitchJmpCase, which re-offsetting
-	//     would invalidate.
-	for _, op := range ops {
-		switch op.Instr.OpCode {
-		case OP_JSR_W, OP_GOTO_W, OP_TABLESWITCH, OP_LOOKUPSWITCH:
-			bail("contains jsr_w/goto_w/switch")
-			return false
+	// tableswitch/lookupswitch are supported through switchFixup below (their targets live in
+	// parsed absolute-offset fields, which are remapped once the new offsets are known), and wide
+	// branches (goto_w/jsr_w) reuse the same fixup list as the 2-byte forms.
+	//
+	// JDEC_JSR_WIDE_INLINE_OFF=1 restores the pre-fix bail: methods that mix jsr with a switch or a
+	// wide branch keep the original bytecode and degrade to the existing stub.
+	if os.Getenv("JDEC_JSR_WIDE_INLINE_OFF") != "" {
+		for _, op := range ops {
+			switch op.Instr.OpCode {
+			case OP_JSR_W, OP_GOTO_W, OP_TABLESWITCH, OP_LOOKUPSWITCH:
+				bail("contains jsr_w/goto_w/switch (JDEC_JSR_WIDE_INLINE_OFF)")
+				return false
+			}
 		}
 	}
 
-	// origTarget resolves every 2-byte branch (if*/goto) to the opcode it jumps to, using the
-	// ORIGINAL offsets (still intact: nothing has been mutated yet).
+	// origTarget resolves every branch (if*/goto/goto_w/jsr/jsr_w) to the opcode it jumps to,
+	// using the ORIGINAL offsets (still intact: nothing has been mutated yet).
 	origTarget := make(map[*OpCode]*OpCode, n)
 	for _, op := range ops {
-		if !isTwoByteBranch(op.Instr.OpCode) && op.Instr.OpCode != OP_JSR {
+		if !isBranchOp(op.Instr.OpCode) {
 			continue
 		}
-		dst := op.CurrentOffset + Convert2bytesToInt(op.Data)
-		idx, ok := d.offsetToOpcodeIndex[dst]
+		dst, ok := branchAbsoluteTarget(op)
+		if !ok {
+			bail("branch operand truncated")
+			return false
+		}
+		idx, ok := d.offsetToOpcodeIndex[uint16(dst)]
 		if !ok || idx < 0 || idx >= n {
 			bail("branch target offset not resolvable")
 			return false
@@ -160,7 +181,7 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) bool {
 	subsByEntry := map[int]*jsrSubroutine{}
 	jsrSub := map[int]*jsrSubroutine{} // jsr opcode index -> its subroutine
 	for i, op := range ops {
-		if op.Instr.OpCode != OP_JSR {
+		if op.Instr.OpCode != OP_JSR && op.Instr.OpCode != OP_JSR_W {
 			continue
 		}
 		entry := origTarget[op]
@@ -270,6 +291,31 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) bool {
 	// are cloned per jsr call site. Nothing is mutated yet.
 	newOps := make([]*OpCode, 0, n)
 	branches := make([]branchTarget, 0, n)
+	switchJobs := make([]switchFixup, 0, 4)
+	resolveSwitch := func(op *OpCode) (*switchFixup, bool) {
+		job := &switchFixup{op: op, caseTargets: map[int]*OpCode{}}
+		if op.SwitchJmpCase != nil {
+			bad := false
+			op.SwitchJmpCase.ForEach(func(k int, target int32) bool {
+				idx, ok := d.offsetToOpcodeIndex[uint16(target)]
+				if !ok || idx < 0 || idx >= n {
+					bad = true
+					return false
+				}
+				job.caseTargets[k] = ops[idx]
+				return true
+			})
+			if bad {
+				return nil, false
+			}
+		}
+		idx, ok := d.offsetToOpcodeIndex[uint16(op.SwitchDefaultOffset)]
+		if !ok || idx < 0 || idx >= n {
+			return nil, false
+		}
+		job.defaultTarget = ops[idx]
+		return job, true
+	}
 	jsrFirstNew := map[uint16]*OpCode{} // original jsr offset -> first opcode emitted in its place
 	// excJobs: try/catch entries nested inside a finally, to be re-emitted (one per inline site)
 	// with PCs mapped through the call site's cloneMap once final offsets are assigned.
@@ -307,6 +353,17 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) bool {
 				if len(src.Data) > 0 {
 					c.Data = append([]byte(nil), src.Data...)
 				}
+				// A switch inside the body needs its own case map: each clone's targets are
+				// remapped to this call site's copy of the body.
+				if src.SwitchJmpCase != nil {
+					cases := omap.NewEmptyOrderedMap[int, int32]()
+					src.SwitchJmpCase.ForEach(func(k int, v int32) bool {
+						cases.Set(k, v)
+						return true
+					})
+					c.SwitchJmpCase = cases
+				}
+				c.SwitchDefaultOffset = src.SwitchDefaultOffset
 				cloneMap[src] = c
 				newOps = append(newOps, c)
 				if firstEmitted == nil {
@@ -329,7 +386,15 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) bool {
 			// cloneMap; exits to outside code keep the original (survivor) pointer.
 			for k := sub.entryIdx + 1; k <= sub.retIdx-1; k++ {
 				src := ops[k]
-				if !isTwoByteBranch(src.Instr.OpCode) {
+				if src.Instr.OpCode == OP_TABLESWITCH || src.Instr.OpCode == OP_LOOKUPSWITCH {
+					if job, ok := resolveSwitch(cloneMap[src]); ok {
+						switchJobs = append(switchJobs, *job)
+					} else {
+						bail("cloned switch target not resolvable")
+						return false
+					}
+				}
+				if !isBranchOp(src.Instr.OpCode) {
 					continue
 				}
 				tOld := origTarget[src]
@@ -348,30 +413,72 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) bool {
 		}
 		// Ordinary survivor.
 		newOps = append(newOps, op)
-		if isTwoByteBranch(op.Instr.OpCode) || op.Instr.OpCode == OP_JSR {
+		if op.Instr.OpCode == OP_TABLESWITCH || op.Instr.OpCode == OP_LOOKUPSWITCH {
+			if job, ok := resolveSwitch(op); ok {
+				switchJobs = append(switchJobs, *job)
+			} else {
+				bail("switch target not resolvable")
+				return false
+			}
+		}
+		if isBranchOp(op.Instr.OpCode) {
 			branches = append(branches, branchTarget{op: op, target: origTarget[op]})
 		}
 	}
 
-	// A surviving branch may target a jsr instruction directly (e.g. a loop back-edge whose head is
-	// the jsr). The jsr op is deleted, so redirect such targets to the first opcode emitted in its
-	// place (semantically: jump to "execute the finally, then continue"). jsrFirstNew is fully
-	// populated now that the build loop processed every jsr.
+	// Switch case/default targets follow the same rule as branch targets: a jsr site is gone, so
+	// a target on it resolves to the first opcode emitted in its place.
+	inNew := make(map[*OpCode]struct{}, len(newOps))
+	for _, op := range newOps {
+		inNew[op] = struct{}{}
+	}
+	redirectTarget := func(t *OpCode) (*OpCode, bool) {
+		if t == nil {
+			return nil, false
+		}
+		if t.Instr != nil && (t.Instr.OpCode == OP_JSR || t.Instr.OpCode == OP_JSR_W) {
+			if first, ok := jsrFirstNew[t.CurrentOffset]; ok {
+				return first, true
+			}
+			return nil, false
+		}
+		if _, ok := inNew[t]; !ok {
+			return nil, false
+		}
+		return t, true
+	}
 	for i := range branches {
-		if t := branches[i].target; t != nil && t.Instr != nil && t.Instr.OpCode == OP_JSR {
+		t := branches[i].target
+		if t == nil {
+			bail("unresolved branch target (nil)")
+			return false
+		}
+		if t.Instr != nil && (t.Instr.OpCode == OP_JSR || t.Instr.OpCode == OP_JSR_W) {
 			if first, ok := jsrFirstNew[t.CurrentOffset]; ok {
 				branches[i].target = first
 			}
 		}
 	}
+	for i := range switchJobs {
+		for k, t := range switchJobs[i].caseTargets {
+			redirected, ok := redirectTarget(t)
+			if !ok {
+				bail("switch case target not in rewritten list")
+				return false
+			}
+			switchJobs[i].caseTargets[k] = redirected
+		}
+		redirected, ok := redirectTarget(switchJobs[i].defaultTarget)
+		if !ok {
+			bail("switch default target not in rewritten list")
+			return false
+		}
+		switchJobs[i].defaultTarget = redirected
+	}
 
 	// Every branch target must resolve to an opcode that actually exists in the rewritten list
 	// (survivors reuse their pointer, clones are new pointers). Anything else (a target that fell
 	// inside a deleted body, or a survivor branch into a body) means the shape is not canonical.
-	inNew := make(map[*OpCode]struct{}, len(newOps))
-	for _, op := range newOps {
-		inNew[op] = struct{}{}
-	}
 	for _, b := range branches {
 		if b.target == nil {
 			bail("unresolved branch target (nil)")
@@ -443,6 +550,19 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) bool {
 
 	for _, b := range branches {
 		signedDelta := int(b.target.CurrentOffset) - int(b.op.CurrentOffset)
+		if isWideBranch(b.op.Instr.OpCode) {
+			// goto_w/jsr_w carry a signed 32-bit operand; the 16-bit IR offset space is
+			// already enforced by the codeLenNew check above.
+			if len(b.op.Data) != 4 {
+				b.op.Data = make([]byte, 4)
+			}
+			delta := uint32(int32(signedDelta))
+			b.op.Data[0] = byte(delta >> 24)
+			b.op.Data[1] = byte(delta >> 16)
+			b.op.Data[2] = byte(delta >> 8)
+			b.op.Data[3] = byte(delta)
+			continue
+		}
 		if signedDelta < -32768 || signedDelta > 32767 {
 			bail("expanded short branch exceeds signed 16-bit range")
 			return false
@@ -453,6 +573,23 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) bool {
 		}
 		b.op.Data[0] = byte(delta >> 8)
 		b.op.Data[1] = byte(delta)
+	}
+
+	// Remap switch case/default targets into the new offset space. Data keeps its original bytes:
+	// the operand length is unchanged, and the analysis reads SwitchJmpCase/SwitchDefaultOffset.
+	for i := range switchJobs {
+		job := &switchJobs[i]
+		if job.op.SwitchJmpCase != nil {
+			job.op.SwitchJmpCase.ForEach(func(k int, _ int32) bool {
+				if target, ok := job.caseTargets[k]; ok && target != nil {
+					job.op.SwitchJmpCase.Set(k, int32(target.CurrentOffset))
+				}
+				return true
+			})
+		}
+		if job.defaultTarget != nil {
+			job.op.SwitchDefaultOffset = int32(job.defaultTarget.CurrentOffset)
+		}
 	}
 
 	// Remap exception table PCs to the new offset space.
@@ -623,6 +760,38 @@ func isTwoByteBranch(op int) bool {
 		return true
 	}
 	return false
+}
+
+// isWideBranch reports whether op carries a 4-byte relative branch operand.
+func isWideBranch(op int) bool {
+	return op == OP_GOTO_W || op == OP_JSR_W
+}
+
+// isBranchOp reports whether op transfers control through a relative operand that must be
+// rewritten when instruction offsets change.
+func isBranchOp(op int) bool {
+	return isTwoByteBranch(op) || isWideBranch(op) || op == OP_JSR
+}
+
+// branchAbsoluteTarget resolves a relative branch operand against the opcode's ORIGINAL offset.
+// It returns false when the operand bytes are missing.
+func branchAbsoluteTarget(op *OpCode) (int, bool) {
+	if op == nil || op.Instr == nil {
+		return 0, false
+	}
+	switch {
+	case isWideBranch(op.Instr.OpCode):
+		if len(op.Data) < 4 {
+			return 0, false
+		}
+		return int(op.CurrentOffset) + int(int32(Convert4bytesToInt(op.Data))), true
+	case isTwoByteBranch(op.Instr.OpCode) || op.Instr.OpCode == OP_JSR:
+		if len(op.Data) < 2 {
+			return 0, false
+		}
+		return int(op.CurrentOffset) + int(int16(Convert2bytesToInt(op.Data))), true
+	}
+	return 0, false
 }
 
 func isUnconditionalTransfer(op int) bool {

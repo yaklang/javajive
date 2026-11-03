@@ -351,6 +351,73 @@ func boolOperandCondition(v JavaValue) (JavaValue, bool) {
 	return nil, false
 }
 
+// incrementOperandText drops one redundant outer parenthesis layer from an
+// increment/decrement operand. Java permits `++(x)` and `(x)++`, but some
+// downstream Java frontends only accept the plain lvalue spelling, and an
+// lvalue never needs parentheses. The rewrite is limited to a conservative
+// identifier / member / index chain so no expression precedence can change;
+// anything else keeps its original text.
+func incrementOperandText(text string) string {
+	if len(text) < 3 || text[0] != '(' || text[len(text)-1] != ')' {
+		return text
+	}
+	inner := text[1 : len(text)-1]
+	if !isIncrementTarget(inner) {
+		return text
+	}
+	return inner
+}
+
+func isIncrementTarget(text string) bool {
+	i := 0
+	if i >= len(text) || !isJavaIdentStart(text[i]) {
+		return false
+	}
+	for i < len(text) && isJavaIdentPart(text[i]) {
+		i++
+	}
+	for i < len(text) {
+		switch text[i] {
+		case '.':
+			i++
+			if i >= len(text) || !isJavaIdentStart(text[i]) {
+				return false
+			}
+			for i < len(text) && isJavaIdentPart(text[i]) {
+				i++
+			}
+		case '[':
+			depth := 0
+			for i < len(text) {
+				switch text[i] {
+				case '[':
+					depth++
+				case ']':
+					depth--
+					if depth == 0 {
+						i++
+						goto nextSegment
+					}
+				}
+				i++
+			}
+			return false
+		default:
+			return false
+		}
+	nextSegment:
+	}
+	return true
+}
+
+func isJavaIdentStart(c byte) bool {
+	return c == '_' || c == '$' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z'
+}
+
+func isJavaIdentPart(c byte) bool {
+	return isJavaIdentStart(c) || c >= '0' && c <= '9'
+}
+
 func (j *JavaExpression) String(funcCtx *class_context.ClassContext) string {
 	guard := renderGuarded(funcCtx)
 	if guard {
@@ -386,10 +453,10 @@ func (j *JavaExpression) String(funcCtx *class_context.ClassContext) string {
 	}
 	if len(vs) == 1 {
 		if j.Op == INC {
-			return finishExpressionRender(funcCtx, guard, fmt.Sprintf("++(%s)", vs[0]))
+			return finishExpressionRender(funcCtx, guard, fmt.Sprintf("++%s", incrementOperandText(vs[0])))
 		}
 		if j.Op == DEC {
-			return finishExpressionRender(funcCtx, guard, fmt.Sprintf("--(%s)", vs[0]))
+			return finishExpressionRender(funcCtx, guard, fmt.Sprintf("--%s", incrementOperandText(vs[0])))
 		}
 		return finishExpressionRender(funcCtx, guard, fmt.Sprintf("%s(%s)", j.Op, vs[0]))
 	}
@@ -397,9 +464,9 @@ func (j *JavaExpression) String(funcCtx *class_context.ClassContext) string {
 	case ADD:
 		return finishExpressionRender(funcCtx, guard, fmt.Sprintf("(%s) + (%s)", vs[0], vs[1]))
 	case INC:
-		return finishExpressionRender(funcCtx, guard, fmt.Sprintf("%s++", vs[0]))
+		return finishExpressionRender(funcCtx, guard, fmt.Sprintf("%s++", incrementOperandText(vs[0])))
 	case DEC:
-		return finishExpressionRender(funcCtx, guard, fmt.Sprintf("%s--", vs[0]))
+		return finishExpressionRender(funcCtx, guard, fmt.Sprintf("%s--", incrementOperandText(vs[0])))
 	case GT, SUB:
 		return finishExpressionRender(funcCtx, guard, fmt.Sprintf("(%s) %s (%s)", vs[0], j.Op, vs[1]))
 	default:
@@ -942,6 +1009,8 @@ type FunctionCallExpression struct {
 	// Legacy/unbound construction keeps a live lookup; nil supports direct IR
 	// literals that deliberately use the current ambient policy.
 	TypeEnv func(string) string
+	// replacing stops ReplaceVar when a call's arguments point back at the call.
+	replacing bool
 }
 
 // Witness returns the bytecode invoke identity. Owner is ClassName, name is
@@ -978,11 +1047,23 @@ func (f *FunctionCallExpression) Clone() *FunctionCallExpression {
 // ReplaceVar implements JavaValue. Nested variable ids are rewritten; invoke
 // identity (Kind, OriginPC, Descriptor, ClassName, FunctionName) is kept.
 func (f *FunctionCallExpression) ReplaceVar(oldId *utils.VariableId, newId *utils.VariableId) {
+	if f == nil || f.replacing {
+		return
+	}
+	proceed, root := beginReplaceWalk()
+	if !proceed {
+		return
+	}
+	defer endReplaceWalk(root)
+	f.replacing = true
+	defer func() { f.replacing = false }()
 	if f.Object != nil {
 		f.Object.ReplaceVar(oldId, newId)
 	}
 	for _, arg := range f.Arguments {
-		arg.ReplaceVar(oldId, newId)
+		if arg != nil {
+			arg.ReplaceVar(oldId, newId)
+		}
 	}
 }
 

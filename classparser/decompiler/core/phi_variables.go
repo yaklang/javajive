@@ -326,6 +326,15 @@ func polyFunctionalDefinition(value values.JavaValue) (poly, admissible bool) {
 }
 
 func polyFunctionalDefinitionSeen(value values.JavaValue, seen map[*values.JavaRef]bool) (poly, admissible bool) {
+	return polyFunctionalDefinitionWalk(value, seen, map[*values.TernaryExpression]struct{}{}, 0)
+}
+
+func polyFunctionalDefinitionWalk(value values.JavaValue, seen map[*values.JavaRef]bool, ternaries map[*values.TernaryExpression]struct{}, depth int) (poly, admissible bool) {
+	// A ternary that points at itself, or a DAG of shared ternaries, used to
+	// recurse until the goroutine stack died and the whole prepare stopped.
+	if depth > 64 {
+		return false, false
+	}
 	value = values.UnpackSoltValue(value)
 	if values.IsNullLiteral(value) {
 		return false, true
@@ -335,14 +344,18 @@ func polyFunctionalDefinitionSeen(value values.JavaValue, seen map[*values.JavaR
 			return false, false
 		}
 		seen[ref] = true
-		return polyFunctionalDefinitionSeen(ref.Val, seen)
+		return polyFunctionalDefinitionWalk(ref.Val, seen, ternaries, depth+1)
 	}
 	if custom, ok := value.(*values.CustomValue); ok && custom != nil {
 		return custom.Flag == "lambda" || custom.IsMethodRef, custom.Flag == "lambda" || custom.IsMethodRef
 	}
 	if ternary, ok := value.(*values.TernaryExpression); ok && ternary != nil {
-		leftPoly, leftOK := polyFunctionalDefinitionSeen(ternary.TrueValue, seen)
-		rightPoly, rightOK := polyFunctionalDefinitionSeen(ternary.FalseValue, seen)
+		if _, ok := ternaries[ternary]; ok {
+			return false, false
+		}
+		ternaries[ternary] = struct{}{}
+		leftPoly, leftOK := polyFunctionalDefinitionWalk(ternary.TrueValue, seen, ternaries, depth+1)
+		rightPoly, rightOK := polyFunctionalDefinitionWalk(ternary.FalseValue, seen, ternaries, depth+1)
 		return leftPoly || rightPoly, leftOK && rightOK
 	}
 	return false, false

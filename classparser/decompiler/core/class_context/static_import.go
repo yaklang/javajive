@@ -68,6 +68,11 @@ func (s *StaticMethodImports) Imports() []string {
 // and have no same-spelled method (even one of a different arity). Values and
 // local/formal type names do not participate in import declarations.
 func (f *ClassContext) StaticInterfaceCallPrefix(owner, member, descriptor string) string {
+	if f.packageRootIsType(owner) && !f.staticImportScopeClear(member) {
+		if spelling := f.importedTypeCallPrefix(owner, member, descriptor, true); spelling != "" {
+			return spelling
+		}
+	}
 	bound, known := f.staticTypeOwner(owner)
 	if known {
 		return bound + "."
@@ -79,14 +84,31 @@ func (f *ClassContext) StaticInterfaceCallPrefix(owner, member, descriptor strin
 // type still denotes the original class. If type syntax is also obscured,
 // use the same proved method-namespace import as an interface invocation.
 func (f *ClassContext) StaticClassCallPrefix(owner, member, descriptor string) string {
+	if f.packageRootIsType(owner) && !f.staticImportScopeClear(member) {
+		if spelling := f.importedTypeCallPrefix(owner, member, descriptor, false); spelling != "" {
+			return spelling
+		}
+	}
 	bound, known := f.staticTypeOwner(owner)
 	if known {
 		return bound + "."
 	}
-	if f.staticOwnerTypeSyntax(owner, bound) {
-		return "((" + bound + ")null)."
+	if f.staticOwnerTypeSyntax(owner, bound) && !f.packageRootIsType(owner) {
+		if f.boundNamesOwner(owner, bound) || f.samePackageClassOwnerCast(owner, bound, member, descriptor) {
+			return "((" + bound + ")null)."
+		}
 	}
 	return f.staticImportCallPrefix(owner, member, descriptor, bound, false)
+}
+
+// retainedOwnerPrefix keeps the original package path. A keyword segment
+// such as `if` is spelled `if_`, matching every other rendered type name.
+func retainedOwnerPrefix(owner string) string {
+	parts := strings.Split(owner, ".")
+	for i, part := range parts {
+		parts[i] = SafeIdentifier(part)
+	}
+	return strings.Join(parts, ".") + "."
 }
 
 func (f *ClassContext) failStaticOwner(owner, member, descriptor, reason string) {
@@ -123,6 +145,12 @@ func (f *ClassContext) staticImportCallPrefix(owner, member, descriptor, bound s
 	internal := strings.ReplaceAll(owner, ".", "/")
 	declaration, exists := f.InvocationMetadata(internal)
 	if !exists || declaration.Name != internal || declaration.IsInterface != interfaceOwner || !declaration.Public || !declaration.MembersComplete || !declaration.ParentsComplete {
+		// The invoke already names this owner. A missing JDK table is not a
+		// different target. Analysis output keeps the qualified call; the default
+		// path still refuses an unproved owner.
+		if f.RetainUnprovedSource && owner != "" && SafeIdentifier(member) == member {
+			return retainedOwnerPrefix(owner)
+		}
 		return fail("incomplete, mismatched or inaccessible original owner")
 	}
 	matches := 0
@@ -132,6 +160,21 @@ func (f *ClassContext) staticImportCallPrefix(owner, member, descriptor, bound s
 		}
 	}
 	if matches != 1 || !f.staticImportScopeClear(member) {
+		// The method name is already a member here, so a static import is
+		// ambiguous (JLS 6.4.1 / 15.12). When the owner's package root is a type
+		// in scope, the qualified name is also illegal (JLS 6.5.5.1). The single
+		// type import of that unique owner is the remaining source spelling:
+		// `Owner.member(...)`, which does not reclassify the method name.
+		if spelling := f.importedTypeCallPrefix(owner, member, descriptor, interfaceOwner); spelling != "" {
+			return spelling
+		}
+		// The invoke names one public static method, but neither a static import
+		// nor a single-type import can spell it. Analysis output keeps that owner.
+		// Keyword segments use the same SafeIdentifier spelling as other types.
+		// The default path still refuses instead of choosing another method.
+		if f.RetainUnprovedSource && matches == 1 {
+			return retainedOwnerPrefix(owner)
+		}
 		return fail("method namespace or original static target unproved")
 	}
 	pkg, cls := SplitPackageClassName(owner)
@@ -170,6 +213,122 @@ func (f *ClassContext) staticImportCallPrefix(owner, member, descriptor, bound s
 	f.StaticMethodImports.owners[member] = qualified
 	f.StaticMethodImports.retainedBytes = retained
 	return ""
+}
+
+// samePackageClassOwnerCast proves a cast primary for an exact same-package
+// top-level class whose simple name is shadowed by a value. Cast type syntax
+// is resolved in the type namespace. Require an exact original declaration,
+// complete members, one matching static target, no private/source-inaccessible
+// target, and no type parameter, lexical type, or imported type taking the
+// simple name.
+func (f *ClassContext) samePackageClassOwnerCast(owner, bound, member, descriptor string) bool {
+	if f == nil || owner == "" || member == "" || bound == "" {
+		return false
+	}
+	pkg, cls := SplitPackageClassName(owner)
+	internal := strings.ReplaceAll(owner, ".", "/")
+	if pkg != f.PackageName || cls == "" || cls != bound || f.IsTypeParam(bound) || f.LexicalTypeNames[bound] || f.KeySet != nil && f.KeySet.Has(bound) {
+		return false
+	}
+	if f.InvocationMetadata == nil {
+		return false
+	}
+	declaration, ok := f.InvocationMetadata(internal)
+	if !ok || declaration.Name != internal || declaration.IsInterface || !declaration.MembersComplete {
+		return false
+	}
+	matches := 0
+	for _, target := range declaration.Methods {
+		if target.Name != member || target.Desc != descriptor || !target.Static || target.Bridge {
+			continue
+		}
+		if target.SourceInaccessible || target.AccessFlagsKnown && target.AccessFlags&0x0002 != 0 {
+			return false
+		}
+		matches++
+	}
+	return matches == 1
+}
+
+// boundNamesOwner reports that a cast type still denotes this owner. A
+// simple name does so only after that owner took the single-type import;
+// otherwise the cast names whatever else is in scope, or nothing.
+func (f *ClassContext) packageRootIsType(owner string) bool {
+	pkg, _ := SplitPackageClassName(owner)
+	if pkg == "" {
+		return false
+	}
+	root := strings.SplitN(pkg, ".", 2)[0]
+	return f.LexicalTypeNames[root] || f.IsTypeParam(root) || f.typeNameShadowsPackageRoot(root)
+}
+
+func (f *ClassContext) boundNamesOwner(owner, bound string) bool {
+	if strings.Contains(bound, ".") {
+		return true
+	}
+	_, cls := SplitPackageClassName(owner)
+	return cls == bound && f.KeySet != nil && f.KeySet.Has(cls)
+}
+
+func (f *ClassContext) importedTypeCallPrefix(owner, member, descriptor string, interfaceOwner bool) string {
+	if f == nil || f.staticImportScopeClear(member) {
+		return ""
+	}
+	pkg, cls := SplitPackageClassName(owner)
+	if pkg == "" || cls == "" || isAnonymousOrLocalBinaryName(cls) || strings.Contains(cls, "$") {
+		return ""
+	}
+	// A value obscuring the package root still leaves the qualified type
+	// name legal, so a conflicting method keeps the static-import refusal.
+	// A type in that position (lexical, a type parameter, or a same-package
+	// class such as a.cn) removes the qualified spelling too.
+	if !f.packageRootIsType(owner) {
+		return ""
+	}
+	if f.typeImportOwner(cls) != "" && f.typeImportOwner(cls) != owner {
+		return ""
+	}
+	internal := strings.ReplaceAll(owner, ".", "/")
+	declaration, exists := f.InvocationMetadata(internal)
+	if !exists || declaration.Name != internal || declaration.IsInterface != interfaceOwner || !declaration.Public || !declaration.MembersComplete || !declaration.ParentsComplete {
+		return ""
+	}
+	matches := 0
+	for _, method := range declaration.Methods {
+		if method.Name == member && method.Desc == descriptor && method.Public && method.Static && !method.Bridge {
+			matches++
+		}
+	}
+	if matches != 1 || SafeIdentifier(cls) != cls {
+		return ""
+	}
+	before := f.KeySet != nil && f.KeySet.Has(cls)
+	f.Import(owner)
+	if f.KeySet == nil || !f.KeySet.Has(cls) {
+		return ""
+	}
+	// The simple name was already taken. Reuse it only when this package is
+	// the one that registered it; another type of the same simple name must
+	// not receive its calls.
+	if before && !f.importedFrom(pkg, cls) {
+		return ""
+	}
+	// ShortTypeName records a qualified-name refusal before this import
+	// exists. That refusal names the caller method, not the owner, and it is
+	// the only error this prefix computation can have stored so far.
+	if f.StaticMethodImports != nil && f.StaticMethodImports.err != nil && f.StaticMethodImports.failedMethod == f.ClassName+"."+f.FunctionName+f.CurrentMethodDesc {
+		f.StaticMethodImports.err = nil
+		f.StaticMethodImports.failedMethod = ""
+	}
+	return cls + "."
+}
+
+func (f *ClassContext) importedFrom(pkg, cls string) bool {
+	if f == nil || f.BuildInLibsMap == nil {
+		return false
+	}
+	libs := f.BuildInLibsMap.GetMust(pkg)
+	return slices.Contains(libs, cls) || slices.Contains(libs, "*")
 }
 
 func (f *ClassContext) staticImportScopeClear(member string) bool {
