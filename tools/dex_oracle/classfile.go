@@ -9,6 +9,9 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"unicode/utf16"
+
+	"github.com/yaklang/javajive/internal/mutf8"
 )
 
 const (
@@ -172,7 +175,23 @@ func parseClass(data []byte) (classInventory, error) {
 			if _, err := io.ReadFull(c.r, value); err != nil {
 				return classInventory{}, err
 			}
-			c.utf8[i] = string(value)
+			units, err := mutf8.DecodeBounded(value, int(length))
+			if err != nil {
+				return classInventory{}, fmt.Errorf("invalid modified UTF-8: %w", err)
+			}
+			for index := 0; index < len(units); index++ {
+				unit := units[index]
+				switch {
+				case unit >= 0xd800 && unit <= 0xdbff:
+					if index+1 >= len(units) || units[index+1] < 0xdc00 || units[index+1] > 0xdfff {
+						return classInventory{}, fmt.Errorf("unpaired surrogate in constant pool UTF-8")
+					}
+					index++
+				case unit >= 0xdc00 && unit <= 0xdfff:
+					return classInventory{}, fmt.Errorf("unpaired surrogate in constant pool UTF-8")
+				}
+			}
+			c.utf8[i] = string(utf16.Decode(units))
 		case 3, 4:
 			if err := c.skip(4); err != nil {
 				return classInventory{}, err

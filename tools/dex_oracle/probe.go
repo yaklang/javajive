@@ -111,11 +111,15 @@ func runProbe(args []string) error {
 	timeout := fs.Duration("timeout", 60*time.Second, "per-conversion timeout")
 	outputCap := fs.Int64("output-cap", defaultOutputCap, "combined stdout/stderr byte cap")
 	java := fs.String("java", "java", "Java executable")
+	allowHostExecution := fs.Bool("allow-untrusted-host-execution", false, "acknowledge that third-party dex2jar processes untrusted inputs on this host")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() == 0 {
 		return fmt.Errorf("probe requires at least one DEX or APK input")
+	}
+	if !*allowHostExecution {
+		return fmt.Errorf("probe executes third-party dex2jar against untrusted inputs; rerun with --allow-untrusted-host-execution only inside an isolated host or after explicitly accepting that risk")
 	}
 	if *timeout <= 0 || *timeout > 10*time.Minute {
 		return fmt.Errorf("timeout must be between 1ns and 10m")
@@ -209,6 +213,8 @@ func probeOne(oracle Oracle, distribution string, input inputIdentity, java stri
 	cmd.Env = cleanJavaEnv(os.Environ())
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
+	cmd.WaitDelay = 2 * time.Second
+	configureProcessTree(cmd)
 	started := time.Now()
 	runErr := cmd.Run()
 	runtimeMS := time.Since(started).Milliseconds()

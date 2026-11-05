@@ -5,7 +5,9 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -39,6 +41,8 @@ type Oracle struct {
 	Launcher         string `json:"launcher"`
 }
 
+const maxManifestBytes = int64(1 << 20)
+
 var (
 	hex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	hex40 = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -48,10 +52,17 @@ var (
 func loadManifest(filename string) (Manifest, string, error) {
 	b := embeddedManifest
 	if filename != "" {
-		var err error
-		b, err = os.ReadFile(filename)
+		f, err := os.Open(filename)
 		if err != nil {
 			return Manifest{}, "", err
+		}
+		b, err = io.ReadAll(io.LimitReader(f, maxManifestBytes+1))
+		closeErr := f.Close()
+		if err != nil || closeErr != nil {
+			return Manifest{}, "", errors.Join(err, closeErr)
+		}
+		if int64(len(b)) > maxManifestBytes {
+			return Manifest{}, "", fmt.Errorf("manifest exceeds %d bytes", maxManifestBytes)
 		}
 	}
 	var m Manifest

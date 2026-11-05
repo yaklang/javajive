@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -96,10 +97,13 @@ func ensureOracle(ctx context.Context, cache string, oracle Oracle) (fetchRecord
 			return fetchRecord{}, err
 		}
 	}
-	marker := filepath.Join(distDir, ".complete")
-	if markerBytes, err := os.ReadFile(marker); err != nil || strings.TrimSpace(string(markerBytes)) != oracle.SHA256 {
+	distribution := filepath.Join(distDir, oracle.DistributionRoot)
+	if err := verifyDistribution(archivePath, distribution, oracle); err != nil {
 		if err := extractAtomic(archivePath, filepath.Dir(distDir), filepath.Base(distDir), oracle); err != nil {
 			return fetchRecord{}, err
+		}
+		if err := verifyDistribution(archivePath, distribution, oracle); err != nil {
+			return fetchRecord{}, fmt.Errorf("verify extracted distribution: %w", err)
 		}
 	}
 	info, err := os.Lstat(launcher)
@@ -250,11 +254,14 @@ func extractAtomic(archivePath, parent, finalName string, oracle Oracle) error {
 			src.Close()
 			return err
 		}
-		_, copyErr := io.CopyN(dst, src, int64(f.UncompressedSize64))
+		n, copyErr := io.Copy(dst, io.LimitReader(src, int64(f.UncompressedSize64)+1))
 		closeErr := dst.Close()
 		srcErr := src.Close()
 		if copyErr != nil || closeErr != nil || srcErr != nil {
 			return errors.Join(copyErr, closeErr, srcErr)
+		}
+		if n != int64(f.UncompressedSize64) {
+			return fmt.Errorf("zip entry size mismatch: %q", f.Name)
 		}
 	}
 	if err := os.WriteFile(filepath.Join(tmp, ".complete"), []byte(oracle.SHA256+"\n"), 0o644); err != nil {
@@ -271,6 +278,83 @@ func extractAtomic(archivePath, parent, finalName string, oracle Oracle) error {
 		return err
 	}
 	return os.Rename(tmp, final)
+}
+
+func verifyDistribution(archivePath, distributionDir string, oracle Oracle) error {
+	r, err := zip.OpenReader(archivePath)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	if len(r.File) == 0 || len(r.File) > maxArchiveEntries {
+		return fmt.Errorf("archive entry count is outside limits")
+	}
+	expected := make(map[string]*zip.File, len(r.File))
+	for _, f := range r.File {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		name := strings.TrimPrefix(f.Name, oracle.DistributionRoot+"/")
+		if name == f.Name || !safeRelativePath(name) {
+			return fmt.Errorf("archive entry outside distribution root: %q", f.Name)
+		}
+		expected[filepath.Clean(filepath.FromSlash(name))] = f
+	}
+	seen := make(map[string]bool, len(expected))
+	err = filepath.WalkDir(distributionDir, func(name string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(distributionDir, name)
+		if err != nil || rel == "." {
+			return err
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("distribution contains symlink %q", rel)
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("distribution contains non-regular file %q", rel)
+		}
+		if rel == ".complete" {
+			return nil
+		}
+		want, ok := expected[filepath.Clean(rel)]
+		if !ok {
+			return fmt.Errorf("distribution contains unexpected file %q", rel)
+		}
+		got, err := os.Open(name)
+		if err != nil {
+			return err
+		}
+		defer got.Close()
+		wantReader, err := want.Open()
+		if err != nil {
+			return err
+		}
+		defer wantReader.Close()
+		gotHash := sha256.New()
+		wantHash := sha256.New()
+		gotN, gotErr := io.Copy(gotHash, io.LimitReader(got, maxEntryBytes+1))
+		wantN, wantErr := io.Copy(wantHash, io.LimitReader(wantReader, maxEntryBytes+1))
+		if gotErr != nil || wantErr != nil {
+			return errors.Join(gotErr, wantErr)
+		}
+		if gotN != wantN || gotN != int64(want.UncompressedSize64) || !bytes.Equal(gotHash.Sum(nil), wantHash.Sum(nil)) {
+			return fmt.Errorf("distribution file differs from pinned archive: %q", rel)
+		}
+		seen[filepath.Clean(rel)] = true
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if len(seen) != len(expected) {
+		return fmt.Errorf("distribution is incomplete: got %d files, want %d", len(seen), len(expected))
+	}
+	return nil
 }
 
 func writeJSON(w io.Writer, value any) error {

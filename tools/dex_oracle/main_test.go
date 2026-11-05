@@ -138,6 +138,16 @@ func TestExtractRejectsTraversalAndMissingLauncher(t *testing.T) {
 	}
 }
 
+func TestProbeRequiresExplicitHostExecutionApproval(t *testing.T) {
+	input := filepath.Join(t.TempDir(), "input.dex")
+	if err := os.WriteFile(input, []byte("dex\n035\x00fake"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runProbe([]string{input}); err == nil || !strings.Contains(err.Error(), "allow-untrusted-host-execution") {
+		t.Fatalf("runProbe() error = %v, want explicit host-execution refusal", err)
+	}
+}
+
 func TestFakeDistributionProbe(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake Java executable is a POSIX shell script")
@@ -178,6 +188,18 @@ func TestFakeDistributionProbe(t *testing.T) {
 	}
 	if !strings.HasSuffix(record.Launcher, filepath.Join("fake", "run.sh")) {
 		t.Fatalf("unexpected launcher %q", record.Launcher)
+	}
+	cachedJar := filepath.Join(record.Distribution, "lib", "fake.jar")
+	if err := os.WriteFile(cachedJar, []byte("substituted"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	record, err = ensureOracle(context.Background(), cache, oracle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := os.ReadFile(filepath.Join(record.Distribution, "lib", "fake.jar"))
+	if err != nil || string(restored) != "not executed by the fake java process\n" {
+		t.Fatalf("tampered cache was not restored: data=%q error=%v", restored, err)
 	}
 
 	fakeJava := filepath.Join(t.TempDir(), "java")
