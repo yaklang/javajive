@@ -34,6 +34,12 @@ Add a native, pure-Go DEX/APK-to-JAR path as a strict first vertical slice.
   `JDEC_DISPATCH_LOCAL_HOIST_OFF`.
 - Add an opt-in adversarial classfile evaluation suite and a CI gate covering
   real javac shapes, irreducible boundary behavior, scale, and malformed input.
+- Reject classfiles outside the supported major-version range (45..65) at
+  decompile requests while keeping `Parse` permissive for structural
+  inspection. Validate bytecode constant-pool operands before stack simulation,
+  so a missing or wrong-kind constant produces a structured
+  `invalid_constant_pool_reference` method diagnostic instead of a recovered
+  runtime panic.
 
 ## v0.4.0 — 2026-09-19
 
