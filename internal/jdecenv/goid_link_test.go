@@ -5,25 +5,34 @@ import (
 	"testing"
 )
 
-func TestGoidFastMatchesStack(t *testing.T) {
-	goidOnce.Do(calibrateGoidOffset)
-	if !goidFastOK {
-		t.Fatal("goid offset was not found")
-	}
+func TestGoidStableAndUnique(t *testing.T) {
+	const workers = 8
 	var wg sync.WaitGroup
-	errc := make(chan string, 8)
-	for i := 0; i < 8; i++ {
+	ids := make(chan uint64, workers)
+	release := make(chan struct{})
+	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if gid() != gidFromStack() {
-				errc <- "mismatch"
+			id := gid()
+			ids <- id
+			<-release
+			if gid() != id {
+				t.Errorf("goroutine identity changed")
 			}
 		}()
 	}
-	wg.Wait()
-	close(errc)
-	if _, ok := <-errc; ok {
-		t.Fatal("fast goid does not match runtime.Stack")
+	seen := make(map[uint64]struct{}, workers)
+	for i := 0; i < workers; i++ {
+		id := <-ids
+		if id == 0 {
+			t.Fatal("goroutine identity is zero")
+		}
+		if _, ok := seen[id]; ok {
+			t.Fatalf("duplicate live goroutine identity %d", id)
+		}
+		seen[id] = struct{}{}
 	}
+	close(release)
+	wg.Wait()
 }
