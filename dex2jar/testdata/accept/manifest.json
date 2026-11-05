@@ -20,6 +20,23 @@
       "quality": {"precision": {"baseline": {"lines": 48, "tokens": 103, "labels": 0, "while_true": 0, "synthetic_vars": 32, "unsupported_throws": 0}, "maximum": {"lines": 48, "tokens": 103, "labels": 0, "while_true": 0, "synthetic_vars": 32, "unsupported_throws": 0}}, "compatibility": {"baseline": {"lines": 48, "tokens": 103, "labels": 0, "while_true": 0, "synthetic_vars": 32, "unsupported_throws": 0}, "maximum": {"lines": 48, "tokens": 103, "labels": 0, "while_true": 0, "synthetic_vars": 32, "unsupported_throws": 0}}}
     },
     {
+      "file": "array-clone.dex",
+      "sha256": "3ecf1cdeb514604cb9a67a5291c9bdd40e5b7ce0af4113b2c97e576908e18cb6",
+      "size": 476,
+      "input_inventory": ["<raw-dex>"],
+      "jar_sha256": "76e5ca6c0a0dd06acf3cf9190774f98ef61f543276af2ebe55b4256b0e1b09f8",
+      "jar_inventory": ["META-INF/MANIFEST.MF", "accept/ArrayClone.class"],
+      "report": {"dex_files": 1, "classes": 1, "methods": 1, "translated_methods": 1, "warnings": 0},
+      "classes": ["accept.ArrayClone"],
+      "allowed_diagnostics": {"precision": {"accept.ArrayClone": ["legacy_source_recovery_disabled"]}, "compatibility": {"accept.ArrayClone": []}},
+      "driver": "drivers/ArrayCloneDriver.java",
+      "driver_class": "accept.gate.ArrayCloneDriver",
+      "runs": [
+        {"class": "accept.gate.ArrayCloneDriver", "exit": 0, "stdout": "array-clone:true:3:13:5:8:true\n", "stderr": ""}
+      ],
+      "quality": {"precision": {"baseline": {"lines": 7, "tokens": 14, "labels": 0, "while_true": 0, "synthetic_vars": 2, "unsupported_throws": 0}, "maximum": {"lines": 7, "tokens": 14, "labels": 0, "while_true": 0, "synthetic_vars": 2, "unsupported_throws": 0}}, "compatibility": {"baseline": {"lines": 7, "tokens": 14, "labels": 0, "while_true": 0, "synthetic_vars": 2, "unsupported_throws": 0}, "maximum": {"lines": 7, "tokens": 14, "labels": 0, "while_true": 0, "synthetic_vars": 2, "unsupported_throws": 0}}}
+    },
+    {
       "file": "multidex.apk",
       "sha256": "7bb54106362e9440543ea9a144ffcd45510968d8a06ca9baeb923dabd0a1aefc",
       "size": 1890,
