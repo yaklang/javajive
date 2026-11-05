@@ -37,6 +37,17 @@ const (
 	StatusFailed      Status = "failed"
 )
 
+// Options controls report detail. The zero value disables disassembly.
+type Options struct {
+	// Disassembly includes per-instruction DEX disassembly and raw code units.
+	// Disable it for large applications where the report would otherwise reach
+	// hundreds of megabytes; inventory, verdicts and diagnostics are unchanged.
+	Disassembly bool
+}
+
+// DefaultOptions is the full-detail inspection policy.
+var DefaultOptions = Options{Disassembly: true}
+
 // Report is the stable, JSON-oriented result of one inspection.
 type Report struct {
 	SchemaVersion int          `json:"schema_version"`
@@ -160,6 +171,11 @@ var canonicalDEXEntry = regexp.MustCompile(`^classes([0-9]*)\.dex$`)
 // the underlying error; recognized but unsupported content is represented only
 // in the report.
 func AnalyzeFile(path string) (Report, error) {
+	return AnalyzeFileWithOptions(path, DefaultOptions)
+}
+
+// AnalyzeFileWithOptions is AnalyzeFile with an explicit detail policy.
+func AnalyzeFileWithOptions(path string, options Options) (Report, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		report := newReport(path, nil)
@@ -167,23 +183,28 @@ func AnalyzeFile(path string) (Report, error) {
 		report.Diagnostics = append(report.Diagnostics, Diagnostic{Source: "input", Offset: -1, Op: "read", Message: err.Error()})
 		return report, err
 	}
-	return Analyze(data, path), nil
+	return AnalyzeWithOptions(data, path, options), nil
 }
 
 // Analyze inspects data using name only as source identity and an archive-kind
 // hint. Detection always begins with content magic.
 func Analyze(data []byte, name string) Report {
+	return AnalyzeWithOptions(data, name, DefaultOptions)
+}
+
+// AnalyzeWithOptions inspects data with an explicit detail policy.
+func AnalyzeWithOptions(data []byte, name string, options Options) Report {
 	report := newReport(name, data)
 	switch report.Artifact.Magic {
 	case "dex":
 		report.Artifact.Format = "dex"
 		report.DEXFiles = append(report.DEXFiles, analyzeDEX(data, DEXProvenance{
 			Container: "standalone", Entry: "classes.dex", MultidexIndex: 1, Canonical: false,
-		}))
+		}, options))
 		report.Status = report.DEXFiles[0].Status
 		report.Diagnostics = append(report.Diagnostics, report.DEXFiles[0].Diagnostics...)
 	case "zip":
-		analyzeArchive(&report, data, name)
+		analyzeArchive(&report, data, name, options)
 	case "class":
 		report.Artifact.Format = "class"
 		report.Status = StatusUnsupported
@@ -228,7 +249,7 @@ type retainedDEX struct {
 	data  []byte
 }
 
-func analyzeArchive(report *Report, data []byte, name string) {
+func analyzeArchive(report *Report, data []byte, name string, options Options) {
 	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		report.Artifact.Format = archiveHint(name)
@@ -303,7 +324,7 @@ func analyzeArchive(report *Report, data []byte, name string) {
 		return
 	}
 	for _, item := range retained {
-		dex := analyzeDEX(item.data, DEXProvenance{Container: "apk", Entry: item.name, MultidexIndex: item.index, Canonical: true})
+		dex := analyzeDEX(item.data, DEXProvenance{Container: "apk", Entry: item.name, MultidexIndex: item.index, Canonical: true}, options)
 		report.DEXFiles = append(report.DEXFiles, dex)
 		report.Diagnostics = append(report.Diagnostics, dex.Diagnostics...)
 		if dex.Status != StatusComplete && report.Status == StatusComplete {
@@ -391,7 +412,7 @@ func multidexIndex(name string) (int, bool) {
 	return index, true
 }
 
-func analyzeDEX(data []byte, provenance DEXProvenance) DEXFile {
+func analyzeDEX(data []byte, provenance DEXProvenance, options Options) DEXFile {
 	sum := sha256.Sum256(data)
 	dex := DEXFile{
 		Status: StatusComplete, Provenance: provenance, Version: dexVersion(data), Size: uint64(len(data)),
@@ -425,7 +446,7 @@ func analyzeDEX(data []byte, provenance DEXProvenance) DEXFile {
 			return methods[i].MethodIndex < methods[j].MethodIndex
 		})
 		for methodIndex := range methods {
-			method := analyzeMethod(parsed, classModel, &methods[methodIndex])
+			method := analyzeMethod(parsed, classModel, &methods[methodIndex], options)
 			if len(method.Diagnostics) > 0 {
 				dex.Status = StatusPartial
 				dex.Diagnostics = append(dex.Diagnostics, method.Diagnostics...)
@@ -467,7 +488,7 @@ func methodDescriptor(file *model.File, method *model.EncodedMethod) string {
 	return "(" + strings.Join(proto.Parameters, "") + ")" + proto.ReturnType
 }
 
-func analyzeMethod(file *model.File, class *model.Class, encoded *model.EncodedMethod) Method {
+func analyzeMethod(file *model.File, class *model.Class, encoded *model.EncodedMethod, options Options) Method {
 	method := Method{
 		Name: encoded.Method.Name, Descriptor: methodDescriptor(file, encoded), AccessFlags: encoded.AccessFlags,
 		CodeUnits: []string{}, Instructions: []Instruction{}, Diagnostics: []Diagnostic{}, DisassemblyStatus: "not_applicable",
@@ -478,6 +499,10 @@ func analyzeMethod(file *model.File, class *model.Class, encoded *model.EncodedM
 	method.Registers = encoded.Code.RegistersSize
 	method.Inputs = encoded.Code.InsSize
 	method.Outputs = encoded.Code.OutsSize
+	if !options.Disassembly {
+		method.DisassemblyStatus = "skipped"
+		return method
+	}
 	method.CodeUnits = formatWords(encoded.Code.Instructions)
 	ctx := ir.Context{Entry: file.Entry, Class: class.Descriptor, Method: encoded.Method.Name}
 	decoded, err := ir.Decode(encoded.Code, ctx)

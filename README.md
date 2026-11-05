@@ -122,6 +122,9 @@ Commands:
 ```bash
 javajive inspect app.apk --format json
 javajive inspect app.war --format json
+
+# Large applications: omit per-instruction disassembly and raw code units.
+javajive inspect --disassembly=false --format json app.apk
 ```
 
 `inspect` never translates input or writes a JAR. It reports the artifact hash

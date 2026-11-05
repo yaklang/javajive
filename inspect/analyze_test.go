@@ -163,3 +163,42 @@ func entryNames(entries []artifactinspect.ArchiveEntry) []string {
 	}
 	return names
 }
+
+// Disabling disassembly must not change inventory, verdicts or diagnostics; it
+// only omits the per-instruction payload that dominates large reports.
+func TestAnalyzeDisassemblyOptionPreservesInventory(t *testing.T) {
+	path := filepath.Join("..", "dex2jar", "testdata", "accept", "arithmetic.dex")
+	full, err := artifactinspect.AnalyzeFileWithOptions(path, artifactinspect.Options{Disassembly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lean, err := artifactinspect.AnalyzeFileWithOptions(path, artifactinspect.Options{Disassembly: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if full.Status != lean.Status || len(full.DEXFiles) != len(lean.DEXFiles) {
+		t.Fatalf("status/inventory changed: %q vs %q", full.Status, lean.Status)
+	}
+	fullClasses := full.DEXFiles[0].Classes
+	leanClasses := lean.DEXFiles[0].Classes
+	if len(fullClasses) != len(leanClasses) {
+		t.Fatalf("classes changed: %d vs %d", len(fullClasses), len(leanClasses))
+	}
+	for index := range fullClasses {
+		if fullClasses[index].Translation != leanClasses[index].Translation {
+			t.Fatalf("translation verdict changed for %s", fullClasses[index].Descriptor)
+		}
+		if len(fullClasses[index].Methods) != len(leanClasses[index].Methods) {
+			t.Fatalf("methods changed for %s", fullClasses[index].Descriptor)
+		}
+		for methodIndex := range fullClasses[index].Methods {
+			method := leanClasses[index].Methods[methodIndex]
+			if len(method.Instructions) != 0 || len(method.CodeUnits) != 0 {
+				t.Fatalf("disassembly was not skipped for %s", method.Name)
+			}
+		}
+	}
+	if len(fullClasses[0].Methods[0].Instructions) == 0 {
+		t.Fatal("full report has no disassembly")
+	}
+}

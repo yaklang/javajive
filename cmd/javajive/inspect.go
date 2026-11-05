@@ -19,11 +19,12 @@ func cmdInspectTo(args []string, stdout io.Writer) error {
 	fs := newFlagSet("inspect")
 	fs.SetOutput(io.Discard)
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: javajive inspect INPUT --format json")
+		fmt.Fprintln(os.Stderr, "usage: javajive inspect INPUT --format json [--disassembly=false]")
 		fmt.Fprintln(os.Stderr, "Read-only inventory and best-effort analysis of DEX, APK, JAR, and WAR artifacts.")
 		fs.PrintDefaults()
 	}
 	format := fs.String("format", "json", "report format (json)")
+	disassembly := fs.Bool("disassembly", true, "include per-instruction DEX disassembly; disable for very large applications")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -34,7 +35,7 @@ func cmdInspectTo(args []string, stdout io.Writer) error {
 		return fmt.Errorf("unsupported inspect format %q (want json)", *format)
 	}
 
-	report, err := artifactinspect.AnalyzeFile(fs.Arg(0))
+	report, err := artifactinspect.AnalyzeFileWithOptions(fs.Arg(0), artifactinspect.Options{Disassembly: *disassembly})
 	if err != nil {
 		return err
 	}

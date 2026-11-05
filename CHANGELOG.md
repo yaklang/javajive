@@ -12,7 +12,8 @@ Complete the reverse-engineering toolchain for nested archives and real DEX inpu
   files and the Jenkins WAR from 1 to its full nested inventory.
 - Add `javajive inspect INPUT --format json`: read-only inventory, multidex
   provenance, deterministic DEX disassembly, per-class strict translation
-  verdicts, and precise first-blocker diagnostics.
+  verdicts, and precise first-blocker diagnostics. `--disassembly=false`
+  keeps large-application reports small without changing verdicts.
 - Admit real DEX metadata: decode `debug_info` into `LineNumberTable`,
   `LocalVariableTable`, and parameter names; decode annotation directories and
   emit user annotations, `Signature`, `Exceptions`, `InnerClasses`,
