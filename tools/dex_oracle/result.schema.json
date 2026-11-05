@@ -92,10 +92,24 @@
         "inventory_error": {"type": "string"}
       }
     },
+    "isolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "status", "reason", "did_execute", "cleanup_verified"],
+      "properties": {
+        "mode": {"enum": ["sandbox", "host-override"]},
+        "backend": {"type": "string"},
+        "policy_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "status": {"type": "string"},
+        "reason": {"type": "string"},
+        "did_execute": {"type": "boolean"},
+        "cleanup_verified": {"type": "boolean"}
+      }
+    },
     "result": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["oracle_id", "oracle_version", "oracle_archive_sha256", "input_path", "input_sha256", "exit_code", "timed_out", "output_limited", "conversion_runtime_ms", "stdout", "stderr", "output_jar", "error_zips"],
+      "required": ["oracle_id", "oracle_version", "oracle_archive_sha256", "input_path", "input_sha256", "exit_code", "timed_out", "output_limited", "conversion_runtime_ms", "isolation", "stdout", "stderr", "output_jar", "error_zips"],
       "properties": {
         "oracle_id": {"type": "string"},
         "oracle_version": {"type": "string"},
@@ -106,6 +120,7 @@
         "timed_out": {"type": "boolean"},
         "output_limited": {"type": "boolean"},
         "conversion_runtime_ms": {"type": "integer", "minimum": 0},
+        "isolation": {"$ref": "#/$defs/isolation"},
         "stdout": {"$ref": "#/$defs/stream"},
         "stderr": {"$ref": "#/$defs/stream"},
         "output_jar": {"$ref": "#/$defs/jar"},

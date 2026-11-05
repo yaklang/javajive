@@ -34,7 +34,9 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   dex_oracle fetch [--cache DIR] [--manifest FILE] [--versions LIST]
-  dex_oracle probe --allow-untrusted-host-execution [--cache DIR] [--manifest FILE] [--versions LIST] [--output FILE] INPUT...
+  dex_oracle probe [--cache DIR] [--manifest FILE] [--versions LIST] [--output FILE] INPUT...
+
+probe uses tools/sandbox_worker by default. --allow-untrusted-host-execution is an explicit unsafe bypass.
 
 LIST is a comma-separated set of manifest ids or versions; default is all.`)
 }

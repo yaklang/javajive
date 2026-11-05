@@ -138,16 +138,6 @@ func TestExtractRejectsTraversalAndMissingLauncher(t *testing.T) {
 	}
 }
 
-func TestProbeRequiresExplicitHostExecutionApproval(t *testing.T) {
-	input := filepath.Join(t.TempDir(), "input.dex")
-	if err := os.WriteFile(input, []byte("dex\n035\x00fake"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := runProbe([]string{input}); err == nil || !strings.Contains(err.Error(), "allow-untrusted-host-execution") {
-		t.Fatalf("runProbe() error = %v, want explicit host-execution refusal", err)
-	}
-}
-
 func TestFakeDistributionProbe(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake Java executable is a POSIX shell script")
@@ -216,12 +206,15 @@ func TestFakeDistributionProbe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := probeOne(oracle, record.Distribution, input, fakeJava, 5*time.Second, defaultOutputCap)
+	result, err := probeOneHost(oracle, record.Distribution, input, fakeJava, 5*time.Second, defaultOutputCap)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.ExitCode != 0 || result.TimedOut || result.OutputLimited || !result.OutputJar.Present {
 		t.Fatalf("unexpected probe result: %+v", result)
+	}
+	if result.Isolation.Mode != "host-override" || result.Isolation.CleanupVerified {
+		t.Fatalf("host override must be explicit and unisolated: %+v", result.Isolation)
 	}
 	if len(result.OutputJar.Classes) != 1 {
 		t.Fatalf("got %d classes, want 1", len(result.OutputJar.Classes))

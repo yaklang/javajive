@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash"
@@ -77,6 +78,16 @@ type jarArtifact struct {
 	Error   string           `json:"inventory_error,omitempty"`
 }
 
+type isolationRecord struct {
+	Mode            string `json:"mode"`
+	Backend         string `json:"backend,omitempty"`
+	PolicyDigest    string `json:"policy_digest,omitempty"`
+	Status          string `json:"status"`
+	Reason          string `json:"reason"`
+	DidExecute      bool   `json:"did_execute"`
+	CleanupVerified bool   `json:"cleanup_verified"`
+}
+
 type probeResult struct {
 	OracleID            string            `json:"oracle_id"`
 	OracleVersion       string            `json:"oracle_version"`
@@ -87,6 +98,7 @@ type probeResult struct {
 	TimedOut            bool              `json:"timed_out"`
 	OutputLimited       bool              `json:"output_limited"`
 	ConversionRuntimeMS int64             `json:"conversion_runtime_ms"`
+	Isolation           isolationRecord   `json:"isolation"`
 	Stdout              streamRecord      `json:"stdout"`
 	Stderr              streamRecord      `json:"stderr"`
 	OutputJar           jarArtifact       `json:"output_jar"`
@@ -111,15 +123,13 @@ func runProbe(args []string) error {
 	timeout := fs.Duration("timeout", 60*time.Second, "per-conversion timeout")
 	outputCap := fs.Int64("output-cap", defaultOutputCap, "combined stdout/stderr byte cap")
 	java := fs.String("java", "java", "Java executable")
-	allowHostExecution := fs.Bool("allow-untrusted-host-execution", false, "acknowledge that third-party dex2jar processes untrusted inputs on this host")
+	allowHostExecution := fs.Bool("allow-untrusted-host-execution", false, "bypass the isolation worker and acknowledge third-party host execution risk")
+	python := fs.String("python", "python3", "Python executable for the isolation bridge")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() == 0 {
 		return fmt.Errorf("probe requires at least one DEX or APK input")
-	}
-	if !*allowHostExecution {
-		return fmt.Errorf("probe executes third-party dex2jar against untrusted inputs; rerun with --allow-untrusted-host-execution only inside an isolated host or after explicitly accepting that risk")
 	}
 	if *timeout <= 0 || *timeout > 10*time.Minute {
 		return fmt.Errorf("timeout must be between 1ns and 10m")
@@ -151,7 +161,12 @@ func runProbe(args []string) error {
 		}
 		report.Oracles = append(report.Oracles, oracleIdentity{ID: oracle.ID, Version: oracle.Version, Family: oracle.Family, SourceCommit: oracle.SourceCommit, ArchiveSHA256: oracle.SHA256})
 		for _, input := range inputs {
-			result, err := probeOne(oracle, record.Distribution, input, *java, *timeout, *outputCap)
+			var result probeResult
+			if *allowHostExecution {
+				result, err = probeOneHost(oracle, record.Distribution, input, *java, *timeout, *outputCap)
+			} else {
+				result, err = probeOneSandbox(oracle, record.Distribution, input, *python, *timeout, *outputCap)
+			}
 			if err != nil {
 				return fmt.Errorf("probe %s on %s: %w", oracle.ID, input.Path, err)
 			}
@@ -183,7 +198,113 @@ func identifyInput(name string) (inputIdentity, error) {
 	return inputIdentity{Path: filepath.Clean(name), SHA256: hashValue, Size: size, abs: abs}, nil
 }
 
-func probeOne(oracle Oracle, distribution string, input inputIdentity, java string, timeout time.Duration, outputCap int64) (probeResult, error) {
+type sandboxRequestInput struct {
+	Name  string `json:"name"`
+	Path  string `json:"path"`
+	Limit int64  `json:"limit"`
+}
+
+type sandboxRequest struct {
+	Inputs         []sandboxRequestInput `json:"inputs"`
+	Classpath      []string              `json:"classpath"`
+	InputName      string                `json:"input_name"`
+	TimeoutSeconds float64               `json:"timeout_seconds"`
+	OutputCap      int64                 `json:"output_cap"`
+}
+
+type sandboxResponse struct {
+	Status          string   `json:"status"`
+	Reason          string   `json:"reason"`
+	Backend         string   `json:"backend"`
+	PolicyDigest    string   `json:"policy_digest"`
+	DidExecute      bool     `json:"did_execute"`
+	CleanupVerified bool     `json:"cleanup_verified"`
+	ExitCode        *int     `json:"exit_code"`
+	TimedOut        bool     `json:"timed_out"`
+	OutputLimited   bool     `json:"output_limited"`
+	Stdout          string   `json:"stdout"`
+	Stderr          string   `json:"stderr"`
+	Artifacts       []string `json:"artifacts"`
+}
+
+func probeOneSandbox(oracle Oracle, distribution string, input inputIdentity, python string, timeout time.Duration, outputCap int64) (probeResult, error) {
+	jars, err := sortedJars(distribution)
+	if err != nil {
+		return probeResult{}, err
+	}
+	work, err := os.MkdirTemp("", "javajive-dex-oracle-sandbox-*")
+	if err != nil {
+		return probeResult{}, err
+	}
+	defer os.RemoveAll(work)
+	stagedInput, err := stageInput(work, input)
+	if err != nil {
+		return probeResult{}, err
+	}
+	request := sandboxRequest{InputName: filepath.Base(stagedInput), TimeoutSeconds: timeout.Seconds(), OutputCap: outputCap}
+	request.Inputs = append(request.Inputs, sandboxRequestInput{Name: request.InputName, Path: stagedInput, Limit: maxInputBytes})
+	for index, jar := range jars {
+		name := fmt.Sprintf("oracle-%03d.jar", index)
+		request.Inputs = append(request.Inputs, sandboxRequestInput{Name: name, Path: jar, Limit: maxArchiveBytes})
+		request.Classpath = append(request.Classpath, name)
+	}
+	requestPath := filepath.Join(work, "request.json")
+	responsePath := filepath.Join(work, "response.json")
+	artifacts := filepath.Join(work, "artifacts")
+	requestBytes, err := json.Marshal(request)
+	if err != nil {
+		return probeResult{}, err
+	}
+	if err := os.WriteFile(requestPath, requestBytes, 0o600); err != nil {
+		return probeResult{}, err
+	}
+	bridge := filepath.Join("tools", "dex_oracle", "sandbox_bridge.py")
+	started := time.Now()
+	cmd := exec.Command(python, "-I", bridge, "--request", requestPath, "--response", responsePath, "--artifacts", artifacts)
+	cmd.Env = cleanPythonEnv(os.Environ())
+	bridgeOutput, runErr := cmd.CombinedOutput()
+	runtimeMS := time.Since(started).Milliseconds()
+	if runErr != nil {
+		return probeResult{}, fmt.Errorf("sandbox bridge: %w: %s", runErr, strings.TrimSpace(string(bridgeOutput)))
+	}
+	responseBytes, err := os.ReadFile(responsePath)
+	if err != nil {
+		return probeResult{}, err
+	}
+	var response sandboxResponse
+	if err := json.Unmarshal(responseBytes, &response); err != nil {
+		return probeResult{}, fmt.Errorf("decode sandbox response: %w", err)
+	}
+	stdout := recordText(response.Stdout)
+	stderr := recordText(response.Stderr)
+	exit := -1
+	if response.ExitCode != nil {
+		exit = *response.ExitCode
+	}
+	result := probeResult{
+		OracleID: oracle.ID, OracleVersion: oracle.Version, OracleArchiveSHA256: oracle.SHA256,
+		InputPath: input.Path, InputSHA256: input.SHA256, ExitCode: exit,
+		TimedOut: response.TimedOut, OutputLimited: response.OutputLimited, ConversionRuntimeMS: runtimeMS,
+		Isolation: isolationRecord{Mode: "sandbox", Backend: response.Backend, PolicyDigest: response.PolicyDigest, Status: response.Status, Reason: response.Reason, DidExecute: response.DidExecute, CleanupVerified: response.CleanupVerified},
+		Stdout:    stdout, Stderr: stderr, ErrorZips: []archiveArtifact{},
+	}
+	if !response.DidExecute || !response.CleanupVerified {
+		result.StartError = fmt.Sprintf("sandbox %s: %s", response.Status, response.Reason)
+		return result, nil
+	}
+	result.OutputJar = inventoryJar(filepath.Join(artifacts, "output.jar"))
+	matches, err := filepath.Glob(filepath.Join(artifacts, "*.zip"))
+	if err != nil {
+		return probeResult{}, err
+	}
+	sort.Strings(matches)
+	for _, filename := range matches {
+		result.ErrorZips = append(result.ErrorZips, inventoryZip(filename))
+	}
+	return result, nil
+}
+
+func probeOneHost(oracle Oracle, distribution string, input inputIdentity, java string, timeout time.Duration, outputCap int64) (probeResult, error) {
 	jars, err := sortedJars(distribution)
 	if err != nil {
 		return probeResult{}, err
@@ -222,7 +343,9 @@ func probeOne(oracle Oracle, distribution string, input inputIdentity, java stri
 		OracleID: oracle.ID, OracleVersion: oracle.Version, OracleArchiveSHA256: oracle.SHA256,
 		InputPath: input.Path, InputSHA256: input.SHA256, ExitCode: exitCode(runErr),
 		TimedOut: errors.Is(ctx.Err(), context.DeadlineExceeded), OutputLimited: combined.exceeded(),
-		ConversionRuntimeMS: runtimeMS, Stdout: stdout.record(), Stderr: stderr.record(), ErrorZips: []archiveArtifact{},
+		ConversionRuntimeMS: runtimeMS,
+		Isolation:           isolationRecord{Mode: "host-override", Backend: "host", Status: "unisolated", Reason: "explicit_host_override", DidExecute: true, CleanupVerified: false},
+		Stdout:              stdout.record(), Stderr: stderr.record(), ErrorZips: []archiveArtifact{},
 	}
 	if runErr != nil {
 		var exitErr *exec.ExitError
@@ -240,6 +363,18 @@ func probeOne(oracle Oracle, distribution string, input inputIdentity, java stri
 		result.ErrorZips = append(result.ErrorZips, inventoryZip(filename))
 	}
 	return result, nil
+}
+
+func cleanPythonEnv(env []string) []string {
+	blocked := map[string]bool{"PYTHONPATH": true, "PYTHONHOME": true, "PYTHONSTARTUP": true, "PYTHONINSPECT": true}
+	result := make([]string, 0, len(env)+2)
+	for _, value := range env {
+		key, _, _ := strings.Cut(value, "=")
+		if !blocked[key] {
+			result = append(result, value)
+		}
+	}
+	return append(result, "PYTHONNOUSERSITE=1", "PYTHONDONTWRITEBYTECODE=1")
 }
 
 func cleanJavaEnv(env []string) []string {
@@ -348,6 +483,11 @@ func (w *captureWriter) record() streamRecord {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return streamRecord{SHA256: hex.EncodeToString(w.hash.Sum(nil)), Bytes: w.total, Truncated: w.total > int64(len(w.text)), Text: string(w.text)}
+}
+
+func recordText(text string) streamRecord {
+	h := sha256.Sum256([]byte(text))
+	return streamRecord{SHA256: hex.EncodeToString(h[:]), Bytes: int64(len(text)), Text: text}
 }
 
 func hashFile(name string, limit int64) (string, int64, error) {
