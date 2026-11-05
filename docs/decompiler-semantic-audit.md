@@ -66,6 +66,10 @@ Reported but not claimed as clean:
 - **Large single methods.** The documented `MaxAnalysisUpdates=1,000,000`
   reaching-definition budget still degrades a 47 KB generated method to a
   method stub; the same workload split into ten methods passes.
+- **Constructor prefixes.** Acyclic stack phis and discarded-value sinks are
+  disabled inside constructors because Java cannot declare a synthetic local
+  before `super()`/`this()`; constructor prefix joins use the established
+  lowering path.
 - **Record-deconstruction patterns.** T21-C06 covers a supported
   reconstruction. A separate adversarial shape whose record accessor calls
   share `Throwable` handlers that wrap failures in `MatchException` is

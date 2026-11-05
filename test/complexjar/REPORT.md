@@ -135,6 +135,10 @@ being counted as success.
   `MaxAnalysisUpdates=1,000,000` reaching-definition budget and degrades that
   method to a stub. Splitting the same work into ten methods passes. This is a
   policy boundary, not a silent miscompile.
+- **Constructor prefixes.** Java cannot declare a synthetic local before the
+  `super()`/`this()` delegation, so acyclic stack phis and discarded-value
+  sinks are disabled inside constructors; constructor switch-expression joins
+  remain on the established prefix path.
 - **`module-info.class` is inspected but not regenerated.** The archive path
   emits a comment-only unit; modular descriptors are not reconstructed. The
   exported classes still compile and run on the classpath.

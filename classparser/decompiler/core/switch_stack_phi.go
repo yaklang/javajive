@@ -36,6 +36,17 @@ func (d *Decompiler) prepareAcyclicStackMergeSlot(merge *OpCode, sources []*OpCo
 	if d.FunctionContext != nil && d.FunctionContext.FunctionName == "<init>" {
 		return nil
 	}
+	if d.acyclicPhiHasProtectedJoin(merge) && !d.commonSwitchAncestor(merge) {
+		// A protected normal/catch merge belongs to the established protected
+		// stack-store lowering. Only a switch expression join (every edge from
+		// one switch) is safe to materialize here.
+		return nil
+	}
+	if acyclicPhiHasCatchAncestor(merge) {
+		// One incoming edge comes from a catch handler. The try structurer
+		// owns that merge; do not synthesize edge stores.
+		return nil
+	}
 	baseOffset := merge.CurrentOffset
 	for _, source := range merge.Source {
 		if source == nil || source.Instr == nil ||
