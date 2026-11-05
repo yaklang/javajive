@@ -153,6 +153,32 @@ func dominatesNode(tree map[*core.Node][]*core.Node, dominator, node *core.Node)
 	return false
 }
 
+// skipGuardTarget keeps the entry switch's own paths on the gate so the gate
+// remains an immediate dominator child of the switch. Other pre-loop exit
+// predecessors enter the loop directly; the in-loop guard skips it.
+func skipGuardTarget(source, gate, loop *core.Node) *core.Node {
+	if gate != nil && source != nil && (source.SwitchCases != nil || source.SwitchDefault != nil) {
+		return gate
+	}
+	return loop
+}
+
+// dominatesAllEntryTargets reports whether source lies on every path to every
+// region entry. Such a node can serve as the loop's ordinary guard; any other
+// pre-loop exit predecessor needs the explicit skip flag.
+func dominatesAllEntryTargets(source *core.Node, entries []*core.Node, root *core.Node) bool {
+	if source == nil || root == nil || len(entries) == 0 {
+		return false
+	}
+	tree := GenerateDominatorTree(root)
+	for _, entry := range entries {
+		if !dominatesNode(tree, source, entry) {
+			return false
+		}
+	}
+	return true
+}
+
 func (m *RewriteManager) lowerIrreducibleRegion(region irreducibleDispatchRegion) bool {
 	members := map[*core.Node]bool{}
 	for _, node := range region.component.Nodes {
@@ -227,7 +253,82 @@ func (m *RewriteManager) lowerIrreducibleRegion(region irreducibleDispatchRegion
 	switchStatement := statements.NewSwitchStatement(state, cases)
 	loop := statements.NewDoWhileStatement(values.NewJavaLiteral(true, boolean), []statements.Statement{switchStatement})
 	loop.Label = label
+	loop.IrreducibleDispatch = true
+	// Snapshot non-member exit predecessors before wiring the loop. Once
+	// loopNode.AddNext(dispatchRoot) runs, the loop itself is a predecessor and
+	// must never be rewritten as an external handoff.
+	externalExitSources := make(map[*core.Node][]*core.Node, len(region.exits))
+	for _, exit := range region.exits {
+		for _, source := range append([]*core.Node(nil), exit.Source...) {
+			if members[source] {
+				continue
+			}
+			externalExitSources[exit] = append(externalExitSources[exit], source)
+		}
+	}
+
+	// A single ConditionStatement that dominates every region entry can be
+	// consumed by ordinary loop structuring as the loop guard. Any other
+	// pre-loop exit predecessor (a switch default, the last condition of an
+	// entry chain, or a second predecessor) cannot skip the dispatcher loop in
+	// structured Java; without an explicit flag its arm would fall through into
+	// the loop and execute the wrong state.
+	needsSkipGuard := false
+	hasSwitchExitSource := false
+	for _, exit := range region.exits {
+		sources := externalExitSources[exit]
+		if len(sources) == 0 {
+			continue
+		}
+		for _, source := range sources {
+			if source.SwitchCases != nil || source.SwitchDefault != nil {
+				hasSwitchExitSource = true
+			}
+		}
+		if len(sources) > 1 {
+			needsSkipGuard = true
+			continue
+		}
+		source := sources[0]
+		if _, simple := source.Statement.(*statements.ConditionStatement); !simple {
+			needsSkipGuard = true
+			continue
+		}
+		if !dominatesAllEntryTargets(source, region.component.EntryTargets, m.RootNode) {
+			needsSkipGuard = true
+		}
+	}
+	var skip *values.JavaRef
+	var gateNode *core.Node
+	if needsSkipGuard {
+		skipID := coreutils.NewRootVariableId()
+		skipID.SetName(fmt.Sprintf("jdecSkip%d", dispatchID))
+		skip = values.NewJavaRef(skipID, nil, boolean)
+		// The guard lives at the top of the loop body and breaks out before the
+		// state switch. Keep an acyclic gate between the entry dispatch and the
+		// loop: making the cyclic loop the switch merge suppresses per-case
+		// break emission, and the entry cases would fall through into each
+		// other (including the default arm).
+		guardBody := []statements.Statement{
+			statements.NewSourceTransferStatement("break", label),
+		}
+		loop.Body = append([]statements.Statement{
+			statements.NewIfStatement(skip, guardBody, nil),
+		}, loop.Body...)
+		// A gate is only needed for a raw entry switch: it restores an acyclic
+		// switch merge so per-case breaks are emitted. Routing other pre-loop
+		// predecessors through the gate would make the gate the switch's common
+		// dominator instead of an immediate child, and merge detection would
+		// fail again.
+		if hasSwitchExitSource {
+			gateNode = m.NewNode(statements.NewMiddleStatement("", nil))
+		}
+	}
 	loopNode := m.NewNode(loop)
+	if gateNode != nil {
+		gateNode.AddNext(loopNode)
+	}
+
 	dispatchRoot := buildExitDispatch(m, exitState, region.exits, exitOf)
 	if dispatchRoot == nil {
 		if m.irreducibleDispatchError == "" {
@@ -235,38 +336,71 @@ func (m *RewriteManager) lowerIrreducibleRegion(region irreducibleDispatchRegion
 		}
 		return false
 	}
+
 	loopNode.AddNext(dispatchRoot)
+	if !needsSkipGuard && len(region.exits) == 1 {
+		// Preserve the legacy wiring for single-exit regions: the newly created
+		// loop is itself a predecessor of that exit and receives the exit-state
+		// handoff. Multi-exit loops point at the synthetic exit dispatch switch,
+		// not at individual exits, so they must not be appended here.
+		for _, exit := range region.exits {
+			externalExitSources[exit] = append(externalExitSources[exit], loopNode)
+		}
+	}
 	for _, exit := range region.exits {
-		for _, source := range append([]*core.Node(nil), exit.Source...) {
-			if members[source] {
-				continue
+		for _, source := range externalExitSources[exit] {
+			var head *core.Node
+			switch {
+			case skip != nil && len(region.exits) > 1:
+				exitAssign := m.NewNode(statements.NewAssignStatement(exitState, values.NewJavaLiteral(exitOf[exit], integer), false))
+				skipAssign := m.NewNode(statements.NewAssignStatement(skip, values.NewJavaLiteral(true, boolean), false))
+				exitAssign.AddNext(skipAssign)
+				skipAssign.AddNext(skipGuardTarget(source, gateNode, loopNode))
+				head = exitAssign
+			case skip != nil:
+				skipAssign := m.NewNode(statements.NewAssignStatement(skip, values.NewJavaLiteral(true, boolean), false))
+				skipAssign.AddNext(skipGuardTarget(source, gateNode, loopNode))
+				head = skipAssign
+			default:
+				assign := m.NewNode(statements.NewAssignStatement(exitState, values.NewJavaLiteral(exitOf[exit], integer), false))
+				assign.AddNext(dispatchRoot)
+				head = assign
 			}
-			assign := m.NewNode(statements.NewAssignStatement(exitState, values.NewJavaLiteral(exitOf[exit], integer), false))
-			assign.AddNext(dispatchRoot)
-			replaceNextInPlace(source, exit, assign)
+			replaceNextInPlace(source, exit, head)
 		}
 	}
 
+	entryTarget := loopNode
+	if gateNode != nil {
+		entryTarget = gateNode
+	}
 	for _, edge := range region.component.EntryEdges {
 		if members[edge.From] || !members[edge.To] {
 			continue
 		}
 		assign := m.NewNode(statements.NewAssignStatement(state, values.NewJavaLiteral(stateOf[edge.To], integer), false))
-		assign.AddNext(loopNode)
+		assign.AddNext(entryTarget)
 		replaceNextInPlace(edge.From, edge.To, assign)
 	}
 	originalRoot := m.RootNode
 	initial := 0
+	rootNext := m.RootNode
 	if members[originalRoot] {
 		initial = stateOf[originalRoot]
-		m.RootNode = loopNode
+		rootNext = loopNode
 	}
-	oldRoot := m.RootNode
+	oldRoot := rootNext
 	declareState := m.NewNode(statements.NewAssignStatement(state, values.NewJavaLiteral(initial, integer), true))
 	declareExit := m.NewNode(statements.NewAssignStatement(exitState, values.NewJavaLiteral(0, integer), true))
 	declareState.AddNext(declareExit)
 	declareExit.AddNext(oldRoot)
-	m.RootNode = declareState
+	if skip != nil {
+		declareSkip := m.NewNode(statements.NewAssignStatement(skip, values.NewJavaLiteral(false, boolean), true))
+		declareSkip.AddNext(declareState)
+		m.RootNode = declareSkip
+	} else {
+		m.RootNode = declareState
+	}
 	for _, node := range remaining {
 		node.RemoveAllSource()
 		node.RemoveAllNext()

@@ -197,6 +197,12 @@ func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.Ja
 	if jdecenv.Get("JDEC_WIDEN_CONCRETE_TO_OBJECT_OFF") != "1" {
 		widenConcreteDeclToObject(sts)
 	}
+	// Irreducible-dispatch locals that placeCrossScopeDeclarations widened to
+	// the do-body are bare `T varN;` declarations. javac rejects a read in a
+	// sibling switch case as possibly uninitialized even though the JVM
+	// verifier proves a store dominates every original read. Hoist those
+	// generated locals to the method root with a type-default initializer.
+	hoistDispatchCrossCaseDeclarations(sts)
 }
 
 // dropDuplicateDeclarations removes repeated declaration flags for an exact
