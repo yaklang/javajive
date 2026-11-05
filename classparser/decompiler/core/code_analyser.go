@@ -6168,10 +6168,14 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	}
 	for _, slotVal := range ternaryExpMergeNodeSlot {
 		ternaryExp, ok := slotVal.GetValue().(*values.TernaryExpression)
-		if !ok {
+		if !ok || ternaryExp == nil || ternaryExp.TrueValue == nil || ternaryExp.FalseValue == nil {
 			continue
 		}
-		types.MergeTypes(ternaryExp.TrueValue.Type(), ternaryExp.FalseValue.Type())
+		trueType, falseType := ternaryExp.TrueValue.Type(), ternaryExp.FalseValue.Type()
+		if trueType == nil || falseType == nil {
+			continue
+		}
+		types.MergeTypes(trueType, falseType)
 	}
 	return nil
 }
@@ -6328,6 +6332,12 @@ func (d *Decompiler) ParseStatement() error {
 	funcCtx := d.FunctionContext
 	err := d.ParseOpcode()
 	if err != nil {
+		return err
+	}
+	// Reject missing or wrong-kind constant-pool operands before stack
+	// simulation indexes the pool or asserts a member/class type. Malformed
+	// input must yield a structured method error, not a recovered panic.
+	if err := d.validateConstantPoolReferences(); err != nil {
 		return err
 	}
 	// Validate encoded offsets before a normalizer changes the instruction PC space.

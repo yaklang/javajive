@@ -228,6 +228,13 @@ func decompileWithBudget(data []byte, options DecompileOptions) (result Decompil
 		}
 		return result, budget, err
 	}
+	// Parse remains permissive for unknown versions so structural callers can
+	// inspect them. A decompile request, however, must not silently apply
+	// Java-21 source semantics to a classfile outside the supported range.
+	if err := ValidateSupportedClassMajor(obj.MajorVersion); err != nil {
+		result.Status = "unsupported"
+		return result, budget, err
+	}
 	result.Members = newMemberLedger(obj)
 	result.Syntax = ValidationObservation{Status: "not_run"}
 	defer func() {
