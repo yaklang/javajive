@@ -101,7 +101,8 @@ func (d *Decompiler) unifyReferenceWebs() {
 			}
 			for _, store := range stores {
 				ref := d.opcodeIdToRef[store][0][0].(*values.JavaRef)
-				if (ref.IsParam && ref != param) || len(owners[ref]) != 1 || len(store.stackConsumed) != 1 {
+				parameterAlias := param != nil && param.Id != nil && param.VarUid != "" && ref.Id == param.Id && ref.VarUid == param.VarUid
+				if (ref.IsParam && ref != param && !parameterAlias) || len(owners[ref]) != 1 || len(store.stackConsumed) != 1 {
 					valid = false
 					break
 				}
@@ -110,7 +111,7 @@ func (d *Decompiler) unifyReferenceWebs() {
 				if canon == nil {
 					canon = ref
 				}
-				if values.IsNullLiteral(value) {
+				if value == values.JavaNull || values.IsNullLiteral(value) {
 					continue
 				}
 				for _, typ := range webDefinitionTypes(value, refs) {
@@ -185,11 +186,13 @@ func (d *Decompiler) unifyReferenceWebs() {
 			// All aliases are retained as objects (existing SlotValues can reference them),
 			// but agree on identity and declaration type before statements are constructed.
 			identity := canon.SolvedWebIdentity
-			if identity == nil && param == nil && len(refs) > 1 {
+			if identity == nil && param == nil && len(stores) > 1 {
 				// Source naming visits sibling scopes independently. The same
 				// solved definition web must keep one binder even when its joined
 				// use lies outside the immediate try/if body. A mutable Id alone
-				// loses that fact as soon as one arm is renamed.
+				// loses that fact as soon as one arm is renamed. The simulator
+				// may already share one ref across all stores; naming clones that
+				// ref for each declaration, so counting aliases misses this join.
 				identity = canon.Id
 			}
 			for ref := range refs {
@@ -198,6 +201,12 @@ func (d *Decompiler) unifyReferenceWebs() {
 				}
 				ref.Id = canon.Id
 				ref.VarUid = canon.VarUid
+				if param != nil && !param.IsThis {
+					// The solved identity denotes the parameter's declaration as
+					// well as its reads and writes. Otherwise declaration recovery
+					// invents a second local with the parameter's source name.
+					ref.IsParam = param.IsParam
+				}
 				if param == nil && identity != nil {
 					ref.SolvedWebIdentity = identity
 				}

@@ -75,26 +75,12 @@ func fixMath3RemainingReconstructs(body string) string {
 		body = strings.ReplaceAll(body, "var4.getKey()", "(Integer)(var4.getKey())")
 		body = strings.ReplaceAll(body, "(Integer)((Integer)(var4.getKey()))", "(Integer)(var4.getKey())")
 	}
-	if strings.Contains(body, "class RectangularCholeskyDecomposition") {
-		body = strings.Replace(body, "var14 = var11;", "var10 = var11;", 1)
-		body = strings.Replace(body, "if ((var8) != ((var10_1) != (0)))", "if ((var8) != (var10))", 1)
-		body = strings.Replace(body, "var6[var8] = var6[var10_1];", "var6[var8] = var6[var10];", 1)
-		body = strings.Replace(body, "var6[var10_1] = var11;", "var6[var10] = var11;", 1)
-		body = strings.Replace(body, "var5[var8] = var5[var10_1];", "var5[var8] = var5[var10];", 1)
-		body = strings.Replace(body, "var5[var10_1] = var12_1;", "var5[var10] = var12_1;", 1)
-	}
 	if strings.Contains(body, "class AVLTree$Node") {
 		body = strings.ReplaceAll(body, "Comparable var1 = this.element;", "T var1 = this.element;")
 	}
 	if strings.Contains(body, "class Network") {
 		body = strings.ReplaceAll(body, "var3.getKey()", "(Long)(var3.getKey())")
 		body = strings.ReplaceAll(body, "(Long)((Long)(var3.getKey()))", "(Long)(var3.getKey())")
-	}
-	if strings.Contains(body, "class SymmLQ$State") {
-		body = strings.Replace(body,
-			"static final double CBRT_MACH_PREC = FastMath.cbrt(MACH_PREC);\n\tstatic final double MACH_PREC = FastMath.ulp(1D);",
-			"static final double MACH_PREC = FastMath.ulp(1D);\n\tstatic final double CBRT_MACH_PREC = FastMath.cbrt(MACH_PREC);",
-			1)
 	}
 	if strings.Contains(body, "class Frequency$NaturalComparator") {
 		body = strings.Replace(body,
@@ -144,23 +130,6 @@ func fixMath3RemainingReconstructs(body string) string {
 		body = strings.ReplaceAll(body,
 			"(T)((T)(this.this$0.getStepSize()))",
 			"(T)(this.this$0.getStepSize())")
-	}
-	if strings.Contains(body, "class ResizableDoubleArray") {
-		filled := "ResizableDoubleArray var2 = this;\n\t\t\t\tsynchronized(this){\n\t\t\t\t\tResizableDoubleArray var3 = ((ResizableDoubleArray)(var1));\n\t\t\t\t\treturn ((this.numElements) == (var3.numElements)) && ((this.startIndex) == (var3.startIndex));\n\t\t\t\t}"
-		body = strings.Replace(body,
-			"ResizableDoubleArray var2 = this;\n\t\t\t\tsynchronized(this){\n\n\t\t\t\t}\n\t\t\t\treturn false;",
-			filled,
-			1)
-		body = strings.Replace(body,
-			"ResizableDoubleArray var2 = this;\n\t\t\t\tsynchronized(this){\n\n\t\t\t\t}",
-			filled,
-			1)
-	}
-	if strings.Contains(body, "class Erf") {
-		body = strings.Replace(body,
-			"if ((var0) < (-0.4769362762044697D)){\n\n\t\t\t}else{",
-			"if ((var0) < (-0.4769362762044697D)){\n\t\t\t\treturn ((var1) < (0D)) ? ((erfc(-var1)) - (erfc(-var0))) : ((erfc(-var0)) - (erfc(var1)));\n\t\t\t}else{",
-			1)
 	}
 	return body
 }

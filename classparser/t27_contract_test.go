@@ -84,8 +84,11 @@ func testT27C02(t *testing.T) {
 
 	posDefault := "\tswitch (x) {\n\tdefault:\n\t}\n"
 	nearDefault := "\tswitch (x) {\n\tdefault:\n\t\tbreak;\n\t}\n"
-	if ApplyContractedRule(RewriteFixEmptySwitchDefault, posDefault) == posDefault {
-		t.Fatal("T27-C02 empty-default positive should apply")
+	if _, present := lookupRewriteContract(RewriteFixEmptySwitchDefault); present {
+		t.Fatal("T27-C02 unproved default terminator must remain retired")
+	}
+	if ApplyContractedRule(RewriteFixEmptySwitchDefault, posDefault) != posDefault {
+		t.Fatal("T27-C02 empty default must not acquire an invented exception")
 	}
 	if ApplyContractedRule(RewriteFixEmptySwitchDefault, nearDefault) != nearDefault {
 		t.Fatal("T27-C02 empty-default near-miss must not apply")

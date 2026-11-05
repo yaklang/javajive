@@ -35,6 +35,11 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	splitSharedFallthroughExpression(manager, ifNode)
 	splitSharedLiteralPhiStores(manager, ifNode)
 	splitSharedTerminalLeaves(manager, ifNode)
+	materializeProtectedCommitExit(manager, ifNode)
+	materializeProtectedNormalExit(manager, ifNode)
+	// Normalize shared edge blocks first. A shared terminal store can look
+	// like a second region exit until its selected edge has its own owner.
+	materializeForwardRegionExits(manager, ifNode)
 	err := CalcEnd(manager.DominatorMap, ifNode)
 	if err != nil {
 		return err
@@ -58,7 +63,7 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	originNodeStatement := ifNode.Statement
 
 	ifStatementNode := manager.NewNode(ifStatement)
-	ifNode.Replace(ifStatementNode)
+	manager.replaceStructuredNode(ifNode, ifStatementNode)
 	checkIsEndNode := func(node1, node2 *core.Node) bool {
 		if node1 == nil || node2 == nil {
 			return false
@@ -67,6 +72,9 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 		core.WalkGraph[*core.Node](node1, func(node *core.Node) ([]*core.Node, error) {
 			var next []*core.Node
 			for _, n := range node.Next {
+				if encodedJumpTo(node, n) {
+					continue
+				}
 				if slices.Contains(manager.DominatorMap[node], n) {
 					next = append(next, n)
 				}
@@ -129,7 +137,7 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 			sts = append(sts, node)
 			var next []*core.Node
 			for _, n := range node.Next {
-				if slices.Contains(manager.DominatorMap[node], n) {
+				if !encodedJumpTo(node, n) && slices.Contains(manager.DominatorMap[node], n) {
 					next = append(next, n)
 				} else {
 					endNodes = append(endNodes, n)
@@ -199,7 +207,8 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	markEncodedJumps(ifStatementNode, ifBodyNodes)
 	retargetProtectedIfBoundary(manager.TryNodes, ifNode, ifStatementNode)
 
-	return nil
+	rememberForwardEntry(manager, ifNode, ifStatementNode)
+	return finishForwardRegion(manager, ifNode, ifStatementNode)
 }
 
 // A loop edge already expressed by continue/break is an abrupt exit, just
@@ -318,20 +327,25 @@ func sameProtectedMembership(root, a, b *core.Node) bool {
 
 // Shared terminal leaves are not necessarily dominated by an inner condition.
 // Split its selected edge before collecting dominated regions, or an abrupt
-// arm can disappear. Preserve the ATHROW operand and original PC; its expression
-// is still evaluated once on the selected path. Opaque custom statements and
-// nonliteral value returns remain outside this narrowly proved transformation.
+// arm can disappear. Preserve the operand and original PC; its expression is
+// still evaluated once on the selected edge. Nonliteral returns additionally
+// require a copy-stable expression and every original exceptional effect to
+// have the same handler domain as the incoming branch.
 func splitSharedTerminalLeaves(manager *RewriteManager, condition *core.Node) {
 	changed := false
 	for _, target := range slices.Clone(condition.Next) {
 		var terminalCopy statements.Statement
 		switch st := target.Statement.(type) {
 		case *statements.ReturnStatement:
-			value := values.UnpackSoltValue(st.JavaValue)
+			if st == nil {
+				continue
+			}
+			value := loopStepOperand(st.JavaValue)
 			_, literal := value.(*values.JavaLiteral)
 			literal = literal || value == values.JavaNull
 			if st.JavaValue == nil || (literal && st.HasOriginPC && target.HasOriginPC &&
-				st.OriginPC == target.OriginPC && sameProtectedMembership(manager.RootNode, condition, target)) {
+				st.OriginPC == target.OriginPC && sameProtectedMembership(manager.RootNode, condition, target)) ||
+				sharedReturnCanFollowEdge(manager, condition, target, st) {
 				copy := *st
 				terminalCopy = &copy
 			}

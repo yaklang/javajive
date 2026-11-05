@@ -68,8 +68,8 @@ func TestCollections4RemainingReconstructsAreLoadBearing(t *testing.T) {
 	if !strings.Contains(on, "this.inToRange((K)(var2),false)") || !strings.Contains(on, "this.inFromRange((K)(var2),false)") {
 		t.Errorf("ON: missing RangeEntryMap (K) casts, got:\n%s", on)
 	}
-	if strings.Contains(on, "public boolean containsValue") && strings.Contains(on, "throw new RuntimeException()") {
-		t.Errorf("ON: expected Flat3Map containsValue default throw dropped, got:\n%s", on)
+	if !strings.Contains(on, "throw new RuntimeException()") {
+		t.Errorf("ON: a class/method name cannot authorize deleting an explicit throw, got:\n%s", on)
 	}
 
 	t.Setenv("JDEC_COLLECTIONS4_REMAINING_OFF", "1")

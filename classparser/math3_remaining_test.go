@@ -112,12 +112,6 @@ func TestNetworkPutLongKeyIsLoadBearing(t *testing.T) {
 		"var3.getKey()")
 }
 
-func TestSymmLQMachPrecOrderIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/SymmLQ$State.class", "JDEC_MATH3_REMAINING_OFF",
-		"static final double MACH_PREC = FastMath.ulp(1D);\n\tstatic final double CBRT_MACH_PREC",
-		"static final double CBRT_MACH_PREC = FastMath.cbrt(MACH_PREC);\n\tstatic final double MACH_PREC")
-}
-
 func TestAdversarialPoissonBoolAsDoubleIsLoadBearing(t *testing.T) {
 	raw, err := os.ReadFile("testdata/regression/PoissonDistribution.class")
 	if err != nil {
@@ -138,10 +132,32 @@ func TestAdversarialPoissonBoolAsDoubleIsLoadBearing(t *testing.T) {
 	}
 }
 
-func TestErfTwoArgEmptyIfReturnIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/Erf.class", "JDEC_MATH3_REMAINING_OFF",
-		"return ((var1) < (0D)) ? ((erfc(-var1)) - (erfc(-var0))) : ((erfc(-var0)) - (erfc(var1)));",
-		"if ((var0) < (-0.4769362762044697D)){\n\n\t\t\t}else{")
+// Their original initialization and control-flow evidence now drives source.
+// These historical classes must no longer depend on a named text replacement;
+// generic effect/exception and declaration-permutation JVM tests exercise the
+// behavior independently, including renamed controls and Precision mode.
+func TestAdversarialMathInitializationAndDecisionsNeedNoNamedRepair(t *testing.T) {
+	for _, name := range []string{"SymmLQ$State", "Erf", "RectangularCholeskyDecomposition"} {
+		t.Run(name, func(t *testing.T) {
+			raw, err := os.ReadFile("testdata/regression/" + name + ".class")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("JDEC_MATH3_REMAINING_OFF", "")
+			with, err := Decompile(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("JDEC_MATH3_REMAINING_OFF", "1")
+			without, err := Decompile(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if with != without || strings.Contains(with, DecompileStubMarker) {
+				t.Fatalf("original-evidence recovery still needs a named repair:\n%s\n%s", with, without)
+			}
+		})
+	}
 }
 
 func TestMathRecoveryPreservesLoopDeclarationIdentities(t *testing.T) {
@@ -159,5 +175,26 @@ func TestMathRemainingKeepsRawConstructorBinding(t *testing.T) {
 	got := fixMath3RemainingReconstructs(in)
 	if !strings.Contains(got, "new Array2DRowFieldMatrix(matrix.getData())") || strings.Contains(got, "new Array2DRowFieldMatrix<T>") {
 		t.Fatal(got)
+	}
+}
+
+func TestAdversarialMathSourceNamesCannotAuthorizeValueRewrites(t *testing.T) {
+	// Both are valid programs. A library-like class name supplies no evidence
+	// that an assignment should target another local, or that a false result
+	// should become a field comparison. Renaming must not change either body.
+	programs := []string{
+		"class RectangularCholeskyDecomposition { int choose(int var11) { int var10 = 1; int var14 = 2; var14 = var11; return 100 * var10 + var14; } }",
+		"class ResizableDoubleArray { int numElements, startIndex; boolean same(Object var1) {\n\t\t\t\tResizableDoubleArray var2 = this;\n\t\t\t\tsynchronized(this){\n\n\t\t\t\t}\n\t\t\t\treturn false;\n} }",
+	}
+	for _, program := range programs {
+		for _, renamed := range []bool{false, true} {
+			text := program
+			if renamed {
+				text = strings.NewReplacer("RectangularCholeskyDecomposition", "LocalTransfer", "ResizableDoubleArray", "MonitorResult").Replace(text)
+			}
+			if got := fixMath3RemainingReconstructs(text); got != text {
+				t.Errorf("class name changed program values (renamed=%v):\n%s", renamed, got)
+			}
+		}
 	}
 }

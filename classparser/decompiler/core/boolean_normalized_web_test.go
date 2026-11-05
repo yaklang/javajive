@@ -64,7 +64,7 @@ func TestNormalizedBooleanWebRequiresClosedDefinitionsAndBooleanUses(t *testing.
 }
 
 func TestNormalizedBooleanWebJoinsSplitSourceNamesWithoutCrossWebMutation(t *testing.T) {
-	for _, kind := range []string{"split", "already boolean seed", "noncanonical", "numeric use", "foreign store", "foreign load", "missing load", "unreplaceable load", "missing definition"} {
+	for _, kind := range []string{"split", "already boolean seed", "conditional", "nested conditional", "noncanonical arm", "missing condition", "cyclic conditional", "noncanonical", "numeric use", "foreign store", "foreign load", "missing load", "unreplaceable load", "missing definition"} {
 		t.Run(kind, func(t *testing.T) {
 			integer := types.NewJavaPrimer(types.JavaInteger)
 			first := values.NewJavaRef(utils.NewRootVariableId(), nil, integer.Copy())
@@ -79,6 +79,20 @@ func TestNormalizedBooleanWebJoinsSplitSourceNamesWithoutCrossWebMutation(t *tes
 			webs := &slotWeb{webOf: map[*OpCode]int{seed: 1, store: 1, load: 1}, entryWeb: map[int]int{}}
 			d := &Decompiler{cachedSlotWebs: webs, opCodes: []*OpCode{seed, store, load, branch}, opcodeIdToRef: map[*OpCode][][2]any{seed: {{first, true}}, store: {{second, true}}}}
 			switch kind {
+			case "conditional", "nested conditional", "noncanonical arm", "missing condition", "cyclic conditional":
+				condition := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaPrimer(types.JavaBoolean))
+				choice := values.NewTernaryExpression(condition, one, zero)
+				store.stackConsumed[0] = choice
+				switch kind {
+				case "nested conditional":
+					choice.FalseValue = values.NewTernaryExpression(condition, zero, one)
+				case "noncanonical arm":
+					choice.FalseValue = values.NewJavaLiteral(2, integer)
+				case "missing condition":
+					choice.Condition = nil
+				case "cyclic conditional":
+					choice.FalseValue = choice
+				}
 			case "already boolean seed":
 				zero.JavaType = types.NewJavaPrimer(types.JavaBoolean)
 			case "noncanonical":
@@ -100,7 +114,7 @@ func TestNormalizedBooleanWebJoinsSplitSourceNamesWithoutCrossWebMutation(t *tes
 			}
 			d.restoreNormalizedBooleanWebs()
 			got := d.opcodeIdToRef[seed][0][0].(*values.JavaRef)
-			want := kind == "split" || kind == "already boolean seed"
+			want := kind == "split" || kind == "already boolean seed" || kind == "conditional" || kind == "nested conditional"
 			if (got != first) != want {
 				t.Fatalf("joined=%v want=%v", got != first, want)
 			}
@@ -180,5 +194,53 @@ func TestBooleanCopyComponentsKeepDistinctLocalsAndRejectNumericEscapes(t *testi
 				}
 			})
 		}
+	}
+}
+
+func TestConsistentBooleanJoinRetainsOneSourceIdentityAcrossScopes(t *testing.T) {
+	for _, scenario := range []string{"closed", "single definition", "foreign owner", "entry", "numeric producer", "numeric return", "missing definition", "no consumer"} {
+		t.Run(scenario, func(t *testing.T) {
+			typ := types.NewJavaPrimer(types.JavaBoolean)
+			ref := values.NewJavaRef(utils.NewRootVariableId(), nil, typ)
+			ref.Id.SetName("choice")
+			id, uid := ref.Id, ref.VarUid
+			a, b, load, ret := op(OP_ISTORE_1, 1), op(OP_ISTORE_1, 2), op(OP_ILOAD_1, 3), op(OP_IRETURN, 4)
+			first := &values.FunctionCallExpression{Descriptor: "()Z", FuncType: &types.JavaFuncType{ReturnType: typ}}
+			second := &values.FunctionCallExpression{Descriptor: "()Z", FuncType: &types.JavaFuncType{ReturnType: typ}}
+			a.stackConsumed, b.stackConsumed = []values.JavaValue{first}, []values.JavaValue{second}
+			view := values.NewSlotValue(ref, typ)
+			load.stackProduced, ret.stackConsumed = []values.JavaValue{view}, []values.JavaValue{view}
+			webs := &slotWeb{webOf: map[*OpCode]int{a: 1, b: 1, load: 1}, entryWeb: map[int]int{}}
+			d := &Decompiler{cachedSlotWebs: webs, opCodes: []*OpCode{a, b, load, ret}, opcodeIdToRef: map[*OpCode][][2]any{a: {{ref, true}}, b: {{ref, false}}}, FunctionType: &types.JavaFuncType{ReturnType: typ}}
+			d.FunctionContext = &class_context.ClassContext{FunctionType: d.FunctionType}
+			switch scenario {
+			case "single definition":
+				delete(webs.webOf, b)
+				delete(d.opcodeIdToRef, b)
+				d.opCodes = []*OpCode{a, load, ret}
+			case "foreign owner":
+				other := op(OP_ISTORE_2, 5)
+				webs.webOf[other] = 2
+				d.opcodeIdToRef[other] = [][2]any{{ref, true}}
+			case "entry":
+				webs.entryWeb[1] = 1
+			case "numeric producer":
+				second.Descriptor = "()I"
+				second.FuncType = &types.JavaFuncType{ReturnType: types.NewJavaPrimer(types.JavaInteger)}
+			case "numeric return":
+				d.FunctionType.ReturnType = types.NewJavaPrimer(types.JavaInteger)
+			case "missing definition":
+				b.stackConsumed = nil
+			case "no consumer":
+				ret.stackConsumed = nil
+			}
+			d.restoreNormalizedBooleanWebs()
+			if (ref.SolvedWebIdentity != nil) != (scenario == "closed") {
+				t.Fatal("wrong source identity proof")
+			}
+			if ref.Id != id || ref.VarUid != uid || view.GetValue() != ref || a.stackConsumed[0] != first || b.stackConsumed != nil && b.stackConsumed[0] != second || d.opcodeIdToRef[a][0][0] != ref {
+				t.Fatal("changed a value, binding or evaluation")
+			}
+		})
 	}
 }

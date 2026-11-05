@@ -46,7 +46,14 @@ func TestDecompilePolicyFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, err := DecompileWithOptions(raw, DecompileOptions{MaxAnalysisUpdates: 1})
+	// Isolate the solver-update limit from the independent graph construction
+	// and metadata-work limits. The default derived graph cap can be exhausted
+	// first, which correctly returns resource_limit rather than a solver stub.
+	// T22 separately verifies those default caps and exception-table fanout.
+	r, err := DecompileWithOptions(raw, DecompileOptions{MaxAnalysisUpdates: 1, Limits: Limits{
+		MaxGraphEdges: defaultGraphBound, MaxGraphScans: defaultGraphBound,
+		MaxSetElementWork: defaultGraphBound, MaxNodeCopies: defaultGraphBound,
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
