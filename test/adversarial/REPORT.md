@@ -24,20 +24,21 @@ JAVAJIVE_ADVERSARIAL_EVAL=1 go test ./test/adversarial \
 |---|---|
 | 真实 javac 形状 | **10 / 10** 恢复、重编译、校验、行为等价 |
 | 规模压力 | **5 / 5** 通过（2000 基本块、200 路 switch、300 连续 if、50 catch、250 locals） |
-| 对抗性非规约形状 | **5 / 6** 完全恢复；1 个共享后置 merge 保持精确 fail-closed |
+| 对抗性非规约形状 | **6 / 6** 完全恢复 |
 | 文档化 fail-closed 边界 | **5 / 5** 精确降级为 stub，无静默错误 |
 | 畸形输入 | 564 个变异：0 崩溃、0 超时；41 次内部 panic 被 recover 兜住 |
 | 既有 irreducible corpus | 8 / 8 源码 hash、行为、编译、校验全部不变 |
 
-本轮修复了两个在合并后的 #18 代码上确认的缺陷：
+本轮修复了在合并后的 #18 代码上确认的三个缺陷：
 
 - **F1（已修复）**：单出口非规约区域中，循环外多路前驱无法跳过 dispatcher 循环，
   导致越界 entry 执行错误状态（静默 miscompile）。
 - **F2（已修复）**：跨 case 局部变量被提升为 `do { int var6; ... }` 裸声明，
   javac 因 definite-assignment 拒绝编译。
+- **F3（已修复）**：多个出口汇入同一后置 continuation 时被 `linearTerminalExit`
+  拒绝，方法退化为 stub。
 
-F3（多出口共享后置 dispatch）仍按 fail-closed 处理；F4（畸形输入内部 panic 与
-classfile major version 校验）不在本 PR 范围。
+F4（畸形输入内部 panic 与 classfile major version 校验）由独立 PR 处理。
 
 ## 一、非规约边界矩阵（修复后）
 
@@ -47,7 +48,7 @@ classfile major version 校验）不在本 PR 范围。
 | IfChainEightEntry | 恢复 | recovered | 25 | 151 | 16ms |
 | TwoSequentialKernels | 恢复 | recovered | 13 | 94 | 12ms |
 | DeepRegional | 恢复 | recovered | 15 | 77 | 9ms |
-| FourExitEffects | fail-closed | fail-closed-stub | 0 | 3 | 15ms |
+| FourExitEffects | 恢复 | recovered | 13 | 102 | 21ms |
 | FallthroughEntry | 恢复 | recovered | 6 | 48 | 6ms |
 | ConstructorIrreducible | fail-closed | fail-closed-stub | 0 | 5 | 3ms |
 | TryCatchIrreducible | fail-closed | fail-closed-stub | 0 | 3 | 3ms |
@@ -100,18 +101,24 @@ classfile major version 校验）不在本 PR 范围。
 修复后 `DeepRegional` 与 `TwoSequentialKernels` 均可编译、校验并通过行为矩阵；
 新增单测覆盖提升、幂等和普通循环不受影响。
 
-### F3（保留）：多出口共享后置 merge
+### F3 修复：共享出口 continuation 坍缩
 
-`FourExitEffects` 的四个出口先汇合再按 exit-state 分派，被
-`linearTerminalExit` 拒绝为：
+`FourExitEffects` 的四个出口并不是四个独立终止链：它们各自写入同一个原始
+exit-state 局部变量，然后汇入同一段 if-chain。旧实现把每个出口交给
+`linearTerminalExit`，在共享节点处因 `len(Source) != 1` 拒绝，方法退化为 stub。
 
-```text
-unsupported_irreducible_control_flow: nonlinear terminal exit id=17
-statement=*statements.AssignStatement next=1
-```
+修复策略：
 
-最终 `status=partial`，方法整体 stub。该行为是 fail-closed（无静默错误），
-已作为能力边界记录，不在本 PR 扩展。
+1. 在 lowering 前识别“所有出口经线性前缀到达同一共享 continuation”的形状；
+   只要存在独立终止出口，就不坍缩，保留原有 multi-exit 处理。
+2. 坍缩为单个 dispatch exit，并把每个出口的前缀语句复制到对应的成员退出
+   case body；case 以 `break LOOP_n` 结束，共享 continuation 在循环之后只执行一次。
+3. 共享 continuation 的循环外前驱（预算检查、入口 switch default）由 F1 的
+   skip 守卫处理，避免 fall through 进 dispatcher。
+4. 前缀节点只断开前向边，保留 Source 边供成员退出分析与后续外部前驱改写使用。
+
+修复后 `FourExitEffects` 可编译、JVM 校验并通过 99 组输入的行为矩阵，输出
+102 行；既有 corpus 8/8 源码 hash 与行为不变。
 
 ## 二、真实 javac 形状（全部通过）
 

@@ -201,7 +201,18 @@ func (m *RewriteManager) lowerIrreducibleRegion(region irreducibleDispatchRegion
 			return false
 		}
 	}
-	for _, exit := range region.exits {
+
+	exits := region.exits
+	var exitPrefixes map[*core.Node][]statements.Statement
+	if plan := planSharedExit(region.exits); plan != nil {
+		exitPrefixes = plan.prefixes
+		exitPrefixes[plan.exit] = nil
+		for _, exit := range region.exits {
+			detachExitChainTo(exit, plan.exit)
+		}
+		exits = []*core.Node{plan.exit}
+	}
+	for _, exit := range exits {
 		for _, source := range exit.Source {
 			if members[source] {
 				continue
@@ -236,14 +247,14 @@ func (m *RewriteManager) lowerIrreducibleRegion(region irreducibleDispatchRegion
 	exitID := coreutils.NewRootVariableId()
 	exitID.SetName(fmt.Sprintf("jdecExit%d", dispatchID))
 	exitState := values.NewJavaRef(exitID, nil, integer)
-	exitOf := make(map[*core.Node]int, len(region.exits))
-	for index, exit := range region.exits {
+	exitOf := make(map[*core.Node]int, len(exits))
+	for index, exit := range exits {
 		exitOf[exit] = index
 	}
 	label := m.NewLoopLabel()
 	cases := make([]*statements.CaseItem, 0, len(remaining))
 	for _, node := range remaining {
-		body, ok := dispatchCaseBody(node, members, stateOf, state, exitOf, exitState, label)
+		body, ok := dispatchCaseBody(node, members, stateOf, state, exitOf, exitState, label, exitPrefixes)
 		if !ok {
 			m.irreducibleDispatchError = fmt.Sprintf("cannot lower residual state node id=%d statement=%T next=%d", node.Id, node.Statement, len(node.Next))
 			return false
@@ -257,8 +268,8 @@ func (m *RewriteManager) lowerIrreducibleRegion(region irreducibleDispatchRegion
 	// Snapshot non-member exit predecessors before wiring the loop. Once
 	// loopNode.AddNext(dispatchRoot) runs, the loop itself is a predecessor and
 	// must never be rewritten as an external handoff.
-	externalExitSources := make(map[*core.Node][]*core.Node, len(region.exits))
-	for _, exit := range region.exits {
+	externalExitSources := make(map[*core.Node][]*core.Node, len(exits))
+	for _, exit := range exits {
 		for _, source := range append([]*core.Node(nil), exit.Source...) {
 			if members[source] {
 				continue
@@ -275,7 +286,7 @@ func (m *RewriteManager) lowerIrreducibleRegion(region irreducibleDispatchRegion
 	// the loop and execute the wrong state.
 	needsSkipGuard := false
 	hasSwitchExitSource := false
-	for _, exit := range region.exits {
+	for _, exit := range exits {
 		sources := externalExitSources[exit]
 		if len(sources) == 0 {
 			continue
@@ -329,7 +340,7 @@ func (m *RewriteManager) lowerIrreducibleRegion(region irreducibleDispatchRegion
 		gateNode.AddNext(loopNode)
 	}
 
-	dispatchRoot := buildExitDispatch(m, exitState, region.exits, exitOf)
+	dispatchRoot := buildExitDispatch(m, exitState, exits, exitOf)
 	if dispatchRoot == nil {
 		if m.irreducibleDispatchError == "" {
 			m.irreducibleDispatchError = "cannot build exit dispatch"
@@ -338,20 +349,20 @@ func (m *RewriteManager) lowerIrreducibleRegion(region irreducibleDispatchRegion
 	}
 
 	loopNode.AddNext(dispatchRoot)
-	if !needsSkipGuard && len(region.exits) == 1 {
+	if !needsSkipGuard && len(exits) == 1 {
 		// Preserve the legacy wiring for single-exit regions: the newly created
 		// loop is itself a predecessor of that exit and receives the exit-state
 		// handoff. Multi-exit loops point at the synthetic exit dispatch switch,
 		// not at individual exits, so they must not be appended here.
-		for _, exit := range region.exits {
+		for _, exit := range exits {
 			externalExitSources[exit] = append(externalExitSources[exit], loopNode)
 		}
 	}
-	for _, exit := range region.exits {
+	for _, exit := range exits {
 		for _, source := range externalExitSources[exit] {
 			var head *core.Node
 			switch {
-			case skip != nil && len(region.exits) > 1:
+			case skip != nil && len(exits) > 1:
 				exitAssign := m.NewNode(statements.NewAssignStatement(exitState, values.NewJavaLiteral(exitOf[exit], integer), false))
 				skipAssign := m.NewNode(statements.NewAssignStatement(skip, values.NewJavaLiteral(true, boolean), false))
 				exitAssign.AddNext(skipAssign)
@@ -406,6 +417,111 @@ func (m *RewriteManager) lowerIrreducibleRegion(region irreducibleDispatchRegion
 		node.RemoveAllNext()
 	}
 	return true
+}
+
+type sharedExitPlan struct {
+	exit     *core.Node
+	prefixes map[*core.Node][]statements.Statement
+}
+
+// planSharedExit recognizes exit targets that all converge on one shared
+// continuation. Such exits are not independent terminal handlers: the
+// continuation (a dispatch on the original exit-state local) must execute once
+// after the loop, while each exit contributes only its state assignment.
+func planSharedExit(exits []*core.Node) *sharedExitPlan {
+	if len(exits) < 2 {
+		return nil
+	}
+	var shared *core.Node
+	for _, exit := range exits {
+		if exit == nil {
+			return nil
+		}
+		node := exit
+		found := (*core.Node)(nil)
+		for steps := 0; node != nil && steps < 64; steps++ {
+			if node != exit && len(node.Source) > 1 {
+				found = node
+				break
+			}
+			if isTerminalExitStatement(node.Statement) || len(node.Next) != 1 {
+				return nil
+			}
+			node = node.Next[0]
+		}
+		if found == nil {
+			return nil
+		}
+		if shared == nil {
+			shared = found
+		} else if shared != found {
+			return nil
+		}
+	}
+	if shared == nil {
+		return nil
+	}
+	prefixes := make(map[*core.Node][]statements.Statement, len(exits))
+	for _, exit := range exits {
+		body, ok := linearPrefixTo(exit, shared)
+		if !ok {
+			return nil
+		}
+		prefixes[exit] = body
+	}
+	return &sharedExitPlan{exit: shared, prefixes: prefixes}
+}
+
+// detachExitChainTo removes the forward links of an exit prefix while keeping
+// its Source edges. Member exits still target the prefix node so
+// dispatchCaseBody can copy its statements; external predecessors are rewired
+// later against the collapsed exit.
+func detachExitChainTo(start, shared *core.Node) {
+	for node := start; node != nil && node != shared; {
+		var next *core.Node
+		if len(node.Next) == 1 {
+			next = node.Next[0]
+		}
+		node.RemoveAllNext()
+		node = next
+	}
+}
+
+func linearPrefixTo(start, shared *core.Node) ([]statements.Statement, bool) {
+	body := []statements.Statement{}
+	seen := map[*core.Node]bool{}
+	node := start
+	for node != nil && node != shared {
+		if seen[node] || node.Statement == nil || len(body) >= 64 || node.IsTryCatch || node.IsCatchStart || node.HasProtectedRange {
+			return nil, false
+		}
+		if node != start && len(node.Source) != 1 {
+			return nil, false
+		}
+		seen[node] = true
+		if _, middle := node.Statement.(*statements.MiddleStatement); !middle {
+			body = append(body, node.Statement)
+		}
+		if len(node.Next) != 1 {
+			return nil, false
+		}
+		node = node.Next[0]
+	}
+	return body, node == shared
+}
+
+func isTerminalExitStatement(statement statements.Statement) bool {
+	if statement == nil {
+		return false
+	}
+	if _, ok := statement.(*statements.ReturnStatement); ok {
+		return true
+	}
+	if custom, ok := statement.(*statements.CustomStatement); ok {
+		_, thrown := custom.SourceThrowOperand()
+		return thrown
+	}
+	return false
 }
 
 func buildExitDispatch(m *RewriteManager, exitState *values.JavaRef, exits []*core.Node, exitOf map[*core.Node]int) *core.Node {
@@ -470,12 +586,17 @@ func linearTerminalExit(start *core.Node, owned map[*core.Node]bool) ([]statemen
 	return nil, false
 }
 
-func dispatchCaseBody(node *core.Node, members map[*core.Node]bool, stateOf map[*core.Node]int, state *values.JavaRef, exitOf map[*core.Node]int, exitState *values.JavaRef, label string) ([]statements.Statement, bool) {
+func dispatchCaseBody(node *core.Node, members map[*core.Node]bool, stateOf map[*core.Node]int, state *values.JavaRef, exitOf map[*core.Node]int, exitState *values.JavaRef, label string, exitPrefixes map[*core.Node][]statements.Statement) ([]statements.Statement, bool) {
 	prefix := []statements.Statement{}
 	if _, middle := node.Statement.(*statements.MiddleStatement); !middle {
 		prefix = append(prefix, node.Statement)
 	}
 	transfer := func(target *core.Node) ([]statements.Statement, bool) {
+		if prefix, ok := exitPrefixes[target]; ok {
+			body := append([]statements.Statement{}, prefix...)
+			body = append(body, statements.NewSourceTransferStatement("break", label))
+			return body, true
+		}
 		if members[target] {
 			return []statements.Statement{
 				statements.NewAssignStatement(state, values.NewJavaLiteral(stateOf[target], state.Type()), false),

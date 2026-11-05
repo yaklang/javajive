@@ -32,6 +32,10 @@ Add a native, pure-Go DEX/APK-to-JAR path as a strict first vertical slice.
   initializer, fixing rebuilt sources that javac rejected as possibly
   uninitialized. The pass reuses the original variable identity and is gated by
   `JDEC_DISPATCH_LOCAL_HOIST_OFF`.
+- Collapse irreducible exits that converge on one shared post-exit continuation
+  into a single dispatch exit. Each member exit carries its state prefix into
+  the exiting case body; the shared continuation executes once after the loop
+  and reuses the skip guard for pre-loop predecessors.
 - Add an opt-in adversarial classfile evaluation suite and a CI gate covering
   real javac shapes, irreducible boundary behavior, scale, and malformed input.
 - Reject classfiles outside the supported major-version range (45..65) at
