@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "fixtures": [
+    {
+      "file": "arithmetic.dex",
+      "sha256": "f41fd0a34b807d8d02f8e1f6316bc17bd2302bf23c47123a2cc74732c6243805",
+      "size": 832,
+      "input_inventory": ["<raw-dex>"],
+      "jar_sha256": "3566b4b2b7fa6f23cc8098e9db346309bb27f4e3c34d083ff065ce9e10d06a11",
+      "jar_inventory": ["META-INF/MANIFEST.MF", "accept/Arithmetic.class"],
+      "report": {"dex_files": 1, "classes": 1, "methods": 5, "translated_methods": 5, "warnings": 0},
+      "classes": ["accept.Arithmetic"],
+      "allowed_diagnostics": {"precision": {"accept.Arithmetic": ["legacy_source_recovery_disabled"]}, "compatibility": {"accept.Arithmetic": []}},
+      "driver": "drivers/ArithmeticDriver.java",
+      "driver_class": "accept.gate.ArithmeticDriver",
+      "runs": [
+        {"class": "accept.Arithmetic", "exit": 0, "stdout": "", "stderr": ""},
+        {"class": "accept.gate.ArithmeticDriver", "exit": 0, "stdout": "arithmetic:-1:-1:3:7:9:7\n", "stderr": ""}
+      ],
+      "quality": {"precision": {"baseline": {"lines": 48, "tokens": 103, "labels": 0, "while_true": 0, "synthetic_vars": 32, "unsupported_throws": 0}, "maximum": {"lines": 48, "tokens": 103, "labels": 0, "while_true": 0, "synthetic_vars": 32, "unsupported_throws": 0}}, "compatibility": {"baseline": {"lines": 48, "tokens": 103, "labels": 0, "while_true": 0, "synthetic_vars": 32, "unsupported_throws": 0}, "maximum": {"lines": 48, "tokens": 103, "labels": 0, "while_true": 0, "synthetic_vars": 32, "unsupported_throws": 0}}}
+    },
+    {
+      "file": "multidex.apk",
+      "sha256": "7bb54106362e9440543ea9a144ffcd45510968d8a06ca9baeb923dabd0a1aefc",
+      "size": 1890,
+      "input_inventory": ["AndroidManifest.xml", "assets/ignored.dex", "classes.dex", "classes2.dex", "res/raw/placeholder.txt"],
+      "jar_sha256": "303a547c47f646de4d2d46c0703f562953c572bcfdee5c73ebd6b4f86bc1109b",
+      "jar_inventory": ["META-INF/MANIFEST.MF", "accept/apk/Primary.class", "accept/apk/Secondary.class"],
+      "report": {"dex_files": 2, "classes": 2, "methods": 4, "translated_methods": 4, "warnings": 0},
+      "classes": ["accept.apk.Primary", "accept.apk.Secondary"],
+      "allowed_diagnostics": {"precision": {"accept.apk.Primary": ["legacy_source_recovery_disabled"], "accept.apk.Secondary": ["legacy_source_recovery_disabled"]}, "compatibility": {"accept.apk.Primary": [], "accept.apk.Secondary": []}},
+      "driver": "drivers/MultidexDriver.java",
+      "driver_class": "accept.gate.MultidexDriver",
+      "runs": [
+        {"class": "accept.apk.Primary", "exit": 0, "stdout": "", "stderr": ""},
+        {"class": "accept.apk.Secondary", "exit": 0, "stdout": "", "stderr": ""},
+        {"class": "accept.gate.MultidexDriver", "exit": 0, "stdout": "multidex:accept.apk.Primary:accept.apk.Secondary\n", "stderr": ""}
+      ],
+      "quality": {"precision": {"baseline": {"lines": 30, "tokens": 54, "labels": 0, "while_true": 0, "synthetic_vars": 8, "unsupported_throws": 0}, "maximum": {"lines": 30, "tokens": 54, "labels": 0, "while_true": 0, "synthetic_vars": 8, "unsupported_throws": 0}}, "compatibility": {"baseline": {"lines": 30, "tokens": 54, "labels": 0, "while_true": 0, "synthetic_vars": 8, "unsupported_throws": 0}, "maximum": {"lines": 30, "tokens": 54, "labels": 0, "while_true": 0, "synthetic_vars": 8, "unsupported_throws": 0}}}
+    }
+  ]
+}

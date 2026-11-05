@@ -12,10 +12,11 @@
 **English** | [简体中文](README.zh-CN.md) | [Website](https://yaklang.io/javajive/)
 
 A portable, **pure-Go** Java toolkit — extracted and trimmed from
-[yaklang](https://github.com/yaklang/yaklang) — that does three things and
-nothing else:
+[yaklang](https://github.com/yaklang/yaklang) — focused on four things:
 
 - **Decompile** — `.class` / `.jar` / `.war` / `.zip` → readable Java source.
+- **Translate DEX** — native `.dex` / `.apk` → deterministic `.jar`, or directly
+  to readable Java source, without invoking an external dex2jar tool.
 - **Parse classes** — inspect the structure of a `.class` file (constant pool,
   fields, methods, version, access flags).
 - **(De)serialize** — parse and re-marshal the Java serialization (ObjectStream)
@@ -25,10 +26,10 @@ Built for portability and embedding:
 
 - **Pure Go, single binary** — **no JDK, no cgo, no ANTLR runtime**, no native
   libraries. Cross-compiles to linux / macOS / windows on amd64 and arm64.
-- **One import** — a unified `javajive` facade package wraps all three
+- **One import** — a unified `javajive` facade package wraps all four
   capabilities; the sub-packages remain available for advanced use.
-- **First-class CLI** — `decompile`, `classinfo`, and `serial` subcommands,
-  built on the standard library.
+- **First-class CLI** — `decompile`, `dex2jar`, `classinfo`, and `serial`
+  subcommands, built on the standard library.
 - **Cross-tested against a real JDK** — CI compiles real `.class` / `.jar` and
   JDK-serialized blobs with `javac`/`java`, then verifies JavaJive against them
   (see [HARNESS-WORKFLOW.md](HARNESS-WORKFLOW.md)).
@@ -96,7 +97,8 @@ Requires Go 1.22+.
 javajive <command> [arguments]
 
 Commands:
-  decompile   decompile .class/.jar/.war/.zip or a directory into Java source
+  decompile   decompile Java artifacts or the strict DEX 035 subset into Java source
+  dex2jar     convert the strict DEX 035 subset in a DEX/APK to a deterministic JAR
   classinfo   print the structure of a .class file (version, fields, methods)
   serial      Java serialization tools (subcommands: tojson, fromjson)
   version     print the version
@@ -114,9 +116,42 @@ javajive decompile Foo.class -o Foo.java
 javajive decompile app.jar
 javajive decompile app.war -o ./app-src
 
+# DEX or APK: run the native DEX-to-JAR pipeline and decompile the result.
+# The default output directory is "<input>.src".
+javajive decompile classes.dex
+javajive decompile app.apk -o ./app-src
+
 # Directory: recursively decompile .class files (requires -o output dir).
 javajive decompile ./classes -o ./src
 ```
+
+### dex2jar
+
+```bash
+javajive dex2jar -o classes.jar classes.dex
+javajive dex2jar -o app.jar app.apk
+```
+
+Input is detected by magic rather than the filename extension. Output is a
+reproducible JAR. `dex2jar` fails the complete conversion on any unsupported or
+malformed class or method; it writes a same-directory temporary file before
+replacing the destination and never substitutes method stubs.
+
+### Native DEX/APK support boundary
+
+Native DEX translation is currently a **strict first vertical slice**, not a
+general Android application converter. The tested subset is standard DEX 035
+with ordinary integer/reference control flow, fields and invokes, safely paired
+`new-instance`/constructor initialization, and basic arrays. Generated class
+files are parser-tested and JVM-verified, including executable branch, field,
+invoke, constructor, and `int[]` paths.
+
+Not yet supported: try/catch and monitor operations; float, long, and double
+values or opcodes; switches, payload instructions, and filled arrays; DEX 038+
+dynamic invokes and method constants; annotations and debug metadata;
+CompactDex; and APK resources or native libraries. APK input means only
+canonically named `classes.dex`, `classes2.dex`, ... entries are translated.
+All selected DEX files must succeed transactionally or no JAR is produced.
 
 ### classinfo
 
@@ -152,12 +187,29 @@ javajive serial fromjson dump.json          # prints hex
 
 ## Library
 
-Use the unified facade package — one import covers all three capabilities:
+Use the unified facade package — one import covers all four capabilities:
 
 ```go
-import "github.com/yaklang/javajive"
+import (
+    "os"
 
-// Decompile a single class, or a whole archive into a directory.
+    "github.com/yaklang/javajive"
+)
+
+// Translate DEX or APK bytes in memory.
+jarBytes, report, err := javajive.DexToJar(dexOrAPKBytes, javajive.DexOptions{})
+if err == nil {
+    err = os.WriteFile("app.jar", jarBytes, 0o644)
+    _ = report.Classes
+}
+
+// Translate a file and atomically write the JAR.
+report, err = javajive.DexFileToJar("app.apk", "app.jar", javajive.DexOptions{})
+
+// Translate through a private temporary JAR and decompile directly to source.
+err = javajive.DecompileDEXFile("classes.dex", "app-src", javajive.DexOptions{})
+
+// Decompile a single class, or a whole Java archive into a directory.
 src, err := javajive.Decompile(classBytes)
 err = javajive.DecompileArchive("app.jar", "app-src")
 
@@ -180,6 +232,9 @@ out := javajive.MarshalSerialized(restored...)
 | `DecompileFile(path) (string, error)` | Decompile one `.class` from disk |
 | `DecompileWithResolver(classBytes, resolve)` | Decompile with a class-bytes resolver |
 | `DecompileArchive(src, dst) error` | Decompile a `.jar`/`.war`/`.zip` into a directory |
+| `DexToJar(input, options) ([]byte, DexReport, error)` | Convert DEX/APK bytes to a deterministic JAR |
+| `DexFileToJar(src, dst, options) (DexReport, error)` | Convert a DEX/APK file using a same-directory temporary JAR |
+| `DecompileDEXFile(src, dst, options) error` | Convert DEX/APK through a private temporary JAR and decompile it |
 | `ParseClass(classBytes) (*ClassObject, error)` | Parse one `.class`'s bytes |
 | `ParseClassFile(path) (*ClassObject, error)` | Parse one `.class` from disk |
 | `ParseSerialized(raw) ([]JavaSerializable, error)` | Parse a serialization stream |
@@ -190,7 +245,7 @@ out := javajive.MarshalSerialized(restored...)
 | `SerializedFromJSON(raw) ([]JavaSerializable, error)` | Rebuild objects from JSON |
 
 The sub-packages are also exported for advanced use:
-`classparser`, `classparser/jarwar`, `serialization`.
+`classparser`, `classparser/jarwar`, `dex2jar`, `serialization`.
 
 ## Differences from upstream yaklang
 

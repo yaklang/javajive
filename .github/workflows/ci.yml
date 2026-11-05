@@ -250,6 +250,24 @@ jobs:
           echo "$RUNNER_TEMP/fixture-java" >> "$GITHUB_PATH"
       - name: Build
         run: go build ./...
+      - name: Native DEX regression tests (race)
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          go test -json -race -count=1 -timeout=5m ./classparser/classfilebuilder ./dex2jar/... . ./cmd/javajive | tee artifacts/native-dex-race-tests.jsonl
+      - name: Native DEX coverage contract
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          go test -json -count=1 -covermode=atomic -coverpkg=./dex2jar/...,./internal/dexparser \
+            -coverprofile=artifacts/dex2jar.coverprofile ./dex2jar/... ./internal/dexparser \
+            | tee artifacts/dex2jar-coverage-tests.jsonl
+          python3 -I scripts/check_dex_coverage.py \
+            --profile artifacts/dex2jar.coverprofile \
+            --baseline dex2jar/coverage_baseline.json \
+            --summary artifacts/dex2jar-coverage-summary.json
       - name: Core algorithm and resource-guard tests (race)
         run: |
           set -o pipefail

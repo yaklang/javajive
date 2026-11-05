@@ -12,9 +12,11 @@
 [English](README.md) | **简体中文** | [官网](https://yaklang.io/javajive/)
 
 便携、**纯 Go** 的 Java 工具链——从 [yaklang](https://github.com/yaklang/yaklang)
-抽取并裁剪而来，只专注三件事：
+抽取并裁剪而来，专注四件事：
 
 - **反编译**：`.class` / `.jar` / `.war` / `.zip` → 可读的 Java 源码。
+- **DEX 转换**：原生将 `.dex` / `.apk` 转为确定性 `.jar`，或直接输出可读 Java 源码，
+  无需调用外部 dex2jar 工具。
 - **Class 解析**：解析 class 文件结构（常量池、字段、方法、版本、访问标志）。
 - **序列化**：以字节级保真解析与重组 Java 序列化（ObjectStream）二进制，并可与 JSON 互转。
 
@@ -22,8 +24,9 @@
 
 - **纯 Go、单一二进制**：**无需 JDK、无 cgo、无 ANTLR 运行时**、无原生库。可交叉编译到
   linux / macOS / windows 的 amd64 与 arm64。
-- **一个 import**：统一门面包 `javajive` 聚合三类能力；子包仍可用于高级用法。
-- **一流的命令行**：`decompile`、`classinfo`、`serial` 子命令，基于标准库实现。
+- **一个 import**：统一门面包 `javajive` 聚合四类能力；子包仍可用于高级用法。
+- **一流的命令行**：`decompile`、`dex2jar`、`classinfo`、`serial` 子命令，
+  基于标准库实现。
 - **与真实 JDK 交叉测试**：CI 用 `javac`/`java` 编译真实 `.class` / `.jar` 与 JDK 序列化字节，
   再用 JavaJive 验证（见 [HARNESS-WORKFLOW.md](HARNESS-WORKFLOW.md)）。
 - **收敛的依赖图**：`utils` / `codec` / `log` / `go-funk` 被重写为 `internal/` 下最小自包含实现。
@@ -80,7 +83,8 @@ go build -o javajive ./cmd/javajive
 javajive <command> [arguments]
 
 Commands:
-  decompile   反编译 .class/.jar/.war/.zip 或目录为 Java 源码
+  decompile   反编译 .class/.jar/.war/.zip/.dex/.apk 或目录为 Java 源码
+  dex2jar     将 DEX 或 APK 转为确定性 JAR
   classinfo   打印 .class 文件结构（版本、字段、方法）
   serial      Java 序列化工具（子命令：tojson、fromjson）
   version     打印版本
@@ -98,9 +102,37 @@ javajive decompile Foo.class -o Foo.java
 javajive decompile app.jar
 javajive decompile app.war -o ./app-src
 
+# DEX 或 APK：使用原生 DEX-to-JAR 流程，再反编译结果
+# 默认输出目录为「<输入>.src」
+javajive decompile classes.dex
+javajive decompile app.apk -o ./app-src
+
 # 目录：递归反编译其中的 .class（必须用 -o 指定输出目录）
 javajive decompile ./classes -o ./src
 ```
+
+### dex2jar
+
+```bash
+javajive dex2jar -o classes.jar classes.dex
+javajive dex2jar -o app.jar app.apk
+```
+
+输入类型按文件魔数而非扩展名识别，输出为可复现的 JAR。任一 class 或方法不受支持、
+或输入损坏时，`dex2jar` 会让整个转换失败；它会先写入目标目录中的临时文件，再替换
+目标文件，并且不会用方法 stub 代替失败内容。
+
+### 原生 DEX/APK 支持边界
+
+当前原生 DEX 转换只是一个**严格的首个垂直切片**，并非通用 Android 应用转换器。
+已测试范围为标准 DEX 035：普通 int/引用控制流、字段与 invoke、安全配对的
+`new-instance`/构造器初始化，以及基础数组。生成的 class 会经过解析测试与 JVM 校验，
+其中包括可执行的分支、字段、调用、构造器和 `int[]` 路径。
+
+暂不支持：try/catch 与 monitor 操作；float、long、double 值或操作码；switch、payload
+指令及 filled array；DEX 038+ 动态调用与方法常量；annotation 与 debug 元数据；
+CompactDex；以及 APK 资源或原生库。APK 支持仅表示转换规范命名的 `classes.dex`、
+`classes2.dex`……条目。所有选中的 DEX 必须事务性地全部成功，否则不生成 JAR。
 
 ### classinfo
 
@@ -136,12 +168,29 @@ javajive serial fromjson dump.json          # 打印 hex
 
 ## 作为库使用
 
-推荐使用统一门面包，一个 import 即可覆盖三类能力：
+推荐使用统一门面包，一个 import 即可覆盖四类能力：
 
 ```go
-import "github.com/yaklang/javajive"
+import (
+    "os"
 
-// 反编译单个 class，或把整个归档反编译到目录
+    "github.com/yaklang/javajive"
+)
+
+// 在内存中转换 DEX 或 APK 字节
+jarBytes, report, err := javajive.DexToJar(dexOrAPKBytes, javajive.DexOptions{})
+if err == nil {
+    err = os.WriteFile("app.jar", jarBytes, 0o644)
+    _ = report.Classes
+}
+
+// 转换文件并原子写入 JAR
+report, err = javajive.DexFileToJar("app.apk", "app.jar", javajive.DexOptions{})
+
+// 经私有临时 JAR 转换，并直接反编译到源码目录
+err = javajive.DecompileDEXFile("classes.dex", "app-src", javajive.DexOptions{})
+
+// 反编译单个 class，或把整个 Java 归档反编译到目录
 src, err := javajive.Decompile(classBytes)
 err = javajive.DecompileArchive("app.jar", "app-src")
 
@@ -164,6 +213,9 @@ out := javajive.MarshalSerialized(restored...)
 | `DecompileFile(path) (string, error)` | 从磁盘反编译单个 `.class` |
 | `DecompileWithResolver(classBytes, resolve)` | 带「类字节解析器」的反编译 |
 | `DecompileArchive(src, dst) error` | 将 `.jar`/`.war`/`.zip` 反编译到目录 |
+| `DexToJar(input, options) ([]byte, DexReport, error)` | 将 DEX/APK 字节转为确定性 JAR |
+| `DexFileToJar(src, dst, options) (DexReport, error)` | 使用目标目录中的临时文件转换 DEX/APK |
+| `DecompileDEXFile(src, dst, options) error` | 经私有临时 JAR 转换并反编译 DEX/APK |
 | `ParseClass(classBytes) (*ClassObject, error)` | 解析单个 `.class` 字节 |
 | `ParseClassFile(path) (*ClassObject, error)` | 从磁盘解析单个 `.class` |
 | `ParseSerialized(raw) ([]JavaSerializable, error)` | 解析序列化流 |
@@ -173,7 +225,7 @@ out := javajive.MarshalSerialized(restored...)
 | `SerializedToJSON(objs...) ([]byte, error)` | 对象 → JSON |
 | `SerializedFromJSON(raw) ([]JavaSerializable, error)` | JSON → 对象 |
 
-也可直接使用子包（高级用法）：`classparser`、`classparser/jarwar`、`serialization`。
+也可直接使用子包（高级用法）：`classparser`、`classparser/jarwar`、`dex2jar`、`serialization`。
 
 ## 与上游 yaklang 的差异
 

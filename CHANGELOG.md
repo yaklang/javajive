@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased — 2026-11-03
+
+Add a native, pure-Go DEX/APK-to-JAR path as a strict first vertical slice.
+
+- Add deterministic in-memory and atomic file conversion through `DexToJar` and
+  `DexFileToJar`, plus direct source output through `DecompileDEXFile` and the
+  CLI `dex2jar` / DEX-aware `decompile` commands.
+- Cover standard DEX 035 ordinary integer/reference control flow, fields and
+  invokes, safe constructor initialization, and basic arrays. Translation is
+  transactional: unsupported input fails the whole product and never emits
+  fallback method stubs.
+- Treat APK input as multidex code input only: translate canonical
+  `classes*.dex` entries, not resources or native libraries.
+- Keep the initial boundary explicit: try/catch and monitors; float, long, and
+  double operations; switches, payloads, and filled arrays; DEX 038+ dynamic
+  invokes; annotations/debug metadata; and CompactDex remain unsupported.
+
 ## v0.4.0 — 2026-09-19
 
 Preserve bytecode semantics and separate decompilation results from independent
