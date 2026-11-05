@@ -126,6 +126,10 @@ func generate(out string) error {
 	if err != nil {
 		return err
 	}
+	arrayClone, err := buildDEX(arrayCloneClass())
+	if err != nil {
+		return err
+	}
 	primary, err := buildDEX(simpleClass("Laccept/apk/Primary;", 3))
 	if err != nil {
 		return err
@@ -143,6 +147,7 @@ func generate(out string) error {
 		data []byte
 	}{
 		{name: "arithmetic.dex", data: raw},
+		{name: "array-clone.dex", data: arrayClone},
 		{name: "multidex.apk", data: apk},
 	}
 	for _, fixture := range fixtures {
@@ -160,6 +165,8 @@ or external compiler is involved.
 - ` + "`arithmetic.dex`" + ` defines ` + "`accept.Arithmetic`" + `. It has a real constructor,
   an instance integer field, static integer arithmetic and branching, object creation,
   virtual/static invokes, and a self-checking ` + "`main`" + ` method.
+- ` + "`array-clone.dex`" + ` defines ` + "`accept.ArrayClone`" + ` and invokes the legal
+  array-owned method reference ` + "`[I.clone()Ljava/lang/Object;`" + `.
 - ` + "`multidex.apk`" + ` contains canonical ` + "`classes.dex`" + ` and ` + "`classes2.dex`" + ` entries
   defining the unique classes ` + "`accept.apk.Primary`" + ` and ` + "`accept.apk.Secondary`" + `. Its
   asset and resource placeholders are intentionally not DEX inputs.
@@ -246,6 +253,29 @@ func arithmeticClass() classSpec {
 			ref: value, flags: dexPublic,
 			code: codeSpec{registers: 2, ins: 1, build: func(i indices) []uint16 {
 				return words(field22c(0x52, i.fields[field.key()], 0, 1), []uint16{0x000f})
+			}},
+		}},
+	}
+}
+
+func arrayCloneClass() classSpec {
+	owner := "Laccept/ArrayClone;"
+	objectResult := proto{ret: "Ljava/lang/Object;"}
+	cloneArrayProto := proto{ret: "Ljava/lang/Object;", params: []string{"[I"}}
+	arrayClone := methodRef{owner: "[I", name: "clone", proto: objectResult}
+	cloneArray := methodRef{owner: owner, name: "cloneArray", proto: cloneArrayProto}
+	return classSpec{
+		descriptor: owner,
+		super:      "Ljava/lang/Object;",
+		flags:      dexPublic,
+		references: []methodRef{arrayClone},
+		direct: []methodDef{{
+			ref: cloneArray, flags: dexPublic | dexStatic,
+			code: codeSpec{registers: 2, ins: 1, outs: 1, build: func(i indices) []uint16 {
+				return words(
+					invoke(0x6e, i.methods[arrayClone.key()], 1),
+					[]uint16{0x000c, 0x0011},
+				)
 			}},
 		}},
 	}

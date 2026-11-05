@@ -550,7 +550,7 @@ func (l *methodLowerer) emitInvoke(index int, instruction *ir.Instruction) error
 	if err != nil {
 		return methodDiagnostic(l.method.Context, instruction, "", err)
 	}
-	owner, err := objectInternalName(callee.Class)
+	owner, err := ir.InternalName(callee.Class)
 	if err != nil {
 		return methodDiagnostic(l.method.Context, instruction, "", err)
 	}

@@ -8,6 +8,8 @@ or external compiler is involved.
 - `arithmetic.dex` defines `accept.Arithmetic`. It has a real constructor,
   an instance integer field, static integer arithmetic and branching, object creation,
   virtual/static invokes, and a self-checking `main` method.
+- `array-clone.dex` defines `accept.ArrayClone` and invokes the legal
+  array-owned method reference `[I.clone()Ljava/lang/Object;`.
 - `multidex.apk` contains canonical `classes.dex` and `classes2.dex` entries
   defining the unique classes `accept.apk.Primary` and `accept.apk.Secondary`. Its
   asset and resource placeholders are intentionally not DEX inputs.

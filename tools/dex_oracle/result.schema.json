@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://javajive.local/schemas/dex-oracle-result-v1.json",
+  "title": "dex2jar differential oracle probe result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "manifest_sha256", "oracles", "inputs", "results"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "oracles": {"type": "array", "items": {"$ref": "#/$defs/oracle"}},
+    "inputs": {"type": "array", "items": {"$ref": "#/$defs/input"}},
+    "results": {"type": "array", "items": {"$ref": "#/$defs/result"}}
+  },
+  "$defs": {
+    "oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "family", "source_commit", "archive_sha256"],
+      "properties": {
+        "id": {"type": "string"},
+        "version": {"type": "string"},
+        "family": {"type": "string"},
+        "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "archive_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "size"],
+      "properties": {
+        "path": {"type": "string"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "size": {"type": "integer", "minimum": 0}
+      }
+    },
+    "stream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "bytes", "truncated", "text"],
+      "properties": {
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "bytes": {"type": "integer", "minimum": 0},
+        "truncated": {"type": "boolean"},
+        "text": {"type": "string"}
+      }
+    },
+    "archive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["present"],
+      "properties": {
+        "present": {"type": "boolean"},
+        "name": {"type": "string"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "size": {"type": "integer", "minimum": 0},
+        "entries": {"type": "array", "items": {"type": "string"}},
+        "inventory_error": {"type": "string"}
+      }
+    },
+    "member": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "descriptor"],
+      "properties": {
+        "name": {"type": "string"},
+        "descriptor": {"type": "string"}
+      }
+    },
+    "class": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entry", "name", "fields", "methods"],
+      "properties": {
+        "entry": {"type": "string"},
+        "name": {"type": "string"},
+        "fields": {"type": "array", "items": {"$ref": "#/$defs/member"}},
+        "methods": {"type": "array", "items": {"$ref": "#/$defs/member"}}
+      }
+    },
+    "jar": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["present"],
+      "properties": {
+        "present": {"type": "boolean"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "size": {"type": "integer", "minimum": 0},
+        "entries": {"type": "array", "items": {"type": "string"}},
+        "classes": {"type": "array", "items": {"$ref": "#/$defs/class"}},
+        "inventory_error": {"type": "string"}
+      }
+    },
+    "isolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "status", "reason", "did_execute", "cleanup_verified"],
+      "properties": {
+        "mode": {"enum": ["sandbox", "host-override"]},
+        "backend": {"type": "string"},
+        "policy_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "status": {"type": "string"},
+        "reason": {"type": "string"},
+        "did_execute": {"type": "boolean"},
+        "cleanup_verified": {"type": "boolean"}
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["oracle_id", "oracle_version", "oracle_archive_sha256", "input_path", "input_sha256", "exit_code", "timed_out", "output_limited", "conversion_runtime_ms", "isolation", "stdout", "stderr", "output_jar", "error_zips"],
+      "properties": {
+        "oracle_id": {"type": "string"},
+        "oracle_version": {"type": "string"},
+        "oracle_archive_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "input_path": {"type": "string"},
+        "input_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "exit_code": {"type": "integer"},
+        "timed_out": {"type": "boolean"},
+        "output_limited": {"type": "boolean"},
+        "conversion_runtime_ms": {"type": "integer", "minimum": 0},
+        "isolation": {"$ref": "#/$defs/isolation"},
+        "stdout": {"$ref": "#/$defs/stream"},
+        "stderr": {"$ref": "#/$defs/stream"},
+        "output_jar": {"$ref": "#/$defs/jar"},
+        "error_zips": {"type": "array", "items": {"$ref": "#/$defs/archive"}},
+        "start_error": {"type": "string"}
+      }
+    }
+  }
+}

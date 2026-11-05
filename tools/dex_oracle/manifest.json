@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "oracles": [
+    {
+      "id": "official-2.0",
+      "family": "official",
+      "version": "2.0",
+      "repository": "https://github.com/pxb1988/dex2jar",
+      "release_tag": "2.0",
+      "source_commit": "a9126a95ad613c4021cb37930823b1281ec5414a",
+      "url": "https://github.com/pxb1988/dex2jar/releases/download/2.0/dex-tools-2.0.zip",
+      "archive_name": "dex-tools-2.0.zip",
+      "archive_size": 2362460,
+      "sha256": "7907eb4d6e9280b6e17ddce7ee0507eae2ef161ee29f70a10dbc6944fdca75bc",
+      "license": "Apache-2.0",
+      "distribution_root": "dex2jar-2.0",
+      "launcher": "d2j-dex2jar.sh"
+    },
+    {
+      "id": "official-2.1",
+      "family": "official",
+      "version": "2.1",
+      "repository": "https://github.com/pxb1988/dex2jar",
+      "release_tag": "v2.1",
+      "source_commit": "b12d69cb64ce2c5e316d4acea69a782ca899fa72",
+      "url": "https://github.com/pxb1988/dex2jar/releases/download/v2.1/dex2jar-2.1.zip",
+      "archive_name": "dex2jar-2.1.zip",
+      "archive_size": 5641797,
+      "sha256": "7a9bdf843d43de4d1e94ec2e7b6f55825017b0c4a7ee39ff82660e2493a46f08",
+      "license": "Apache-2.0",
+      "distribution_root": "dex-tools-2.1",
+      "launcher": "d2j-dex2jar.sh"
+    },
+    {
+      "id": "official-2.3",
+      "family": "official",
+      "version": "2.3",
+      "repository": "https://github.com/pxb1988/dex2jar",
+      "release_tag": "v2.3",
+      "source_commit": "d66af7dc8eb9e3e04aa9b9480e0f8728460da584",
+      "url": "https://github.com/pxb1988/dex2jar/releases/download/v2.3/dex2jar-v2.zip",
+      "archive_name": "dex2jar-v2.zip",
+      "archive_size": 5662415,
+      "sha256": "d0507b6277193476ae29351905b5fa9b20d1a9a5ce119b46d87e5b188edf859e",
+      "license": "Apache-2.0",
+      "distribution_root": "dex2jar-v2.3",
+      "launcher": "d2j-dex2jar.sh"
+    },
+    {
+      "id": "official-2.4",
+      "family": "official",
+      "version": "2.4",
+      "repository": "https://github.com/pxb1988/dex2jar",
+      "release_tag": "v2.4",
+      "source_commit": "b5bda4fb4935ae8b3869b422454ae3b3896c7bc1",
+      "url": "https://github.com/pxb1988/dex2jar/releases/download/v2.4/dex-tools-v2.4.zip",
+      "archive_name": "dex-tools-v2.4.zip",
+      "archive_size": 19105975,
+      "sha256": "ee7c45eb3c1d2474a6145d8d447e651a736a22d9664b6d3d3be5a5a817dda23a",
+      "license": "Apache-2.0",
+      "distribution_root": "dex-tools-v2.4",
+      "launcher": "d2j-dex2jar.sh"
+    },
+    {
+      "id": "fork-2.4.38",
+      "family": "maintained-fork",
+      "version": "2.4.38",
+      "repository": "https://github.com/ThexXTURBOXx/dex2jar",
+      "release_tag": "2.4.38",
+      "source_commit": "ecdd1b5074e8f8ad1ade959b2a65b4babfe1b3d2",
+      "url": "https://github.com/ThexXTURBOXx/dex2jar/releases/download/2.4.38/dex-tools-2.4.38.zip",
+      "archive_name": "dex-tools-2.4.38.zip",
+      "archive_size": 2881515,
+      "sha256": "5d88e269bd120852fec68de268f6900f5466601e06ca8c16611f4377c6254e5c",
+      "license": "Apache-2.0",
+      "distribution_root": "dex-tools-2.4.38",
+      "launcher": "d2j-dex2jar.sh"
+    }
+  ]
+}

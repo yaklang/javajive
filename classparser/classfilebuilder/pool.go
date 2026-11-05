@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"strings"
 	"unicode/utf16"
 )
 
@@ -119,22 +120,31 @@ func (p *ConstantPool) NameAndType(name, descriptor string) (uint16, error) {
 }
 
 func (p *ConstantPool) member(tag byte, kind, owner, name, descriptor string) (uint16, error) {
-	if err := validateInternalName(owner); err != nil {
-		return 0, fmt.Errorf("owner %q: %w", owner, err)
-	}
 	switch tag {
 	case cpFieldref:
+		if err := validateInternalName(owner); err != nil {
+			return 0, fmt.Errorf("owner %q: %w", owner, err)
+		}
 		if err := validateFieldSymbol(name, descriptor); err != nil {
 			return 0, err
 		}
 	case cpMethodref:
+		if err := validateClassConstantName(owner); err != nil {
+			return 0, fmt.Errorf("owner %q: %w", owner, err)
+		}
 		if err := validateMethodSymbol(name, descriptor); err != nil {
 			return 0, err
+		}
+		if strings.HasPrefix(owner, "[") && (name != "clone" || descriptor != "()Ljava/lang/Object;") {
+			return 0, fmt.Errorf("array method reference only permits clone()Ljava/lang/Object;")
 		}
 		if name == "<clinit>" {
 			return 0, fmt.Errorf("method reference name must not be <clinit>")
 		}
 	case cpInterfaceMethodref:
+		if err := validateInternalName(owner); err != nil {
+			return 0, fmt.Errorf("owner %q: %w", owner, err)
+		}
 		if err := validateMethodSymbol(name, descriptor); err != nil {
 			return 0, err
 		}

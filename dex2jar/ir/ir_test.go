@@ -190,6 +190,29 @@ func TestBuildRejectsOpcodeSpecificTypeDescriptors(t *testing.T) {
 	}
 }
 
+func TestArrayCloneMethodOwnerMetadata(t *testing.T) {
+	in := fixture([]uint16{0x000e}, 0, 0, model.Proto{ReturnType: "V"}, dexAccessStatic)
+	in.File.Header = model.Header{StringIDsSize: 7, TypeIDsSize: 4, ProtoIDsSize: 2, MethodIDsSize: 2}
+	in.File.Strings = []string{"LFoo;", "[I", "clone", "V", "Ljava/lang/Object;", "L", "value"}
+	in.File.Fields = nil
+	in.File.Types = []model.Type{{DescriptorIndex: 0, Descriptor: "LFoo;"}, {DescriptorIndex: 1, Descriptor: "[I"}, {DescriptorIndex: 3, Descriptor: "V"}, {DescriptorIndex: 4, Descriptor: "Ljava/lang/Object;"}}
+	in.File.Protos = []model.Proto{{ShortyIndex: 3, Shorty: "V", ReturnTypeIndex: 2, ReturnType: "V"}, {ShortyIndex: 5, Shorty: "L", ReturnTypeIndex: 3, ReturnType: "Ljava/lang/Object;"}}
+	in.File.Methods = []model.MethodID{
+		{ClassIndex: 0, ProtoIndex: 0, NameIndex: 2, Class: "LFoo;", Name: "clone"},
+		{ClassIndex: 1, ProtoIndex: 1, NameIndex: 2, Class: "[I", Name: "clone"},
+	}
+	in.Method.MethodIndex = 0
+	in.Method.Method = in.File.Methods[0]
+	if err := validateFileMetadata(in.File); err != nil {
+		t.Fatalf("array clone method metadata: %v", err)
+	}
+	in.File.Methods[1].Name = "value"
+	in.File.Methods[1].NameIndex = 6
+	if err := validateFileMetadata(in.File); err == nil || !strings.Contains(err.Error(), "array owner only permits clone") {
+		t.Fatalf("invalid array method error = %v", err)
+	}
+}
+
 func TestBuildRejectsInconsistentIndexedMetadata(t *testing.T) {
 	valid := func() Input {
 		file := &model.File{

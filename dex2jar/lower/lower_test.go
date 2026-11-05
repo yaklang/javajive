@@ -105,6 +105,32 @@ func TestIntArrayPathVerifiesAndExecutes(t *testing.T) {
 	}
 }
 
+func TestArrayCloneOwnerVerifiesAndExecutes(t *testing.T) {
+	file, class := arrayCloneFixture()
+	raw, err := Class(file, class)
+	if err != nil {
+		t.Fatalf("Class: %v", err)
+	}
+	if _, err := javaclassparser.Parse(raw); err != nil {
+		t.Fatalf("parse generated array clone class: %v", err)
+	}
+	java, err := exec.LookPath("java")
+	if err != nil {
+		t.Skip("java is unavailable")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dex", "ArrayClone.class")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command(java, "-Xverify:all", "-cp", dir, "dex.ArrayClone").CombinedOutput(); err != nil {
+		t.Fatalf("java array clone verification/execution: %v\n%s", err, output)
+	}
+}
+
 func TestUnsupportedMethodReturnsNoClassAndDiagnostic(t *testing.T) {
 	file := &model.File{Entry: "classes.dex", Protos: []model.Proto{{ReturnType: "V"}}}
 	class := &model.Class{
@@ -465,6 +491,58 @@ func definedDirectTargetFixture(virtual bool) (*model.File, *model.Class) {
 		class.VirtualMethods = []model.EncodedMethod{targetDefinition}
 	} else {
 		class.DirectMethods = []model.EncodedMethod{targetDefinition, caller}
+	}
+	return file, class
+}
+
+func arrayCloneFixture() (*model.File, *model.Class) {
+	const owner = "Ldex/ArrayClone;"
+	protos := []model.Proto{
+		{ReturnType: "Ljava/lang/Object;", Parameters: []string{"[I"}, ParameterTypes: []uint32{0}},
+		{ReturnType: "Ljava/lang/Object;"},
+		{ReturnType: "V", Parameters: []string{"[Ljava/lang/String;"}, ParameterTypes: []uint32{1}},
+	}
+	methods := []model.MethodID{
+		{Class: "[I", Name: "clone", ProtoIndex: 1},
+		{Class: owner, Name: "cloneArray", ProtoIndex: 0},
+		{Class: owner, Name: "main", ProtoIndex: 2},
+	}
+	file := &model.File{
+		Entry:   "classes.dex",
+		Types:   []model.Type{{Descriptor: "[I"}, {Descriptor: "[Ljava/lang/String;"}},
+		Protos:  protos,
+		Methods: methods,
+	}
+	class := &model.Class{
+		Descriptor:  owner,
+		Superclass:  "Ljava/lang/Object;",
+		AccessFlags: dexPublic,
+		DirectMethods: []model.EncodedMethod{
+			{
+				AccessFlags: dexPublic | dexStatic,
+				Method:      methods[1],
+				Code: &model.Code{RegistersSize: 2, InsSize: 1, OutsSize: 1, Instructions: []uint16{
+					0x106e, 0x0000, 0x0001,
+					0x000c,
+					0x0011,
+				}},
+			},
+			{
+				AccessFlags: dexPublic | dexStatic,
+				Method:      methods[2],
+				Code: &model.Code{RegistersSize: 5, InsSize: 1, OutsSize: 1, Instructions: []uint16{
+					0x2312,
+					0x3423, 0x0000,
+					0x1071, 0x0001, 0x0004,
+					0x000c,
+					0x0120, 0x0000,
+					0x0138, 0x0003,
+					0x000e,
+					0x0212,
+					0x0227,
+				}},
+			},
+		},
 	}
 	return file, class
 }
