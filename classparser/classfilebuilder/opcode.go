@@ -28,8 +28,8 @@ const (
 	ACC_ENUM         uint16 = 0x4000
 )
 
-// JVM opcodes supported by the assembler. TABLESWITCH, LOOKUPSWITCH, JSR,
-// JSR_W, RET, MULTIANEWARRAY, and invokedynamic intentionally have no helpers.
+// JVM opcodes supported by the assembler. JSR, JSR_W, RET, MULTIANEWARRAY,
+// and invokedynamic intentionally have no helpers.
 const (
 	NOP             Opcode = 0x00
 	ACONST_NULL     Opcode = 0x01
@@ -158,6 +158,8 @@ const (
 	IF_ACMPEQ       Opcode = 0xa5
 	IF_ACMPNE       Opcode = 0xa6
 	GOTO            Opcode = 0xa7
+	TABLESWITCH     Opcode = 0xaa
+	LOOKUPSWITCH    Opcode = 0xab
 	IRETURN         Opcode = 0xac
 	LRETURN         Opcode = 0xad
 	FRETURN         Opcode = 0xae

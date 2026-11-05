@@ -29,22 +29,11 @@ func testT09C06API(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Status != "partial" && r.Status != "unsupported" {
-		t.Fatalf("unsupported region reported as complete: %+v", r)
+	if r.Status != "complete" || len(r.StubMethods) != 0 {
+		t.Fatalf("irreducible dispatch did not complete: %+v", r)
 	}
-	if len(r.StubMethods) == 0 {
-		t.Fatalf("irreducible method was not stubbed: %+v", r)
+	if !strings.Contains(r.Source, "switch") || !strings.Contains(r.Source, "continue LOOP_") {
+		t.Fatalf("missing state dispatch in recovered source:\n%s", r.Source)
 	}
-	found := false
-	for _, d := range r.Diagnostics {
-		if strings.Contains(d.Message, "unsupported_irreducible_control_flow") {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("missing reason: %+v", r.Diagnostics)
-	}
-	if r.Status == "complete" {
-		t.Fatal("diagnostic success must not count as round-trip")
-	}
+	auditBytecodeRoundTrip(t, raw, "System.out.println(Fixture.f(0));System.out.println(Fixture.f(1));")
 }

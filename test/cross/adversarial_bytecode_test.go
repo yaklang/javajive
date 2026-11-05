@@ -137,30 +137,22 @@ func TestAuditLegalBytecode(t *testing.T) {
 func TestAuditIrreducibleDiagnostic(t *testing.T) {
 	code := []byte{core.OP_ICONST_0, core.OP_ISTORE_1, core.OP_ILOAD_0, core.OP_IFEQ, 0, 9, core.OP_IINC, 1, 1, core.OP_GOTO, 0, 3, core.OP_IINC, 1, 2, core.OP_ILOAD_1, core.OP_BIPUSH, 5, core.OP_IF_ICMPLT, 255, 244, core.OP_ILOAD_1, core.OP_IRETURN}
 	raw := auditClass(code, "(I)I", 2)
-	original := t.TempDir()
-	if err := os.WriteFile(filepath.Join(original, "Fixture.class"), raw, 0644); err != nil {
-		t.Fatal(err)
-	}
-	writeSources(t, original, map[string]string{"Driver.java": "public class Driver {public static void main(String[] x){System.out.println(Fixture.f(0));System.out.println(Fixture.f(1));}}"})
-	auditCommand(t, original, auditTool(t, "javac"), "-cp", original, "-d", original, "Driver.java")
-	if got := auditCommand(t, original, auditTool(t, "java"), "-Xverify:all", "-cp", original, "Driver"); strings.TrimSpace(strings.ReplaceAll(got, "\r\n", "\n")) != "5\n6" {
-		t.Fatal(got)
-	}
-	r, err := javajive.DecompileWithOptions(raw, javajive.DecompileOptions{Mode: javajive.Precision})
+	auditBytecodeRoundTrip(t, raw, "System.out.println(Fixture.f(0));System.out.println(Fixture.f(1));")
+
+	result, err := javajive.DecompileWithOptions(raw, javajive.DecompileOptions{Mode: javajive.Precision})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Status != "partial" || len(r.StubMethods) != 1 {
-		t.Fatalf("unsupported region reported as complete: %+v", r)
+	if result.Status != "complete" || len(result.StubMethods) != 0 {
+		t.Fatalf("irreducible dispatch did not complete: %+v", result)
 	}
-	found := false
-	for _, d := range r.Diagnostics {
-		if strings.Contains(d.Message, "unsupported_irreducible_control_flow") {
-			found = true
+	if !strings.Contains(result.Source, "switch") || !strings.Contains(result.Source, "continue LOOP_") {
+		t.Fatalf("missing state dispatch in recovered source:\n%s", result.Source)
+	}
+	for _, diagnostic := range result.Diagnostics {
+		if strings.Contains(diagnostic.Message, "unsupported_irreducible_control_flow") {
+			t.Fatalf("successful dispatch retained unsupported diagnostic: %+v", result.Diagnostics)
 		}
-	}
-	if !found {
-		t.Fatalf("missing reason: %+v", r.Diagnostics)
 	}
 }
 

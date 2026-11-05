@@ -49,6 +49,9 @@ type SemanticCFG struct {
 	FunctionType *types.JavaFuncType
 	IsStatic     bool
 	entryWidth   map[int]int
+	// IrreducibleError records a normal-flow reducibility failure that is safe to
+	// defer until the statement CFG can lower the region to source dispatch.
+	IrreducibleError error
 	// analysis holds the T26 graph-analysis cache. SemanticCFG is immutable after
 	// construction; epoch stays 0. Lazy-initialized on first GetOrCompute.
 	analysis *graphAnalysisState
@@ -146,9 +149,62 @@ func (d *Decompiler) buildSemanticCFG() (*SemanticCFG, error) {
 		return g, g.Err
 	}
 	if err := g.ValidateReducible(); err != nil {
-		return nil, err
+		if !g.canDeferIrreducible() {
+			return nil, err
+		}
+		g.IrreducibleError = err
 	}
 	return g, nil
+}
+
+// HasDeferredIrreducibleControlFlow reports whether SemanticCFG admitted a
+// normal-edge irreducible method for later statement-level state dispatch.
+func (d *Decompiler) HasDeferredIrreducibleControlFlow() bool {
+	return d != nil && d.semanticCFG != nil && d.semanticCFG.IrreducibleError != nil
+}
+
+func (d *Decompiler) irreducibleEdgesHaveEmptyStack() bool {
+	if d == nil || d.semanticCFG == nil {
+		return false
+	}
+	normalIncoming := make(map[*OpCode]int)
+	for _, edge := range d.semanticCFG.Edges {
+		if edge.Kind == EdgeException {
+			return false
+		}
+		normalIncoming[edge.To]++
+	}
+	for _, edge := range d.semanticCFG.Edges {
+		if edge.From == nil || edge.From.Instr == nil {
+			return false
+		}
+		op := edge.From.Instr.OpCode
+		boundary := edge.Kind != EdgeFallthrough || normalIncoming[edge.To] > 1 ||
+			isConditionalBranchOpcode(op) || op == OP_GOTO || op == OP_GOTO_W ||
+			op == OP_TABLESWITCH || op == OP_LOOKUPSWITCH
+		if boundary && NewStackSimulation(edge.From.StackEntry, nil, nil).Size() != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (g *SemanticCFG) canDeferIrreducible() bool {
+	for _, edge := range g.Edges {
+		if edge.Kind == EdgeException {
+			return false
+		}
+	}
+	for _, node := range g.Nodes {
+		if node == nil || node.Instr == nil {
+			return false
+		}
+		switch node.Instr.OpCode {
+		case OP_NEW, OP_MONITORENTER, OP_MONITOREXIT:
+			return false
+		}
+	}
+	return true
 }
 
 func liveInSlotWidths(isStatic bool, ft *types.JavaFuncType) map[int]int {

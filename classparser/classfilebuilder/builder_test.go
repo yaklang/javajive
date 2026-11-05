@@ -3,6 +3,7 @@ package classfilebuilder
 import (
 	"bytes"
 	"encoding/binary"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -202,6 +203,196 @@ func TestLongBranchesWidenAndExpand(t *testing.T) {
 	gotoBytes := gotoParsed.Methods[0].Attributes[0].(*javaclassparser.CodeAttribute).Code
 	if gotoBytes[0] != byte(GOTO_W) || binary.BigEndian.Uint32(gotoBytes[1:5]) != 33005 {
 		t.Fatalf("goto_w prefix = % x", gotoBytes[:5])
+	}
+}
+
+func TestTableSwitchAlignmentAndTargets(t *testing.T) {
+	class := NewClass("SwitchOps", "java/lang/Object", ACC_PUBLIC|ACC_SUPER)
+	code := class.AddMethod(ACC_PUBLIC|ACC_STATIC, "choose", "(I)I").Code()
+	caseNeg, caseZero, caseOne, fallback := code.NewLabel(), code.NewLabel(), code.NewLabel(), code.NewLabel()
+	code.Load(IntLocal, 0).TableSwitch(-1, fallback, caseNeg, caseZero, caseOne)
+	code.Mark(caseNeg).Emit(ICONST_M1).Emit(IRETURN)
+	code.Mark(caseZero).Emit(ICONST_0).Emit(IRETURN)
+	code.Mark(caseOne).Emit(ICONST_1).Emit(IRETURN)
+	code.Mark(fallback).Emit(ICONST_5).Emit(IRETURN)
+	raw, err := class.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := javaclassparser.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assembled := parsed.Methods[0].Attributes[0].(*javaclassparser.CodeAttribute).Code
+	want := []byte{
+		0x1a, byte(TABLESWITCH), 0, 0,
+		0, 0, 0, 33, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 1,
+		0, 0, 0, 27, 0, 0, 0, 29, 0, 0, 0, 31,
+		byte(ICONST_M1), byte(IRETURN), byte(ICONST_0), byte(IRETURN),
+		byte(ICONST_1), byte(IRETURN), byte(ICONST_5), byte(IRETURN),
+	}
+	if !bytes.Equal(assembled, want) {
+		t.Fatalf("code = % x, want % x", assembled, want)
+	}
+}
+
+func TestLookupSwitchAlignmentAndTargets(t *testing.T) {
+	class := NewClass("LookupSwitchOps", "java/lang/Object", ACC_PUBLIC|ACC_SUPER)
+	code := class.AddMethod(ACC_PUBLIC|ACC_STATIC, "choose", "(I)I").Code()
+	backward, forward, fallback := code.NewLabel(), code.NewLabel(), code.NewLabel()
+	keys := []int32{-7, 42}
+	targets := []*Label{backward, forward}
+	code.Mark(backward).Load(IntLocal, 0).LookupSwitch(fallback, keys, targets...)
+	keys[0] = 100
+	targets[0] = fallback
+	code.Mark(forward).Emit(ICONST_1).Emit(IRETURN)
+	code.Mark(fallback).Emit(ICONST_M1).Emit(IRETURN)
+
+	raw, err := class.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := class.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, again) {
+		t.Fatal("repeated switch assembly is not deterministic")
+	}
+	parsed, err := javaclassparser.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attr := parsed.Methods[0].Attributes[0].(*javaclassparser.CodeAttribute)
+	if attr.MaxStack != 1 || attr.MaxLocals != 1 {
+		t.Fatalf("frames = stack %d, locals %d", attr.MaxStack, attr.MaxLocals)
+	}
+	want := []byte{0x1a, byte(LOOKUPSWITCH), 0, 0}
+	for _, value := range []int32{29, 2, -7, -1, 42, 27} {
+		want = binary.BigEndian.AppendUint32(want, uint32(value))
+	}
+	want = append(want, byte(ICONST_1), byte(IRETURN), byte(ICONST_M1), byte(IRETURN))
+	if !bytes.Equal(attr.Code, want) {
+		t.Fatalf("code = % x, want % x", attr.Code, want)
+	}
+}
+
+func TestSwitchPaddingTracksOpcodePosition(t *testing.T) {
+	for _, kind := range []string{"table", "lookup"} {
+		for prefix := 0; prefix < 4; prefix++ {
+			t.Run(kind+string(rune('0'+prefix)), func(t *testing.T) {
+				class := NewClass("SwitchPadding", "java/lang/Object", ACC_PUBLIC|ACC_SUPER)
+				code := class.AddMethod(ACC_PUBLIC|ACC_STATIC, "run", "()V").Code()
+				for i := 0; i < prefix; i++ {
+					code.Emit(NOP)
+				}
+				target := code.NewLabel()
+				code.Emit(ICONST_0)
+				if kind == "table" {
+					code.TableSwitch(0, target, target)
+				} else {
+					code.LookupSwitch(target, nil)
+				}
+				code.Mark(target).Emit(RETURN)
+
+				raw, err := class.Bytes()
+				if err != nil {
+					t.Fatal(err)
+				}
+				parsed, err := javaclassparser.Parse(raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				assembled := parsed.Methods[0].Attributes[0].(*javaclassparser.CodeAttribute).Code
+				switchPC := prefix + 1
+				padding := (4 - (switchPC+1)%4) % 4
+				if (switchPC+1+padding)%4 != 0 {
+					t.Fatalf("payload offset %d is not aligned", switchPC+1+padding)
+				}
+				if got := assembled[switchPC+1 : switchPC+1+padding]; !bytes.Equal(got, make([]byte, padding)) {
+					t.Fatalf("padding = % x", got)
+				}
+				payloadSize := 8
+				wantOpcode := LOOKUPSWITCH
+				if kind == "table" {
+					payloadSize = 16
+					wantOpcode = TABLESWITCH
+				}
+				if assembled[switchPC] != byte(wantOpcode) {
+					t.Fatalf("opcode = 0x%02x", assembled[switchPC])
+				}
+				wantLength := switchPC + 1 + padding + payloadSize + 1
+				if len(assembled) != wantLength {
+					t.Fatalf("code length = %d, want %d", len(assembled), wantLength)
+				}
+				if got := int32(binary.BigEndian.Uint32(assembled[switchPC+1+padding:])); got != int32(wantLength-1-switchPC) {
+					t.Fatalf("default offset = %d", got)
+				}
+			})
+		}
+	}
+}
+
+func TestSwitchValidationRejectsInvalidKeysAndLabels(t *testing.T) {
+	tests := []struct {
+		name  string
+		want  string
+		build func(*Code, *Code)
+	}{
+		{"table empty", "at least one", func(code, _ *Code) { code.TableSwitch(0, code.NewLabel()) }},
+		{"table overflow", "exceeds signed 32-bit", func(code, _ *Code) {
+			target := code.NewLabel()
+			code.TableSwitch(math.MaxInt32, target, target, target)
+		}},
+		{"table foreign label", "another Code", func(code, other *Code) {
+			code.TableSwitch(0, code.NewLabel(), other.NewLabel())
+		}},
+		{"table unbound label", "unbound label", func(code, _ *Code) {
+			target := code.NewLabel()
+			code.Emit(ICONST_0).TableSwitch(0, target, target)
+		}},
+		{"lookup mismatched pairs", "1 keys and 0 targets", func(code, _ *Code) {
+			code.LookupSwitch(code.NewLabel(), []int32{1})
+		}},
+		{"lookup duplicate key", "strictly increasing", func(code, _ *Code) {
+			target := code.NewLabel()
+			code.LookupSwitch(target, []int32{1, 1}, target, target)
+		}},
+		{"lookup descending keys", "strictly increasing", func(code, _ *Code) {
+			target := code.NewLabel()
+			code.LookupSwitch(target, []int32{2, 1}, target, target)
+		}},
+		{"lookup foreign label", "another Code", func(code, other *Code) {
+			code.LookupSwitch(code.NewLabel(), []int32{1}, other.NewLabel())
+		}},
+		{"lookup unbound label", "unbound label", func(code, _ *Code) {
+			target := code.NewLabel()
+			code.Emit(ICONST_0).LookupSwitch(target, nil)
+		}},
+		{"lookup target at code end", "not an instruction", func(code, _ *Code) {
+			target := code.NewLabel()
+			code.Emit(ICONST_0).LookupSwitch(target, nil).Mark(target)
+		}},
+		{"unreachable branch target at code end", "not an instruction", func(code, _ *Code) {
+			end := code.NewLabel()
+			code.Emit(RETURN).Branch(GOTO, end).Mark(end)
+		}},
+		{"lookup stack underflow", "stack underflow", func(code, _ *Code) {
+			target := code.NewLabel()
+			code.LookupSwitch(target, nil).Mark(target).Emit(RETURN)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			class := NewClass("BadSwitch", "java/lang/Object", ACC_PUBLIC|ACC_SUPER)
+			code := class.AddMethod(ACC_PUBLIC|ACC_STATIC, "bad", "()V").Code()
+			otherClass := NewClass("OtherSwitch", "java/lang/Object", ACC_PUBLIC|ACC_SUPER)
+			other := otherClass.AddMethod(ACC_PUBLIC|ACC_STATIC, "other", "()V").Code()
+			test.build(code, other)
+			if _, err := class.Bytes(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want substring %q", err, test.want)
+			}
+		})
 	}
 }
 
@@ -422,13 +613,48 @@ func TestJavaVerifyAll(t *testing.T) {
 	if err != nil {
 		t.Skip("java is not installed")
 	}
-	_, raw := buildVerifyTiny(t)
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "VerifyTiny.class"), raw, 0o600); err != nil {
+	_, tinyRaw := buildVerifyTiny(t)
+
+	switchClass := NewClass("VerifySwitches", "java/lang/Object", ACC_PUBLIC|ACC_SUPER)
+	table := switchClass.AddMethod(ACC_PUBLIC|ACC_STATIC, "table", "(I)I").Code()
+	tableZero, tableOne, tableDefault := table.NewLabel(), table.NewLabel(), table.NewLabel()
+	table.Load(IntLocal, 0).TableSwitch(0, tableDefault, tableZero, tableOne)
+	table.Mark(tableZero).Emit(ICONST_0).Emit(IRETURN)
+	table.Mark(tableOne).Emit(ICONST_1).Emit(IRETURN)
+	table.Mark(tableDefault).Emit(ICONST_M1).Emit(IRETURN)
+	lookup := switchClass.AddMethod(ACC_PUBLIC|ACC_STATIC, "lookup", "(I)I").Code()
+	lookupNeg, lookupLarge, lookupDefault := lookup.NewLabel(), lookup.NewLabel(), lookup.NewLabel()
+	lookup.Load(IntLocal, 0).LookupSwitch(lookupDefault, []int32{-7, 1000}, lookupNeg, lookupLarge)
+	lookup.Mark(lookupNeg).Emit(ICONST_M1).Emit(IRETURN)
+	lookup.Mark(lookupLarge).Emit(ICONST_5).Emit(IRETURN)
+	lookup.Mark(lookupDefault).Emit(ICONST_0).Emit(IRETURN)
+	tableRef, err := switchClass.Pool().Methodref("VerifySwitches", "table", "(I)I")
+	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(java, "-Xverify:all", "-cp", dir, "VerifyTiny")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("java verification failed: %v\n%s", err, output)
+	lookupRef, err := switchClass.Pool().Methodref("VerifySwitches", "lookup", "(I)I")
+	if err != nil {
+		t.Fatal(err)
+	}
+	main := switchClass.AddMethod(ACC_PUBLIC|ACC_STATIC, "main", "([Ljava/lang/String;)V").Code()
+	main.Emit(ICONST_0).CP(INVOKESTATIC, tableRef).Emit(POP)
+	main.Emit(ICONST_0).CP(INVOKESTATIC, lookupRef).Emit(POP).Emit(RETURN)
+	switchRaw, err := switchClass.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	classes := map[string][]byte{"VerifyTiny.class": tinyRaw, "VerifySwitches.class": switchRaw}
+	for name, raw := range classes {
+		if err := os.WriteFile(filepath.Join(dir, name), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, className := range []string{"VerifyTiny", "VerifySwitches"} {
+		cmd := exec.Command(java, "-Xverify:all", "-cp", dir, className)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("java verification of %s failed: %v\n%s", className, err, output)
+		}
 	}
 }

@@ -39,18 +39,19 @@ type RewriteManager struct {
 	forwardRegions        map[*core.Node]*forwardRegion
 	forwardEntries        map[*core.Node]forwardEntry
 	// Method-local allocation keeps synthetic names deterministic across concurrent requests.
-	syntheticCatchVarCounter int
-	currentNodeId            int
-	startVarId               int
-	RootNode                 *core.Node
-	PreNode                  *core.Node
-	CircleEntryPoint         []*core.Node
-	WhileNode                []*core.Node
-	IfNodes                  []*core.Node
-	SwitchNode               []*core.Node
-	TryNodes                 []*core.Node
-	DominatorMap             map[*core.Node][]*core.Node
-	LabelId                  int
+	syntheticCatchVarCounter   int
+	irreducibleDispatchCounter int
+	currentNodeId              int
+	startVarId                 int
+	RootNode                   *core.Node
+	PreNode                    *core.Node
+	CircleEntryPoint           []*core.Node
+	WhileNode                  []*core.Node
+	IfNodes                    []*core.Node
+	SwitchNode                 []*core.Node
+	TryNodes                   []*core.Node
+	DominatorMap               map[*core.Node][]*core.Node
+	LabelId                    int
 	// LoopRegionReducible records whether the ORIGINAL method CFG (before any loop wrapping) is a
 	// reducible flow graph. It is computed once in Rewrite() because mid-pipeline the graph gains
 	// do-while wrapper nodes and rewrite-inserted break/continue edges that corrupt dominance, making a
@@ -61,7 +62,8 @@ type RewriteManager struct {
 	visitedNodeSet      *utils.Set[*core.Node]
 	// Aggressive enables higher-risk structuring paths that only run during the
 	// gated second pass for methods that already failed conservative decompilation.
-	Aggressive bool
+	Aggressive               bool
+	irreducibleDispatchError string
 }
 
 func NewRootStatementManager(node *core.Node) *RewriteManager {
@@ -85,6 +87,13 @@ func (s *RewriteManager) CheckVisitedNode(node *core.Node) error {
 func (s *RewriteManager) NewLoopLabel() string {
 	s.LabelId++
 	return fmt.Sprintf("LOOP_%d", s.LabelId)
+}
+
+func (s *RewriteManager) IrreducibleDispatchError() string {
+	if s == nil {
+		return ""
+	}
+	return s.irreducibleDispatchError
 }
 
 func (s *RewriteManager) MergeIf() {
