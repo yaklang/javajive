@@ -23,6 +23,12 @@ func (d *Decompiler) materializeDiscardedValue(opcode *OpCode, value values.Java
 	if d == nil || opcode == nil || value == nil {
 		return nil
 	}
+	// Constructor prefixes cannot declare a synthetic local before the
+	// super()/this() delegation. Keep the established constructor path; this
+	// also avoids turning a legal prefix expression into an escaping local.
+	if d.FunctionContext != nil && d.FunctionContext.FunctionName == "<init>" {
+		return nil
+	}
 	if caught, ok := values.UnpackSoltValue(value).(*values.CustomValue); ok && caught.IsSourceCaught() {
 		// A handler-entry exception binding has no evaluation effect. Keep the
 		// original POP path: it emits the caught-exception statement that the

@@ -5057,7 +5057,8 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 					// except the one the combiner happens to pick. Multi-source
 					// joins require the closed-tree certificate; otherwise the
 					// acyclic stack-phi lowering below owns the join.
-					if isIfMergeNode && len(code.Source) > 2 && d.closedNestedValueRoot(code, ifNodes) == nil {
+					if isIfMergeNode && len(code.Source) > 2 && (d.FunctionContext == nil || d.FunctionContext.FunctionName != "<init>") &&
+						d.closedNestedValueRoot(code, ifNodes) == nil && !ifNodesFormSingleDecisionTree(ifNodes, code) {
 						isIfMergeNode = false
 						delete(carriedPrimitiveJoins, code)
 						delete(retainedReferenceJoins, code)

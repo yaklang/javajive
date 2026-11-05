@@ -29,6 +29,13 @@ func (d *Decompiler) prepareAcyclicStackMergeSlot(merge *OpCode, sources []*OpCo
 		merge.Instr == nil || sim.Size() == 0 || merge.IsCatch || merge.IsTryCatchParent || IsSwitchOpcode(merge.Instr.OpCode) {
 		return nil
 	}
+	// Constructor prefixes (the super()/this() call and its arguments) cannot
+	// declare or assign a synthetic local before the delegation. Keep the
+	// established constructor lowering path; an acyclic phi in an ordinary
+	// constructor body remains a follow-up boundary.
+	if d.FunctionContext != nil && d.FunctionContext.FunctionName == "<init>" {
+		return nil
+	}
 	baseOffset := merge.CurrentOffset
 	for _, source := range merge.Source {
 		if source == nil || source.Instr == nil ||
