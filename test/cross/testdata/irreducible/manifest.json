@@ -1,0 +1,1036 @@
+{
+  "schemaVersion": 1,
+  "classfileMajor": 49,
+  "generator": "generate/main.go",
+  "vectors": [
+    {
+      "entry": 0,
+      "budget": 0
+    },
+    {
+      "entry": 0,
+      "budget": 1
+    },
+    {
+      "entry": 1,
+      "budget": 2
+    },
+    {
+      "entry": 2,
+      "budget": 3
+    },
+    {
+      "entry": 3,
+      "budget": 5
+    },
+    {
+      "entry": -1,
+      "budget": 8
+    }
+  ],
+  "cases": [
+    {
+      "name": "NaturalSingleEntry",
+      "kind": "reducible",
+      "graphEntries": [
+        "H"
+      ],
+      "description": "One natural loop with one header and one latch.",
+      "classFile": "original/NaturalSingleEntry.class",
+      "equivalentSource": "equivalent/NaturalSingleEntry.java",
+      "bytecodeDoc": "bytecode/NaturalSingleEntry.md",
+      "controlFlow": {
+        "blocks": [
+          {
+            "name": "entry",
+            "pc": 0
+          },
+          {
+            "name": "H",
+            "pc": 4
+          },
+          {
+            "name": "body",
+            "pc": 8
+          },
+          {
+            "name": "exit",
+            "pc": 18
+          }
+        ],
+        "edges": [
+          {
+            "from": "entry",
+            "to": "H",
+            "kind": "fallthrough"
+          },
+          {
+            "from": "H",
+            "to": "exit",
+            "kind": "ifle/taken"
+          },
+          {
+            "from": "H",
+            "to": "body",
+            "kind": "ifle/fallthrough"
+          },
+          {
+            "from": "body",
+            "to": "H",
+            "kind": "goto/backedge"
+          }
+        ],
+        "cyclicScc": [
+          "H",
+          "body"
+        ],
+        "entryTargets": [
+          "H"
+        ],
+        "reducibility": "reducible"
+      },
+      "expectedOutput": [
+        0,
+        1,
+        4,
+        8,
+        18,
+        35
+      ],
+      "size": 443,
+      "sha256": "fde8ab8fc8e4ede4a390168780d83cfe000aaa786d640d412b105d87e3999019"
+    },
+    {
+      "name": "NaturalMultipleLatch",
+      "kind": "reducible",
+      "graphEntries": [
+        "H"
+      ],
+      "description": "One natural loop with two distinct latch blocks.",
+      "classFile": "original/NaturalMultipleLatch.class",
+      "equivalentSource": "equivalent/NaturalMultipleLatch.java",
+      "bytecodeDoc": "bytecode/NaturalMultipleLatch.md",
+      "controlFlow": {
+        "blocks": [
+          {
+            "name": "entry",
+            "pc": 0
+          },
+          {
+            "name": "H",
+            "pc": 4
+          },
+          {
+            "name": "dispatch",
+            "pc": 8
+          },
+          {
+            "name": "oddLatch",
+            "pc": 14
+          },
+          {
+            "name": "evenLatch",
+            "pc": 24
+          },
+          {
+            "name": "exit",
+            "pc": 34
+          }
+        ],
+        "edges": [
+          {
+            "from": "entry",
+            "to": "H",
+            "kind": "fallthrough"
+          },
+          {
+            "from": "H",
+            "to": "exit",
+            "kind": "ifle/taken"
+          },
+          {
+            "from": "H",
+            "to": "dispatch",
+            "kind": "ifle/fallthrough"
+          },
+          {
+            "from": "dispatch",
+            "to": "evenLatch",
+            "kind": "ifeq/taken"
+          },
+          {
+            "from": "dispatch",
+            "to": "oddLatch",
+            "kind": "ifeq/fallthrough"
+          },
+          {
+            "from": "oddLatch",
+            "to": "H",
+            "kind": "goto/backedge"
+          },
+          {
+            "from": "evenLatch",
+            "to": "H",
+            "kind": "goto/backedge"
+          }
+        ],
+        "cyclicScc": [
+          "H",
+          "dispatch",
+          "oddLatch",
+          "evenLatch"
+        ],
+        "entryTargets": [
+          "H"
+        ],
+        "reducibility": "reducible"
+      },
+      "expectedOutput": [
+        0,
+        3,
+        6,
+        10,
+        16,
+        19
+      ],
+      "size": 461,
+      "sha256": "5bb059adc44c85d4c7f876547d51cee6ee963b8e32eb68690972301e6a87b726"
+    },
+    {
+      "name": "DeadSecondaryEntry",
+      "kind": "reachable-reducible",
+      "graphEntries": [
+        "A",
+        "dead D -\u003e B"
+      ],
+      "description": "A dead block supplies a syntactic secondary edge into an otherwise natural A/B loop.",
+      "classFile": "original/DeadSecondaryEntry.class",
+      "equivalentSource": "equivalent/DeadSecondaryEntry.java",
+      "bytecodeDoc": "bytecode/DeadSecondaryEntry.md",
+      "controlFlow": {
+        "blocks": [
+          {
+            "name": "entry",
+            "pc": 0
+          },
+          {
+            "name": "toA",
+            "pc": 8
+          },
+          {
+            "name": "dead",
+            "pc": 11
+          },
+          {
+            "name": "A",
+            "pc": 19
+          },
+          {
+            "name": "AtoB",
+            "pc": 30
+          },
+          {
+            "name": "B",
+            "pc": 33
+          },
+          {
+            "name": "BtoA",
+            "pc": 44
+          },
+          {
+            "name": "exit",
+            "pc": 47
+          }
+        ],
+        "edges": [
+          {
+            "from": "entry",
+            "to": "exit",
+            "kind": "ifle/taken"
+          },
+          {
+            "from": "entry",
+            "to": "toA",
+            "kind": "ifle/fallthrough"
+          },
+          {
+            "from": "toA",
+            "to": "A",
+            "kind": "goto"
+          },
+          {
+            "from": "dead",
+            "to": "B",
+            "kind": "goto/unreachable"
+          },
+          {
+            "from": "A",
+            "to": "exit",
+            "kind": "ifle/taken"
+          },
+          {
+            "from": "A",
+            "to": "AtoB",
+            "kind": "ifle/fallthrough"
+          },
+          {
+            "from": "AtoB",
+            "to": "B",
+            "kind": "goto"
+          },
+          {
+            "from": "B",
+            "to": "exit",
+            "kind": "ifle/taken"
+          },
+          {
+            "from": "B",
+            "to": "BtoA",
+            "kind": "ifle/fallthrough"
+          },
+          {
+            "from": "BtoA",
+            "to": "A",
+            "kind": "goto/backedge"
+          }
+        ],
+        "cyclicScc": [
+          "A",
+          "AtoB",
+          "B",
+          "BtoA"
+        ],
+        "entryTargets": [
+          "A"
+        ],
+        "reducibility": "reachable-reducible (dead syntactic entry to B)"
+      },
+      "expectedOutput": [
+        0,
+        2,
+        6,
+        9,
+        15,
+        19
+      ],
+      "size": 472,
+      "sha256": "caaae45e63c8f6b38367484a7a195e5f54ede8c7a81fbd12b33540113b6152b0"
+    },
+    {
+      "name": "IrreducibleTwoEntry",
+      "kind": "irreducible",
+      "graphEntries": [
+        "A",
+        "B"
+      ],
+      "description": "A two-node strongly connected component entered independently at both nodes.",
+      "classFile": "original/IrreducibleTwoEntry.class",
+      "equivalentSource": "equivalent/IrreducibleTwoEntry.java",
+      "bytecodeDoc": "bytecode/IrreducibleTwoEntry.md",
+      "controlFlow": {
+        "blocks": [
+          {
+            "name": "entry",
+            "pc": 0
+          },
+          {
+            "name": "select",
+            "pc": 8
+          },
+          {
+            "name": "toB",
+            "pc": 12
+          },
+          {
+            "name": "A",
+            "pc": 15
+          },
+          {
+            "name": "AtoB",
+            "pc": 26
+          },
+          {
+            "name": "B",
+            "pc": 29
+          },
+          {
+            "name": "BtoA",
+            "pc": 40
+          },
+          {
+            "name": "exit",
+            "pc": 43
+          }
+        ],
+        "edges": [
+          {
+            "from": "entry",
+            "to": "exit",
+            "kind": "ifle/taken"
+          },
+          {
+            "from": "entry",
+            "to": "select",
+            "kind": "ifle/fallthrough"
+          },
+          {
+            "from": "select",
+            "to": "A",
+            "kind": "ifeq/taken"
+          },
+          {
+            "from": "select",
+            "to": "toB",
+            "kind": "ifeq/fallthrough"
+          },
+          {
+            "from": "toB",
+            "to": "B",
+            "kind": "goto/entry"
+          },
+          {
+            "from": "A",
+            "to": "exit",
+            "kind": "ifle/taken"
+          },
+          {
+            "from": "A",
+            "to": "AtoB",
+            "kind": "ifle/fallthrough"
+          },
+          {
+            "from": "AtoB",
+            "to": "B",
+            "kind": "goto"
+          },
+          {
+            "from": "B",
+            "to": "exit",
+            "kind": "ifle/taken"
+          },
+          {
+            "from": "B",
+            "to": "BtoA",
+            "kind": "ifle/fallthrough"
+          },
+          {
+            "from": "BtoA",
+            "to": "A",
+            "kind": "goto/backedge"
+          }
+        ],
+        "cyclicScc": [
+          "A",
+          "AtoB",
+          "B",
+          "BtoA"
+        ],
+        "entryTargets": [
+          "A",
+          "B"
+        ],
+        "reducibility": "irreducible"
+      },
+      "expectedOutput": [
+        0,
+        3,
+        9,
+        15,
+        24,
+        31
+      ],
+      "size": 469,
+      "sha256": "84f6e61d68549e478a0b1183d264248e48be12d12be4c2bedf222b41519fa8f9"
+    },
+    {
+      "name": "IrreducibleMidBodyPhi",
+      "kind": "irreducible",
+      "graphEntries": [
+        "H",
+        "M"
+      ],
+      "description": "A secondary entry reaches the loop body at a local-value merge.",
+      "classFile": "original/IrreducibleMidBodyPhi.class",
+      "equivalentSource": "equivalent/IrreducibleMidBodyPhi.java",
+      "bytecodeDoc": "bytecode/IrreducibleMidBodyPhi.md",
+      "controlFlow": {
+        "blocks": [
+          {
+            "name": "entry",
+            "pc": 0
+          },
+          {
+            "name": "select",
+            "pc": 11
+          },
+          {
+            "name": "toM",
+            "pc": 15
+          },
+          {
+            "name": "H",
+            "pc": 18
+          },
+          {
+            "name": "M",
+            "pc": 26
+          },
+          {
+            "name": "MtoH",
+            "pc": 38
+          },
+          {
+            "name": "exit",
+            "pc": 41
+          }
+        ],
+        "edges": [
+          {
+            "from": "entry",
+            "to": "exit",
+            "kind": "ifle/taken"
+          },
+          {
+            "from": "entry",
+            "to": "select",
+            "kind": "ifle/fallthrough"
+          },
+          {
+            "from": "select",
+            "to": "H",
+            "kind": "ifeq/taken"
+          },
+          {
+            "from": "select",
+            "to": "toM",
+            "kind": "ifeq/fallthrough"
+          },
+          {
+            "from": "toM",
+            "to": "M",
+            "kind": "goto/entry"
+          },
+          {
+            "from": "H",
+            "to": "M",
+            "kind": "goto"
+          },
+          {
+            "from": "M",
+            "to": "exit",
+            "kind": "ifle/taken"
+          },
+          {
+            "from": "M",
+            "to": "MtoH",
+            "kind": "ifle/fallthrough"
+          },
+          {
+            "from": "MtoH",
+            "to": "H",
+            "kind": "goto/backedge"
+          }
+        ],
+        "cyclicScc": [
+          "H",
+          "M",
+          "MtoH"
+        ],
+        "entryTargets": [
+          "H",
+          "M"
+        ],
+        "reducibility": "irreducible"
+      },
+      "expectedOutput": [
+        0,
+        2,
+        6,
+        22,
+        126,
+        -2
+      ],
+      "size": 469,
+      "sha256": "11b36d17be7a61e674416216961c7d07df1eeb8c83a995c6e66cec54fde5a24a"
+    },
+    {
+      "name": "IrreducibleSwitchThreeEntry",
+      "kind": "irreducible",
+      "graphEntries": [
+        "A",
+        "B",
+        "C"
+      ],
+      "description": "A tableswitch enters each node of a three-node cycle.",
+      "classFile": "original/IrreducibleSwitchThreeEntry.class",
+      "equivalentSource": "equivalent/IrreducibleSwitchThreeEntry.java",
+      "bytecodeDoc": "bytecode/IrreducibleSwitchThreeEntry.md",
+      "controlFlow": {
+        "blocks": [
+          {
+            "name": "entry",
+            "pc": 0
+          },
+          {
+            "name": "switch",
+            "pc": 8
+          },
+          {
+            "name": "A",
+            "pc": 36
+          },
+          {
+            "name": "AtoB",
+            "pc": 47
+          },
+          {
+            "name": "B",
+            "pc": 50
+          },
+          {
+            "name": "BtoC",
+            "pc": 62
+          },
+          {
+            "name": "C",
+            "pc": 65
+          },
+          {
+            "name": "CtoA",
+            "pc": 77
+          },
+          {
+            "name": "exit",
+            "pc": 80
+          }
+        ],
+        "edges": [
+          {
+            "from": "entry",
+            "to": "exit",
+            "kind": "ifle/taken"
+          },
+          {
+            "from": "entry",
+            "to": "switch",
+            "kind": "ifle/fallthrough"
+          },
+          {
+            "from": "switch",
+            "to": "A",
+            "kind": "tableswitch case 0/default"
+          },
+          {
+            "from": "switch",
+            "to": "B",
+            "kind": "tableswitch case 1"
+          },
+          {
+            "from": "switch",
+            "to": "C",
+            "kind": "tableswitch case 2"
+          },
+          {
+            "from": "A",
+            "to": "exit",
+            "kind": "ifle/taken"
+          },
+          {
+            "from": "A",
+            "to": "AtoB",
+            "kind": "ifle/fallthrough"
+          },
+          {
+            "from": "AtoB",
+            "to": "B",
+            "kind": "goto"
+          },
+          {
+            "from": "B",
+            "to": "exit",
+            "kind": "ifle/taken"
+          },
+          {
+            "from": "B",
+            "to": "BtoC",
+            "kind": "ifle/fallthrough"
+          },
+          {
+            "from": "BtoC",
+            "to": "C",
+            "kind": "goto"
+          },
+          {
+            "from": "C",
+            "to": "exit",
+            "kind": "ifle/taken"
+          },
+          {
+            "from": "C",
+            "to": "CtoA",
+            "kind": "ifle/fallthrough"
+          },
+          {
+            "from": "CtoA",
+            "to": "A",
+            "kind": "goto/backedge"
+          }
+        ],
+        "cyclicScc": [
+          "A",
+          "AtoB",
+          "B",
+          "BtoC",
+          "C",
+          "CtoA"
+        ],
+        "entryTargets": [
+          "A",
+          "B",
+          "C"
+        ],
+        "reducibility": "irreducible"
+      },
+      "expectedOutput": [
+        0,
+        1,
+        111,
+        113,
+        125,
+        232
+      ],
+      "size": 514,
+      "sha256": "24685f11a21eddf5ab1049a54aa8fc1a841ad085d0f001f25a78fb136a07c497"
+    },
+    {
+      "name": "IrreducibleMultiExitEffects",
+      "kind": "irreducible",
+      "graphEntries": [
+        "A",
+        "B"
+      ],
+      "description": "A two-entry cycle has distinct effectful early exits and a budget exit.",
+      "classFile": "original/IrreducibleMultiExitEffects.class",
+      "equivalentSource": "equivalent/IrreducibleMultiExitEffects.java",
+      "bytecodeDoc": "bytecode/IrreducibleMultiExitEffects.md",
+      "controlFlow": {
+        "blocks": [
+          {
+            "name": "entry",
+            "pc": 0
+          },
+          {
+            "name": "select",
+            "pc": 12
+          },
+          {
+            "name": "toB",
+            "pc": 16
+          },
+          {
+            "name": "A",
+            "pc": 19
+          },
+          {
+            "name": "Atest",
+            "pc": 38
+          },
+          {
+            "name": "AtoB",
+            "pc": 45
+          },
+          {
+            "name": "B",
+            "pc": 48
+          },
+          {
+            "name": "Btest",
+            "pc": 68
+          },
+          {
+            "name": "BtoA",
+            "pc": 74
+          },
+          {
+            "name": "exitA",
+            "pc": 77
+          },
+          {
+            "name": "exitB",
+            "pc": 87
+          },
+          {
+            "name": "budgetExit",
+            "pc": 97
+          }
+        ],
+        "edges": [
+          {
+            "from": "entry",
+            "to": "budgetExit",
+            "kind": "ifle/taken"
+          },
+          {
+            "from": "entry",
+            "to": "select",
+            "kind": "ifle/fallthrough"
+          },
+          {
+            "from": "select",
+            "to": "A",
+            "kind": "ifeq/taken"
+          },
+          {
+            "from": "select",
+            "to": "toB",
+            "kind": "ifeq/fallthrough"
+          },
+          {
+            "from": "toB",
+            "to": "B",
+            "kind": "goto/entry"
+          },
+          {
+            "from": "A",
+            "to": "budgetExit",
+            "kind": "ifle/taken"
+          },
+          {
+            "from": "A",
+            "to": "Atest",
+            "kind": "ifle/fallthrough"
+          },
+          {
+            "from": "Atest",
+            "to": "exitA",
+            "kind": "ifeq/taken"
+          },
+          {
+            "from": "Atest",
+            "to": "AtoB",
+            "kind": "ifeq/fallthrough"
+          },
+          {
+            "from": "AtoB",
+            "to": "B",
+            "kind": "goto"
+          },
+          {
+            "from": "B",
+            "to": "budgetExit",
+            "kind": "ifle/taken"
+          },
+          {
+            "from": "B",
+            "to": "Btest",
+            "kind": "ifle/fallthrough"
+          },
+          {
+            "from": "Btest",
+            "to": "exitB",
+            "kind": "ifeq/taken"
+          },
+          {
+            "from": "Btest",
+            "to": "BtoA",
+            "kind": "ifeq/fallthrough"
+          },
+          {
+            "from": "BtoA",
+            "to": "A",
+            "kind": "goto/backedge"
+          }
+        ],
+        "cyclicScc": [
+          "A",
+          "Atest",
+          "AtoB",
+          "B",
+          "Btest",
+          "BtoA"
+        ],
+        "entryTargets": [
+          "A",
+          "B"
+        ],
+        "reducibility": "irreducible"
+      },
+      "expectedOutput": [
+        0,
+        3,
+        2014,
+        31,
+        1019,
+        2044
+      ],
+      "size": 567,
+      "sha256": "4ed44c0bde898f8cebeb74df350c63c4d70dda9d9f5c5cc7f040bebe8b723f78"
+    },
+    {
+      "name": "RegionalIrreducibility",
+      "kind": "regionally-irreducible",
+      "graphEntries": [
+        "H -\u003e A",
+        "H -\u003e B"
+      ],
+      "description": "A natural outer loop contains an A/B subregion with two entries.",
+      "classFile": "original/RegionalIrreducibility.class",
+      "equivalentSource": "equivalent/RegionalIrreducibility.java",
+      "bytecodeDoc": "bytecode/RegionalIrreducibility.md",
+      "controlFlow": {
+        "blocks": [
+          {
+            "name": "entry",
+            "pc": 0
+          },
+          {
+            "name": "toH",
+            "pc": 8
+          },
+          {
+            "name": "H",
+            "pc": 11
+          },
+          {
+            "name": "HtoB",
+            "pc": 17
+          },
+          {
+            "name": "A",
+            "pc": 20
+          },
+          {
+            "name": "Adispatch",
+            "pc": 31
+          },
+          {
+            "name": "AtoB",
+            "pc": 37
+          },
+          {
+            "name": "B",
+            "pc": 40
+          },
+          {
+            "name": "Bdispatch",
+            "pc": 51
+          },
+          {
+            "name": "BtoH",
+            "pc": 57
+          },
+          {
+            "name": "exit",
+            "pc": 60
+          }
+        ],
+        "edges": [
+          {
+            "from": "entry",
+            "to": "exit",
+            "kind": "ifle/taken"
+          },
+          {
+            "from": "entry",
+            "to": "toH",
+            "kind": "ifle/fallthrough"
+          },
+          {
+            "from": "toH",
+            "to": "H",
+            "kind": "goto"
+          },
+          {
+            "from": "H",
+            "to": "A",
+            "kind": "ifeq/taken"
+          },
+          {
+            "from": "H",
+            "to": "HtoB",
+            "kind": "ifeq/fallthrough"
+          },
+          {
+            "from": "HtoB",
+            "to": "B",
+            "kind": "goto"
+          },
+          {
+            "from": "A",
+            "to": "exit",
+            "kind": "ifle/taken"
+          },
+          {
+            "from": "A",
+            "to": "Adispatch",
+            "kind": "ifle/fallthrough"
+          },
+          {
+            "from": "Adispatch",
+            "to": "H",
+            "kind": "ifeq/taken"
+          },
+          {
+            "from": "Adispatch",
+            "to": "AtoB",
+            "kind": "ifeq/fallthrough"
+          },
+          {
+            "from": "AtoB",
+            "to": "B",
+            "kind": "goto"
+          },
+          {
+            "from": "B",
+            "to": "exit",
+            "kind": "ifle/taken"
+          },
+          {
+            "from": "B",
+            "to": "Bdispatch",
+            "kind": "ifle/fallthrough"
+          },
+          {
+            "from": "Bdispatch",
+            "to": "A",
+            "kind": "ifeq/taken"
+          },
+          {
+            "from": "Bdispatch",
+            "to": "BtoH",
+            "kind": "ifeq/fallthrough"
+          },
+          {
+            "from": "BtoH",
+            "to": "H",
+            "kind": "goto/backedge"
+          }
+        ],
+        "cyclicScc": [
+          "H",
+          "HtoB",
+          "A",
+          "Adispatch",
+          "AtoB",
+          "B",
+          "Bdispatch",
+          "BtoH"
+        ],
+        "entryTargets": [
+          "H"
+        ],
+        "reducibility": "regionally-irreducible (whole SCC has outer header H; cyclic subregion A/B has entry targets A and B)"
+      },
+      "expectedOutput": [
+        0,
+        2,
+        8,
+        11,
+        22,
+        27
+      ],
+      "size": 489,
+      "sha256": "d8a439310910d112b9da65e48211245c382801566c4feccf1bed71b615f5f4fa"
+    }
+  ]
+}

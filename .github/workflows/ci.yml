@@ -277,6 +277,11 @@ jobs:
         run: |
           set -o pipefail
           go test -json ./test/cross -run '^(TestRebuiltJarRuntimeSelectionPreservesOriginalAuthority|TestRebuiltJarRejectsUnknownMetadataAndKeepsPlainPacking)$' -count=1 -timeout=2m | tee artifacts/rebuilt-jar-runtime-tests.jsonl
+      - name: Irreducible CFG semantic round trip
+        run: |
+          set -o pipefail
+          test "$(go test ./test/cross -list '^TestRoundTripIrreducibleCFGCorpus$' | grep -xc 'TestRoundTripIrreducibleCFGCorpus')" -eq 1
+          go test -json ./test/cross -run '^TestRoundTripIrreducibleCFGCorpus$' -count=1 -timeout=3m | tee artifacts/irreducible-cfg-roundtrip-tests.jsonl
       - name: Trusted original and rebuilt algorithm round trips
         run: |
           evidence="$RUNNER_TEMP/algorithm-regression-evidence"

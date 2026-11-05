@@ -16,6 +16,13 @@ Add a native, pure-Go DEX/APK-to-JAR path as a strict first vertical slice.
 - Keep the initial boundary explicit: try/catch and monitors; float, long, and
   double operations; switches, payloads, and filled arrays; DEX 038+ dynamic
   invokes; annotations/debug metadata; and CompactDex remain unsupported.
+- Recover normal-edge JVM irreducible regions with deterministic state dispatch,
+  including multiple entries, switch entries, multiple exits, and irreducible
+  kernels nested in natural loops. The checked-in major-49 corpus verifies original,
+  reviewed-equivalent, and rebuilt behavior without requiring identical bytecode.
+  Constructors, exception-entry, monitor, uninitialized-object,
+  non-empty-stack-boundary, and uninlined `jsr`/`ret` regions remain explicit
+  unsupported boundaries.
 
 ## v0.4.0 — 2026-09-19
 
@@ -43,7 +50,8 @@ compilation, JVM verification, and runtime observations.
 The historical v0.3.0 benchmark below is not current semantic acceptance evidence.
 See the [complete corpus results](docs/historical-jar-audit.md) and
 [implementation boundaries](docs/decompiler-semantic-audit.md). Full operand-stack
-SSA, general type constraints and irreducible restructuring remain incomplete.
+SSA and general type constraints remain incomplete; irreducible restructuring is
+limited to the audited normal-edge, stack-empty region described above.
 
 ## v0.3.0 — 2026-09-05
 

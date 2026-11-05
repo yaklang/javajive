@@ -1,9 +1,11 @@
 package decompiler
 
 import (
-	"github.com/yaklang/javajive/internal/jdecenv"
+	"errors"
 	"slices"
 	"strings"
+
+	"github.com/yaklang/javajive/internal/jdecenv"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
@@ -41,6 +43,16 @@ func ParseBytesCode(decompiler *core.Decompiler) (res []statements.Statement, er
 	statementManager.SetOriginalExceptionTable(decompiler.ExceptionTable)
 	statementManager.SetId(decompiler.CurrentId)
 	statementManager.Aggressive = decompiler.Aggressive
+	if !statementManager.LowerIrreducibleDispatch(
+		decompiler.HasDeferredIrreducibleControlFlow(),
+		decompiler.FunctionContext != nil && decompiler.FunctionContext.FunctionName == "<init>",
+	) {
+		reason := statementManager.IrreducibleDispatchError()
+		if reason != "" {
+			return nil, errors.New("unsupported_irreducible_control_flow: " + reason)
+		}
+		return nil, errors.New("unsupported_irreducible_control_flow: statement CFG cannot be lowered safely")
+	}
 	decompiler.InlineAdjacentLiteralGuardArrays()
 	decompiler.InlineLiteralArrayGuardChains()
 	decompiler.RegisterNestedBranchArrayCalls()

@@ -272,8 +272,14 @@ go test ./test/cross/ -v      # Java cross-tests only (needs javac/java on PATH)
 ```
 
 The JDK cross-tests compile real Java artifacts at test time and verify them
-against JavaJive; they `t.Skip` automatically when no JDK is present. See
-[HARNESS-WORKFLOW.md](HARNESS-WORKFLOW.md) for how the harness and CI work.
+against JavaJive; they `t.Skip` automatically when no JDK is present. The
+[irreducible CFG corpus](test/cross/testdata/irreducible/README.md) additionally
+pins generated classfiles, exact CFG topology, reviewed equivalent Java, rebuilt
+JVM verification, and runtime equivalence. JavaJive emits deterministic state
+machines for supported normal-edge, non-constructor regions; it does not claim
+to recover the original source or identical bytecode. See
+[HARNESS-WORKFLOW.md](HARNESS-WORKFLOW.md)
+for how the harness and CI work.
 
 ## Project layout
 

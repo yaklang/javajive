@@ -251,6 +251,9 @@ go test ./test/cross/ -v      # 仅 Java 交叉测试（需 PATH 上有 javac/ja
 ```
 
 JDK 交叉测试会在测试时编译真实 Java 产物并用 JavaJive 验证；无 JDK 时自动 `t.Skip`。
+[非规约 CFG 专题语料](test/cross/testdata/irreducible/README.md) 还会固定生成的 class、
+精确 CFG 拓扑、人工审阅的等价 Java、重编译后的 JVM 验证及运行时等价性。对于受支持的
+普通边、非构造器区域，JavaJive 会输出确定性的状态机；不承诺恢复原始源码或相同字节码。
 harness 与 CI 的工作方式见 [HARNESS-WORKFLOW.md](HARNESS-WORKFLOW.md)。
 
 ## 包结构

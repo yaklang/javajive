@@ -6360,6 +6360,9 @@ func (d *Decompiler) ParseStatement() error {
 	if err != nil {
 		return err
 	}
+	if d.semanticCFG != nil && d.semanticCFG.IrreducibleError != nil && !d.irreducibleEdgesHaveEmptyStack() {
+		return d.semanticCFG.IrreducibleError
+	}
 	// convert opcode to statement
 	var nodes []*Node
 	statementsIndex := 0

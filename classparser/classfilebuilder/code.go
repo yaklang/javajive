@@ -23,6 +23,8 @@ const (
 	kindLDC
 	kindBranch
 	kindInvokeInterface
+	kindTableSwitch
+	kindLookupSwitch
 )
 
 type instruction struct {
@@ -31,6 +33,8 @@ type instruction struct {
 	arg        int
 	arg2       int
 	target     *Label
+	targets    []*Label
+	keys       []int32
 	wideBranch bool
 	expanded   bool
 }
@@ -253,6 +257,59 @@ func (c *Code) Branch(op Opcode, target *Label) *Code {
 	return c
 }
 
+// TableSwitch appends a tableswitch whose consecutive case values start at
+// low. targets must contain at least one case target. Offsets and alignment
+// padding are resolved during assembly.
+func (c *Code) TableSwitch(low int32, defaultTarget *Label, targets ...*Label) *Code {
+	if !c.validLabel(defaultTarget) {
+		return c
+	}
+	if len(targets) == 0 {
+		c.fail("tableswitch requires at least one case target")
+		return c
+	}
+	if int64(low)+int64(len(targets))-1 > math.MaxInt32 {
+		c.fail("tableswitch high value exceeds signed 32-bit range")
+		return c
+	}
+	for _, target := range targets {
+		if !c.validLabel(target) {
+			return c
+		}
+	}
+	c.nodes = append(c.nodes, codeNode{insn: &instruction{
+		kind: kindTableSwitch, op: TABLESWITCH, arg: int(low), target: defaultTarget,
+		targets: append([]*Label(nil), targets...),
+	}})
+	return c
+}
+
+// LookupSwitch appends a lookupswitch. keys and targets are corresponding
+// pairs, and keys must be strictly increasing as required by the class format.
+func (c *Code) LookupSwitch(defaultTarget *Label, keys []int32, targets ...*Label) *Code {
+	if !c.validLabel(defaultTarget) {
+		return c
+	}
+	if len(keys) != len(targets) {
+		c.fail("lookupswitch has %d keys and %d targets", len(keys), len(targets))
+		return c
+	}
+	for index, target := range targets {
+		if index > 0 && keys[index] <= keys[index-1] {
+			c.fail("lookupswitch keys must be strictly increasing: key %d at index %d follows %d", keys[index], index, keys[index-1])
+			return c
+		}
+		if !c.validLabel(target) {
+			return c
+		}
+	}
+	c.nodes = append(c.nodes, codeNode{insn: &instruction{
+		kind: kindLookupSwitch, op: LOOKUPSWITCH, target: defaultTarget,
+		keys: append([]int32(nil), keys...), targets: append([]*Label(nil), targets...),
+	}})
+	return c
+}
+
 // Catch adds an exception-table entry. catchClass is an internal class name;
 // use an empty string for a finally/all-exceptions handler. The protected range
 // is [start,end), and all labels must be bound before assembly.
@@ -324,7 +381,7 @@ func inverseConditional(op Opcode) Opcode {
 	return IFNULL
 }
 
-func (i *instruction) size() int {
+func (i *instruction) size(pc int) int {
 	switch i.kind {
 	case kindSimple:
 		return 1
@@ -360,6 +417,12 @@ func (i *instruction) size() int {
 		return 3
 	case kindInvokeInterface:
 		return 5
+	case kindTableSwitch:
+		padding := (4 - (pc+1)%4) % 4
+		return 1 + padding + 12 + 4*len(i.targets)
+	case kindLookupSwitch:
+		padding := (4 - (pc+1)%4) % 4
+		return 1 + padding + 8 + 8*len(i.targets)
 	default:
 		return 0
 	}
@@ -450,7 +513,7 @@ func (c *Code) layout() (map[*Label]int, []int, int, error) {
 				labelPC[node.label] = pc
 			} else if node.insn != nil {
 				insnPC = append(insnPC, pc)
-				pc += node.insn.size()
+				pc += node.insn.size(pc)
 			}
 		}
 		changed := false
@@ -473,14 +536,69 @@ func (c *Code) layout() (map[*Label]int, []int, int, error) {
 						insn.expanded, changed = true, true
 					}
 				}
+			} else if insn.kind == kindTableSwitch || insn.kind == kindLookupSwitch {
+				targets := append([]*Label{insn.target}, insn.targets...)
+				for _, target := range targets {
+					if _, ok := labelPC[target]; !ok {
+						return nil, nil, 0, fmt.Errorf("switch at instruction %d targets unbound label %d", insnIndex, target.id)
+					}
+				}
 			}
 			insnIndex++
 		}
 		if !changed {
+			if err := c.validateControlTargets(labelPC, insnPC); err != nil {
+				return nil, nil, 0, err
+			}
 			return labelPC, insnPC, pc, nil
 		}
 	}
 	return nil, nil, 0, fmt.Errorf("branch layout did not converge")
+}
+
+func (c *Code) validateControlTargets(labels map[*Label]int, instructionPCs []int) error {
+	instructionAt := make(map[int]struct{}, len(instructionPCs))
+	for _, pc := range instructionPCs {
+		instructionAt[pc] = struct{}{}
+	}
+	validate := func(kind, role string, label *Label) error {
+		pc := labels[label]
+		if _, ok := instructionAt[pc]; !ok {
+			return fmt.Errorf("%s %s label %d at offset %d is not an instruction", kind, role, label.id, pc)
+		}
+		return nil
+	}
+	for _, node := range c.nodes {
+		insn := node.insn
+		if insn == nil {
+			continue
+		}
+		switch insn.kind {
+		case kindBranch:
+			if err := validate("branch", "target", insn.target); err != nil {
+				return err
+			}
+		case kindTableSwitch:
+			if err := validate("tableswitch", "default target", insn.target); err != nil {
+				return err
+			}
+			for index, target := range insn.targets {
+				if err := validate("tableswitch", fmt.Sprintf("case target %d", index), target); err != nil {
+					return err
+				}
+			}
+		case kindLookupSwitch:
+			if err := validate("lookupswitch", "default target", insn.target); err != nil {
+				return err
+			}
+			for index, target := range insn.targets {
+				if err := validate("lookupswitch", fmt.Sprintf("key %d target", insn.keys[index]), target); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func (c *Code) writeInstruction(out *byteWriter, i *instruction, pc int, labels map[*Label]int) error {
@@ -553,6 +671,28 @@ func (c *Code) writeInstruction(out *byteWriter, i *instruction, pc int, labels 
 		out.u2(uint16(i.arg))
 		out.u1(byte(i.arg2))
 		out.u1(0)
+	case kindTableSwitch:
+		out.u1(byte(TABLESWITCH))
+		for padding := (4 - (pc+1)%4) % 4; padding > 0; padding-- {
+			out.u1(0)
+		}
+		out.i4(int32(labels[i.target] - pc))
+		out.i4(int32(i.arg))
+		out.i4(int32(int64(i.arg) + int64(len(i.targets)) - 1))
+		for _, target := range i.targets {
+			out.i4(int32(labels[target] - pc))
+		}
+	case kindLookupSwitch:
+		out.u1(byte(LOOKUPSWITCH))
+		for padding := (4 - (pc+1)%4) % 4; padding > 0; padding-- {
+			out.u1(0)
+		}
+		out.i4(int32(labels[i.target] - pc))
+		out.i4(int32(len(i.keys)))
+		for index, key := range i.keys {
+			out.i4(key)
+			out.i4(int32(labels[i.targets[index]] - pc))
+		}
 	default:
 		return fmt.Errorf("unknown internal instruction kind %d", i.kind)
 	}

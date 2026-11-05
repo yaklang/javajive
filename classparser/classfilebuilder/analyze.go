@@ -112,6 +112,19 @@ func (c *Code) calculateFrames(descriptor string, access uint16, labels map[*Lab
 			if insn.op == GOTO {
 				continue
 			}
+		} else if insn.kind == kindTableSwitch || insn.kind == kindLookupSwitch {
+			targets := append([]*Label{insn.target}, insn.targets...)
+			for _, target := range targets {
+				targetPC := labels[target]
+				targetIndex, ok := pcIndex[targetPC]
+				if !ok {
+					return 0, 0, fmt.Errorf("switch target at offset %d is not an instruction", targetPC)
+				}
+				if err := enqueue(targetIndex, after); err != nil {
+					return 0, 0, err
+				}
+			}
+			continue
 		}
 		if isTerminal(insn.op) {
 			continue
@@ -202,6 +215,8 @@ func (c *Code) instructionEffect(i *instruction) (stackEffect, error) {
 			return stackEffect{}, err
 		}
 		return stackEffect{pop: args + 1, push: result}, nil
+	case kindTableSwitch, kindLookupSwitch:
+		return stackEffect{pop: 1}, nil
 	case kindSimple:
 		if effect, ok := simpleEffect(i.op); ok {
 			return effect, nil
