@@ -371,6 +371,22 @@ func buildFallthroughEntry(class *cf.Class) error {
 	})
 }
 
+// A discarded static field read is not a legal Java expression statement. The
+// sink comparison must preserve the read (and any class initialization) while
+// keeping the rebuilt source compilable.
+func buildDiscardedStaticRead(class *cf.Class) error {
+	class.AddField(cf.ACC_PUBLIC|cf.ACC_STATIC, "TOKEN", "Ljava/lang/Object;")
+	return addRun(class, func(code *cf.Code) error {
+		field, err := class.Pool().Fieldref("DiscardedStaticRead", "TOKEN", "Ljava/lang/Object;")
+		if err != nil {
+			return err
+		}
+		code.CP(cf.GETSTATIC, field).Emit(cf.POP)
+		code.Load(cf.IntLocal, 1).Emit(cf.IRETURN)
+		return nil
+	})
+}
+
 // ---------------------------------------------------------------------------
 // Fail-closed shapes
 // ---------------------------------------------------------------------------
@@ -512,6 +528,7 @@ func cases() []evalCase {
 		{"DeepRegional", expectRecovered, buildDeepRegional},
 		{"FourExitEffects", expectRecovered, buildFourExitEffects},
 		{"FallthroughEntry", expectRecovered, buildFallthroughEntry},
+		{"DiscardedStaticRead", expectRecovered, buildDiscardedStaticRead},
 		{"ConstructorIrreducible", expectFailClosed, buildConstructorIrreducible},
 		{"TryCatchIrreducible", expectFailClosed, buildTryCatchIrreducible},
 		{"MonitorIrreducible", expectFailClosed, buildMonitorIrreducible},

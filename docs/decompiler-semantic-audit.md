@@ -44,6 +44,41 @@ Requests own their mode, analysis budget, resolver, result and rewrite history. 
 | P2-02 contexts | Per-request options and diagnostics, explicit analysis budget, panic-safe lambda context restoration, concurrent request race test. | Old environment-controlled core behavior is not fully replaced by options. |
 | P2-03 adversarial validation | Generated legal classfiles, metamorphic debug/no-debug and key-renaming tests, two policies, multiple Java compiler versions in CI, decoder fuzzing and durable evidence. | No claim of a complete random-program generator, ECJ matrix, or external holdout benchmark. |
 
+## Modern JAR coverage and boundaries
+
+`test/complexjar` round-trips seven JARs with the same independent protocol
+(decompile → tree `javac` → `java -Xverify:all` → runtime comparison):
+Java 21 records/sealed/pattern switches/switch expressions, control-flow
+torture, Java 8 enum constant bodies, a 100-class scale JAR, a multi-release
+JAR, a modular JAR, and the packaged irreducible fixtures. The run rejects any
+source containing a decompiler stub marker. A Java 21 source-shape subtest is
+also part of the CI-gated adversarial suite (`SwitchExpressionShape` and
+`ModernShape`), including an equivalent-dispatcher path for pattern switches
+that T21 cannot rewrite to a source-level pattern switch.
+
+Reported but not claimed as clean:
+
+- **Kotlin/JVM bytecode.** `kotlin-stdlib-2.0.21.jar` decompiles 994 classes
+  with 29 whole-class stubs and 104 method stubs. Kotlin enums carrying a
+  synthetic `$ENTRIES` field initialized from `$VALUES` remain outside the
+  enum-regeneration proof. This is an external stress observation, not a corpus
+  acceptance target.
+- **Large single methods.** The documented `MaxAnalysisUpdates=1,000,000`
+  reaching-definition budget still degrades a 47 KB generated method to a
+  method stub; the same workload split into ten methods passes.
+- **Record-deconstruction patterns.** T21-C06 covers a supported
+  reconstruction. A separate adversarial shape whose record accessor calls
+  share `Throwable` handlers that wrap failures in `MatchException` is
+  currently rejected by the shared-handler structurer and emits a method stub
+  with a diagnostic (fail-closed). Simple type patterns, `case null`, guards,
+  and equivalent-dispatcher forms are covered.
+- **Module descriptors.** `module-info.class` is inspected but emitted only as
+  a synthetic-descriptor comment; classpath compilation and behavior remain
+  verified.
+- **Flattened names.** `Outer$Inner` is emitted as a standalone top-level unit,
+  as documented for the archive path; reflection and record `toString` text can
+  differ even when method behavior is identical.
+
 ## Adversarial families
 
 The single-class source suite has 39 shapes × 2 debug configurations × 2 policies = **156 independent round trips**. Each target is compiled with `--release 8`, run with `-Xverify:all`, decompiled, compiled into a fresh directory, and executed again with only that directory on the application classpath. Verification is a separate JVM process using reflection without target initialization; execution runs afterward in a fresh process. Inputs include signed boundaries, NaN, signed zero, branch arms, side-effect traces, exception class and identity, suppressed exceptions, and lock release.

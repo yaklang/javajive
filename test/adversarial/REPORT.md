@@ -181,3 +181,24 @@ go vet ./...
 ```
 
 既有 corpus 8/8 的源码 hash、行为、JVM 校验均保持不变，确认本轮为纯增量修复。
+
+## 六、2026-11-06 Java 21 / 复杂 JAR 补充
+
+新增 `TestAdversarialModernSourceShapes`（JDK 21 时启用）：
+
+| case | 内容 | 结果 |
+|---|---|---|
+| ModernShape | public/package-private record、sealed 接口、record pattern switch、switch 表达式、private/default interface 方法 | 通过（等价 dispatcher 源码可编译，行为一致） |
+| SwitchExpressionShape | switch 表达式 + yield + 嵌套 switch + null/ternary 臂 + try 内 switch | 通过 |
+| NullPatternShape | `case null` + type pattern 的 pattern switch（循环内、存储到局部） | 通过 |
+
+另有 `TestAdversarialRecordDeconstructionFailsClosed`：T21-C06 覆盖一种可重建的
+record 解构形状；该对抗形状的 accessor 调用共享 `Throwable` handler，当前以
+`exception-handler structuring failed` 诊断降级为方法 stub，不会输出静默错误的源码。
+
+本轮同时新增 `test/complexjar` 的 7 个 JAR 往返（Java 21、控制流、Java 8 legacy、
+100 类规模、multi-release、module、非规约打包），全部通过整树编译、JVM 校验和行为
+比较；详细清单与边界见 `test/complexjar/REPORT.md`。期间修复了 switch 表达式
+栈值丢失、pattern-switch 变量重命名、switch 作为整个循环体时的 break 标签、
+record 接口/规范构造器、private interface 方法、现代 enum 常量体、以及丢弃
+static field read 生成非法语句等问题。

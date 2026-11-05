@@ -57,6 +57,14 @@
 
 完整方法学、逐 jar 表格与复现命令见 [BENCHMARK.md](BENCHMARK.md)。
 
+### 复杂 JAR 语料
+
+另有一套 CI 强制的复杂 JAR 语料，覆盖历史 Java 8 库之外的语言目标：Java 21 的
+record/sealed/模式 switch/switch 表达式、控制流压力样例、Java 8 enum 常量体、
+100 个类的规模 JAR、多版本 JAR、模块化 JAR，以及打包后的非规约样例。每个用例都会
+反编译、整树重编译、`java -Xverify:all` 校验，并与原始程序输出做行为对比。清单、
+已修复缺陷与剩余边界见 [test/complexjar/REPORT.md](test/complexjar/REPORT.md)。
+
 ## 安装
 
 ```bash

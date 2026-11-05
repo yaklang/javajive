@@ -71,6 +71,17 @@ recompile → repackage → JVM verify:
 
 See [BENCHMARK.md](BENCHMARK.md) for the full methodology, per-jar tables and reproduction commands.
 
+### Complex JAR corpus
+
+A separate, CI-gated corpus exercises modern language targets rather than the
+historical Java 8 libraries: Java 21 records/sealed types/pattern switches/switch
+expressions, control-flow torture, Java 8 enum bodies, a 100-class scale JAR,
+multi-release and modular JARs, and the packaged irreducible fixtures. Each case
+is decompiled, tree-recompiled, verified with `java -Xverify:all`, and compared
+against original runtime output. See
+[test/complexjar/REPORT.md](test/complexjar/REPORT.md) for the inventory, fixed
+defects and remaining boundaries.
+
 ## Install
 
 ```bash
