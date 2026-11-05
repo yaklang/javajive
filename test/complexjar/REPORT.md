@@ -18,7 +18,7 @@ complex corpus.
 | Historical libraries (`test/cross/testdata/historical-jars.lock.json`) | 38 | 24,883 classes / 24,359 units | 26/38 full tree compile; 4 stub units; 12 packages retain baseline residual errors |
 | Checked-in small fixtures | 4 | — | used by archive/unit tests |
 | New complex corpus (this suite) | 7 | 151 decompiled units | all tree-compile, verify and (where a driver exists) behavior-match |
-| **Total distinct JAR inputs** | **49** | | |
+| **Total JAR inputs** | **49 paths / 48 unique files** | | plexus-cipher is mirrored in two test roots |
 | External Kotlin stdlib 2.0.21 stress test (not gated) | +1 | 994 classes | 29 whole-class stubs, 104 method stubs, 77 files with stubs |
 
 The historical 38 are not vendored; CI downloads and SHA-256-pins them. The

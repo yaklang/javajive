@@ -23,6 +23,12 @@ func (d *Decompiler) materializeDiscardedValue(opcode *OpCode, value values.Java
 	if d == nil || opcode == nil || value == nil {
 		return nil
 	}
+	if caught, ok := values.UnpackSoltValue(value).(*values.CustomValue); ok && caught.IsSourceCaught() {
+		// A handler-entry exception binding has no evaluation effect. Keep the
+		// original POP path: it emits the caught-exception statement that the
+		// try structurer relies on to distinguish sibling handlers.
+		return nil
+	}
 	switch values.UnpackSoltValue(value).(type) {
 	case *values.FunctionCallExpression, *values.NewExpression:
 		return nil
