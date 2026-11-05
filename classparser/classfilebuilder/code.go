@@ -49,6 +49,17 @@ type exceptionHandler struct {
 	catchType           uint16
 }
 
+type lineNumber struct {
+	at   *Label
+	line uint16
+}
+
+type localVariable struct {
+	start, end       *Label
+	name, descriptor uint16
+	index            uint16
+}
+
 // Code is a symbolic Code attribute assembler. It is not safe for concurrent
 // mutation. Errors are sticky and returned by Class.Bytes.
 type Code struct {
@@ -56,6 +67,10 @@ type Code struct {
 	nodes     []codeNode
 	nextLabel int
 	handlers  []exceptionHandler
+	lines     []lineNumber
+	locals    []localVariable
+	lineName  uint16
+	localName uint16
 	err       error
 	maxStack  *uint16
 	maxLocals *uint16
@@ -338,6 +353,74 @@ func (c *Code) Catch(start, end, handler *Label, catchClass string) *Code {
 	return c
 }
 
+// Line records a source line at a symbolic bytecode position.
+func (c *Code) Line(at *Label, line uint16) *Code {
+	if !c.validLabel(at) {
+		return c
+	}
+	if line == 0 {
+		c.fail("line number must be positive")
+		return c
+	}
+	if len(c.lines) >= math.MaxUint16 {
+		c.fail("line_number_table_length exceeds 65535")
+		return c
+	}
+	if c.lineName == 0 {
+		var err error
+		c.lineName, err = c.pool.UTF8("LineNumberTable")
+		if err != nil {
+			c.fail("LineNumberTable attribute name: %v", err)
+			return c
+		}
+	}
+	c.lines = append(c.lines, lineNumber{at: at, line: line})
+	return c
+}
+
+// Local records one LocalVariableTable range. The range is [start,end).
+func (c *Code) Local(start, end *Label, name, descriptor string, index uint16) *Code {
+	if !c.validLabel(start) || !c.validLabel(end) {
+		return c
+	}
+	if name == "" {
+		c.fail("local variable name is empty")
+		return c
+	}
+	width, err := fieldDescriptorWords(descriptor)
+	if err != nil {
+		c.fail("local variable %q: %v", name, err)
+		return c
+	}
+	if int(index)+width > math.MaxUint16 {
+		c.fail("local variable %q index %d with width %d exceeds 65535", name, index, width)
+		return c
+	}
+	if len(c.locals) >= math.MaxUint16 {
+		c.fail("local_variable_table_length exceeds 65535")
+		return c
+	}
+	nameIndex, err := c.pool.UTF8(name)
+	if err != nil {
+		c.fail("local variable name %q: %v", name, err)
+		return c
+	}
+	descriptorIndex, err := c.pool.UTF8(descriptor)
+	if err != nil {
+		c.fail("local variable descriptor %q: %v", descriptor, err)
+		return c
+	}
+	if c.localName == 0 {
+		c.localName, err = c.pool.UTF8("LocalVariableTable")
+		if err != nil {
+			c.fail("LocalVariableTable attribute name: %v", err)
+			return c
+		}
+	}
+	c.locals = append(c.locals, localVariable{start: start, end: end, name: nameIndex, descriptor: descriptorIndex, index: index})
+	return c
+}
+
 // SetMaxStack requires the calculated maximum stack to equal value.
 func (c *Code) SetMaxStack(value uint16) *Code { c.maxStack = &value; return c }
 
@@ -432,11 +515,26 @@ type assembledCode struct {
 	bytes               []byte
 	maxStack, maxLocals uint16
 	handlers            []assembledHandler
+	lines               []assembledLine
+	locals              []assembledLocal
+	lineName            uint16
+	localName           uint16
 }
 
 type assembledHandler struct {
 	start, end, handler uint16
 	catchType           uint16
+}
+
+type assembledLine struct {
+	start uint16
+	line  uint16
+}
+
+type assembledLocal struct {
+	start, length    uint16
+	name, descriptor uint16
+	index            uint16
 }
 
 func (c *Code) assemble(descriptor string, access uint16) (*assembledCode, error) {
@@ -500,7 +598,34 @@ func (c *Code) assemble(descriptor string, access uint16) (*assembledCode, error
 		}
 		handlers[i] = assembledHandler{uint16(start), uint16(end), uint16(entry), handler.catchType}
 	}
-	return &assembledCode{bytes: out.data, maxStack: maxStack, maxLocals: maxLocals, handlers: handlers}, nil
+	lines := make([]assembledLine, len(c.lines))
+	for i, line := range c.lines {
+		pc, ok := labelPC[line.at]
+		if !ok {
+			return nil, fmt.Errorf("line number entry %d contains an unbound label", i)
+		}
+		if pc >= codeLength {
+			return nil, fmt.Errorf("line number entry %d is outside code_length %d", i, codeLength)
+		}
+		lines[i] = assembledLine{start: uint16(pc), line: line.line}
+	}
+	locals := make([]assembledLocal, len(c.locals))
+	for i, local := range c.locals {
+		start, ok1 := labelPC[local.start]
+		end, ok2 := labelPC[local.end]
+		if !ok1 || !ok2 {
+			return nil, fmt.Errorf("local variable entry %d contains an unbound label", i)
+		}
+		if start >= end || end > codeLength {
+			return nil, fmt.Errorf("local variable entry %d has invalid range [%d,%d) for code_length %d", i, start, end, codeLength)
+		}
+		locals[i] = assembledLocal{start: uint16(start), length: uint16(end - start), name: local.name, descriptor: local.descriptor, index: local.index}
+	}
+	return &assembledCode{
+		bytes: out.data, maxStack: maxStack, maxLocals: maxLocals,
+		handlers: handlers, lines: lines, locals: locals,
+		lineName: c.lineName, localName: c.localName,
+	}, nil
 }
 
 func (c *Code) layout() (map[*Label]int, []int, int, error) {

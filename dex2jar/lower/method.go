@@ -20,6 +20,8 @@ type methodLowerer struct {
 	homeBase uint16
 
 	labels             map[uint32]*classfilebuilder.Label
+	addressLabels      map[uint32]*classfilebuilder.Label
+	endLabel           *classfilebuilder.Label
 	allocationByNew    map[int]ir.Allocation
 	allocationByCtor   map[int]ir.Allocation
 	allocationAliasOps map[int]bool
@@ -67,15 +69,125 @@ func (l *methodLowerer) lower() error {
 	if err := l.emitPrologue(); err != nil {
 		return err
 	}
+	l.prepareAddressLabels()
 	for _, block := range l.method.Blocks {
 		l.code.Mark(l.labels[block.Start])
 		for _, index := range block.Instructions {
+			instruction := &l.method.Instructions[index]
+			if label := l.addressLabels[instruction.Offset]; label != nil && label != l.labels[block.Start] {
+				l.code.Mark(label)
+			}
 			if err := l.emitInstruction(index); err != nil {
 				return err
 			}
 		}
 	}
+	if l.endLabel != nil {
+		l.code.Mark(l.endLabel)
+	}
+	if err := l.emitDebug(); err != nil {
+		return err
+	}
 	l.code.SetMaxLocals(l.homeBase + l.method.Code.RegistersSize)
+	return nil
+}
+
+// prepareAddressLabels binds a JVM label to every DEX address that debug data
+// refers to, so line numbers and local ranges survive branch widening.
+func (l *methodLowerer) prepareAddressLabels() {
+	l.addressLabels = make(map[uint32]*classfilebuilder.Label, len(l.method.Blocks))
+	for _, block := range l.method.Blocks {
+		l.addressLabels[block.Start] = l.labels[block.Start]
+	}
+	debug := l.method.Code.Debug
+	if debug == nil {
+		return
+	}
+	boundary := make(map[uint32]bool, len(l.method.Instructions)+1)
+	for index := range l.method.Instructions {
+		boundary[l.method.Instructions[index].Offset] = true
+	}
+	codeUnits := uint32(len(l.method.Code.Instructions))
+	need := func(address uint32) {
+		if _, ok := l.addressLabels[address]; ok {
+			return
+		}
+		if address != codeUnits && !boundary[address] {
+			return
+		}
+		l.addressLabels[address] = l.code.NewLabel()
+	}
+	for _, position := range debug.Positions {
+		need(position.Address)
+	}
+	for _, local := range debug.Locals {
+		need(local.Start)
+		need(local.End)
+	}
+	need(codeUnits)
+	if label, ok := l.addressLabels[codeUnits]; ok {
+		l.endLabel = label
+	}
+}
+
+// emitDebug records line numbers, local variable names and parameter names from
+// the original DEX debug_info. Positions that cannot be anchored to a real
+// instruction boundary are dropped rather than misattributed.
+func (l *methodLowerer) emitDebug() error {
+	debug := l.method.Code.Debug
+	if debug == nil {
+		return nil
+	}
+	for _, position := range debug.Positions {
+		label := l.addressLabels[position.Address]
+		if label == nil {
+			continue
+		}
+		l.code.Line(label, uint16(position.Line))
+	}
+	codeUnits := uint32(len(l.method.Code.Instructions))
+	startLabel := l.addressLabels[0]
+	// The JVM rejects two LocalVariableTable entries for the same slot and
+	// range, so a register already described explicitly keeps only that entry.
+	described := make(map[uint16]bool)
+	for _, local := range debug.Locals {
+		if local.Name == "" || local.Type == "" || local.Start >= local.End || local.End > codeUnits {
+			continue
+		}
+		if local.Type == "J" || local.Type == "D" || local.Type == "F" {
+			continue
+		}
+		start, end := l.addressLabels[local.Start], l.addressLabels[local.End]
+		if start == nil || end == nil {
+			continue
+		}
+		l.code.Local(start, end, local.Name, local.Type, l.home(local.Register))
+		described[local.Register] = true
+	}
+	parameterRegister := l.method.Code.RegistersSize - l.method.Code.InsSize
+	if l.encoded.AccessFlags&dexStatic == 0 {
+		parameterRegister++
+	}
+	if l.endLabel == nil || startLabel == nil {
+		return nil
+	}
+	for index, name := range debug.ParameterNames {
+		if name == "" {
+			return nil
+		}
+		register := int(parameterRegister) + index
+		if register >= int(l.method.Code.RegistersSize) {
+			return nil
+		}
+		if described[uint16(register)] {
+			continue
+		}
+		descriptor := l.registerDescriptor[register]
+		if descriptor == "" {
+			descriptor = "Ljava/lang/Object;"
+		}
+		l.code.Local(startLabel, l.endLabel, name, descriptor, l.home(uint16(register)))
+	}
 	return nil
 }
 
@@ -191,6 +303,8 @@ func (l *methodLowerer) emitInstruction(index int) error {
 		l.store(instruction.Regs[0])
 	case instruction.Opcode == 0x23:
 		return l.emitNewArray(instruction)
+	case instruction.Opcode == 0x24 || instruction.Opcode == 0x25:
+		return l.emitFilledNewArray(index, instruction)
 	case instruction.Opcode == 0x27:
 		l.load(instruction.Regs[0]).Emit(classfilebuilder.ATHROW)
 	case instruction.Opcode >= 0x28 && instruction.Opcode <= 0x2a:
@@ -292,15 +406,15 @@ func (l *methodLowerer) emitNewArray(instruction *ir.Instruction) error {
 	}
 	l.load(instruction.Regs[1])
 	component := descriptor[1:]
-	if component == "I" {
-		l.code.Byte(classfilebuilder.NEWARRAY, 10)
+	if atype, ok := primitiveArrayType(component); ok {
+		l.code.Byte(classfilebuilder.NEWARRAY, atype)
 	} else {
 		if len(component) == 1 {
-			return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("only int and reference arrays are supported"))
+			return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("unsupported primitive array component %q", component))
 		}
 		name, err := ir.InternalName(component)
 		if err != nil {
-			return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("only int and reference arrays are supported: %w", err))
+			return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("unsupported array component: %w", err))
 		}
 		constant, err := l.builder.Pool().Class(name)
 		if err != nil {
@@ -313,29 +427,113 @@ func (l *methodLowerer) emitNewArray(instruction *ir.Instruction) error {
 	return nil
 }
 
-func (l *methodLowerer) emitArray(instruction *ir.Instruction) error {
-	switch instruction.Opcode {
-	case 0x44, 0x46:
-		l.load(instruction.Regs[1])
-		l.load(instruction.Regs[2])
-		if instruction.Opcode == 0x44 {
-			l.code.Emit(classfilebuilder.IALOAD)
-		} else {
-			l.code.Emit(classfilebuilder.AALOAD)
-		}
-		l.store(instruction.Regs[0])
-	case 0x4b, 0x4d:
-		l.load(instruction.Regs[1])
-		l.load(instruction.Regs[2])
-		l.load(instruction.Regs[0])
-		if instruction.Opcode == 0x4b {
-			l.code.Emit(classfilebuilder.IASTORE)
-		} else {
-			l.code.Emit(classfilebuilder.AASTORE)
-		}
-	default:
-		return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("only int and reference array elements are supported"))
+// primitiveArrayType maps a one-character DEX primitive descriptor to the JVM
+// NEWARRAY atype. Wide and floating kinds are outside the supported slice.
+func primitiveArrayType(component string) (int, bool) {
+	atypes := map[string]int{"Z": 4, "C": 5, "B": 8, "S": 9, "I": 10}
+	atype, ok := atypes[component]
+	return atype, ok
+}
+
+// arrayAccessOpcode maps a DEX aget*/aput* opcode to the JVM element access.
+func arrayAccessOpcode(opcode byte) (classfilebuilder.Opcode, bool) {
+	loads := map[byte]classfilebuilder.Opcode{
+		0x44: classfilebuilder.IALOAD,
+		0x46: classfilebuilder.AALOAD,
+		0x47: classfilebuilder.BALOAD,
+		0x48: classfilebuilder.BALOAD,
+		0x49: classfilebuilder.CALOAD,
+		0x4a: classfilebuilder.SALOAD,
 	}
+	if op, ok := loads[opcode]; ok {
+		return op, true
+	}
+	stores := map[byte]classfilebuilder.Opcode{
+		0x4b: classfilebuilder.IASTORE,
+		0x4d: classfilebuilder.AASTORE,
+		0x4e: classfilebuilder.BASTORE,
+		0x4f: classfilebuilder.BASTORE,
+		0x50: classfilebuilder.CASTORE,
+		0x51: classfilebuilder.SASTORE,
+	}
+	op, ok := stores[opcode]
+	return op, ok
+}
+
+// emitFilledNewArray builds an array literal. The DEX result register is only
+// assigned by the following move-result-object, which lowering consumes here.
+func (l *methodLowerer) emitFilledNewArray(index int, instruction *ir.Instruction) error {
+	descriptor := l.file.Types[instruction.Index].Descriptor
+	if len(descriptor) < 2 || descriptor[0] != '[' {
+		return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("filled-new-array type %q is not an array", descriptor))
+	}
+	component := descriptor[1:]
+	storeOp, atype, className, err := filledArrayShape(component)
+	if err != nil {
+		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	if err := l.pushInt(int32(len(instruction.Regs))); err != nil {
+		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	if atype != 0 {
+		l.code.Byte(classfilebuilder.NEWARRAY, atype)
+	} else {
+		constant, err := l.builder.Pool().Class(className)
+		if err != nil {
+			return methodDiagnostic(l.method.Context, instruction, "", err)
+		}
+		l.code.CP(classfilebuilder.ANEWARRAY, constant)
+	}
+	for offset, register := range instruction.Regs {
+		l.code.Emit(classfilebuilder.DUP)
+		if err := l.pushInt(int32(offset)); err != nil {
+			return methodDiagnostic(l.method.Context, instruction, "", err)
+		}
+		l.load(register)
+		l.code.Emit(storeOp)
+	}
+	next := index + 1
+	if next >= len(l.method.Instructions) || l.method.Instructions[next].Opcode != 0x0c {
+		return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("filled-new-array must be followed by move-result-object"))
+	}
+	l.store(l.method.Instructions[next].Regs[0])
+	return nil
+}
+
+// filledArrayShape maps an array component descriptor to its construction and
+// element-store form.
+func filledArrayShape(component string) (classfilebuilder.Opcode, int, string, error) {
+	if atype, ok := primitiveArrayType(component); ok {
+		stores := map[string]classfilebuilder.Opcode{
+			"I": classfilebuilder.IASTORE, "Z": classfilebuilder.BASTORE, "B": classfilebuilder.BASTORE,
+			"C": classfilebuilder.CASTORE, "S": classfilebuilder.SASTORE,
+		}
+		return stores[component], atype, "", nil
+	}
+	if component == "J" || component == "D" || component == "F" {
+		return 0, 0, "", fmt.Errorf("unsupported filled array component %q", component)
+	}
+	name, err := ir.InternalName(component)
+	if err != nil {
+		return 0, 0, "", fmt.Errorf("unsupported array component: %w", err)
+	}
+	return classfilebuilder.AASTORE, 0, name, nil
+}
+
+func (l *methodLowerer) emitArray(instruction *ir.Instruction) error {
+	op, ok := arrayAccessOpcode(instruction.Opcode)
+	if !ok {
+		return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("unsupported array element kind %#x", instruction.Opcode))
+	}
+	l.load(instruction.Regs[1])
+	l.load(instruction.Regs[2])
+	if instruction.Opcode <= 0x4a {
+		l.code.Emit(op)
+		l.store(instruction.Regs[0])
+		return nil
+	}
+	l.load(instruction.Regs[0])
+	l.code.Emit(op)
 	return nil
 }
 
@@ -550,7 +748,7 @@ func (l *methodLowerer) emitInvoke(index int, instruction *ir.Instruction) error
 	if err != nil {
 		return methodDiagnostic(l.method.Context, instruction, "", err)
 	}
-	owner, err := objectInternalName(callee.Class)
+	owner, err := memberOwnerName(callee.Class)
 	if err != nil {
 		return methodDiagnostic(l.method.Context, instruction, "", err)
 	}

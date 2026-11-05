@@ -51,6 +51,16 @@ type DexOptions = nativedex.Options
 // DexReport summarizes a successful native DEX/APK translation.
 type DexReport = nativedex.Report
 
+// InputKind identifies reverse-toolchain input by content magic.
+type InputKind = nativedex.InputKind
+
+const (
+	InputUnknown = nativedex.InputUnknown
+	InputClass   = nativedex.InputClass
+	InputDEX     = nativedex.InputDEX
+	InputZIP     = nativedex.InputZIP
+)
+
 // ---------------------------------------------------------------------------
 // Decompilation
 // ---------------------------------------------------------------------------
@@ -66,6 +76,18 @@ type DecompileResult = classparser.DecompileResult
 type DecompileMode = classparser.DecompileMode
 type Limits = classparser.Limits
 type WorkBudget = classparser.WorkBudget
+
+// ArchiveOptions controls archive export. Structured mode separates decompiled
+// sources, resources, and preserved nested archives.
+type ArchiveOptions = jarwar.ArchiveOptions
+
+// DecompileArchiveOptions is the explicit name for ArchiveOptions.
+type DecompileArchiveOptions = jarwar.DecompileArchiveOptions
+
+type ArchiveReport = jarwar.ArchiveReport
+type DecompileArchiveReport = jarwar.DecompileArchiveReport
+type ArchiveEntryReport = jarwar.ArchiveEntryReport
+type NestedArchiveReport = jarwar.NestedArchiveReport
 
 const (
 	Precision     = classparser.Precision
@@ -103,6 +125,18 @@ func DecompileArchive(src, dst string) error {
 // caps needed by very large generated methods; zero keeps the default policy.
 func DecompileArchiveWithAnalysisBudget(src, dst string, maxAnalysisUpdates int) error {
 	return jarwar.AutoDecompileWithAnalysisBudget(src, dst, maxAnalysisUpdates)
+}
+
+// DecompileArchiveWithOptions decompiles an archive with explicit export policy.
+// Set Structured to preserve nested archive bytes separately from their expanded
+// source and resource views.
+func DecompileArchiveWithOptions(src, dst string, options ArchiveOptions) (ArchiveReport, error) {
+	return jarwar.AutoDecompileWithOptions(src, dst, options)
+}
+
+// DetectInputKind classifies supported reverse-toolchain input by content magic.
+func DetectInputKind(input []byte) InputKind {
+	return nativedex.DetectInputKind(input)
 }
 
 // DexToJar converts raw DEX or APK bytes into a deterministic JAR.

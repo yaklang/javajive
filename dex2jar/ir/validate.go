@@ -128,6 +128,20 @@ func validateObjectDescriptor(descriptor string) error {
 	return nil
 }
 
+// validateMethodOwnerDescriptor accepts object types and array types: the DEX
+// method pool legitimately references array methods such as "[I.clone()",
+// which the JVM models as a Methodref whose owner is the array class.
+func validateMethodOwnerDescriptor(descriptor string) error {
+	kind, err := parseDescriptor(descriptor, false)
+	if err != nil {
+		return err
+	}
+	if kind != descriptorReference {
+		return fmt.Errorf("descriptor %q is not a reference type", descriptor)
+	}
+	return nil
+}
+
 func validateProto(proto model.Proto) error {
 	if _, err := parseDescriptor(proto.ReturnType, true); err != nil {
 		return fmt.Errorf("return type: %w", err)
@@ -135,12 +149,28 @@ func validateProto(proto model.Proto) error {
 	if len(proto.Parameters) != len(proto.ParameterTypes) {
 		return fmt.Errorf("prototype has %d parameter descriptors and %d type indices", len(proto.Parameters), len(proto.ParameterTypes))
 	}
+	var shorty strings.Builder
+	shorty.WriteByte(shortyDescriptor(proto.ReturnType))
 	for index, descriptor := range proto.Parameters {
 		if _, err := parseDescriptor(descriptor, false); err != nil {
 			return fmt.Errorf("parameter %d: %w", index, err)
 		}
+		shorty.WriteByte(shortyDescriptor(descriptor))
+	}
+	if proto.Shorty != "" && proto.Shorty != shorty.String() {
+		return fmt.Errorf("shorty %q does not match prototype; want %q", proto.Shorty, shorty.String())
 	}
 	return nil
+}
+
+func shortyDescriptor(descriptor string) byte {
+	if descriptor == "" {
+		return 0
+	}
+	if descriptor[0] == 'L' || descriptor[0] == '[' {
+		return 'L'
+	}
+	return descriptor[0]
 }
 
 func validateFileMetadata(file *model.File) error {
@@ -220,7 +250,7 @@ func validateFileMetadata(file *model.File) error {
 		}
 	}
 	for index, method := range file.Methods {
-		if err := validateObjectDescriptor(method.Class); err != nil {
+		if err := validateMethodOwnerDescriptor(method.Class); err != nil {
 			return fmt.Errorf("method %d owner: %w", index, err)
 		}
 		if err := validateMethodName(method.Name); err != nil {

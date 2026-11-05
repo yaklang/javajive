@@ -219,7 +219,7 @@ func TestUnsupportedFamiliesHavePreciseDiagnostics(t *testing.T) {
 		{"monitor", []uint16{0x001d, 0x000e}, "monitor"},
 		{"switch", []uint16{0x002b, 0, 0}, "switch"},
 		{"fill-array", []uint16{0x0026, 0, 0}, "filled/fill-array"},
-		{"narrow-array", []uint16{0x0047, 0, 0x000e}, "non-int/non-reference array element"},
+		{"wide-array", []uint16{0x0045, 0, 0x000e}, "wide/float/double"},
 		{"polymorphic", []uint16{0x00fa, 0, 0, 0}, "polymorphic/custom"},
 	}
 	for _, test := range tests {

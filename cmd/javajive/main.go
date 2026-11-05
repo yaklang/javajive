@@ -30,6 +30,8 @@ func main() {
 		err = cmdDecompile(args)
 	case "dex2jar", "d2j":
 		err = cmdDexToJar(args)
+	case "inspect", "analyze":
+		err = cmdInspect(args)
 	case "classinfo", "info":
 		err = cmdClassInfo(args)
 	case "serial", "ser":
@@ -58,6 +60,8 @@ Usage:
 Commands:
 	  decompile   Decompile Java artifacts or the strict DEX 035 subset into Java source
 	  dex2jar     Convert the strict DEX 035 subset in a DEX/APK to a deterministic JAR
+	  inspect      Read-only inventory and best-effort analysis of DEX/APK/JAR/WAR input
+
   classinfo   Print the structure of a .class file (version, fields, methods)
   serial      Java serialization tools (subcommands: tojson, fromjson)
   version     Print the javajive version
@@ -74,12 +78,13 @@ Run "javajive <command> -h" for command-specific options.
 func cmdDecompile(args []string) error {
 	fs := newFlagSet("decompile")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "usage: javajive decompile [-o out] [-analysis-budget N] <file|dir>")
+		fmt.Fprintln(fs.Output(), "usage: javajive decompile [-o out] [-analysis-budget N] [--structured] <file|dir>")
 		fmt.Fprintln(fs.Output(), "Decompile .class, archive, DEX, APK, or directory input; DEX/APK defaults to <input>.src.")
 		fs.PrintDefaults()
 	}
 	out := fs.String("o", "", "output file (for a .class) or directory (for archives/DEX/APK/dirs); default: stdout / <input>.src")
 	budget := fs.Int("analysis-budget", 0, "per-method analysis updates for very large generated methods (0 = default; >1000000 scales graph caps)")
+	structured := fs.Bool("structured", false, "for archives: emit sources/, resources/, and preserved nested archives/ views")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -100,18 +105,18 @@ func cmdDecompile(args []string) error {
 		return decompileDir(input, *out, *budget)
 	}
 
-	switch strings.ToLower(filepath.Ext(input)) {
-	case ".jar", ".war", ".zip", ".jmod", ".ear":
-		dst := *out
-		if dst == "" {
-			dst = input + ".src"
-		}
-		if err := jj.DecompileArchiveWithAnalysisBudget(input, dst, *budget); err != nil {
-			return err
-		}
-		fmt.Fprintf(os.Stderr, "decompiled archive %q -> %q\n", input, dst)
-		return nil
-	case ".dex", ".apk":
+	var magic [8]byte
+	file, err := os.Open(input)
+	if err != nil {
+		return err
+	}
+	read, readErr := io.ReadFull(file, magic[:])
+	_ = file.Close()
+	if readErr != nil && readErr != io.ErrUnexpectedEOF {
+		return readErr
+	}
+	kind := jj.DetectInputKind(magic[:read])
+	if kind == jj.InputDEX || kind == jj.InputZIP && strings.EqualFold(filepath.Ext(input), ".apk") {
 		dst := *out
 		if dst == "" {
 			dst = input + ".src"
@@ -120,6 +125,31 @@ func cmdDecompile(args []string) error {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "decompiled DEX input %q -> %q\n", input, dst)
+		return nil
+	}
+
+	switch strings.ToLower(filepath.Ext(input)) {
+	case ".jar", ".war", ".zip", ".jmod", ".ear":
+		dst := *out
+		if dst == "" {
+			dst = input + ".src"
+		}
+		if *structured {
+			report, err := jj.DecompileArchiveWithOptions(input, dst, jj.ArchiveOptions{
+				Structured:         true,
+				MaxAnalysisUpdates: *budget,
+			})
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "decompiled archive %q -> %q (%d entries, %d nested archives)\n",
+				input, dst, len(report.Entries), len(report.Archives))
+			return nil
+		}
+		if err := jj.DecompileArchiveWithAnalysisBudget(input, dst, *budget); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "decompiled archive %q -> %q\n", input, dst)
 		return nil
 	default:
 		data, err := os.ReadFile(input)

@@ -119,7 +119,13 @@ func (p *ConstantPool) NameAndType(name, descriptor string) (uint16, error) {
 }
 
 func (p *ConstantPool) member(tag byte, kind, owner, name, descriptor string) (uint16, error) {
-	if err := validateInternalName(owner); err != nil {
+	// Method owners may be array descriptors ("[I" for array clone); fields
+	// never take an array owner.
+	if tag == cpFieldref {
+		if err := validateInternalName(owner); err != nil {
+			return 0, fmt.Errorf("owner %q: %w", owner, err)
+		}
+	} else if err := validateClassConstantName(owner); err != nil {
 		return 0, fmt.Errorf("owner %q: %w", owner, err)
 	}
 	switch tag {

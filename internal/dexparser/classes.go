@@ -8,6 +8,14 @@ import (
 	"github.com/yaklang/javajive/dex2jar/model"
 )
 
+const (
+	accessPrivate     = uint32(0x0002)
+	accessStatic      = uint32(0x0008)
+	accessNative      = uint32(0x0100)
+	accessAbstract    = uint32(0x0400)
+	accessConstructor = uint32(0x10000)
+)
+
 func (p *parser) parseClasses() error {
 	h := p.file.Header
 	if err := p.tableRange(h.ClassDefsOff, h.ClassDefsSize, 32, "class_defs"); err != nil {
@@ -42,7 +50,12 @@ func (p *parser) parseClasses() error {
 		}
 		p.class = c.Descriptor
 		if annotationsOff != 0 {
-			return p.fail(off+20, "class_defs", "unsupported annotations_off=%#x; must be zero", annotationsOff)
+			if err := p.parseAnnotationDirectory(annotationsOff, &c); err != nil {
+				return err
+			}
+			if err := p.translateSystemAnnotations(&c); err != nil {
+				return err
+			}
 		}
 		indices, names, err := p.typeList(interfacesOff)
 		if err != nil {
@@ -104,11 +117,11 @@ func (p *parser) classData(off uint32, c *model.Class) error {
 	if err != nil {
 		return err
 	}
-	c.DirectMethods, err = p.encodedMethods(&cur, directCount)
+	c.DirectMethods, err = p.encodedMethods(&cur, directCount, true)
 	if err != nil {
 		return err
 	}
-	c.VirtualMethods, err = p.encodedMethods(&cur, virtualCount)
+	c.VirtualMethods, err = p.encodedMethods(&cur, virtualCount, false)
 	return err
 }
 
@@ -139,7 +152,7 @@ func (p *parser) encodedFields(cur *int, count uint32) ([]model.EncodedField, er
 	return out, nil
 }
 
-func (p *parser) encodedMethods(cur *int, count uint32) ([]model.EncodedMethod, error) {
+func (p *parser) encodedMethods(cur *int, count uint32, direct bool) ([]model.EncodedMethod, error) {
 	out := make([]model.EncodedMethod, count)
 	var index uint32
 	for i := range out {
@@ -167,6 +180,27 @@ func (p *parser) encodedMethods(cur *int, count uint32) ([]model.EncodedMethod, 
 		}
 		methodID := p.file.Methods[index]
 		p.method = methodID.Name
+		isDirect := flags&(accessStatic|accessPrivate|accessConstructor) != 0
+		if direct != isDirect {
+			list := "virtual_methods"
+			if direct {
+				list = "direct_methods"
+			}
+			return nil, p.fail(*cur, "class_data method", "%s membership disagrees with access flags for %q", list, methodID.Name)
+		}
+		if methodID.Name == "<init>" && flags&accessConstructor == 0 {
+			return nil, p.fail(*cur, "class_data method", "<init> is missing ACC_CONSTRUCTOR")
+		}
+		if methodID.Name == "<clinit>" && flags&(accessStatic|accessConstructor) != accessStatic|accessConstructor {
+			return nil, p.fail(*cur, "class_data method", "<clinit> must be static and carry ACC_CONSTRUCTOR")
+		}
+		if flags&accessConstructor != 0 && methodID.Name != "<init>" && methodID.Name != "<clinit>" {
+			return nil, p.fail(*cur, "class_data method", "ACC_CONSTRUCTOR is set on non-initializer %q", methodID.Name)
+		}
+		declarationOnly := flags&(accessNative|accessAbstract) != 0
+		if declarationOnly != (codeOff == 0) {
+			return nil, p.fail(*cur, "class_data method", "code_off and abstract/native access flags disagree for %q", methodID.Name)
+		}
 		method := model.EncodedMethod{MethodIndex: index, AccessFlags: flags, Method: methodID}
 		if codeOff != 0 {
 			method.Code, err = p.codeItem(codeOff)
@@ -194,9 +228,6 @@ func (p *parser) codeItem(off uint32) (*model.Code, error) {
 	triesSize := binary.LittleEndian.Uint16(p.data[pos+6 : pos+8])
 	debugOff := binary.LittleEndian.Uint32(p.data[pos+8 : pos+12])
 	insnsSize := binary.LittleEndian.Uint32(p.data[pos+12 : pos+16])
-	if debugOff != 0 {
-		return nil, p.fail(pos+8, "code_item", "unsupported debug_info_off=%#x; must be zero", debugOff)
-	}
 	insnsOff := uint64(off) + 16
 	insnsBytes := uint64(insnsSize) * 2
 	if insnsOff+insnsBytes > uint64(len(p.data)) {
@@ -206,6 +237,13 @@ func (p *parser) codeItem(off uint32) (*model.Code, error) {
 	for i := range code.Instructions {
 		at := int(insnsOff) + i*2
 		code.Instructions[i] = binary.LittleEndian.Uint16(p.data[at : at+2])
+	}
+	if debugOff != 0 {
+		debug, err := p.parseDebugInfo(debugOff, insnsSize, registers)
+		if err != nil {
+			return nil, err
+		}
+		code.Debug = debug
 	}
 	if triesSize == 0 {
 		return code, nil

@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased — 2026-11-05
+
+Complete the reverse-engineering toolchain for nested archives and real DEX input.
+
+- Fix WAR/EAR export: every `WEB-INF/lib/*.jar` and `EAR/lib/*.jar` layer is
+  decompiled instead of being read from the outer ZIP. Structured export
+  (`decompile --structured`, `DecompileArchiveWithOptions`) separates
+  `sources/`, `resources/`, and byte-exact `archives/`, with per-entry and
+  per-nested-archive provenance. The WSO2 portal WAR goes from 0 to 944 source
+  files and the Jenkins WAR from 1 to its full nested inventory.
+- Add `javajive inspect INPUT --format json`: read-only inventory, multidex
+  provenance, deterministic DEX disassembly, per-class strict translation
+  verdicts, and precise first-blocker diagnostics.
+- Admit real DEX metadata: decode `debug_info` into `LineNumberTable`,
+  `LocalVariableTable`, and parameter names; decode annotation directories and
+  emit user annotations, `Signature`, `Exceptions`, `InnerClasses`,
+  `EnclosingMethod`, `AnnotationDefault`, and `SourceDebugExtension`; emit
+  `SourceFile` and `ConstantValue` for integer and string static fields.
+  Malformed debug metadata degrades to "no debug information" instead of
+  rejecting the class.
+- Gate DEX versions by validated evidence instead of the exact 035 string:
+  037/038/039 are accepted only when `map_list` proves the file carries no
+  call-site, method-handle, or hidden-API sections, and rejections name the
+  exact section or opcode.
+- Validate header Adler-32/SHA-1, prototype shorties, `outs_size`, direct/virtual
+  membership, and initializer access flags; accept DEX-compliant
+  `ACC_CONSTRUCTOR` on `<clinit>` and array method owners such as `[I.clone()`.
+- Extend the supported DEX subset with `filled-new-array`,
+  `filled-new-array/range`, and boolean/byte/char/short array element access.
+- Keep `dex2jar` transactional: unsupported semantics still produce no JAR and
+  no substitute methods; the real-world `arsylk-dexfile-tiny.dex` fixture now
+  converts end-to-end.
+
 ## Unreleased — 2026-11-03
 
 Add a native, pure-Go DEX/APK-to-JAR path as a strict first vertical slice.

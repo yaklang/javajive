@@ -27,6 +27,20 @@ func validateInternalName(name string) error {
 	return nil
 }
 
+// internalNameFromDescriptor converts "Ljava/lang/String;" to its internal
+// name form. Array descriptors are rejected: annotation and exception metadata
+// only refers to object types.
+func internalNameFromDescriptor(descriptor string) (string, error) {
+	if len(descriptor) < 3 || descriptor[0] != 'L' || descriptor[len(descriptor)-1] != ';' {
+		return "", fmt.Errorf("descriptor %q is not an object type", descriptor)
+	}
+	name := descriptor[1 : len(descriptor)-1]
+	if err := validateInternalName(name); err != nil {
+		return "", fmt.Errorf("descriptor %q: %w", descriptor, err)
+	}
+	return name, nil
+}
+
 func validateNamePart(name, kind string, method bool) error {
 	if name == "" {
 		return fmt.Errorf("%s is empty", kind)

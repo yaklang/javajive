@@ -90,6 +90,16 @@ type Class struct {
 	DirectMethods    []EncodedMethod
 	VirtualMethods   []EncodedMethod
 	StaticValues     []EncodedValue
+
+	Annotations          []Annotation
+	FieldAnnotations     []FieldAnnotation
+	MethodAnnotations    []MethodAnnotation
+	ParameterAnnotations []ParameterAnnotation
+	Signature            string
+	Throws               []string
+	InnerClasses         []InnerClass
+	Enclosing            *EnclosingMethod
+	SourceDebugExtension string
 }
 
 type EncodedField struct {
@@ -110,8 +120,33 @@ type Code struct {
 	InsSize         uint16
 	OutsSize        uint16
 	DebugInfoOffset uint32
+	Debug           *DebugInfo
 	Instructions    []uint16
 	Tries           []Try
+}
+
+// DebugInfo is the decoded debug_info_item of one code item. Addresses are DEX
+// code-unit offsets; End is exclusive.
+type DebugInfo struct {
+	LineStart      uint32
+	ParameterNames []string
+	Positions      []DebugPosition
+	Locals         []DebugLocal
+}
+
+type DebugPosition struct {
+	Address uint32
+	Line    uint32
+	File    string
+}
+
+type DebugLocal struct {
+	Register  uint16
+	Name      string
+	Type      string
+	Signature string
+	Start     uint32
+	End       uint32
 }
 
 type Try struct {
@@ -170,6 +205,54 @@ type EncodedAnnotation struct {
 	TypeIndex uint32
 	Type      string
 	Elements  []AnnotationElement
+}
+
+// Annotation visibility values follow the DEX annotation_item encoding.
+const (
+	AnnotationBuild   = 0x00
+	AnnotationRuntime = 0x01
+	AnnotationSystem  = 0x02
+)
+
+// Annotation is one decoded annotation_item.
+type Annotation struct {
+	Visibility uint8
+	Type       string
+	Elements   []AnnotationElement
+}
+
+// FieldAnnotation and MethodAnnotation bind an annotation set to a member.
+type FieldAnnotation struct {
+	FieldIndex  uint32
+	Annotations []Annotation
+}
+
+type MethodAnnotation struct {
+	MethodIndex uint32
+	Annotations []Annotation
+}
+
+// ParameterAnnotation holds one annotation set per declared parameter.
+type ParameterAnnotation struct {
+	MethodIndex uint32
+	Parameters  [][]Annotation
+}
+
+// InnerClass mirrors one InnerClasses table row reconstructed from DEX system
+// annotations.
+type InnerClass struct {
+	Inner string
+	Outer string
+	Name  string
+	Flags uint16
+}
+
+// EnclosingMethod identifies the enclosing class and method of a local or
+// anonymous class.
+type EnclosingMethod struct {
+	Class  string
+	Method string
+	Proto  string
 }
 
 type AnnotationElement struct {

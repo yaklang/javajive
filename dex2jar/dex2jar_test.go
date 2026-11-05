@@ -3,7 +3,9 @@ package dex2jar_test
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha1"
 	"encoding/binary"
+	"hash/adler32"
 	"io"
 	"os"
 	"path/filepath"
@@ -84,6 +86,7 @@ func TestClassFailureReturnsNoJarAfterEarlierClassSucceeded(t *testing.T) {
 	invalid := minimalDEX("Lexample/Second;")
 	classDefsOff := binary.LittleEndian.Uint32(invalid[100:104])
 	putU32(invalid, int(classDefsOff)+4, 0x80000001)
+	sealDEX(invalid)
 	apk := makeAPKEntries(t, map[string][]byte{
 		"classes.dex":  valid,
 		"classes2.dex": invalid,
@@ -266,7 +269,17 @@ func minimalDEX(descriptor string) []byte {
 	putU32(data, classDefsOff+4, 1)
 	putU32(data, classDefsOff+8, 1)
 	putU32(data, classDefsOff+16, ^uint32(0))
+	sealDEX(data)
 	return data
+}
+
+// sealDEX refreshes the DEX header signature and checksum after a fixture or
+// adversarial mutation. The parser rejects files whose integrity fields do not
+// match their contents, so synthetic inputs must be sealed like real DEX files.
+func sealDEX(data []byte) {
+	signature := sha1.Sum(data[32:])
+	copy(data[12:32], signature[:])
+	putU32(data, 8, adler32.Checksum(data[12:]))
 }
 
 func putU32(data []byte, offset int, value uint32) {

@@ -57,6 +57,41 @@ func Class(file *model.File, class *model.Class) ([]byte, error) {
 		return nil, classDiagnostic(file, class, "class", fmt.Errorf("interface superclass must be java/lang/Object"))
 	}
 	builder := classfilebuilder.NewClass(className, superName, access)
+	if class.SourceFile != "" {
+		builder.SetSourceFile(class.SourceFile)
+	}
+	if class.Signature != "" {
+		builder.SetClassSignature(class.Signature)
+	}
+	if class.SourceDebugExtension != "" {
+		builder.SetSourceDebugExtension(class.SourceDebugExtension)
+	}
+	if len(class.InnerClasses) > 0 {
+		specs := make([]classfilebuilder.InnerClassSpec, 0, len(class.InnerClasses))
+		for _, inner := range class.InnerClasses {
+			specs = append(specs, classfilebuilder.InnerClassSpec{
+				Inner: inner.Inner, Outer: inner.Outer, Name: inner.Name, Flags: inner.Flags,
+			})
+		}
+		builder.SetInnerClasses(specs)
+	}
+	if class.Enclosing != nil {
+		builder.SetEnclosingMethod(classfilebuilder.EnclosingMethodSpec{
+			Class: class.Enclosing.Class, Method: class.Enclosing.Method, Proto: class.Enclosing.Proto,
+		})
+	}
+	if len(class.Annotations) > 0 {
+		translated, err := translateAnnotations(file, class.Annotations)
+		if err != nil {
+			return nil, classDiagnostic(file, class, "annotation", err)
+		}
+		if translated.signature != "" {
+			builder.SetClassSignature(translated.signature)
+		}
+		for index, annotation := range translated.annotations {
+			builder.AddClassAnnotation(annotation, translated.visible[index])
+		}
+	}
 	for _, descriptor := range class.Interfaces {
 		name, err := objectInternalName(descriptor)
 		if err != nil {
@@ -65,9 +100,6 @@ func Class(file *model.File, class *model.Class) ([]byte, error) {
 		builder.AddInterface(name)
 	}
 	if err := addFields(file, class, builder); err != nil {
-		return nil, err
-	}
-	if err := validateStaticValues(file, class); err != nil {
 		return nil, err
 	}
 	seenMethods := make(map[string]bool)
@@ -139,9 +171,115 @@ func addFields(file *model.File, class *model.Class, builder *classfilebuilder.C
 		if class.AccessFlags&dexInterface != 0 && field.AccessFlags&(dexPublic|dexStatic|dexFinal) != dexPublic|dexStatic|dexFinal {
 			return classDiagnostic(file, class, "field", fmt.Errorf("Java 5 interface field must be public static final"))
 		}
-		builder.AddField(access, field.Field.Name, field.Field.Type)
+		member := builder.AddField(access, field.Field.Name, field.Field.Type)
+		if isStatic && index < len(class.StaticValues) {
+			if err := applyStaticValue(file, class, &fields[index], member, builder, class.StaticValues[index]); err != nil {
+				return err
+			}
+		}
+		if annotations := fieldAnnotationsOf(class, field.FieldIndex); len(annotations) > 0 {
+			translated, err := translateAnnotations(file, annotations)
+			if err != nil {
+				return classDiagnostic(file, class, "field annotation", fmt.Errorf("field %q: %w", field.Field.Name, err))
+			}
+			if translated.signature != "" {
+				builder.SetFieldSignature(member, translated.signature)
+			}
+			for i, annotation := range translated.annotations {
+				builder.AddFieldAnnotation(member, annotation, translated.visible[i])
+			}
+		}
 	}
 	return nil
+}
+
+func fieldAnnotationsOf(class *model.Class, index uint32) []model.Annotation {
+	for _, entry := range class.FieldAnnotations {
+		if entry.FieldIndex == index {
+			return entry.Annotations
+		}
+	}
+	return nil
+}
+
+func methodAnnotationsOf(class *model.Class, index uint32) []model.Annotation {
+	for _, entry := range class.MethodAnnotations {
+		if entry.MethodIndex == index {
+			return entry.Annotations
+		}
+	}
+	return nil
+}
+
+func parameterAnnotationsOf(class *model.Class, index uint32) [][]model.Annotation {
+	for _, entry := range class.ParameterAnnotations {
+		if entry.MethodIndex == index {
+			return entry.Parameters
+		}
+	}
+	return nil
+}
+
+// applyStaticValue turns a non-default encoded static initializer into a
+// ConstantValue attribute. Wide and non-scalar constants stay rejected: the
+// classfile builder has no Long/Float/Double constant pool entries yet.
+func applyStaticValue(file *model.File, class *model.Class, field *model.EncodedField, member *classfilebuilder.Field, builder *classfilebuilder.Class, value model.EncodedValue) error {
+	kind, err := fieldKind(field.Field.Type)
+	if err != nil {
+		return classDiagnostic(file, class, "static-value", fmt.Errorf("field %q: %w", field.Field.Name, err))
+	}
+	if kind == ir.Reference {
+		switch value.Type {
+		case model.ValueNull:
+			return nil
+		case model.ValueString:
+			index := value.Unsigned
+			if index >= uint64(len(file.Strings)) {
+				return classDiagnostic(file, class, "static-value", fmt.Errorf("field %q string index %d is out of range", field.Field.Name, index))
+			}
+			builder.SetConstantString(member, file.Strings[index])
+			return nil
+		default:
+			return classDiagnostic(file, class, "static-value", fmt.Errorf("field %q has unsupported reference initializer", field.Field.Name))
+		}
+	}
+	switch value.Type {
+	case model.ValueBoolean:
+		if !value.Boolean {
+			return nil
+		}
+		builder.SetConstantInt(member, 1)
+	case model.ValueByte, model.ValueShort, model.ValueChar, model.ValueInt:
+		if value.Signed == 0 && value.Unsigned == 0 {
+			return nil
+		}
+		builder.SetConstantInt(member, shrinkSigned(field.Field.Type, value))
+	case model.ValueNull:
+		return classDiagnostic(file, class, "static-value", fmt.Errorf("field %q has a null initializer for a primitive type", field.Field.Name))
+	default:
+		return classDiagnostic(file, class, "static-value", fmt.Errorf("field %q has unsupported initializer kind %#x", field.Field.Name, value.Type))
+	}
+	return nil
+}
+
+// shrinkSigned narrows the encoded constant to the field's storage width so the
+// ConstantValue matches the descriptor instead of silently truncating later.
+func shrinkSigned(descriptor string, value model.EncodedValue) int32 {
+	switch descriptor {
+	case "Z":
+		if value.Signed != 0 || value.Unsigned != 0 {
+			return 1
+		}
+		return 0
+	case "B":
+		return int32(int8(value.Signed))
+	case "S":
+		return int32(int16(value.Signed))
+	case "C":
+		return int32(uint16(value.Unsigned))
+	default:
+		return int32(value.Signed)
+	}
 }
 
 func addMethod(file *model.File, class *model.Class, method *model.EncodedMethod, builder *classfilebuilder.Class) error {
@@ -175,8 +313,8 @@ func addMethod(file *model.File, class *model.Class, method *model.EncodedMethod
 		if method.AccessFlags&dexStatic != 0 || proto.ReturnType != "V" {
 			return methodDiagnostic(ctx, nil, "method", fmt.Errorf("constructor must be non-static and return void"))
 		}
-	} else if method.AccessFlags&dexConstructor != 0 {
-		return methodDiagnostic(ctx, nil, "method", fmt.Errorf("constructor access flag is missing from <init> or set on another method"))
+	} else if method.AccessFlags&dexConstructor != 0 && method.Method.Name != "<clinit>" {
+		return methodDiagnostic(ctx, nil, "method", fmt.Errorf("constructor access flag is set on a non-initializer method"))
 	}
 	if method.Method.Name == "<clinit>" {
 		if method.AccessFlags&dexStatic == 0 || len(proto.Parameters) != 0 || proto.ReturnType != "V" {
@@ -187,6 +325,44 @@ func addMethod(file *model.File, class *model.Class, method *model.EncodedMethod
 		return methodDiagnostic(ctx, nil, "method", fmt.Errorf("Java 5 interface method must be public abstract"))
 	}
 	member := builder.AddMethod(access, method.Method.Name, descriptor)
+	if annotations := methodAnnotationsOf(class, method.MethodIndex); len(annotations) > 0 {
+		translated, err := translateAnnotations(file, annotations)
+		if err != nil {
+			return methodDiagnostic(ctx, nil, "method annotation", err)
+		}
+		if translated.signature != "" {
+			builder.SetMethodSignature(member, translated.signature)
+		}
+		if len(translated.throws) > 0 {
+			builder.SetMethodExceptions(member, translated.throws)
+		}
+		if translated.defaultVal != nil {
+			builder.SetMethodAnnotationDefault(member, *translated.defaultVal)
+		}
+		for index, annotation := range translated.annotations {
+			builder.AddMethodAnnotation(member, annotation, translated.visible[index])
+		}
+	}
+	if parameters := parameterAnnotationsOf(class, method.MethodIndex); len(parameters) > 0 {
+		converted := make([][]classfilebuilder.Annotation, len(parameters))
+		visible := make([][]bool, len(parameters))
+		for index, set := range parameters {
+			converted[index] = make([]classfilebuilder.Annotation, 0, len(set))
+			visible[index] = make([]bool, 0, len(set))
+			for _, annotation := range set {
+				if isSystemAnnotation(annotation) {
+					continue
+				}
+				value, err := builderAnnotation(file, annotation)
+				if err != nil {
+					return methodDiagnostic(ctx, nil, "parameter annotation", err)
+				}
+				converted[index] = append(converted[index], value)
+				visible[index] = append(visible[index], annotation.Visibility == model.AnnotationRuntime)
+			}
+		}
+		builder.SetMethodParameterAnnotations(member, converted, visible)
+	}
 	if declarationOnly {
 		return nil
 	}
@@ -260,6 +436,16 @@ func objectInternalName(descriptor string) (string, error) {
 	return ir.InternalName(descriptor)
 }
 
+// memberOwnerName converts a member owner. Array descriptors are legal owners
+// for methods (javac emits invokevirtual on a class constant such as "[I" for
+// array clone), while fields only ever belong to object types.
+func memberOwnerName(descriptor string) (string, error) {
+	if strings.HasPrefix(descriptor, "[") {
+		return descriptor, nil
+	}
+	return objectInternalName(descriptor)
+}
+
 func classAccess(flags uint32) (uint16, error) {
 	const allowed = dexPublic | dexFinal | dexInterface | dexAbstract | dexSynthetic | dexAnnotation | dexEnum
 	if flags&^allowed != 0 {
@@ -305,10 +491,13 @@ func methodAccess(flags uint32, name string) (uint16, error) {
 	if err := validateVisibility(flags); err != nil {
 		return 0, err
 	}
+	if flags&dexSynchronized != 0 && flags&dexNative == 0 {
+		return 0, fmt.Errorf("DEX synchronized flag requires native method")
+	}
 	if flags&dexAbstract != 0 && flags&(dexPrivate|dexStatic|dexFinal|dexSynchronized|dexNative|dexStrict|dexDeclaredSynchronized) != 0 {
 		return 0, fmt.Errorf("abstract method has incompatible access flags")
 	}
-	if flags&dexConstructor != 0 && name != "<init>" {
+	if flags&dexConstructor != 0 && name != "<init>" && name != "<clinit>" {
 		return 0, fmt.Errorf("constructor access flag is set on %q", name)
 	}
 	if name == "<init>" && flags&(dexStatic|dexFinal|dexSynchronized|dexBridge|dexNative|dexAbstract|dexStrict|dexDeclaredSynchronized) != 0 {
@@ -341,34 +530,6 @@ func fieldKind(descriptor string) (ir.CategoryKind, error) {
 		return ir.Unknown, fmt.Errorf("invalid field descriptor %q", descriptor)
 	}
 	return kind, nil
-}
-
-func validateStaticValues(file *model.File, class *model.Class) error {
-	if len(class.StaticValues) > len(class.StaticFields) {
-		return classDiagnostic(file, class, "static-value", fmt.Errorf("%d values for %d static fields", len(class.StaticValues), len(class.StaticFields)))
-	}
-	for index, value := range class.StaticValues {
-		descriptor := class.StaticFields[index].Field.Type
-		kind, err := fieldKind(descriptor)
-		if err != nil {
-			return classDiagnostic(file, class, "static-value", err)
-		}
-		isDefault := false
-		if kind == ir.Reference {
-			isDefault = value.Type == model.ValueNull
-		} else {
-			switch value.Type {
-			case model.ValueBoolean:
-				isDefault = !value.Boolean
-			case model.ValueByte, model.ValueShort, model.ValueChar, model.ValueInt:
-				isDefault = value.Signed == 0 && value.Unsigned == 0
-			}
-		}
-		if !isDefault {
-			return classDiagnostic(file, class, "static-value", fmt.Errorf("non-default initializer for field %q is unsupported", class.StaticFields[index].Field.Name))
-		}
-	}
-	return nil
 }
 
 func classDiagnostic(file *model.File, class *model.Class, op string, err error) error {

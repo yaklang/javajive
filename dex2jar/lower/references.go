@@ -179,8 +179,14 @@ func (l *methodLowerer) transferReferences(index int, state referenceState) {
 		set(instruction.Regs[0], state[instruction.Regs[1]])
 	case instruction.Opcode == 0x0c:
 		if index > 0 {
-			invoke := l.method.Instructions[index-1]
-			callee := l.file.Methods[invoke.Index]
+			previous := l.method.Instructions[index-1]
+			if previous.Opcode == 0x24 || previous.Opcode == 0x25 {
+				// filled-new-array yields the array type itself; its Index names
+				// a type, not a method.
+				setOne(instruction.Regs[0], l.file.Types[previous.Index].Descriptor)
+				break
+			}
+			callee := l.file.Methods[previous.Index]
 			setOne(instruction.Regs[0], l.file.Protos[callee.ProtoIndex].ReturnType)
 		}
 	case instruction.Opcode >= 0x12 && instruction.Opcode <= 0x15 && instruction.Literal == 0:

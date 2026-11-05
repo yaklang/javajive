@@ -3,9 +3,14 @@ package input
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha1"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/adler32"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"unicode/utf16"
 
@@ -65,6 +70,55 @@ func TestParseDEXFoundation(t *testing.T) {
 	}
 }
 
+func TestParseDEXDecodesDebugInfo(t *testing.T) {
+	fixture := buildDEXFixture(t, "Ldebug/Feature;")
+	file, err := ParseDEX(fixture.data, "debug.dex")
+	if err != nil {
+		t.Fatalf("ParseDEX: %v", err)
+	}
+	if len(file.Classes) != 1 || len(file.Classes[0].DirectMethods) != 1 {
+		t.Fatalf("classes = %+v", file.Classes)
+	}
+	code := file.Classes[0].DirectMethods[0].Code
+	if code == nil || code.Debug == nil {
+		t.Fatalf("debug info not decoded: %+v", code)
+	}
+	if code.Debug.LineStart != 1 {
+		t.Fatalf("line_start = %d", code.Debug.LineStart)
+	}
+	if len(code.Debug.ParameterNames) != 0 {
+		t.Fatalf("parameter names = %v", code.Debug.ParameterNames)
+	}
+	if len(code.Debug.Positions) != 1 || code.Debug.Positions[0].Address != 0 || code.Debug.Positions[0].Line != 5 {
+		t.Fatalf("positions = %+v", code.Debug.Positions)
+	}
+}
+
+// Debug metadata is auxiliary: a broken stream must degrade to "no debug
+// information" instead of rejecting the class.
+func TestParseDEXToleratesMalformedDebugInfo(t *testing.T) {
+	fixture := buildDEXFixture(t, "Ldebug/Broken;")
+	fixture.data[len(fixture.data)-1] = 0x05 // DBG_END_LOCAL without its operand
+	refreshDEXIntegrity(fixture.data)
+	file, err := ParseDEX(fixture.data, "broken.dex")
+	if err != nil {
+		t.Fatalf("ParseDEX rejected a class for broken debug metadata: %v", err)
+	}
+	code := file.Classes[0].DirectMethods[0].Code
+	if code == nil {
+		t.Fatal("code item was dropped")
+	}
+	// Any surviving debug data must still be structurally valid: the truncation
+	// itself may only cut the tail short.
+	if code.Debug != nil {
+		for _, position := range code.Debug.Positions {
+			if position.Address > uint32(len(code.Instructions)) || position.Line == 0 {
+				t.Fatalf("truncated debug stream kept an invalid position: %#v", position)
+			}
+		}
+	}
+}
+
 func TestParseDEXRejectsUnsupportedFirstSliceData(t *testing.T) {
 	const descriptor = "Lunsupported/Feature;"
 	base := buildDEXFixture(t, descriptor)
@@ -78,25 +132,15 @@ func TestParseDEXRejectsUnsupportedFirstSliceData(t *testing.T) {
 		message string
 	}{
 		{
-			name: "annotations",
+			// Annotations are decoded now; an offset pointing into unrelated
+			// bytes must still be rejected at the annotation directory.
+			name: "annotations outside the directory",
 			mutate: func(data []byte) {
 				putU32(data, base.classDefsOff+20, 1)
 			},
-			offset:  int64(base.classDefsOff + 20),
-			class:   descriptor,
-			op:      "class_defs",
-			message: "unsupported annotations_off=0x1; must be zero",
-		},
-		{
-			name: "debug info",
-			mutate: func(data []byte) {
-				putU32(data, base.codeOff+8, 1)
-			},
-			offset:  int64(base.codeOff + 8),
-			class:   descriptor,
-			method:  "method",
-			op:      "code_item",
-			message: "unsupported debug_info_off=0x1; must be zero",
+			offset: 1,
+			class:  descriptor,
+			op:     "annotations_directory",
 		},
 		{
 			name: "version 036",
@@ -105,16 +149,16 @@ func TestParseDEXRejectsUnsupportedFirstSliceData(t *testing.T) {
 			},
 			offset:  4,
 			op:      "header",
-			message: `unsupported DEX version "036"; only "035" is supported`,
+			message: `unsupported DEX version "036"; supported versions are 035, 037, 038, and 039`,
 		},
 		{
-			name: "version 039",
+			name: "version 039 without map evidence",
 			mutate: func(data []byte) {
 				copy(data[4:7], "039")
 			},
-			offset:  4,
+			offset:  52,
 			op:      "header",
-			message: `unsupported DEX version "039"; only "035" is supported`,
+			message: `DEX version "039" requires map_list evidence for feature admission`,
 		},
 		{
 			name: "version before 035",
@@ -123,7 +167,7 @@ func TestParseDEXRejectsUnsupportedFirstSliceData(t *testing.T) {
 			},
 			offset:  4,
 			op:      "header",
-			message: `unsupported DEX version "034"; only "035" is supported`,
+			message: `unsupported DEX version "034"; supported versions are 035, 037, 038, and 039`,
 		},
 	}
 	for _, test := range tests {
@@ -134,7 +178,10 @@ func TestParseDEXRejectsUnsupportedFirstSliceData(t *testing.T) {
 			if diagnostic.Entry != "unsupported.dex" || diagnostic.Class != test.class || diagnostic.Method != test.method || diagnostic.Offset != test.offset || diagnostic.Op != test.op {
 				t.Fatalf("diagnostic context = %#v", diagnostic)
 			}
-			if diagnostic.Err == nil || diagnostic.Err.Error() != test.message {
+			if diagnostic.Err == nil {
+				t.Fatal("diagnostic has no error")
+			}
+			if test.message != "" && diagnostic.Err.Error() != test.message {
 				t.Fatalf("diagnostic error = %v, want %q", diagnostic.Err, test.message)
 			}
 		})
@@ -435,6 +482,13 @@ func buildDEXFixtureUnits(t *testing.T, descriptor []uint16) dexFixture {
 	data = appendULEB(data, codeOff)
 	staticValuesOff := uint32(len(data))
 	data = append(data, 1, byte(model.ValueInt), 42)
+	debugOff := uint32(len(data))
+	data = appendULEB(data, 1)      // line_start
+	data = appendULEB(data, 0)      // parameters_size
+	data = append(data, 0x02, 0x04) // DBG_ADVANCE_LINE +4 -> line 5
+	data = append(data, 0x0e)       // special: address 0, line unchanged -> position (0,5)
+	data = append(data, 0x00)       // DBG_END_SEQUENCE
+	putU32(data, int(codeOff)+8, debugOff)
 
 	copy(data[:8], []byte("dex\n035\x00"))
 	putU32(data, 32, uint32(len(data)))
@@ -478,12 +532,19 @@ func buildDEXFixtureUnits(t *testing.T, descriptor []uint16) dexFixture {
 	putU32(data, classDefsOff+20, 0)
 	putU32(data, classDefsOff+24, classDataOff)
 	putU32(data, classDefsOff+28, staticValuesOff)
+	refreshDEXIntegrity(data)
 	return dexFixture{
 		data:                 data,
 		classDefsOff:         classDefsOff,
 		codeOff:              int(codeOff),
 		descriptorPayloadOff: descriptorPayloadOff,
 	}
+}
+
+func refreshDEXIntegrity(data []byte) {
+	signature := sha1.Sum(data[32:])
+	copy(data[12:32], signature[:])
+	putU32(data, 8, adler32.Checksum(data[12:]))
 }
 
 func align(data []byte, alignment int) []byte {
@@ -521,4 +582,41 @@ func appendULEB(data []byte, value uint32) []byte {
 
 func putU32(data []byte, offset int, value uint32) {
 	binary.LittleEndian.PutUint32(data[offset:offset+4], value)
+}
+
+// The external fixture is a real-world DEX carrying annotations and debug info;
+// it must parse into a complete class model rather than stopping at a gate.
+func TestParseDEXDecodesExternalAnnotationsAndDebug(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "testdata", "external", "arsylk-dexfile-tiny.dex"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	file, err := ParseDEX(raw, "classes.dex")
+	if err != nil {
+		t.Fatalf("ParseDEX: %v", err)
+	}
+	if len(file.Classes) != 1 {
+		t.Fatalf("classes = %d", len(file.Classes))
+	}
+	class := file.Classes[0]
+	if class.SourceFile != "Hello.java" {
+		t.Fatalf("SourceFile = %q", class.SourceFile)
+	}
+	if len(class.DirectMethods) == 0 || class.DirectMethods[0].Code == nil {
+		t.Fatalf("methods = %#v", class.DirectMethods)
+	}
+	if debug := class.DirectMethods[0].Code.Debug; debug == nil || len(debug.Positions) == 0 {
+		t.Fatalf("debug info = %#v", debug)
+	}
+}
+
+func TestParseDEXRejectsOversizedInput(t *testing.T) {
+	_, err := ParseDEXWithOptions(make([]byte, 64), "large.dex", Options{MaxDEXSize: 8})
+	if err == nil {
+		t.Fatal("ParseDEXWithOptions accepted oversized input")
+	}
+	var diagnostic *report.Diagnostic
+	if !errors.As(err, &diagnostic) || !strings.Contains(err.Error(), "exceeds limit") {
+		t.Fatalf("diagnostic = %#v, err = %v", diagnostic, err)
+	}
 }

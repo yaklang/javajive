@@ -264,9 +264,12 @@ func (l *methodLowerer) registerEffects(index int) (uses, definitions []uint16) 
 		return append([]uint16(nil), instruction.Regs...), nil
 	case instruction.Opcode >= 0x38 && instruction.Opcode <= 0x3d:
 		return []uint16{instruction.Regs[0]}, nil
-	case instruction.Opcode >= 0x44 && instruction.Opcode <= 0x46:
+	case instruction.Opcode == 0x24 || instruction.Opcode == 0x25:
+		// filled-new-array results are assigned by the following move-result.
+		return append([]uint16(nil), instruction.Regs...), nil
+	case instruction.Opcode >= 0x44 && instruction.Opcode <= 0x4a:
 		return []uint16{instruction.Regs[1], instruction.Regs[2]}, []uint16{instruction.Regs[0]}
-	case instruction.Opcode >= 0x4b && instruction.Opcode <= 0x4d:
+	case instruction.Opcode >= 0x4b && instruction.Opcode <= 0x51:
 		return []uint16{instruction.Regs[0], instruction.Regs[1], instruction.Regs[2]}, nil
 	case instruction.Opcode >= 0x52 && instruction.Opcode <= 0x58:
 		return []uint16{instruction.Regs[1]}, []uint16{instruction.Regs[0]}

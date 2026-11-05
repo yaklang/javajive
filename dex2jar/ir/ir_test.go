@@ -29,9 +29,23 @@ func fixture(code []uint16, registers, ins uint16, proto model.Proto, flags uint
 	method := &model.EncodedMethod{
 		AccessFlags: flags,
 		Method:      file.Methods[0],
-		Code:        &model.Code{RegistersSize: registers, InsSize: ins, Instructions: code},
+		Code:        &model.Code{RegistersSize: registers, InsSize: ins, OutsSize: 8, Instructions: code},
 	}
 	return Input{File: file, Class: class, Method: method}
+}
+
+func TestBuildRejectsInsufficientOutsSize(t *testing.T) {
+	// invoke-direct {v0},LFoo;-><init>()V needs one outgoing word.
+	in := fixture([]uint16{0x1070, 0x0002, 0x0000, 0x000e}, 1, 0, model.Proto{ReturnType: "V"}, dexAccessStatic)
+	in.Method.Code.OutsSize = 0
+	_, err := Build(in)
+	if err == nil || !strings.Contains(err.Error(), "outs_size is 0") {
+		t.Fatalf("error = %v", err)
+	}
+	diagnostic, ok := report.AsDiagnostic(err)
+	if !ok || diagnostic.Offset != 0 {
+		t.Fatalf("diagnostic = %#v", diagnostic)
+	}
 }
 
 func TestDescriptorValidationAcceptsLegalDEXTypes(t *testing.T) {
@@ -448,5 +462,83 @@ func TestBuildRejectsStableLocalCategoryConflict(t *testing.T) {
 	_, err := Build(in)
 	if err == nil || !strings.Contains(err.Error(), "incompatible stable local categories") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func filledArrayInput(typeDescriptor string, words []uint16) Input {
+	file := &model.File{
+		Entry:   "classes.dex",
+		Types:   []model.Type{{Descriptor: typeDescriptor}},
+		Protos:  []model.Proto{{ReturnType: "[I"}},
+		Methods: []model.MethodID{{Class: "LFoo;", Name: "test", ProtoIndex: 0}},
+	}
+	class := &model.Class{Descriptor: "LFoo;"}
+	method := &model.EncodedMethod{
+		AccessFlags: dexAccessStatic,
+		Method:      file.Methods[0],
+		Code:        &model.Code{RegistersSize: 2, OutsSize: 2, Instructions: words},
+	}
+	return Input{File: file, Class: class, Method: method}
+}
+
+func TestBuildRejectsMalformedFilledNewArray(t *testing.T) {
+	tests := []struct {
+		name  string
+		kind  string
+		words []uint16
+		part  string
+	}{
+		{
+			name:  "type index out of range",
+			kind:  "[I",
+			words: []uint16{0x1024, 0x0005, 0x0000, 0x000c, 0x0011},
+			part:  "type index 5 is out of range",
+		},
+		{
+			name:  "non array type",
+			kind:  "I",
+			words: []uint16{0x1024, 0x0000, 0x0000, 0x000c, 0x0011},
+			part:  "is not an array",
+		},
+		{
+			name:  "wide element",
+			kind:  "[J",
+			words: []uint16{0x1024, 0x0000, 0x0000, 0x000c, 0x0011},
+			part:  "wide/float/double",
+		},
+		{
+			name:  "missing move-result-object",
+			kind:  "[I",
+			words: []uint16{0x1024, 0x0000, 0x0000, 0x000a, 0x0011},
+			part:  "requires move-result-object",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Build(filledArrayInput(test.kind, test.words))
+			if err == nil || !strings.Contains(err.Error(), test.part) {
+				t.Fatalf("error = %v, want substring %q", err, test.part)
+			}
+		})
+	}
+}
+
+func TestBuildRejectsIncompleteInput(t *testing.T) {
+	valid := fixture([]uint16{0x000e}, 0, 0, model.Proto{ReturnType: "V"}, dexAccessStatic)
+	cases := map[string]Input{
+		"nil file":   {Class: valid.Class, Method: valid.Method},
+		"nil class":  {File: valid.File, Method: valid.Method},
+		"nil method": {File: valid.File, Class: valid.Class},
+		"nil code": {
+			File: valid.File, Class: valid.Class,
+			Method: &model.EncodedMethod{AccessFlags: dexAccessStatic, Method: valid.Method.Method},
+		},
+	}
+	for name, in := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Build(in); err == nil || !strings.Contains(err.Error(), "incomplete method input") {
+				t.Fatalf("error = %v", err)
+			}
+		})
 	}
 }

@@ -108,13 +108,28 @@ Requires Go 1.22+.
 javajive <command> [arguments]
 
 Commands:
-  decompile   decompile Java artifacts or the strict DEX 035 subset into Java source
-  dex2jar     convert the strict DEX 035 subset in a DEX/APK to a deterministic JAR
+  decompile   decompile Java artifacts or the supported DEX subset into Java source
+  dex2jar     convert the supported DEX subset in a DEX/APK to a deterministic JAR
+  inspect     read-only inventory and best-effort analysis of DEX/APK/JAR/WAR input
   classinfo   print the structure of a .class file (version, fields, methods)
   serial      Java serialization tools (subcommands: tojson, fromjson)
   version     print the version
   help        show help
 ```
+
+### inspect
+
+```bash
+javajive inspect app.apk --format json
+javajive inspect app.war --format json
+```
+
+`inspect` never translates input or writes a JAR. It reports the artifact hash
+and format, a sorted archive inventory, canonical multidex provenance, per-class
+and per-method inventory, deterministic DEX disassembly, a per-class strict
+translation verdict, and precise diagnostics for the first unsupported feature
+of each method. This keeps real applications analyzable even when the strict
+translator cannot yet convert them.
 
 ### decompile
 
@@ -126,6 +141,10 @@ javajive decompile Foo.class -o Foo.java
 # Archive: defaults to a "<input>.src" directory, or -o to choose one.
 javajive decompile app.jar
 javajive decompile app.war -o ./app-src
+
+# Structured archive export: sources/, resources/, and preserved nested
+# archives/ (WEB-INF/lib and EAR/lib jars are decompiled in place).
+javajive decompile app.war --structured -o ./app-src
 
 # DEX or APK: run the native DEX-to-JAR pipeline and decompile the result.
 # The default output directory is "<input>.src".
@@ -155,19 +174,24 @@ replacing the destination and never substitutes method stubs.
 
 ### Native DEX/APK support boundary
 
-Native DEX translation is currently a **strict first vertical slice**, not a
-general Android application converter. The tested subset is standard DEX 035
-with ordinary integer/reference control flow, fields and invokes, safely paired
-`new-instance`/constructor initialization, and basic arrays. Generated class
-files are parser-tested and JVM-verified, including executable branch, field,
-invoke, constructor, and `int[]` paths.
+Native DEX translation is a **strict vertical slice**, not a general Android
+application converter. The tested subset covers DEX 035, 037, 038, and 039
+inputs whose `map_list` proves they carry no call-site, method-handle, or
+hidden-API sections; annotations, debug metadata, and `SourceFile`; non-default
+integer/string static constants; ordinary integer/reference control flow; fields
+and invokes on object and array owners; safely paired `new-instance`/constructor
+initialization; and int, reference, boolean, byte, char, and short arrays
+including `filled-new-array`. Generated class files are parser-tested and
+JVM-verified, including executable branch, field, invoke, constructor, and array
+paths.
 
-Not yet supported: try/catch and monitor operations; float, long, and double
-values or opcodes; switches, payload instructions, and filled arrays; DEX 038+
-dynamic invokes and method constants; annotations and debug metadata;
-CompactDex; and APK resources or native libraries. APK input means only
-canonically named `classes.dex`, `classes2.dex`, ... entries are translated.
-All selected DEX files must succeed transactionally or no JAR is produced.
+Still unsupported: try/catch and monitor operations; float, long, and double
+values or opcodes; `packed-switch`/`sparse-switch` and `fill-array-data`
+payloads; DEX 038+ dynamic invokes and method constants; register lifetime reuse
+within one method; CompactDex; and APK resources or native libraries. APK input
+means only canonically named `classes.dex`, `classes2.dex`, ... entries are
+translated. All selected DEX files must succeed transactionally or no JAR is
+produced; use `inspect` to analyze inputs that cross the strict boundary.
 
 ### classinfo
 

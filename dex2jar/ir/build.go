@@ -68,6 +68,18 @@ func validateInstructions(method *Method, file *model.File) error {
 				return diagnostic(method.Context, instruction, "", fmt.Errorf("string index %d is out of range", instruction.Index))
 			}
 		}
+		if instruction.Opcode == 0x24 || instruction.Opcode == 0x25 {
+			if instruction.Index >= uint32(len(file.Types)) {
+				return diagnostic(method.Context, instruction, "", fmt.Errorf("type index %d is out of range", instruction.Index))
+			}
+			descriptor := file.Types[instruction.Index].Descriptor
+			if len(descriptor) < 2 || descriptor[0] != '[' {
+				return diagnostic(method.Context, instruction, "", fmt.Errorf("filled-new-array type %q is not an array", descriptor))
+			}
+			if component := descriptor[1:]; component == "J" || component == "D" || component == "F" {
+				return diagnostic(method.Context, instruction, "", fmt.Errorf("unsupported opcode family: wide/float/double"))
+			}
+		}
 		if instruction.Opcode == 0x1c || instruction.Opcode == 0x1f || instruction.Opcode == 0x20 || instruction.Opcode == 0x22 || instruction.Opcode == 0x23 {
 			if instruction.Index >= uint32(len(file.Types)) {
 				return diagnostic(method.Context, instruction, "", fmt.Errorf("type index %d is out of range", instruction.Index))
@@ -122,6 +134,9 @@ func validateInstructions(method *Method, file *model.File) error {
 			if len(instruction.Regs) != wordCount {
 				return diagnostic(method.Context, instruction, "", fmt.Errorf("invoke has %d register words; descriptor requires %d", len(instruction.Regs), wordCount))
 			}
+			if wordCount > int(method.Code.OutsSize) {
+				return diagnostic(method.Context, instruction, "", fmt.Errorf("invoke requires %d outgoing register words; outs_size is %d", wordCount, method.Code.OutsSize))
+			}
 			if _, err := DescriptorCategory(proto.ReturnType); err != nil {
 				return diagnostic(method.Context, instruction, "", err)
 			}
@@ -130,10 +145,20 @@ func validateInstructions(method *Method, file *model.File) error {
 			}
 		}
 		if isMoveResult(instruction.Opcode) {
-			if index == 0 || !isInvoke(method.Instructions[index-1].Opcode) {
-				return diagnostic(method.Context, instruction, "", fmt.Errorf("move-result must immediately follow an invoke"))
+			if index == 0 {
+				return diagnostic(method.Context, instruction, "", fmt.Errorf("move-result must immediately follow an invoke or filled-new-array"))
 			}
-			kind, err := invokeResultCategory(method.Instructions[index-1], file)
+			previous := method.Instructions[index-1]
+			if !isInvoke(previous.Opcode) && previous.Opcode != 0x24 && previous.Opcode != 0x25 {
+				return diagnostic(method.Context, instruction, "", fmt.Errorf("move-result must immediately follow an invoke or filled-new-array"))
+			}
+			if previous.Opcode == 0x24 || previous.Opcode == 0x25 {
+				if instruction.Opcode != 0x0c {
+					return diagnostic(method.Context, instruction, "", fmt.Errorf("filled-new-array result requires move-result-object"))
+				}
+				continue
+			}
+			kind, err := invokeResultCategory(previous, file)
 			if err != nil {
 				return diagnostic(method.Context, instruction, "", err)
 			}
@@ -387,6 +412,17 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 	case instruction.Opcode == 0x23:
 		set(instruction.Regs[0], Category{Kind: Reference, Descriptor: file.Types[instruction.Index].Descriptor})
 		set(instruction.Regs[1], intCategory)
+	case instruction.Opcode == 0x24 || instruction.Opcode == 0x25:
+		component := file.Types[instruction.Index].Descriptor[1:]
+		if len(component) > 0 && (component[0] == 'L' || component[0] == '[') {
+			for _, register := range instruction.Regs {
+				set(register, refCategory)
+			}
+		} else {
+			for _, register := range instruction.Regs {
+				set(register, intCategory)
+			}
+		}
 	case instruction.Opcode >= 0x32 && instruction.Opcode <= 0x37:
 		left, right := current[instruction.Regs[0]], current[instruction.Regs[1]]
 		if instruction.Opcode >= 0x34 || left.Kind == IntLike || right.Kind == IntLike {
