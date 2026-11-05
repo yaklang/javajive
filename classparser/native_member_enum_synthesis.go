@@ -86,7 +86,15 @@ func nativeEnumValuesFactoryBackingWithParameterNames(obj *ClassObject, method *
 	if backing := nativeEnumArrayCopyValuesBacking(obj, ops, work); backing != nil {
 		return backing
 	}
-	if len(ops) != 4 || !nativeEnumOpcode(ops[0], core.OP_GETSTATIC) || !nativeEnumMemberOperand(obj, ops[1], core.OP_INVOKEVIRTUAL, array, "clone", "()Ljava/lang/Object;") || !nativeEnumOpcode(ops[2], core.OP_CHECKCAST) || !nativeEnumClassOperand(obj, ops[2], array) || !nativeEnumOpcode(ops[3], core.OP_ARETURN) {
+	cloneOwner := false
+	if len(ops) == 4 {
+		cloneOwner = nativeEnumMemberOperand(obj, ops[1], core.OP_INVOKEVIRTUAL, array, "clone", "()Ljava/lang/Object;") ||
+			// Kotlin (and some other emitters) encode array clone with the
+			// java/lang/Object owner; the following CHECKCAST to the enum array
+			// proves the same value flow.
+			nativeEnumMemberOperand(obj, ops[1], core.OP_INVOKEVIRTUAL, "java/lang/Object", "clone", "()Ljava/lang/Object;")
+	}
+	if !cloneOwner || !nativeEnumOpcode(ops[0], core.OP_GETSTATIC) || !nativeEnumOpcode(ops[2], core.OP_CHECKCAST) || !nativeEnumClassOperand(obj, ops[2], array) || !nativeEnumOpcode(ops[3], core.OP_ARETURN) {
 		return nil
 	}
 	member := constructorMotionMember(obj, ops[0], core.OP_GETSTATIC)

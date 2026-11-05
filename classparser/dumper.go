@@ -1677,7 +1677,15 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 				classTypeParams = layout.Components
 			}
 			if layout.DropExtendsRecord {
-				superStr = ""
+				// A record declaration has no explicit `extends Record`, but it
+				// may still implement interfaces. Drop only the extends clause;
+				// clearing the whole suffix loses `implements Shape` and makes
+				// every use of the record as its sealed interface fail javac.
+				if idx := strings.Index(superStr, " implements "); idx >= 0 {
+					superStr = superStr[idx:]
+				} else {
+					superStr = ""
+				}
 			}
 			c.recordSkipMethods = layout.SkipMethodKeys
 			c.recordSkipFields = layout.SkipFieldNames
@@ -5558,9 +5566,12 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 		if accessFlags != "" {
 			methodSourceBuffer.Write([]byte(accessFlags + " "))
 		}
-		// A non-abstract, non-static instance method declared in an interface is a default
-		// method and must carry the `default` keyword, otherwise javac rejects the body.
-		if isInterfaceType && !abstractMethod && name != "<init>" && name != "<clinit>" && !strings.Contains(accessFlags, "static") {
+		// A non-abstract, non-static, non-private instance method declared in an interface
+		// is a default method and must carry the `default` keyword. A private interface
+		// method (Java 9+) has a body but is not a default method; `private default` is
+		// an illegal modifier combination.
+		if isInterfaceType && !abstractMethod && name != "<init>" && name != "<clinit>" &&
+			!strings.Contains(accessFlags, "static") && !strings.Contains(accessFlags, "private") {
 			methodSourceBuffer.Write([]byte("default "))
 		}
 	}
@@ -12538,8 +12549,8 @@ func (c *ClassObjectDumper) dumpStubMethod(method *MemberInfo, name, descriptor,
 	if accessFlags != "" {
 		prefix = accessFlags + " "
 	}
-	// A non-abstract, non-static interface method is a default method.
-	if isInterface && !isAbstract && name != "<clinit>" && !strings.Contains(prefix, "static") {
+	// A non-abstract, non-static, non-private interface method is a default method.
+	if isInterface && !isAbstract && name != "<clinit>" && !strings.Contains(prefix, "static") && !strings.Contains(prefix, "private") {
 		prefix += "default "
 	}
 	throwBody := fmt.Sprintf(" { throw new RuntimeException(%s); /* %s %s */ }",
