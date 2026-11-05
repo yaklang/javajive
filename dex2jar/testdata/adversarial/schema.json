@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/yaklang/javajive/dex2jar/testdata/adversarial/schema.json",
+  "title": "javajive adversarial DEX corpus manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "source", "artifacts"],
+  "properties": {
+    "$schema": {"const": "schema.json"},
+    "schema_version": {"const": 1},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "commit"],
+      "properties": {
+        "repository": {"const": "https://github.com/Arsylk/dexfile"},
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+      }
+    },
+    "artifacts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/artifact"}}
+  },
+  "$defs": {
+    "expected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["disposition", "stage", "category"],
+      "properties": {
+        "disposition": {"enum": ["accepted", "rejected", "pending"]},
+        "stage": {"type": "string", "minLength": 1},
+        "category": {"type": "string", "minLength": 1}
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "path", "source_path", "url", "availability", "format", "version", "size", "sha256", "license", "license_file", "features", "expected"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+        "path": {"type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$"},
+        "source_path": {"type": ["string", "null"]},
+        "url": {"type": ["string", "null"]},
+        "availability": {"enum": ["available", "pending"]},
+        "format": {"enum": ["dex", "apk", "dex-container", "compact-dex"]},
+        "version": {"type": ["string", "null"], "pattern": "^[0-9]{3}$"},
+        "size": {"type": ["integer", "null"], "minimum": 0},
+        "sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "license": {"const": "MIT"},
+        "license_file": {"const": "licenses/Arsylk-dexfile-MIT.txt"},
+        "features": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "expected": {"$ref": "#/$defs/expected"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"availability": {"const": "available"}}},
+          "then": {"properties": {
+            "source_path": {"type": "string", "minLength": 1},
+            "url": {"type": "string", "pattern": "^https://raw\\.githubusercontent\\.com/Arsylk/dexfile/[0-9a-f]{40}/"},
+            "size": {"type": "integer", "minimum": 0},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }}
+        },
+        {
+          "if": {"properties": {"availability": {"const": "pending"}}},
+          "then": {"properties": {
+            "source_path": {"type": "null"},
+            "url": {"type": "null"},
+            "size": {"type": "null"},
+            "sha256": {"type": "null"},
+            "expected": {"properties": {
+              "disposition": {"const": "pending"},
+              "stage": {"const": "availability"},
+              "category": {"const": "artifact-unavailable"}
+            }}
+          }}
+        }
+      ]
+    }
+  }
+}

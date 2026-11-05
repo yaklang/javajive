@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "module": "github.com/yaklang/javajive",
+  "measured_revision": "d6d5f25022bb10bc52d0627970bdf5e67fcf98c6",
+  "command": "go test -json -count=1 -covermode=atomic -coverpkg=./dex2jar/...,./internal/dexparser -coverprofile=artifacts/dex2jar.coverprofile ./dex2jar/... ./internal/dexparser",
+  "total": {
+    "covered": 1784,
+    "statements": 2399
+  },
+  "packages": {
+    "github.com/yaklang/javajive/dex2jar": {
+      "covered": 108,
+      "statements": 138
+    },
+    "github.com/yaklang/javajive/dex2jar/input": {
+      "covered": 74,
+      "statements": 82
+    },
+    "github.com/yaklang/javajive/dex2jar/ir": {
+      "covered": 558,
+      "statements": 674
+    },
+    "github.com/yaklang/javajive/dex2jar/lower": {
+      "covered": 651,
+      "statements": 968
+    },
+    "github.com/yaklang/javajive/dex2jar/report": {
+      "covered": 29,
+      "statements": 29
+    },
+    "github.com/yaklang/javajive/internal/dexparser": {
+      "covered": 364,
+      "statements": 508
+    }
+  },
+  "zero_covered_functions": [
+    "dex2jar/ir/build.go:contiguous",
+    "dex2jar/ir/ir.go:End",
+    "dex2jar/lower/lower.go:LowerClass",
+    "dex2jar/lower/method.go:emitConstClass",
+    "dex2jar/lower/method.go:emitLiteralArithmetic",
+    "dex2jar/lower/method.go:emitMove",
+    "dex2jar/lower/method.go:emitTypeInstruction",
+    "dex2jar/lower/method.go:emitUnary",
+    "dex2jar/lower/method.go:primitiveClassOwner",
+    "internal/dexparser/classes.go:encodedAnnotation"
+  ]
+}

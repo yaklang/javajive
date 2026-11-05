@@ -1,0 +1,169 @@
+{
+  "$schema": "schema.json",
+  "schema_version": 1,
+  "source": {
+    "repository": "https://github.com/Arsylk/dexfile",
+    "commit": "98e55b86ebb26dd8e014afc6fb61fdeb697dc663"
+  },
+  "artifacts": [
+    {
+      "id": "tiny", "path": "tiny.dex", "source_path": "testdata/dex/tiny.dex",
+      "url": "https://raw.githubusercontent.com/Arsylk/dexfile/98e55b86ebb26dd8e014afc6fb61fdeb697dc663/testdata/dex/tiny.dex",
+      "availability": "available", "format": "dex", "version": "035", "size": 1072,
+      "sha256": "613fc5ffac5c463f250d86be2355acdd2c261b052d2cdb12ce63efb479469145",
+      "license": "MIT", "license_file": "licenses/Arsylk-dexfile-MIT.txt",
+      "features": ["annotations", "debug-info", "tiny"],
+      "expected": {"disposition": "rejected", "stage": "parse", "category": "annotations"}
+    },
+    {
+      "id": "release", "path": "release.dex", "source_path": "testdata/dex/release.dex",
+      "url": "https://raw.githubusercontent.com/Arsylk/dexfile/98e55b86ebb26dd8e014afc6fb61fdeb697dc663/testdata/dex/release.dex",
+      "availability": "available", "format": "dex", "version": "035", "size": 215004,
+      "sha256": "d5de6541bc8bf99a8990d6310800d623291f8e0c32936940357145cbe1d42579",
+      "license": "MIT", "license_file": "licenses/Arsylk-dexfile-MIT.txt",
+      "features": ["annotations", "indy-desugared", "release-mode"],
+      "expected": {"disposition": "rejected", "stage": "parse", "category": "annotations"}
+    },
+    {
+      "id": "v035", "path": "v035.dex", "source_path": "testdata/dex/v035.dex",
+      "url": "https://raw.githubusercontent.com/Arsylk/dexfile/98e55b86ebb26dd8e014afc6fb61fdeb697dc663/testdata/dex/v035.dex",
+      "availability": "available", "format": "dex", "version": "035", "size": 285876,
+      "sha256": "8417e11d9b9e468e1db7a5d2f5b98c156f5a26c89a5b839c06f5bcf1a442b80a",
+      "license": "MIT", "license_file": "licenses/Arsylk-dexfile-MIT.txt",
+      "features": ["annotations", "debug-info", "indy-desugared", "version-035"],
+      "expected": {"disposition": "rejected", "stage": "parse", "category": "annotations"}
+    },
+    {
+      "id": "v037", "path": "v037.dex", "source_path": "testdata/dex/v037.dex",
+      "url": "https://raw.githubusercontent.com/Arsylk/dexfile/98e55b86ebb26dd8e014afc6fb61fdeb697dc663/testdata/dex/v037.dex",
+      "availability": "available", "format": "dex", "version": "037", "size": 285280,
+      "sha256": "0dcdec7cf7ad89be6ba6971f60358d21c79fbf08ade860b405c0ea7c8597bc68",
+      "license": "MIT", "license_file": "licenses/Arsylk-dexfile-MIT.txt",
+      "features": ["annotations", "debug-info", "indy-desugared", "version-037"],
+      "expected": {"disposition": "rejected", "stage": "parse", "category": "version"}
+    },
+    {
+      "id": "v038", "path": "v038.dex", "source_path": "testdata/dex/v038.dex",
+      "url": "https://raw.githubusercontent.com/Arsylk/dexfile/98e55b86ebb26dd8e014afc6fb61fdeb697dc663/testdata/dex/v038.dex",
+      "availability": "available", "format": "dex", "version": "038", "size": 282324,
+      "sha256": "b488350a0f17d3711b186a554dce125e8d36ce33a7ccf3faf0e2d80b4f01ffbf",
+      "license": "MIT", "license_file": "licenses/Arsylk-dexfile-MIT.txt",
+      "features": ["call-sites", "invoke-custom", "method-handles", "version-038"],
+      "expected": {"disposition": "rejected", "stage": "parse", "category": "version"}
+    },
+    {
+      "id": "v039", "path": "v039.dex", "source_path": "testdata/dex/v039.dex",
+      "url": "https://raw.githubusercontent.com/Arsylk/dexfile/98e55b86ebb26dd8e014afc6fb61fdeb697dc663/testdata/dex/v039.dex",
+      "availability": "available", "format": "dex", "version": "039", "size": 285200,
+      "sha256": "a61035a191648c7ef6703f7545512191b51d384ff556bd21bf3fd94720d63495",
+      "license": "MIT", "license_file": "licenses/Arsylk-dexfile-MIT.txt",
+      "features": ["invoke-polymorphic", "version-039"],
+      "expected": {"disposition": "rejected", "stage": "parse", "category": "version"}
+    },
+    {
+      "id": "v040", "path": "v040.dex", "source_path": null, "url": null,
+      "availability": "pending", "format": "dex", "version": "040", "size": null, "sha256": null,
+      "license": "MIT", "license_file": "licenses/Arsylk-dexfile-MIT.txt",
+      "features": ["pending-upstream-artifact", "version-040"],
+      "expected": {"disposition": "pending", "stage": "availability", "category": "artifact-unavailable"}
+    },
+    {
+      "id": "v041", "path": "v041.dex", "source_path": "testdata/dex/v041.dex",
+      "url": "https://raw.githubusercontent.com/Arsylk/dexfile/98e55b86ebb26dd8e014afc6fb61fdeb697dc663/testdata/dex/v041.dex",
+      "availability": "available", "format": "dex-container", "version": "041", "size": 284944,
+      "sha256": "9e47bb71b7be8277d80a611dcf0d2c00cbe39a5976e2c483f26758ec599f1cae",
+      "license": "MIT", "license_file": "licenses/Arsylk-dexfile-MIT.txt",
+      "features": ["container-single-section", "version-041"],
+      "expected": {"disposition": "rejected", "stage": "parse", "category": "version"}
+    },
+    {
+      "id": "container041", "path": "container041.dex", "source_path": "testdata/dex/container041.dex",
+      "url": "https://raw.githubusercontent.com/Arsylk/dexfile/98e55b86ebb26dd8e014afc6fb61fdeb697dc663/testdata/dex/container041.dex",
+      "availability": "available", "format": "dex-container", "version": "041", "size": 1402688,
+      "sha256": "b2061be0894fc63d2404287bc1d3ab25882b467e89f8dd853cb0c2be3e4ecd51",
+      "license": "MIT", "license_file": "licenses/Arsylk-dexfile-MIT.txt",
+      "features": ["container-multi-section", "large-method-table", "version-041"],
+      "expected": {"disposition": "rejected", "stage": "parse", "category": "version"}
+    },
+    {
+      "id": "multidex", "path": "multidex.apk", "source_path": "testdata/dex/multidex.apk",
+      "url": "https://raw.githubusercontent.com/Arsylk/dexfile/98e55b86ebb26dd8e014afc6fb61fdeb697dc663/testdata/dex/multidex.apk",
+      "availability": "available", "format": "apk", "version": "035", "size": 278319,
+      "sha256": "eb3c68fa2b12819e8388000422963ed13d08dce5b2dde4b78472239356036577",
+      "license": "MIT", "license_file": "licenses/Arsylk-dexfile-MIT.txt",
+      "features": ["annotations", "cross-dex-references", "duplicate-class", "multidex"],
+      "expected": {"disposition": "rejected", "stage": "parse", "category": "annotations"}
+    },
+    {
+      "id": "malformed-bad-endian-tag", "path": "malformed/bad-endian-tag.dex", "source_path": "testdata/dex/malformed/bad-endian-tag.dex",
+      "url": "https://raw.githubusercontent.com/Arsylk/dexfile/98e55b86ebb26dd8e014afc6fb61fdeb697dc663/testdata/dex/malformed/bad-endian-tag.dex",
+      "availability": "available", "format": "dex", "version": "035", "size": 1072,
+      "sha256": "e40dfcaa102e3fd1fc23e123035ba4f1209d18ca3787a851553de9fb9d77eaa9", "license": "MIT", "license_file": "licenses/Arsylk-dexfile-MIT.txt",
+      "features": ["malformed", "wrong-endian-tag"],
+      "expected": {"disposition": "rejected", "stage": "parse", "category": "endian"}
+    },
+    {
+      "id": "malformed-bad-magic", "path": "malformed/bad-magic.dex", "source_path": "testdata/dex/malformed/bad-magic.dex",
+      "url": "https://raw.githubusercontent.com/Arsylk/dexfile/98e55b86ebb26dd8e014afc6fb61fdeb697dc663/testdata/dex/malformed/bad-magic.dex",
+      "availability": "available", "format": "dex", "version": null, "size": 1072,
+      "sha256": "0bf6c4fc2b6d46e9673b130b19008cea3a6e22eeff46055e805ebe6fd0c81679", "license": "MIT", "license_file": "licenses/Arsylk-dexfile-MIT.txt",
+      "features": ["malformed", "wrong-magic"],
+      "expected": {"disposition": "rejected", "stage": "identify", "category": "magic"}
+    },
+    {
+      "id": "malformed-bad-offsets", "path": "malformed/bad-offsets.dex", "source_path": "testdata/dex/malformed/bad-offsets.dex",
+      "url": "https://raw.githubusercontent.com/Arsylk/dexfile/98e55b86ebb26dd8e014afc6fb61fdeb697dc663/testdata/dex/malformed/bad-offsets.dex",
+      "availability": "available", "format": "dex", "version": "035", "size": 1072,
+      "sha256": "48c52db50ccc6093149fbe35d8e49671dd2bddd24c0169d931b12ca91b72631c", "license": "MIT", "license_file": "licenses/Arsylk-dexfile-MIT.txt",
+      "features": ["malformed", "out-of-range-offsets"],
+      "expected": {"disposition": "rejected", "stage": "parse", "category": "bounds"}
+    },
+    {
+      "id": "malformed-empty", "path": "malformed/empty.dex", "source_path": "testdata/dex/malformed/empty.dex",
+      "url": "https://raw.githubusercontent.com/Arsylk/dexfile/98e55b86ebb26dd8e014afc6fb61fdeb697dc663/testdata/dex/malformed/empty.dex",
+      "availability": "available", "format": "dex", "version": null, "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "license": "MIT", "license_file": "licenses/Arsylk-dexfile-MIT.txt",
+      "features": ["empty", "malformed"],
+      "expected": {"disposition": "rejected", "stage": "identify", "category": "magic"}
+    },
+    {
+      "id": "malformed-huge-sizes", "path": "malformed/huge-sizes.dex", "source_path": "testdata/dex/malformed/huge-sizes.dex",
+      "url": "https://raw.githubusercontent.com/Arsylk/dexfile/98e55b86ebb26dd8e014afc6fb61fdeb697dc663/testdata/dex/malformed/huge-sizes.dex",
+      "availability": "available", "format": "dex", "version": "035", "size": 1072,
+      "sha256": "1d2dc65aaa641f6ee6466ecd8360456b1955eb493fc24437f4c4b40be4fea0ca", "license": "MIT", "license_file": "licenses/Arsylk-dexfile-MIT.txt",
+      "features": ["huge-table-counts", "malformed"],
+      "expected": {"disposition": "rejected", "stage": "parse", "category": "bounds"}
+    },
+    {
+      "id": "malformed-truncated-header", "path": "malformed/truncated-header.dex", "source_path": "testdata/dex/malformed/truncated-header.dex",
+      "url": "https://raw.githubusercontent.com/Arsylk/dexfile/98e55b86ebb26dd8e014afc6fb61fdeb697dc663/testdata/dex/malformed/truncated-header.dex",
+      "availability": "available", "format": "dex", "version": "035", "size": 60,
+      "sha256": "ce631739b4ae248c902bc58e8f902f4c2297b8df279d30f1abbdeaebc2821a70", "license": "MIT", "license_file": "licenses/Arsylk-dexfile-MIT.txt",
+      "features": ["malformed", "truncated-header"],
+      "expected": {"disposition": "rejected", "stage": "parse", "category": "truncated"}
+    },
+    {
+      "id": "malformed-truncated-mid", "path": "malformed/truncated-mid.dex", "source_path": "testdata/dex/malformed/truncated-mid.dex",
+      "url": "https://raw.githubusercontent.com/Arsylk/dexfile/98e55b86ebb26dd8e014afc6fb61fdeb697dc663/testdata/dex/malformed/truncated-mid.dex",
+      "availability": "available", "format": "dex", "version": "035", "size": 536,
+      "sha256": "2efbdb4fc8b1a3201d58170fe180329398229f071e9e17444faa164d89335ef5", "license": "MIT", "license_file": "licenses/Arsylk-dexfile-MIT.txt",
+      "features": ["malformed", "truncated-body"],
+      "expected": {"disposition": "rejected", "stage": "parse", "category": "file-size"}
+    },
+    {
+      "id": "malformed-wrong-file-size", "path": "malformed/wrong-file-size.dex", "source_path": "testdata/dex/malformed/wrong-file-size.dex",
+      "url": "https://raw.githubusercontent.com/Arsylk/dexfile/98e55b86ebb26dd8e014afc6fb61fdeb697dc663/testdata/dex/malformed/wrong-file-size.dex",
+      "availability": "available", "format": "dex", "version": "035", "size": 1072,
+      "sha256": "d2a3cb0081757b94dfcd0f934ac0a858ec5bb94021f015b8a6108a83fd857d27", "license": "MIT", "license_file": "licenses/Arsylk-dexfile-MIT.txt",
+      "features": ["malformed", "wrong-file-size"],
+      "expected": {"disposition": "rejected", "stage": "parse", "category": "file-size"}
+    },
+    {
+      "id": "compact-dex", "path": "compact.cdex", "source_path": null, "url": null,
+      "availability": "pending", "format": "compact-dex", "version": null, "size": null, "sha256": null,
+      "license": "MIT", "license_file": "licenses/Arsylk-dexfile-MIT.txt",
+      "features": ["compact-dex", "pending-upstream-artifact"],
+      "expected": {"disposition": "pending", "stage": "availability", "category": "artifact-unavailable"}
+    }
+  ]
+}
