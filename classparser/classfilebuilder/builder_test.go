@@ -417,6 +417,25 @@ func TestConstantPoolValidationIsIndependent(t *testing.T) {
 	}
 }
 
+func TestArrayCloneMethodReferenceValidation(t *testing.T) {
+	pool := newConstantPool()
+	if _, err := pool.Methodref("[I", "clone", "()Ljava/lang/Object;"); err != nil {
+		t.Fatalf("array clone Methodref: %v", err)
+	}
+	for name, add := range map[string]func() (uint16, error){
+		"array constructor": func() (uint16, error) { return pool.Methodref("[I", "<init>", "()V") },
+		"array method":      func() (uint16, error) { return pool.Methodref("[I", "value", "()I") },
+		"array field":       func() (uint16, error) { return pool.Fieldref("[I", "length", "I") },
+		"array interface":   func() (uint16, error) { return pool.InterfaceMethodref("[I", "clone", "()Ljava/lang/Object;") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := add(); err == nil {
+				t.Fatal("invalid array-owned member reference accepted")
+			}
+		})
+	}
+}
+
 func TestJavaVerifyAll(t *testing.T) {
 	java, err := exec.LookPath("java")
 	if err != nil {

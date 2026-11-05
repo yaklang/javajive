@@ -117,12 +117,22 @@ func validateMethodName(name string) error {
 	return validateUnqualifiedName(name, "method name", true)
 }
 
-func validateObjectDescriptor(descriptor string) error {
+func validateReferenceDescriptor(descriptor string) error {
 	kind, err := parseDescriptor(descriptor, false)
 	if err != nil {
 		return err
 	}
-	if kind != descriptorReference || descriptor[0] != 'L' {
+	if kind != descriptorReference {
+		return fmt.Errorf("descriptor %q is not a reference type", descriptor)
+	}
+	return nil
+}
+
+func validateObjectDescriptor(descriptor string) error {
+	if err := validateReferenceDescriptor(descriptor); err != nil {
+		return err
+	}
+	if descriptor[0] != 'L' {
 		return fmt.Errorf("descriptor %q is not an object type", descriptor)
 	}
 	return nil
@@ -220,7 +230,7 @@ func validateFileMetadata(file *model.File) error {
 		}
 	}
 	for index, method := range file.Methods {
-		if err := validateObjectDescriptor(method.Class); err != nil {
+		if err := validateReferenceDescriptor(method.Class); err != nil {
 			return fmt.Errorf("method %d owner: %w", index, err)
 		}
 		if err := validateMethodName(method.Name); err != nil {
@@ -230,6 +240,9 @@ func validateFileMetadata(file *model.File) error {
 			return fmt.Errorf("method %d proto index %d is out of range", index, method.ProtoIndex)
 		}
 		proto := file.Protos[method.ProtoIndex]
+		if method.Class[0] == '[' && (method.Name != "clone" || len(proto.Parameters) != 0 || proto.ReturnType != "Ljava/lang/Object;") {
+			return fmt.Errorf("method %d array owner only permits clone()Ljava/lang/Object;", index)
+		}
 		if method.Name == "<init>" && proto.ReturnType != "V" {
 			return fmt.Errorf("method %d constructor must return void", index)
 		}
