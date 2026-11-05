@@ -280,7 +280,7 @@ jobs:
       - name: Irreducible CFG semantic round trip
         run: |
           set -o pipefail
-          go test ./test/cross -list '^TestRoundTripIrreducibleCFGCorpus$' | grep -qx 'TestRoundTripIrreducibleCFGCorpus'
+          test "$(go test ./test/cross -list '^TestRoundTripIrreducibleCFGCorpus$' | grep -xc 'TestRoundTripIrreducibleCFGCorpus')" -eq 1
           go test -json ./test/cross -run '^TestRoundTripIrreducibleCFGCorpus$' -count=1 -timeout=3m | tee artifacts/irreducible-cfg-roundtrip-tests.jsonl
       - name: Trusted original and rebuilt algorithm round trips
         run: |
