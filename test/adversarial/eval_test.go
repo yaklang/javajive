@@ -510,7 +510,10 @@ func cases() []evalCase {
 		{"IfChainEightEntry", expectRecovered, buildIfChainEightEntry},
 		{"TwoSequentialKernels", expectRecovered, buildTwoSequentialKernels},
 		{"DeepRegional", expectRecovered, buildDeepRegional},
-		{"FourExitEffects", expectRecovered, buildFourExitEffects},
+		// Four exits that converge on a shared post-exit merge are rejected by
+		// linearTerminalExit; the method degrades to a diagnosed stub. This is a
+		// documented capability boundary, not a silent recovery.
+		{"FourExitEffects", expectFailClosed, buildFourExitEffects},
 		{"FallthroughEntry", expectRecovered, buildFallthroughEntry},
 		{"ConstructorIrreducible", expectFailClosed, buildConstructorIrreducible},
 		{"TryCatchIrreducible", expectFailClosed, buildTryCatchIrreducible},

@@ -282,6 +282,11 @@ jobs:
           set -o pipefail
           test "$(go test ./test/cross -list '^TestRoundTripIrreducibleCFGCorpus$' | grep -xc 'TestRoundTripIrreducibleCFGCorpus')" -eq 1
           go test -json ./test/cross -run '^TestRoundTripIrreducibleCFGCorpus$' -count=1 -timeout=3m | tee artifacts/irreducible-cfg-roundtrip-tests.jsonl
+      - name: Adversarial classfile decompiler evaluation
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          JAVAJIVE_ADVERSARIAL_EVAL=1 go test -json ./test/adversarial -count=1 -timeout=5m | tee artifacts/adversarial-decompiler-tests.jsonl
       - name: Trusted original and rebuilt algorithm round trips
         run: |
           evidence="$RUNNER_TEMP/algorithm-regression-evidence"
