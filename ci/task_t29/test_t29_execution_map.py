@@ -22,8 +22,10 @@ from tools.ci_scheduler.execution_map import (  # noqa: E402
 )
 from tools.ci_scheduler.workflow_inventory import (  # noqa: E402
     BASELINE_CI_JOBS,
-    FAST_REBUILT_JAR_COMMAND,
     FAST_REBUILT_JAR_TESTS,
+    IRREDUCIBLE_CFG_RUN_COMMAND,
+    IRREDUCIBLE_CFG_TEST,
+    REQUIRED_CROSS_COMMANDS,
     required_coverage_snapshot,
     validate_fast_cross_scope,
 )
@@ -91,18 +93,23 @@ class TestExecutionEventMapping(unittest.TestCase):
         validate_fast_cross_scope(workflow)
 
     def test_required_cross_scope_cannot_expand_to_foreign_inputs(self) -> None:
-        validate_fast_cross_scope(FAST_REBUILT_JAR_COMMAND)
+        reviewed = "\n".join(REQUIRED_CROSS_COMMANDS)
+        validate_fast_cross_scope(reviewed)
         for command in (
             "go test ./test/cross",
             "go test ./test/cross -run .",
-            FAST_REBUILT_JAR_COMMAND.replace("-run '^(", "-run '.*|("),
-            FAST_REBUILT_JAR_COMMAND.replace("-timeout=2m", "-timeout=30m"),
-            FAST_REBUILT_JAR_COMMAND.replace("-count=1", "-count=0"),
-            FAST_REBUILT_JAR_COMMAND.replace(FAST_REBUILT_JAR_TESTS[0], "TestHistoricalJarAudit"),
-            FAST_REBUILT_JAR_COMMAND + "\ngo test ./test/cross",
-            FAST_REBUILT_JAR_COMMAND + "\n" + FAST_REBUILT_JAR_COMMAND,
-            FAST_REBUILT_JAR_COMMAND.replace("-json ./test/cross", "-json ./test/cross ./..."),
-            FAST_REBUILT_JAR_COMMAND + " && go test ./...",
+            reviewed.replace("-run '^(", "-run '.*|(", 1),
+            reviewed.replace("-timeout=2m", "-timeout=30m", 1),
+            reviewed.replace("-count=1", "-count=0", 1),
+            reviewed.replace(FAST_REBUILT_JAR_TESTS[0], "TestHistoricalJarAudit", 1),
+            reviewed + "\ngo test ./test/cross",
+            reviewed + "\n" + IRREDUCIBLE_CFG_RUN_COMMAND,
+            reviewed.replace("-json ./test/cross", "-json ./test/cross ./...", 1),
+            reviewed.replace(IRREDUCIBLE_CFG_TEST, "TestHistoricalJarAudit", 1),
+            reviewed.replace("grep -xc", "grep -q", 1),
+            reviewed.replace("-timeout=3m", "-timeout=30m", 1),
+            "\n".join(REQUIRED_CROSS_COMMANDS[:-1]),
+            reviewed + " && go test ./...",
             "",
         ):
             with self.subTest(command=command), self.assertRaises(ValueError):
@@ -113,7 +120,7 @@ class TestExecutionEventMapping(unittest.TestCase):
         names = []
         for path in (ROOT / "test" / "cross").glob("*_test.go"):
             names.extend(re.findall(r"(?m)^func (Test\w+)\(t \*testing\.T\)", path.read_text(encoding="utf-8")))
-        for name in FAST_REBUILT_JAR_TESTS:
+        for name in (*FAST_REBUILT_JAR_TESTS, IRREDUCIBLE_CFG_TEST):
             self.assertEqual(names.count(name), 1, msg=name)
 
     def test_ci_summary_requires_every_source_shard(self) -> None:
