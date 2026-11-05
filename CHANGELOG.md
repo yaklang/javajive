@@ -23,6 +23,17 @@ Add a native, pure-Go DEX/APK-to-JAR path as a strict first vertical slice.
   Constructors, exception-entry, monitor, uninitialized-object,
   non-empty-stack-boundary, and uninlined `jsr`/`ret` regions remain explicit
   unsupported boundaries.
+- Fix shared-exit handoff for irreducible regions whose pre-loop predecessors
+  cannot be consumed as an ordinary loop guard. A synthetic skip flag keeps the
+  dispatcher loop skippable while an acyclic gate preserves per-case switch
+  breaks; this removes a silent miscompile for switch-default and entry-chain
+  exits. Single-exit corpus sources are unchanged.
+- Hoist cross-case dispatcher locals to the method root with a type-default
+  initializer, fixing rebuilt sources that javac rejected as possibly
+  uninitialized. The pass reuses the original variable identity and is gated by
+  `JDEC_DISPATCH_LOCAL_HOIST_OFF`.
+- Add an opt-in adversarial classfile evaluation suite and a CI gate covering
+  real javac shapes, irreducible boundary behavior, scale, and malformed input.
 
 ## v0.4.0 — 2026-09-19
 

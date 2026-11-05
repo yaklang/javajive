@@ -13,6 +13,10 @@ type DoWhileStatement struct {
 	Label          string
 	ConditionValue values.JavaValue
 	Body           []Statement
+	// IrreducibleDispatch marks the synthetic state-dispatch loop emitted by
+	// LowerIrreducibleDispatch. The marker survives variable renaming and is
+	// consumed only by source-recovery passes; it does not affect rendering.
+	IrreducibleDispatch bool
 }
 
 // ReplaceVar implements Statement.
