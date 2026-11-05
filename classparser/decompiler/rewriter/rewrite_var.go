@@ -28,6 +28,7 @@ func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.Ja
 		className = ctx.ClassName
 		methodName = ctx.FunctionName
 	}
+	hoistStackMergePhiDeclarations(sts)
 	scope := NewScope(startVarId, sts)
 	for _, v := range params {
 		scope.assignedMap[v.VarUid] = v.Id

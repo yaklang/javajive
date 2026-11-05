@@ -4739,6 +4739,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	//}
 	ternaryExpMergeNode := []*OpCode{}
 	ternaryExpMergeNodeSlot := map[*OpCode]*values.SlotValue{}
+	acyclicStackMergeSlot := map[*OpCode]*values.SlotValue{}
 	retainedReferenceJoins := map[*OpCode]*OpCode{}
 	carriedPrimitiveJoins := map[*OpCode]*OpCode{}
 	if !d.FunctionContext.IsStatic {
@@ -5049,6 +5050,18 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 							retainedReferenceJoins[code] = root
 						}
 					}
+					// A value merge whose producers are independent case arms
+					// (for example each arm of a switch expression ends in its
+					// own ternary) has if predecessors but no single closed
+					// condition tree. Treating it as a ternary loses every arm
+					// except the one the combiner happens to pick. Multi-source
+					// joins require the closed-tree certificate; otherwise the
+					// acyclic stack-phi lowering below owns the join.
+					if isIfMergeNode && len(code.Source) > 2 && d.closedNestedValueRoot(code, ifNodes) == nil {
+						isIfMergeNode = false
+						delete(carriedPrimitiveJoins, code)
+						delete(retainedReferenceJoins, code)
+					}
 				}
 			}
 			if len(validSources) == 0 {
@@ -5073,6 +5086,12 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 				validSource := validSources[0]
 				scope := getVarScope(validSource)
 				runtimeStackSimulation = NewStackSimulation(validSource.StackEntry, preferConcreteMergeVars(scope.VarTable, validSources), scope.VarId)
+				if len(validSources) >= 1 && len(code.Source) >= 2 && size > 0 {
+					if slotVal := d.prepareAcyclicStackMergeSlot(code, validSources, runtimeStackSimulation); slotVal != nil {
+						runtimeStackSimulation.ReplaceTop(slotVal)
+						acyclicStackMergeSlot[code] = slotVal
+					}
+				}
 			}
 		} else {
 			for _, opCode := range code.Source {
@@ -5175,6 +5194,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	}
 	d.opCodes = GraphToList(d.RootOpCode)
 	d.opcodeToSimulateStack = opcodeToSim
+	d.lowerAcyclicStackMerges(acyclicStackMergeSlot)
 	ternaryExpMergeNode = utils.NewSet(ternaryExpMergeNode).List()
 	sort.Slice(ternaryExpMergeNode, func(i, j int) bool {
 		return ternaryExpMergeNode[i].Id > ternaryExpMergeNode[j].Id
@@ -6871,12 +6891,19 @@ func (d *Decompiler) ParseStatement() error {
 			// call/assign/inc-dec). A discarded bare local/constant/class ref is non-statement and
 			// side-effect-free, so emitting `x;` would be invalid Java; drop it. See
 			// keepDiscardedStackValue (JLS 14.8) and the spring cglib EmitUtils regression seed.
-			if keepDiscardedStackValue(opcode.stackConsumed[0]) {
+			// Static field reads, array reads, casts and arithmetic are neither legal statement
+			// expressions nor inert: materialize them in an unused local so class initialization
+			// and exceptional exits stay at the original instruction boundary.
+			if st := d.materializeDiscardedValue(opcode, opcode.stackConsumed[0]); st != nil {
+				appendNode(st)
+			} else if keepDiscardedStackValue(opcode.stackConsumed[0]) {
 				appendNode(statements.NewExpressionStatement(opcode.stackConsumed[0]))
 			}
 		case OP_POP2:
 			for _, value := range opcode.stackConsumed {
-				if keepDiscardedStackValue(value) {
+				if st := d.materializeDiscardedValue(opcode, value); st != nil {
+					appendNode(st)
+				} else if keepDiscardedStackValue(value) {
 					appendNode(statements.NewExpressionStatement(value))
 				}
 			}

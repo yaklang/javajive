@@ -10,6 +10,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 type NewExpression struct {
@@ -5291,8 +5292,8 @@ func coerceBooleanArgument(arg JavaValue) JavaValue {
 	if at := arg.Type(); at != nil {
 		if prim, ok := primerRawType(at); ok && prim.Name == types.JavaInteger {
 			inner := arg
-			return NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-				return fmt.Sprintf("(%s) != (0)", inner.String(funcCtx))
+			return NewStreamingCustomValue(func(funcCtx *class_context.ClassContext, out *workbudget.Writer) error {
+				return out.WriteString(fmt.Sprintf("(%s) != (0)", inner.String(funcCtx)))
 			}, func() types.JavaType {
 				return types.NewJavaPrimer(types.JavaBoolean)
 			})

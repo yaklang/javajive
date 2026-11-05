@@ -6,8 +6,10 @@ import (
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
+	coreutils "github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 func init() {
@@ -73,7 +75,7 @@ func typeSwitchOperands(req CallSiteRequest) (selector, restart values.JavaValue
 
 func renderTypeSwitchIndex(selector, restart values.JavaValue, labels []TypeSwitchLabel, resultType types.JavaType) values.JavaValue {
 	typ := resultType
-	return values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+	return values.NewStreamingCustomValue(func(funcCtx *class_context.ClassContext, out *workbudget.Writer) error {
 		sel := "null"
 		if selector != nil {
 			sel = selector.String(funcCtx)
@@ -94,13 +96,26 @@ func renderTypeSwitchIndex(selector, restart values.JavaValue, labels []TypeSwit
 			}
 			parts = append(parts, fmt.Sprintf("((%s) <= %d && (%s) instanceof %s) ? %d", rst, i, sel, tn, i))
 		}
-		parts = append(parts, "-1")
-		return strings.Join(parts, " : ") + ")"
+		// typeSwitch returns -1 for null and labels.length for a non-match.
+		// Using -1 for both aliases the default path with `case null`.
+		parts = append(parts, fmt.Sprintf("%d", len(labels)))
+		return out.WriteString(strings.Join(parts, " : ") + ")")
 	}, func() types.JavaType {
 		if typ == nil {
 			return types.NewJavaPrimer(types.JavaInteger)
 		}
 		return typ
+	}, func(oldId, newId *coreutils.VariableId) {
+		// The selector and restart operands live only inside this render
+		// closure. Without forwarding identity rebindings, the restart local
+		// keeps its pre-rewrite unnamed id and falls back to a depth-derived
+		// name that can collide with the selector variable.
+		if selector != nil {
+			selector.ReplaceVar(oldId, newId)
+		}
+		if restart != nil {
+			restart.ReplaceVar(oldId, newId)
+		}
 	})
 }
 
@@ -194,6 +209,15 @@ func TryReconstructPatternSwitch(d *Decompiler) (PatternSwitchRewrite, bool) {
 	mergePC := inferMergePC(sw, byOff)
 	if mergePC < 0 {
 		out.Reason = "cannot find switch merge"
+		return out, false
+	}
+	// This reconstruction replaces the whole method body with
+	// `return switch (...)`. It is only valid when the pattern switch result is
+	// the method's return value. A pattern switch nested in a loop or assigned
+	// to a local has a store/continuation merge; declining here lets the core
+	// dispatcher preserve the surrounding statements.
+	if mergeOp := byOff[mergePC]; mergeOp == nil || mergeOp.Instr == nil || !isReturnOp(mergeOp.Instr.OpCode) {
+		out.Reason = "pattern switch result is not a method return"
 		return out, false
 	}
 
