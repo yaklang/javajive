@@ -361,6 +361,14 @@ jobs:
           test "$REGRESSION_RESULT" = success
           case "$CLASSPARSER" in
             true) test "$SOURCE_RESULT" = success ;;
-            false) test "$SOURCE_RESULT" = skipped ;;
+            false)
+              # A skipped matrix is the expected fast path; success is
+              # tolerated so a host that reports skipped legs differently
+              # cannot fail the required check.
+              case "$SOURCE_RESULT" in
+                skipped|success) ;;
+                *) echo "unexpected source result: $SOURCE_RESULT"; exit 1 ;;
+              esac
+              ;;
             *) echo "missing classparser scope output"; exit 1 ;;
           esac

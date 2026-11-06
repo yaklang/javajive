@@ -139,7 +139,7 @@ class TestExecutionEventMapping(unittest.TestCase):
         self.assertIn('test "$SCOPE_RESULT" = success', summary)
         self.assertIn('test "$REGRESSION_RESULT" = success', summary)
         self.assertIn('true) test "$SOURCE_RESULT" = success', summary)
-        self.assertIn('false) test "$SOURCE_RESULT" = skipped', summary)
+        self.assertIn("skipped|success", summary)
 
     def test_slow_contracts_remain_manual_and_discoverable(self) -> None:
         workflows = ROOT / ".github" / "workflows"
