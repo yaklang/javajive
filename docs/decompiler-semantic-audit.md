@@ -25,6 +25,27 @@ result, err := javajive.DecompileWithOptions(classBytes, javajive.DecompileOptio
 
 Requests own their mode, analysis budget, resolver, result and rewrite history. The API never mutates the process environment. Legacy `JDEC_*` environment switches still exist in older core passes. Shared mutable rendering probe contexts were removed, and nested lambda method context is restored with `defer`, including on panic.
 
+## Algorithm deepening
+
+- **Two-pass declaration typing.** `RebuildRefDeclarationTypes` collects
+  declaration/assignment evidence per VarUid and retypes only when every
+  structural use accepts the candidate common supertype. The use walker exposes
+  `collectRefUses` and provider-aware assignability so widening passes share one
+  proof.
+- **SSA join evidence.** `StackPhiEvidenceProvider` is installed by the
+  classparser package. MethodIR + `ssabuild` validate acyclic stack-phi kind;
+  contradictions fail the method closed. SSA build failures fall back without
+  authorizing a new rewrite.
+- **Shared-handler result types.** `tryTailCommonResultType` solves null and
+  reference-result constraints by LUB while preserving the original handler
+  gaps and terminal-handler proof.
+- **Loop forms.** `NormalizeLoopForms` converts the canonical do-while guard to
+  while, removes a redundant trailing continue, and recovers a for loop only
+  when no unlabeled continue and no escaping declaration is involved.
+- **Generic constraints.** `solveBareMethodTypeConstraints` accumulates lower
+  bounds for bare method type variables and meets them at a hierarchy LUB.
+  Nested invariant occurrences remain on the strict structural binder.
+
 ## Report-to-code mapping
 
 | Report item | Implemented change | Remaining boundary |

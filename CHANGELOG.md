@@ -252,6 +252,31 @@ Add a native, pure-Go DEX/APK-to-JAR path as a strict first vertical slice.
   verify → behavior comparison, plus Java 21 adversarial source shapes in the
   existing CI-gated suite. See `test/complexjar/REPORT.md`.
 
+### Algorithm deepening
+
+- Add a two-pass source typing pass. Pass one collects each VarUid's
+  declaration and assigned value types; pass two derives a common supertype
+  through the archive hierarchy and retypes only when every structural use
+  accepts it. Member/array receivers, ternary arms, lambda captures and opaque
+  values veto a retype; solved def-use webs and parameters are untouched.
+- Use MethodIR/SSA as production stack-join evidence. A primitive/reference
+  contradiction between the SSA phi and the expression-level join type now
+  fails the method closed with a structured diagnostic; unsupported SSA inputs
+  preserve the existing structural proof.
+- Solve shared-handler branch results by common supertype instead of exact
+  source-type equality, allowing heterogeneous but assignable results while
+  preserving exception-table gaps and terminal-handler proofs.
+- Normalize top-tested loop lowering into `while`/`for` forms when the body has
+  no unlabeled continue and a declaration does not escape. Labeled loops and
+  ambiguous bodies are untouched; `ForStatement` renders its condition and body
+  with standard indentation.
+- Add a generic method type-variable constraint solver for bare formals:
+  repeated occurrences meet at a hierarchy LUB, null contributes no bound, and
+  nested invariant occurrences fall back to the strict structural binder.
+- Add generated loop, SSA-contradiction and generic-constraint regression tests;
+  the 38-JAR tree profile remains unchanged on commons-codec, fastjson2, guava
+  and spring.
+
 ## v0.4.0 — 2026-09-19
 
 Preserve bytecode semantics and separate decompilation results from independent
