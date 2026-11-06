@@ -153,8 +153,8 @@ Add a native, pure-Go DEX/APK-to-JAR path as a strict first vertical slice.
   kernels nested in natural loops. The checked-in major-49 corpus verifies original,
   reviewed-equivalent, and rebuilt behavior without requiring identical bytecode.
   Constructors, exception-entry, monitor, uninitialized-object,
-  non-empty-stack-boundary, and uninlined `jsr`/`ret` regions remain explicit
-  unsupported boundaries.
+  non-empty-stack-boundary without a stable carrier, and uninlined `jsr`/`ret`
+  regions remain explicit unsupported boundaries.
 - Fix shared-exit handoff for irreducible regions whose pre-loop predecessors
   cannot be consumed as an ordinary loop guard. A synthetic skip flag keeps the
   dispatcher loop skippable while an acyclic gate preserves per-case switch
@@ -273,6 +273,16 @@ Add a native, pure-Go DEX/APK-to-JAR path as a strict first vertical slice.
 - Add a generic method type-variable constraint solver for bare formals:
   repeated occurrences meet at a hierarchy LUB, null contributes no bound, and
   nested invariant occurrences fall back to the strict structural binder.
+- Replace the blanket empty-stack gate for irreducible state dispatch with a
+  per-word carrier certificate plus a target-merge certificate. Constants and
+  materialized locals always cross; an effectful word may cross only when its
+  producer reaches the boundary through instructions with no observable effect.
+  A target with unequal incoming words must use a materialized stack-phi local.
+  Carried constants, static reads, helper calls, reference values and equal
+  category-2 constants now recover, while a field read carried across a
+  mutating call and unequal literal merges fail closed instead of silently
+  changing behavior. The adversarial matrix adds the recovered shapes and five
+  fail-closed barriers, including a stale local-slot overwrite.
 - Add generated loop, SSA-contradiction and generic-constraint regression tests;
   the 38-JAR tree profile remains unchanged on commons-codec, fastjson2, guava
   and spring.

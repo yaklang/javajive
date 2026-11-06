@@ -6440,7 +6440,7 @@ func (d *Decompiler) ParseStatement() error {
 	if d.unsupportedStackJoin != "" {
 		return fmt.Errorf("%s", d.unsupportedStackJoin)
 	}
-	if d.semanticCFG != nil && d.semanticCFG.IrreducibleError != nil && !d.irreducibleEdgesHaveEmptyStack() {
+	if d.semanticCFG != nil && d.semanticCFG.IrreducibleError != nil && !d.irreducibleBoundaryStackSupported() {
 		return d.semanticCFG.IrreducibleError
 	}
 	// convert opcode to statement

@@ -49,8 +49,8 @@ type irreducibleSourceBaseline struct {
 
 var irreducibleSourceBaselines = map[classparser.DecompileMode]map[string]irreducibleSourceBaseline{
 	classparser.Precision: {
-		"NaturalSingleEntry":          {SHA256: "c85337c51de82b5146fe2582061d9ac0e5773e8143f7bac7377b7f0b4241f183", Bytes: 500, Lines: 23},
-		"NaturalMultipleLatch":        {SHA256: "4fc5a98152f769238be187f400b0d1a9182d9ddaaaec96580dedc0437096ada4", Bytes: 605, Lines: 29},
+		"NaturalSingleEntry":          {SHA256: "f3ccd6f8dcbcbe15b99ca4641829cfa28de49b801128df8d3c9286cae693ac24", Bytes: 440, Lines: 18},
+		"NaturalMultipleLatch":        {SHA256: "b92302247190fbc629d5210ddec27ed6f9a2828b87eefdfde5fd9b829c9e2fd6", Bytes: 552, Lines: 25},
 		"DeadSecondaryEntry":          {SHA256: "49928c9f7fb1e59e1dceeb5b40d69ae08ece056eae3ea47e130949c2adce02dd", Bytes: 604, Lines: 29},
 		"IrreducibleTwoEntry":         {SHA256: "687821ad001b5bd5edc69a85eef2cd29137668e95e4789a89a65f47b39343baf", Bytes: 1009, Lines: 55},
 		"IrreducibleMidBodyPhi":       {SHA256: "5473c20877149d28e21d47fea9d7da71d05bdef7b0960f552fa0ebf0a45a4673", Bytes: 901, Lines: 48},
