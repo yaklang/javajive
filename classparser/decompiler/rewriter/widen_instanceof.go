@@ -24,8 +24,12 @@ import (
 // Long switch-case stores, but the post-switch read uses `.intValue()` / `.longValue()` (Number
 // methods in the bytecode). Declaring the variable as Number compiles cleanly while preserving the
 // method-dispatch semantics. See isNumberSafeWiden for the read-side gate.
-func WidenNumericMixedSlotDecl(sts *[]statements.Statement) {
+func WidenNumericMixedSlotDecl(sts *[]statements.Statement, funcCtx *class_context.ClassContext) {
 	if sts == nil || len(*sts) == 0 || jdecenv.Get("JDEC_WIDEN_NUMERIC_MIXED_OFF") == "1" {
+		return
+	}
+	if jdecenv.Get("JDEC_LEGACY_TEXT_WIDEN") == "" {
+		widenNumericMixedStructured(sts, funcCtx)
 		return
 	}
 	ctx := &class_context.ClassContext{}
@@ -123,8 +127,12 @@ func WidenNumericMixedSlotDecl(sts *[]statements.Statement) {
 
 // WidenInstanceofReadRefs is a post-RewriteVar pass. Kill-switch:
 // JDEC_POST_RW_INSTANCEOF_WIDEN_OFF=1.
-func WidenInstanceofReadRefs(sts *[]statements.Statement) {
+func WidenInstanceofReadRefs(sts *[]statements.Statement, funcCtx *class_context.ClassContext) {
 	if sts == nil || len(*sts) == 0 || jdecenv.Get("JDEC_POST_RW_INSTANCEOF_WIDEN_OFF") == "1" {
+		return
+	}
+	if jdecenv.Get("JDEC_LEGACY_TEXT_WIDEN") == "" {
+		widenInstanceofStructured(sts, funcCtx)
 		return
 	}
 	ctx := &class_context.ClassContext{}
