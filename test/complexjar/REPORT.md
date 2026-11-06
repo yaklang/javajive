@@ -152,6 +152,34 @@ being counted as success.
     output; a generated 3-round record corpus varies 1-3 records with 1-3
     primitive components per case and verifies the same round trip.
 
+## Algorithm deepening
+
+The follow-up round replaced three symptom-level typing/control-flow decisions
+with general proofs:
+
+- **Two-pass per-ref typing.** A first pass collects declaration and assigned
+  value types per VarUid; a second pass computes a common supertype and retypes
+  only when every structural use accepts it. This reuses the AST use walker and
+  leaves member/array receivers, ternary arms and lambda captures untouched.
+- **SSA stack-join evidence.** Acyclic stack joins now query MethodIR/SSA. A
+  primitive/reference contradiction between the SSA phi and the inferred join
+  type fails the method closed with a diagnostic instead of emitting a mixed
+  assignment.
+- **Shared-handler result constraints.** Disjoint protected prefixes sharing one
+  handler may now return heterogeneous reference types that meet at their JDK
+  LUB; primitives, arrays and unknown hierarchies still fail closed.
+- **Loop-form normalization.** Canonical `do { if (cond) ... else break; }
+  while(true)` lowers to `while`, and safe init + while + simple update shapes
+  become `for` loops. `continue`/`break` transfer semantics are preserved.
+- **Generic method constraints.** Bare method type variables accumulate lower
+  bounds and meet at a hierarchy LUB; nested invariant positions retain the
+  strict structural binder.
+
+The 38-JAR tree profile was re-run with these changes. Counts are unchanged on
+commons-codec (0), fastjson2 (0), guava (9), spring (83) and the other locally
+measured baseline jars. Generated adversarial suites cover loop forms,
+SSA-contradiction fail-closed behavior and generic constraint inference.
+
 ## Remaining boundaries
 
 - **Kotlin/JVM metadata is not a supported source target.** The external
