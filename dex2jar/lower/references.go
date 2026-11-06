@@ -3,8 +3,10 @@ package lower
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/yaklang/javajive/dex2jar/ir"
+	"github.com/yaklang/javajive/dex2jar/model"
 )
 
 const nullDescriptor = "<null>"
@@ -171,7 +173,10 @@ func (l *methodLowerer) transferReferences(index int, state referenceState) {
 		}
 		return
 	}
-	if _, ok := l.allocationByNew[index]; ok || l.allocationAliasOps[index] {
+	if allocation, ok := l.allocationByNew[index]; ok {
+		if !allocation.Fused {
+			setOne(instruction.Regs[0], allocation.Descriptor)
+		}
 		return
 	}
 	switch {
@@ -239,6 +244,27 @@ func (l *methodLowerer) checkArrayDescriptors(instruction *ir.Instruction, descr
 	return nil
 }
 
+// fileHierarchyCache indexes one DEX file's classes once; inspect lowers every
+// class of an application, so rebuilding the graph per method would be quadratic.
+var fileHierarchyCache sync.Map // *model.File -> map[string]*model.Class
+
+func classHierarchy(file *model.File) map[string]*model.Class {
+	if cached, ok := fileHierarchyCache.Load(file); ok {
+		return cached.(map[string]*model.Class)
+	}
+	index := make(map[string]*model.Class, len(file.Classes))
+	for position := range file.Classes {
+		class := &file.Classes[position]
+		index[class.Descriptor] = class
+	}
+	fileHierarchyCache.Store(file, index)
+	return index
+}
+
+// maxAssignabilityDepth bounds the ancestry walk so pathological or cyclic
+// hierarchies cannot stall translation.
+const maxAssignabilityDepth = 32
+
 func (l *methodLowerer) provablyAssignable(actual, expected string) bool {
 	if actual == nullDescriptor || actual == expected || expected == "Ljava/lang/Object;" {
 		return true
@@ -255,6 +281,37 @@ func (l *methodLowerer) provablyAssignable(actual, expected string) bool {
 				return true
 			}
 		}
+	}
+	// Follow the application hierarchy declared in the same DEX file. External
+	// ancestors stay unproven, so no unverified assignment is invented.
+	index := classHierarchy(l.file)
+	visited := map[string]bool{actual: true}
+	queue := []string{actual}
+	for depth := 0; depth < maxAssignabilityDepth && len(queue) > 0; depth++ {
+		var next []string
+		for _, current := range queue {
+			class, ok := index[current]
+			if !ok {
+				continue
+			}
+			if class.Superclass == expected {
+				return true
+			}
+			for _, implemented := range class.Interfaces {
+				if implemented == expected {
+					return true
+				}
+			}
+			candidates := append([]string{class.Superclass}, class.Interfaces...)
+			for _, candidate := range candidates {
+				if candidate == "" || visited[candidate] {
+					continue
+				}
+				visited[candidate] = true
+				next = append(next, candidate)
+			}
+		}
+		queue = next
 	}
 	return false
 }

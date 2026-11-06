@@ -26,6 +26,11 @@ type methodLowerer struct {
 	allocationByCtor   map[int]ir.Allocation
 	allocationAliasOps map[int]bool
 	registerDescriptor []string
+
+	// delegationIndex marks this-constructor delegation; field stores that DEX
+	// permits before it are emitted immediately after it.
+	delegationIndex int
+	deferredStores  []int
 }
 
 func (l *methodLowerer) lower() error {
@@ -43,12 +48,15 @@ func (l *methodLowerer) lower() error {
 	for register, category := range l.method.RegisterTypes {
 		l.registerDescriptor[register] = category.Descriptor
 	}
+	l.delegationIndex = -1
 	l.allocationAliasOps = make(map[int]bool)
 	for _, allocation := range l.method.Allocations {
 		l.allocationByNew[allocation.NewInstruction] = allocation
 		l.allocationByCtor[allocation.Constructor] = allocation
-		for index := allocation.NewInstruction + 1; index < allocation.Constructor; index++ {
-			l.allocationAliasOps[index] = true
+		if allocation.Fused {
+			for index := allocation.NewInstruction + 1; index < allocation.Constructor; index++ {
+				l.allocationAliasOps[index] = true
+			}
 		}
 		if err := l.validateAllocationCFG(allocation); err != nil {
 			return err
@@ -70,15 +78,29 @@ func (l *methodLowerer) lower() error {
 		return err
 	}
 	l.prepareAddressLabels()
+	deferred := make(map[int]bool, len(l.deferredStores))
+	for _, index := range l.deferredStores {
+		deferred[index] = true
+	}
 	for _, block := range l.method.Blocks {
 		l.code.Mark(l.labels[block.Start])
 		for _, index := range block.Instructions {
 			instruction := &l.method.Instructions[index]
+			if deferred[index] {
+				continue
+			}
 			if label := l.addressLabels[instruction.Offset]; label != nil && label != l.labels[block.Start] {
 				l.code.Mark(label)
 			}
 			if err := l.emitInstruction(index); err != nil {
 				return err
+			}
+			if index == l.delegationIndex {
+				for _, store := range l.deferredStores {
+					if err := l.emitInstruction(store); err != nil {
+						return err
+					}
+				}
 			}
 		}
 	}
@@ -140,7 +162,9 @@ func (l *methodLowerer) emitDebug() error {
 	}
 	for _, position := range debug.Positions {
 		label := l.addressLabels[position.Address]
-		if label == nil {
+		if label == nil || position.Line == 0 {
+			// R8 emits line 0 for synthetic code; a JVM LineNumberTable cannot
+			// represent it, so the entry is dropped instead of failing the class.
 			continue
 		}
 		l.code.Line(label, uint16(position.Line))
@@ -259,11 +283,20 @@ func (l *methodLowerer) emitPrologue() error {
 
 func (l *methodLowerer) emitInstruction(index int) error {
 	instruction := &l.method.Instructions[index]
-	if _, ok := l.allocationByNew[index]; ok || l.allocationAliasOps[index] {
+	if allocation, ok := l.allocationByNew[index]; ok {
+		if allocation.Fused {
+			return nil
+		}
+		return l.emitAllocationNew(instruction, allocation)
+	}
+	if l.allocationAliasOps[index] {
 		return nil
 	}
 	if allocation, ok := l.allocationByCtor[index]; ok {
-		return l.emitAllocation(instruction, allocation)
+		if allocation.Fused {
+			return l.emitAllocationFused(instruction, allocation)
+		}
+		return l.emitAllocationCtor(instruction, allocation)
 	}
 	switch {
 	case instruction.Opcode == 0x00:
@@ -537,7 +570,26 @@ func (l *methodLowerer) emitArray(instruction *ir.Instruction) error {
 	return nil
 }
 
-func (l *methodLowerer) emitAllocation(instruction *ir.Instruction, allocation ir.Allocation) error {
+// emitAllocationNew allocates at the original new-instance position and keeps
+// the uninitialized reference in its register home. Instructions that d8 emits
+// between allocation and initialization then keep their original order.
+func (l *methodLowerer) emitAllocationNew(instruction *ir.Instruction, allocation ir.Allocation) error {
+	name, err := objectInternalName(allocation.Descriptor)
+	if err != nil {
+		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	classIndex, err := l.builder.Pool().Class(name)
+	if err != nil {
+		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	l.code.CP(classfilebuilder.NEW, classIndex)
+	l.store(instruction.Regs[0])
+	return nil
+}
+
+// emitAllocationFused emits allocation and initialization as one sequence. This
+// keeps the historical, more readable shape whenever nothing sits between them.
+func (l *methodLowerer) emitAllocationFused(instruction *ir.Instruction, allocation ir.Allocation) error {
 	name, err := objectInternalName(allocation.Descriptor)
 	if err != nil {
 		return methodDiagnostic(l.method.Context, instruction, "", err)
@@ -567,6 +619,31 @@ func (l *methodLowerer) emitAllocation(instruction *ir.Instruction, allocation i
 		l.load(first)
 		l.store(register)
 	}
+	return nil
+}
+
+// emitAllocationCtor performs the deferred constructor call on the receiver that
+// still holds the uninitialized reference.
+func (l *methodLowerer) emitAllocationCtor(instruction *ir.Instruction, allocation ir.Allocation) error {
+	name, err := objectInternalName(allocation.Descriptor)
+	if err != nil {
+		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	callee := l.file.Methods[instruction.Index]
+	proto := l.file.Protos[callee.ProtoIndex]
+	descriptor, err := methodDescriptor(proto)
+	if err != nil {
+		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	methodIndex, err := l.builder.Pool().Methodref(name, "<init>", descriptor)
+	if err != nil {
+		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	l.load(instruction.Regs[0])
+	for _, register := range instruction.Regs[1:] {
+		l.load(register)
+	}
+	l.code.CP(classfilebuilder.INVOKESPECIAL, methodIndex)
 	return nil
 }
 
@@ -730,7 +807,10 @@ func validateFieldOpcode(opcode byte, descriptor string, kind ir.CategoryKind) e
 	}
 	want := map[byte]string{0x52: "I", 0x54: "reference", 0x55: "Z", 0x56: "B", 0x57: "C", 0x58: "S"}[family]
 	if want == "reference" {
-		if kind != ir.Reference {
+		// An allocation is reference-typed even while the verifier still tracks
+		// it as uninitialized; allocation validation guarantees the constructor
+		// runs before any such use.
+		if kind != ir.Reference && kind != ir.Uninitialized {
 			return fmt.Errorf("object field opcode does not match descriptor %q", descriptor)
 		}
 		return nil

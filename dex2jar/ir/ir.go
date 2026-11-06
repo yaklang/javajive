@@ -100,6 +100,10 @@ type Allocation struct {
 	NewInstruction int
 	Constructor    int
 	AliasRegisters []uint16
+	// Fused reports that only alias moves separate allocation from
+	// initialization, so the translator may emit one fused new/dup/invokespecial
+	// sequence instead of keeping the uninitialized value in a local.
+	Fused bool
 }
 
 // Method is the validated intermediate representation of one DEX method.

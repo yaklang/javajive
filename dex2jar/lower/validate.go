@@ -90,14 +90,31 @@ func (l *methodLowerer) validateFusedConstructor(instruction *ir.Instruction, al
 
 func (l *methodLowerer) validateDelegationShape(delegation int, thisRegister uint16) error {
 	delegationOffset := l.method.Instructions[delegation].Offset
+	l.delegationIndex = delegation
 	for index := range l.method.Instructions {
 		instruction := &l.method.Instructions[index]
 		if index < delegation {
 			if instruction.Target >= 0 {
 				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("branch before this initialization is unsupported"))
 			}
+			usesThis := false
 			for _, register := range instruction.Regs {
 				if register == thisRegister {
+					usesThis = true
+					break
+				}
+			}
+			if usesThis {
+				switch {
+				case instruction.Opcode >= 0x07 && instruction.Opcode <= 0x09 && instruction.Regs[1] == thisRegister:
+					// Aliasing uninitialized this is inert; the alias is only
+					// meaningful once it is used, which is checked separately.
+				case instruction.Opcode >= 0x59 && instruction.Opcode <= 0x5f && instruction.Regs[1] == thisRegister:
+					// DEX permits field stores on uninitialized this before
+					// super(). The JVM does not, so these move after delegation;
+					// the super constructor cannot observe subclass fields.
+					l.deferredStores = append(l.deferredStores, index)
+				default:
 					return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("uninitialized this v%d is used before constructor delegation", thisRegister))
 				}
 			}
@@ -239,11 +256,17 @@ func (l *methodLowerer) validateDefiniteAssignments() error {
 
 func (l *methodLowerer) registerEffects(index int) (uses, definitions []uint16) {
 	instruction := l.method.Instructions[index]
-	if _, ok := l.allocationByNew[index]; ok || l.allocationAliasOps[index] {
-		return nil, nil
+	if allocation, ok := l.allocationByNew[index]; ok {
+		if allocation.Fused {
+			return nil, nil
+		}
+		return nil, []uint16{allocation.AliasRegisters[0]}
 	}
 	if allocation, ok := l.allocationByCtor[index]; ok {
-		return append([]uint16(nil), instruction.Regs[1:]...), append([]uint16(nil), allocation.AliasRegisters...)
+		if allocation.Fused {
+			return append([]uint16(nil), instruction.Regs[1:]...), append([]uint16(nil), allocation.AliasRegisters...)
+		}
+		return append([]uint16(nil), instruction.Regs...), nil
 	}
 	switch {
 	case instruction.Opcode == 0x00 || instruction.Opcode == 0x0e || instruction.Opcode >= 0x28 && instruction.Opcode <= 0x2a:

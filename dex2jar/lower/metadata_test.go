@@ -432,3 +432,256 @@ func TestLowerEmitsClassMetadataAndArrayOwnerInvoke(t *testing.T) {
 	verifyWithJVM(t, raw, "dex.Outer$Inner")
 	_ = clone
 }
+
+// constructorStoreFixture mirrors the d8 shape where an anonymous-class
+// constructor stores its captured outer instance before calling super().
+func constructorStoreFixture() (*model.File, *model.Class) {
+	const owner = "Ldex/CtorStore;"
+	protos := []model.Proto{
+		{ReturnType: "V", Parameters: []string{"I"}, ParameterTypes: []uint32{0}},
+		{ReturnType: "I"},
+		{ReturnType: "V"},
+	}
+	methods := []model.MethodID{
+		{Class: "Ljava/lang/Object;", Name: "<init>", ProtoIndex: 2},
+		{Class: owner, Name: "<init>", ProtoIndex: 0},
+		{Class: owner, Name: "value", ProtoIndex: 1},
+	}
+	field := model.FieldID{Class: owner, Name: "value", Type: "I"}
+	file := &model.File{
+		Entry:   "classes.dex",
+		Types:   []model.Type{{Descriptor: "I"}, {Descriptor: owner}, {Descriptor: "Ljava/lang/Object;"}},
+		Protos:  protos,
+		Fields:  []model.FieldID{field},
+		Methods: methods,
+	}
+	class := &model.Class{
+		Descriptor:     owner,
+		Superclass:     "Ljava/lang/Object;",
+		AccessFlags:    dexPublic,
+		InstanceFields: []model.EncodedField{{FieldIndex: 0, AccessFlags: dexPublic, Field: field}},
+		DirectMethods: []model.EncodedMethod{
+			{
+				MethodIndex: 1,
+				AccessFlags: dexPublic | dexConstructor,
+				Method:      methods[1],
+				Code: &model.Code{RegistersSize: 2, InsSize: 2, OutsSize: 1, Instructions: []uint16{
+					0x0159, 0x0000, // iput v1, v0, value  (before delegation)
+					0x1070, 0x0000, 0x0000, // invoke-direct {v0}, Object.<init>()
+					0x000e, // return-void
+				}},
+			},
+			{
+				MethodIndex: 2,
+				AccessFlags: dexPublic,
+				Method:      methods[2],
+				Code: &model.Code{RegistersSize: 2, InsSize: 1, Instructions: []uint16{
+					0x1052, 0x0000, // iget v0, v1, value
+					0x000f, // return v0
+				}},
+			},
+		},
+	}
+	return file, class
+}
+
+func TestLowerMovesPreDelegationFieldStoreAfterSuper(t *testing.T) {
+	file, class := constructorStoreFixture()
+	raw, err := Class(file, class)
+	if err != nil {
+		t.Fatalf("Class: %v", err)
+	}
+	if _, err := javaclassparser.Parse(raw); err != nil {
+		t.Fatalf("parse generated class: %v", err)
+	}
+	javac, javacErr := exec.LookPath("javac")
+	java, javaErr := exec.LookPath("java")
+	if javacErr != nil || javaErr != nil {
+		t.Skip("javac/java unavailable")
+	}
+	dir := t.TempDir()
+	classPath := filepath.Join(dir, "dex", "CtorStore.class")
+	if err := os.MkdirAll(filepath.Dir(classPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(classPath, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	driver := filepath.Join(dir, "Driver.java")
+	source := `public class Driver {
+    public static void main(String[] args) {
+        dex.CtorStore store = new dex.CtorStore(7);
+        if (store.value() != 7) throw new AssertionError("constructor field store lost");
+    }
+}`
+	if err := os.WriteFile(driver, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command(javac, "-cp", dir, "-d", dir, driver).CombinedOutput(); err != nil {
+		t.Fatalf("javac driver: %v\n%s", err, output)
+	}
+	if output, err := exec.Command(java, "-Xverify:all", "-cp", dir, "Driver").CombinedOutput(); err != nil {
+		t.Fatalf("driver execution: %v\n%s", err, output)
+	}
+}
+
+// interleavedAllocationFixture mirrors d8 output where argument computation sits
+// between new-instance and the constructor call.
+func interleavedAllocationFixture() (*model.File, *model.Class) {
+	const owner = "Ldex/Interleaved;"
+	protos := []model.Proto{
+		{ReturnType: "V", Parameters: []string{"I"}, ParameterTypes: []uint32{1}},
+		{ReturnType: "I"},
+		{ReturnType: "V"},
+	}
+	methods := []model.MethodID{
+		{Class: "Ljava/lang/Object;", Name: "<init>", ProtoIndex: 2},
+		{Class: owner, Name: "<init>", ProtoIndex: 0},
+		{Class: owner, Name: "value", ProtoIndex: 1},
+	}
+	value := model.FieldID{Class: owner, Name: "value", Type: "I"}
+	instance := model.FieldID{Class: owner, Name: "INSTANCE", Type: owner}
+	file := &model.File{
+		Entry:   "classes.dex",
+		Types:   []model.Type{{Descriptor: owner}, {Descriptor: "I"}, {Descriptor: "Ljava/lang/Object;"}},
+		Protos:  protos,
+		Fields:  []model.FieldID{value, instance},
+		Methods: methods,
+	}
+	class := &model.Class{
+		Descriptor:     owner,
+		Superclass:     "Ljava/lang/Object;",
+		AccessFlags:    dexPublic,
+		InstanceFields: []model.EncodedField{{FieldIndex: 0, AccessFlags: dexPublic, Field: value}},
+		StaticFields:   []model.EncodedField{{FieldIndex: 1, AccessFlags: dexPublic | dexStatic, Field: instance}},
+		DirectMethods: []model.EncodedMethod{
+			{
+				MethodIndex: 1,
+				AccessFlags: dexPublic | dexConstructor,
+				Method:      methods[1],
+				Code: &model.Code{RegistersSize: 2, InsSize: 2, OutsSize: 1, Instructions: []uint16{
+					0x1070, 0x0000, 0x0000, // invoke-direct {v0}, Object.<init>()
+					0x0159, 0x0000, // iput v1, v0, value
+					0x000e,
+				}},
+			},
+			{
+				MethodIndex: 2,
+				AccessFlags: dexPublic,
+				Method:      methods[2],
+				Code: &model.Code{RegistersSize: 2, InsSize: 1, Instructions: []uint16{
+					0x1052, 0x0000, 0x000f,
+				}},
+			},
+			{
+				AccessFlags: dexStatic | dexConstructor,
+				Method:      model.MethodID{Class: owner, Name: "<clinit>", ProtoIndex: 2},
+				Code: &model.Code{RegistersSize: 2, OutsSize: 2, Instructions: []uint16{
+					0x0022, 0x0000, // new-instance v0, Ldex/Interleaved;
+					0x0112,                 // const/4 v1, #0
+					0x2070, 0x0001, 0x0010, // invoke-direct {v0, v1}, <init>(I)V
+					0x0069, 0x0001, // sput-object v0, INSTANCE
+					0x000e,
+				}},
+			},
+		},
+	}
+	return file, class
+}
+
+func TestLowerInterleavedAllocationKeepsArgumentOrder(t *testing.T) {
+	file, class := interleavedAllocationFixture()
+	raw, err := Class(file, class)
+	if err != nil {
+		t.Fatalf("Class: %v", err)
+	}
+	if _, err := javaclassparser.Parse(raw); err != nil {
+		t.Fatalf("parse generated class: %v", err)
+	}
+	javac, javacErr := exec.LookPath("javac")
+	java, javaErr := exec.LookPath("java")
+	if javacErr != nil || javaErr != nil {
+		t.Skip("javac/java unavailable")
+	}
+	dir := t.TempDir()
+	classPath := filepath.Join(dir, "dex", "Interleaved.class")
+	if err := os.MkdirAll(filepath.Dir(classPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(classPath, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	driver := filepath.Join(dir, "Driver.java")
+	source := `public class Driver {
+    public static void main(String[] args) {
+        if (dex.Interleaved.INSTANCE == null) throw new AssertionError("missing instance");
+        if (dex.Interleaved.INSTANCE.value() != 0) throw new AssertionError("bad value");
+    }
+}`
+	if err := os.WriteFile(driver, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command(javac, "-cp", dir, "-d", dir, driver).CombinedOutput(); err != nil {
+		t.Fatalf("javac driver: %v\n%s", err, output)
+	}
+	if output, err := exec.Command(java, "-Xverify:all", "-cp", dir, "Driver").CombinedOutput(); err != nil {
+		t.Fatalf("driver execution: %v\n%s", err, output)
+	}
+}
+
+// hierarchyFixture declares Child extends Mid extends Base inside one DEX file
+// and calls a Base method on a Child receiver.
+func hierarchyFixture() (*model.File, *model.Class) {
+	const child, mid, base = "Ldex/Child;", "Ldex/Mid;", "Ldex/Base;"
+	protos := []model.Proto{{ReturnType: "V"}}
+	methods := []model.MethodID{
+		{Class: child, Name: "<init>", ProtoIndex: 0},
+		{Class: base, Name: "ping", ProtoIndex: 0},
+	}
+	file := &model.File{
+		Entry:   "classes.dex",
+		Types:   []model.Type{{Descriptor: child}, {Descriptor: base}},
+		Protos:  protos,
+		Methods: methods,
+		Classes: []model.Class{
+			{Descriptor: child, Superclass: mid, AccessFlags: dexPublic},
+			{Descriptor: mid, Superclass: base, AccessFlags: dexPublic},
+			{Descriptor: base, Superclass: "Ljava/lang/Object;", AccessFlags: dexPublic},
+		},
+	}
+	class := &file.Classes[0]
+	class.DirectMethods = []model.EncodedMethod{
+		{
+			AccessFlags: dexPublic | dexConstructor,
+			Method:      methods[0],
+			Code: &model.Code{RegistersSize: 1, InsSize: 1, OutsSize: 1, Instructions: []uint16{
+				0x1070, 0x0000, 0x0000, // invoke-direct {v0}, Child.<init>()
+				0x000e,
+			}},
+		},
+		{
+			AccessFlags: dexPublic | dexStatic,
+			Method:      model.MethodID{Class: child, Name: "use", ProtoIndex: 0},
+			Code: &model.Code{RegistersSize: 1, OutsSize: 1, Instructions: []uint16{
+				0x0022, 0x0000, // new-instance v0, Ldex/Child;
+				0x1070, 0x0000, 0x0000, // invoke-direct {v0}, Child.<init>()
+				0x106e, 0x0001, 0x0000, // invoke-virtual {v0}, Base.ping()
+				0x000e,
+			}},
+		},
+	}
+	// The child constructor must resolve through the same method table.
+	methods[0] = model.MethodID{Class: child, Name: "<init>", ProtoIndex: 0}
+	return file, class
+}
+
+func TestLowerUsesApplicationHierarchyForAssignability(t *testing.T) {
+	file, class := hierarchyFixture()
+	raw, err := Class(file, class)
+	if err != nil {
+		t.Fatalf("Class: %v (application hierarchy not used)", err)
+	}
+	if _, err := javaclassparser.Parse(raw); err != nil {
+		t.Fatalf("parse generated class: %v", err)
+	}
+}

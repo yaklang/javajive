@@ -335,6 +335,7 @@ func validateAllocation(method *Method, file *model.File, newIndex int) (Allocat
 	}
 	aliases := map[uint16]bool{newInstruction.Regs[0]: true}
 	constructor := -1
+	interleaved := false
 	for index := newIndex + 1; index < len(method.Instructions); index++ {
 		instruction := method.Instructions[index]
 		if instruction.Opcode >= 0x07 && instruction.Opcode <= 0x09 && aliases[instruction.Regs[1]] {
@@ -349,7 +350,15 @@ func validateAllocation(method *Method, file *model.File, newIndex int) (Allocat
 			constructor = index
 			break
 		}
-		return Allocation{}, diagnostic(method.Context, &instruction, "", fmt.Errorf("unsafe uninitialized allocation use or escape before constructor"))
+		// Any other instruction may sit between allocation and initialization as
+		// long as it never touches the uninitialized value: d8 interleaves
+		// argument computation here.
+		interleaved = true
+		for _, register := range instruction.Regs {
+			if aliases[register] {
+				return Allocation{}, diagnostic(method.Context, &instruction, "", fmt.Errorf("unsafe uninitialized allocation use or escape before constructor"))
+			}
+		}
 	}
 	if constructor < 0 {
 		return Allocation{}, diagnostic(method.Context, &newInstruction, "", fmt.Errorf("new-instance has no adjacent safe constructor invocation"))
@@ -359,7 +368,11 @@ func validateAllocation(method *Method, file *model.File, newIndex int) (Allocat
 		aliasRegisters = append(aliasRegisters, register)
 	}
 	sort.Slice(aliasRegisters, func(i, j int) bool { return aliasRegisters[i] < aliasRegisters[j] })
-	return Allocation{ID: newInstruction.Offset + 1, Descriptor: descriptor, NewInstruction: newIndex, Constructor: constructor, AliasRegisters: aliasRegisters}, nil
+	return Allocation{
+		ID: newInstruction.Offset + 1, Descriptor: descriptor,
+		NewInstruction: newIndex, Constructor: constructor,
+		AliasRegisters: aliasRegisters, Fused: !interleaved,
+	}, nil
 }
 
 func instructionConstraints(method *Method, file *model.File, index int, current []Category, allocations []Allocation) (map[uint16]Category, error) {
