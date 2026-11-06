@@ -3879,16 +3879,18 @@ func NewForStatement(subStatements []Statement) *ForStatement {
 	}
 }
 func (f *ForStatement) String(funcCtx *class_context.ClassContext) string {
-	datas := []string{}
-	datas = append(datas, f.InitVar.String(funcCtx))
-	datas = append(datas, f.Condition.String(funcCtx))
-	datas = append(datas, f.EndExp.String(funcCtx))
-	statementStr := []string{}
-	for _, statement := range f.SubStatements {
-		statementStr = append(statementStr, statement.String(funcCtx))
+	init, condition, update := "", "", ""
+	if f.InitVar != nil {
+		init = f.InitVar.String(funcCtx)
 	}
-	s := fmt.Sprintf("for(%s; %s; %s) {\n%s\n}", datas[0], datas[1], datas[2], strings.Join(statementStr, "\n"))
-	return s
+	if f.Condition != nil && f.Condition.Condition != nil {
+		condition = f.Condition.Condition.String(funcCtx)
+	}
+	if f.EndExp != nil {
+		update = f.EndExp.String(funcCtx)
+	}
+	datas := []string{init, condition, update}
+	return fmt.Sprintf("for(%s; %s; %s) {\n%s\n}", datas[0], datas[1], datas[2], StatementsString(f.SubStatements, funcCtx))
 }
 
 func NewArrayMemberAssignStatement(m *values.JavaArrayMember, value values.JavaValue) *AssignStatement {

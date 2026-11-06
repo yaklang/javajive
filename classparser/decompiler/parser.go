@@ -195,5 +195,6 @@ func ParseBytesCode(decompiler *core.Decompiler) (res []statements.Statement, er
 	// continue). The pass is a strict subset of the JLS reachability rules, so it
 	// leaves already-correct methods untouched.
 	sts = rewriter.PruneUnreachableStatements(sts)
+	sts = rewriter.NormalizeLoopForms(sts)
 	return sts, nil
 }
