@@ -231,7 +231,9 @@ static field read 生成非法语句等问题。
 | StackCarryReference | 各边相同的 static Object read | 恢复 | recovered, 15, 91 |
 | StackCarryLocalRef | 各边相同的局部引用 | 恢复 | recovered, 15, 89 |
 | StackCarryLongSame | 各边相同的 long 常量 | 恢复 | recovered, 11, 72 |
+| StackCarryTwoWords | 两个 int word 各边相同 | 恢复 | recovered, 12, 75 |
 | StackCarryStaleRef | 载入后覆盖同一局部槽再跨界 | fail-closed | fail-closed-stub，无静默错误 |
+| StackCarryTwoWordsDiffering | 两个 word 中较低者各边不同 | fail-closed | fail-closed-stub，无静默错误 |
 | StackCarryDifferingInt | 不同 int 常量 merge，无 phi | fail-closed | fail-closed-stub，无静默错误 |
 | StackCarryLong | 不同 long 常量 merge，无 phi | fail-closed | fail-closed-stub，无静默错误 |
 | StackCarryReordered | field read 跨越修改同一字段的 call | fail-closed | fail-closed-stub，无静默错误 |
@@ -242,7 +244,7 @@ static field read 生成非法语句等问题。
 
 第二轮对抗生成先确认了 `StackCarryDifferingInt` / `StackCarryLong` 在仅有
 carrier 证书时会静默 miscompile（目标 case 固定使用第一条入边的常量）；
-merge 证书加入后两者精确降级为 stub。五个 fail-closed 用例共同确认：放宽
+merge 证书加入后两者精确降级为 stub。六个 fail-closed 用例共同确认：放宽
 空栈限制不会把“可编译但语义漂移”的源码放出去。
 
 同一轮还将自然循环的 do-while(true) 形式规范化为 `while`，因此 irreducible

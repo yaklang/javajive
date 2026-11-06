@@ -992,6 +992,81 @@ func buildStackCarryStaleRef(class *cf.Class) error {
 	})
 }
 
+// Two int words cross every boundary with equal values on all paths. The
+// dispatcher must preserve both words, not just the top one.
+func buildStackCarryTwoWords(class *cf.Class) error {
+	return addRun(class, func(code *cf.Code) error {
+		a, b, exit := code.NewLabel(), code.NewLabel(), code.NewLabel()
+		if err := initAccum(class, code); err != nil {
+			return err
+		}
+		code.Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.Emit(cf.ICONST_1).Emit(cf.ICONST_2)
+		code.Load(cf.IntLocal, 0).Branch(cf.IFEQ, a).Branch(cf.GOTO, b)
+		code.Mark(a)
+		code.Store(cf.IntLocal, 4)
+		code.Store(cf.IntLocal, 5)
+		code.Load(cf.IntLocal, 3).Load(cf.IntLocal, 4).Emit(cf.IADD)
+		code.Load(cf.IntLocal, 5).Emit(cf.IADD).Store(cf.IntLocal, 3)
+		if err := addConst(class, code, 3, 1); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.Emit(cf.ICONST_1).Emit(cf.ICONST_2).Branch(cf.GOTO, b)
+		code.Mark(b)
+		code.Store(cf.IntLocal, 4)
+		code.Store(cf.IntLocal, 5)
+		code.Load(cf.IntLocal, 3).Load(cf.IntLocal, 4).Emit(cf.IADD)
+		code.Load(cf.IntLocal, 5).Emit(cf.IADD).Store(cf.IntLocal, 3)
+		if err := addConst(class, code, 3, 2); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.Emit(cf.ICONST_1).Emit(cf.ICONST_2).Branch(cf.GOTO, a)
+		code.Mark(exit)
+		returnAcc(code)
+		return nil
+	})
+}
+
+// The lower of two carried words differs between the external edge and the
+// backedge. No top-word phi can make the lower word safe, so the shape must
+// fail closed instead of reusing the first path's value.
+func buildStackCarryTwoWordsDiffering(class *cf.Class) error {
+	return addRun(class, func(code *cf.Code) error {
+		a, b, exit := code.NewLabel(), code.NewLabel(), code.NewLabel()
+		if err := initAccum(class, code); err != nil {
+			return err
+		}
+		code.Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.Emit(cf.ICONST_0).Emit(cf.ICONST_2)
+		code.Load(cf.IntLocal, 0).Branch(cf.IFEQ, a).Branch(cf.GOTO, b)
+		code.Mark(a)
+		code.Store(cf.IntLocal, 4)
+		code.Store(cf.IntLocal, 5)
+		code.Load(cf.IntLocal, 3).Load(cf.IntLocal, 4).Emit(cf.IADD)
+		code.Load(cf.IntLocal, 5).Emit(cf.IADD).Store(cf.IntLocal, 3)
+		if err := addConst(class, code, 3, 1); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.Emit(cf.ICONST_1).Emit(cf.ICONST_2).Branch(cf.GOTO, b)
+		code.Mark(b)
+		code.Store(cf.IntLocal, 4)
+		code.Store(cf.IntLocal, 5)
+		code.Load(cf.IntLocal, 3).Load(cf.IntLocal, 4).Emit(cf.IADD)
+		code.Load(cf.IntLocal, 5).Emit(cf.IADD).Store(cf.IntLocal, 3)
+		if err := addConst(class, code, 3, 2); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.Emit(cf.ICONST_1).Emit(cf.ICONST_2).Branch(cf.GOTO, a)
+		code.Mark(exit)
+		returnAcc(code)
+		return nil
+	})
+}
+
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
@@ -1017,6 +1092,8 @@ func cases() []evalCase {
 		{"StackCarryLocalRef", expectRecovered, buildStackCarryLocalRef},
 		{"StackCarryStaleRef", expectFailClosed, buildStackCarryStaleRef},
 		{"StackCarryLongSame", expectRecovered, buildStackCarryLongSame},
+		{"StackCarryTwoWords", expectRecovered, buildStackCarryTwoWords},
+		{"StackCarryTwoWordsDiffering", expectFailClosed, buildStackCarryTwoWordsDiffering},
 		{"StackCarryDifferingInt", expectFailClosed, buildStackCarryDifferingInt},
 		{"StackCarryLong", expectFailClosed, buildStackCarryLong},
 		{"StackCarryReordered", expectFailClosed, buildStackCarryReordered},

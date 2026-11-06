@@ -201,8 +201,9 @@ Add a native, pure-Go DEX/APK-to-JAR path as a strict first vertical slice.
   Carried constants, static reads, helper calls, reference values and equal
   category-2 constants now recover, while a field read carried across a
   mutating call and unequal literal merges fail closed instead of silently
-  changing behavior. The adversarial matrix adds the recovered shapes and five
-  fail-closed barriers, including a stale local-slot overwrite.
+  changing behavior. The adversarial matrix adds the recovered shapes and six
+  fail-closed barriers, including a stale local-slot overwrite and a multi-word
+  merge with a differing lower word.
 - Add generated loop, SSA-contradiction and generic-constraint regression tests;
   the 38-JAR tree profile remains unchanged on commons-codec, fastjson2, guava
   and spring.
