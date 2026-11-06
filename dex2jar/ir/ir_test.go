@@ -385,7 +385,7 @@ func TestBuildValidatesTargetsMoveResultRegistersAndUnsupported(t *testing.T) {
 				in.Method.Code.Tries = []model.Try{{}}
 				return in
 			}(),
-			want: "try/catch is unsupported",
+			want: "empty protected range",
 		},
 	}
 	for _, test := range cases {

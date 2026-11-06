@@ -271,69 +271,11 @@ func (l *methodLowerer) validateDefiniteAssignments() error {
 	return nil
 }
 
+// registerEffects comes from the IR's single use/define table so lowering,
+// liveness and category analysis cannot drift apart.
 func (l *methodLowerer) registerEffects(index int) (uses, definitions []uint16) {
-	instruction := l.method.Instructions[index]
-	if allocation, ok := l.allocationByNew[index]; ok {
-		if allocation.Fused {
-			return nil, nil
-		}
-		return nil, []uint16{allocation.AliasRegisters[0]}
-	}
-	if allocation, ok := l.allocationByCtor[index]; ok {
-		if allocation.Fused {
-			return append([]uint16(nil), instruction.Regs[1:]...), append([]uint16(nil), allocation.AliasRegisters...)
-		}
-		return append([]uint16(nil), instruction.Regs...), nil
-	}
-	switch {
-	case instruction.Opcode == 0x00 || instruction.Opcode == 0x0e || instruction.Opcode >= 0x28 && instruction.Opcode <= 0x2a:
-		return nil, nil
-	case instruction.Opcode >= 0x01 && instruction.Opcode <= 0x03 || instruction.Opcode >= 0x07 && instruction.Opcode <= 0x09:
-		return []uint16{instruction.Regs[1]}, []uint16{instruction.Regs[0]}
-	case instruction.Opcode == 0x0a || instruction.Opcode == 0x0c:
-		return nil, []uint16{instruction.Regs[0]}
-	case instruction.Opcode == 0x0f || instruction.Opcode == 0x11 || instruction.Opcode == 0x27:
-		return []uint16{instruction.Regs[0]}, nil
-	case instruction.Opcode >= 0x12 && instruction.Opcode <= 0x1c || instruction.Opcode == 0x22:
-		return nil, []uint16{instruction.Regs[0]}
-	case instruction.Opcode == 0x1f:
-		return []uint16{instruction.Regs[0]}, []uint16{instruction.Regs[0]}
-	case instruction.Opcode == 0x20 || instruction.Opcode == 0x21 || instruction.Opcode == 0x23:
-		return []uint16{instruction.Regs[1]}, []uint16{instruction.Regs[0]}
-	case instruction.Opcode >= 0x32 && instruction.Opcode <= 0x37:
-		return append([]uint16(nil), instruction.Regs...), nil
-	case instruction.Opcode >= 0x38 && instruction.Opcode <= 0x3d:
-		return []uint16{instruction.Regs[0]}, nil
-	case instruction.Opcode == 0x24 || instruction.Opcode == 0x25:
-		// filled-new-array results are assigned by the following move-result.
-		return append([]uint16(nil), instruction.Regs...), nil
-	case instruction.Opcode >= 0x44 && instruction.Opcode <= 0x4a:
-		return []uint16{instruction.Regs[1], instruction.Regs[2]}, []uint16{instruction.Regs[0]}
-	case instruction.Opcode >= 0x4b && instruction.Opcode <= 0x51:
-		return []uint16{instruction.Regs[0], instruction.Regs[1], instruction.Regs[2]}, nil
-	case instruction.Opcode >= 0x52 && instruction.Opcode <= 0x58:
-		return []uint16{instruction.Regs[1]}, []uint16{instruction.Regs[0]}
-	case instruction.Opcode >= 0x59 && instruction.Opcode <= 0x5f:
-		return []uint16{instruction.Regs[0], instruction.Regs[1]}, nil
-	case instruction.Opcode >= 0x60 && instruction.Opcode <= 0x66:
-		return nil, []uint16{instruction.Regs[0]}
-	case instruction.Opcode >= 0x67 && instruction.Opcode <= 0x6d:
-		return []uint16{instruction.Regs[0]}, nil
-	case isInvoke(instruction.Opcode):
-		return append([]uint16(nil), instruction.Regs...), nil
-	case instruction.Opcode == 0x7b || instruction.Opcode == 0x7c || instruction.Opcode >= 0x8d && instruction.Opcode <= 0x8f:
-		return []uint16{instruction.Regs[1]}, []uint16{instruction.Regs[0]}
-	case instruction.Opcode >= 0x90 && instruction.Opcode <= 0x9a:
-		return []uint16{instruction.Regs[1], instruction.Regs[2]}, []uint16{instruction.Regs[0]}
-	case instruction.Opcode >= 0xb0 && instruction.Opcode <= 0xba:
-		return []uint16{instruction.Regs[0], instruction.Regs[1]}, []uint16{instruction.Regs[0]}
-	case instruction.Opcode >= 0xd0 && instruction.Opcode <= 0xe2:
-		return []uint16{instruction.Regs[1]}, []uint16{instruction.Regs[0]}
-	default:
-		return append([]uint16(nil), instruction.Regs...), nil
-	}
+	return l.method.EffectsAt(index)
 }
-
 func boolsEqual(left, right []bool) bool {
 	if len(left) != len(right) {
 		return false

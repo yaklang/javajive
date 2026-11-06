@@ -3,6 +3,8 @@ package ir
 import (
 	"fmt"
 	"sort"
+
+	"github.com/yaklang/javajive/dex2jar/model"
 )
 
 func isGoto(opcode byte) bool { return opcode >= 0x28 && opcode <= 0x2a }
@@ -14,7 +16,69 @@ func isTerminal(opcode byte) bool {
 	return opcode >= 0x0e && opcode <= 0x11 || opcode == 0x27
 }
 
-func buildBlocks(instructions []Instruction, codeUnits uint32, ctx Context) ([]Block, error) {
+// handlerSite is one DEX try item: a protected instruction range and the
+// handlers the verifier may transfer control to.
+type handlerSite struct {
+	start, end uint32
+	targets    []handlerTarget
+}
+
+type handlerTarget struct {
+	address   uint32
+	catchType string
+}
+
+// handlerSites validates the try table and returns its protected ranges.
+func handlerSites(code *model.Code, instructions []Instruction, codeUnits uint32, ctx Context) ([]handlerSite, error) {
+	if code == nil || len(code.Tries) == 0 {
+		return nil, nil
+	}
+	boundary := make(map[uint32]bool, len(instructions))
+	for _, instruction := range instructions {
+		boundary[instruction.Offset] = true
+	}
+	sites := make([]handlerSite, 0, len(code.Tries))
+	for index, try := range code.Tries {
+		start := try.StartAddress
+		end := uint64(start) + uint64(try.InstructionCount)
+		if try.InstructionCount == 0 {
+			return nil, diagnostic(ctx, nil, "try", fmt.Errorf("try item %d has an empty protected range", index))
+		}
+		if end > uint64(codeUnits) {
+			return nil, diagnostic(ctx, nil, "try", fmt.Errorf("try item %d covers [%d,%d), outside code units [0,%d)", index, start, end, codeUnits))
+		}
+		if !boundary[start] {
+			return nil, diagnostic(ctx, nil, "try", fmt.Errorf("try item %d starts at %d, which is not an instruction boundary", index, start))
+		}
+		if uint32(end) != codeUnits && !boundary[uint32(end)] {
+			return nil, diagnostic(ctx, nil, "try", fmt.Errorf("try item %d ends at %d, which is not an instruction boundary", index, end))
+		}
+		site := handlerSite{start: start, end: uint32(end)}
+		for _, handler := range try.Handler.Handlers {
+			if !boundary[handler.Address] {
+				return nil, diagnostic(ctx, nil, "try", fmt.Errorf("try item %d handler address %d is not an instruction boundary", index, handler.Address))
+			}
+			if handler.Type == "" || handler.Type[0] != 'L' || handler.Type[len(handler.Type)-1] != ';' {
+				return nil, diagnostic(ctx, nil, "try", fmt.Errorf("try item %d handler type %q is not an object descriptor", index, handler.Type))
+			}
+			site.targets = append(site.targets, handlerTarget{address: handler.Address, catchType: handler.Type})
+		}
+		if try.Handler.CatchAllAddress != nil {
+			address := *try.Handler.CatchAllAddress
+			if !boundary[address] {
+				return nil, diagnostic(ctx, nil, "try", fmt.Errorf("try item %d catch-all address %d is not an instruction boundary", index, address))
+			}
+			site.targets = append(site.targets, handlerTarget{address: address})
+		}
+		if len(site.targets) == 0 {
+			return nil, diagnostic(ctx, nil, "try", fmt.Errorf("try item %d has no handlers", index))
+		}
+		sites = append(sites, site)
+	}
+	return sites, nil
+}
+
+func buildBlocks(instructions []Instruction, codeUnits uint32, ctx Context, sites []handlerSite) ([]Block, error) {
 	if len(instructions) == 0 {
 		return nil, diagnostic(ctx, nil, "code", fmt.Errorf("empty instruction stream"))
 	}
@@ -23,6 +87,15 @@ func buildBlocks(instructions []Instruction, codeUnits uint32, ctx Context) ([]B
 		byOffset[instruction.Offset] = index
 	}
 	leaders := map[uint32]bool{0: true}
+	for _, site := range sites {
+		leaders[site.start] = true
+		if site.end < codeUnits {
+			leaders[site.end] = true
+		}
+		for _, target := range site.targets {
+			leaders[target.address] = true
+		}
+	}
 	for index, instruction := range instructions {
 		if isBranch(instruction.Opcode) {
 			if instruction.Target < 0 || instruction.Target >= int64(codeUnits) {
@@ -89,6 +162,27 @@ func buildBlocks(instructions []Instruction, codeUnits uint32, ctx Context) ([]B
 				return nil, diagnostic(ctx, &last, "", fmt.Errorf("reachable execution may fall off end of code"))
 			}
 			addSuccessor(block, index+1)
+		}
+	}
+	// Exception dispatch is an edge from every protected block to each handler
+	// entry. Protected ranges align with block boundaries because their start
+	// and end offsets are leaders.
+	handlerBlock := make(map[uint32]int, len(sites))
+	for _, site := range sites {
+		for _, target := range site.targets {
+			blockIndex := blockAt[target.address]
+			handlerBlock[target.address] = blockIndex
+			blocks[blockIndex].Handler = true
+		}
+	}
+	for _, site := range sites {
+		for index := range blocks {
+			if blocks[index].Start < site.start || blocks[index].Start >= site.end {
+				continue
+			}
+			for _, target := range site.targets {
+				addSuccessor(&blocks[index], handlerBlock[target.address])
+			}
 		}
 	}
 	for index := range blocks {

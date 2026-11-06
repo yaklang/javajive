@@ -183,15 +183,16 @@ inputs whose `map_list` proves they carry no call-site, method-handle, or
 hidden-API sections; annotations, debug metadata, and `SourceFile`; non-default
 integer/string static constants; ordinary integer/reference control flow; fields
 and invokes on object and array owners; safely paired `new-instance`/constructor
-initialization; and int, reference, boolean, byte, char, and short arrays
-including `filled-new-array`. Generated class files are parser-tested and
-JVM-verified, including executable branch, field, invoke, constructor, and array
-paths.
+initialization; int, reference, boolean, byte, char, and short arrays including
+`filled-new-array`; register lifetime reuse within one method; and try/catch with
+`move-exception`, typed handlers, and catch-all handlers. Generated class files
+are parser-tested and JVM-verified, including executable branch, field, invoke,
+constructor, array, and exception paths.
 
-Still unsupported: try/catch and monitor operations; float, long, and double
-values or opcodes; `packed-switch`/`sparse-switch` and `fill-array-data`
-payloads; DEX 038+ dynamic invokes and method constants; register lifetime reuse
-within one method; CompactDex; and APK resources or native libraries. APK input
+Still unsupported: monitor operations; float, long, and double values or
+opcodes; `packed-switch`/`sparse-switch` and `fill-array-data` payloads; DEX 038+
+dynamic invokes and method constants; CompactDex; and APK resources or native
+libraries. APK input
 means only canonically named `classes.dex`, `classes2.dex`, ... entries are
 translated. All selected DEX files must succeed transactionally or no JAR is
 produced; use `inspect` to analyze inputs that cross the strict boundary.

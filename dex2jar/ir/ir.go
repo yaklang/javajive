@@ -91,6 +91,9 @@ type Block struct {
 	Successors   []int
 	Predecessors []int
 	Entry        []Category
+	// Handler marks a block entered by the JVM exception dispatcher. Its first
+	// instruction must be move-exception and the exception is on the stack.
+	Handler bool
 }
 
 // Allocation describes a verifier-safe new-instance/constructor pair.

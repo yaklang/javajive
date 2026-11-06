@@ -35,6 +35,9 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 		define(instruction.Regs[0], intCategory)
 	case instruction.Opcode == 0x0c:
 		define(instruction.Regs[0], refCategory)
+	case instruction.Opcode == 0x0d:
+		// The handler entry pushes the thrown exception; move-exception stores it.
+		define(instruction.Regs[0], Category{Kind: Reference, Descriptor: "Ljava/lang/Throwable;"})
 	case instruction.Opcode == 0x0f:
 		use(instruction.Regs[0], intCategory)
 	case instruction.Opcode == 0x11 || instruction.Opcode == 0x27:

@@ -23,7 +23,7 @@ func TestOpcodeTableExhaustiveContract(t *testing.T) {
 		{"nop", "10x", 1, true, true}, {"move", "12x", 1, true, true}, {"move/from16", "22x", 2, true, true}, {"move/16", "32x", 3, true, true},
 		{"move-wide", "12x", 1, false, true}, {"move-wide/from16", "22x", 2, false, true}, {"move-wide/16", "32x", 3, false, true},
 		{"move-object", "12x", 1, true, true}, {"move-object/from16", "22x", 2, true, true}, {"move-object/16", "32x", 3, true, true},
-		{"move-result", "11x", 1, true, true}, {"move-result-wide", "11x", 1, false, true}, {"move-result-object", "11x", 1, true, true}, {"move-exception", "11x", 1, false, true},
+		{"move-result", "11x", 1, true, true}, {"move-result-wide", "11x", 1, false, true}, {"move-result-object", "11x", 1, true, true}, {"move-exception", "11x", 1, true, true},
 		{"return-void", "10x", 1, true, true}, {"return", "11x", 1, true, true}, {"return-wide", "11x", 1, false, true}, {"return-object", "11x", 1, true, true},
 		{"const/4", "11n", 1, true, true}, {"const/16", "21s", 2, true, true}, {"const", "31i", 3, true, true}, {"const/high16", "21h", 2, true, true},
 		{"const-wide/16", "21s", 2, false, true}, {"const-wide/32", "31i", 3, false, true}, {"const-wide", "51l", 5, false, true}, {"const-wide/high16", "21h", 2, false, true},
@@ -100,7 +100,7 @@ func TestOpcodeTableExhaustiveContract(t *testing.T) {
 			}
 		}
 	}
-	if known != 224 || supported != 134 || reserved != 32 {
+	if known != 224 || supported != 135 || reserved != 32 {
 		t.Fatalf("opcode classification known=%d supported=%d reserved=%d", known, supported, reserved)
 	}
 }

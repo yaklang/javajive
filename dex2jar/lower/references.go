@@ -200,6 +200,8 @@ func (l *methodLowerer) transferReferences(index int, state referenceState) {
 		if definition, ok := l.method.DefinitionAt(index); ok && isReferenceKind(definition.Category.Kind) {
 			setOne(instruction.Regs[0], nullDescriptor)
 		}
+	case instruction.Opcode == 0x0d:
+		setOne(instruction.Regs[0], "Ljava/lang/Throwable;")
 	case instruction.Opcode == 0x1a || instruction.Opcode == 0x1b:
 		setOne(instruction.Regs[0], "Ljava/lang/String;")
 	case instruction.Opcode == 0x1c:

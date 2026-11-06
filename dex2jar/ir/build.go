@@ -35,8 +35,15 @@ func Build(in Input) (*Method, error) {
 	if err := validateInstructions(result, in.File); err != nil {
 		return nil, err
 	}
-	result.Blocks, err = buildBlocks(instructions, uint32(len(method.Code.Instructions)), ctx)
+	sites, err := handlerSites(method.Code, instructions, uint32(len(method.Code.Instructions)), ctx)
 	if err != nil {
+		return nil, err
+	}
+	result.Blocks, err = buildBlocks(instructions, uint32(len(method.Code.Instructions)), ctx, sites)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateExceptionEntries(result); err != nil {
 		return nil, err
 	}
 	allocations, err := collectAllocations(result, in.File)
@@ -52,9 +59,6 @@ func Build(in Input) (*Method, error) {
 }
 
 func validateInstructions(method *Method, file *model.File) error {
-	if len(method.Code.Tries) != 0 {
-		return diagnostic(method.Context, nil, "try/catch", fmt.Errorf("try/catch is unsupported"))
-	}
 	registerCount := uint32(method.Code.RegistersSize)
 	for index := range method.Instructions {
 		instruction := &method.Instructions[index]
@@ -279,6 +283,37 @@ func contiguous(registers []uint16) bool {
 func invokeResultCategory(instruction Instruction, file *model.File) (CategoryKind, error) {
 	callee := file.Methods[instruction.Index]
 	return DescriptorCategory(file.Protos[callee.ProtoIndex].ReturnType)
+}
+
+// validateExceptionEntries requires move-exception to open a handler block and
+// every handler block to start with one.
+func validateExceptionEntries(method *Method) error {
+	handlerStarts := make(map[uint32]bool)
+	for index := range method.Blocks {
+		if method.Blocks[index].Handler {
+			handlerStarts[method.Blocks[index].Start] = true
+		}
+	}
+	for index := range method.Instructions {
+		instruction := &method.Instructions[index]
+		if instruction.Opcode != 0x0d {
+			continue
+		}
+		if !handlerStarts[instruction.Offset] {
+			return diagnostic(method.Context, instruction, "", fmt.Errorf("move-exception is only valid as the first instruction of an exception handler"))
+		}
+	}
+	for blockIndex := range method.Blocks {
+		block := &method.Blocks[blockIndex]
+		if !block.Handler {
+			continue
+		}
+		first := method.Instructions[block.Instructions[0]]
+		if first.Opcode != 0x0d {
+			return diagnostic(method.Context, &first, "", fmt.Errorf("exception handler at offset %d does not start with move-exception", block.Start))
+		}
+	}
+	return nil
 }
 
 // collectAllocations validates and indexes every new-instance/constructor pair.
