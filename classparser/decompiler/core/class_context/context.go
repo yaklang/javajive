@@ -916,14 +916,18 @@ func (f *ClassContext) nestedTypeShouldDot(pkg, className string) bool {
 		}
 		return true
 	}
+	// Without the archive-only callback there is no proof that a stdlib outer
+	// class is one of the input's own flat units. SiblingSuperTypes may resolve
+	// JDK classes from ambient metadata, which must not turn Map$Entry into a
+	// flat reference.
+	if isStdlibNestedDottedPackage(pkg) {
+		return true
+	}
 	if f.SiblingSuperTypes != nil {
 		if _, ok := f.SiblingSuperTypes(outerBin); ok {
 			return false
 		}
 	}
-	// The outer class is external. Standard-library nested types are available
-	// under their dotted source name; the kotlin.* shortcut must not override a
-	// sibling lookup when the input archive itself is Kotlin (kotlin-stdlib).
 	return true
 }
 

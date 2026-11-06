@@ -21,13 +21,21 @@ func TestNestedTypeShouldDotPrefersArchiveSiblingLookup(t *testing.T) {
 		t.Fatal("external stdlib nested type was flattened")
 	}
 
-	// Without an archive callback the resolver-only path still keeps the
-	// established behavior: a resolved sibling stays flat.
+	// Without an archive callback a stdlib outer may be an ambient JDK class
+	// rather than an emitted sibling; stdlib names must stay dotted.
 	f.SiblingClassAccessible = nil
-	if f.nestedTypeShouldDot("kotlin", "RequiresOptIn$Level") {
-		t.Fatal("resolved sibling was dotted without an archive callback")
+	if !f.nestedTypeShouldDot("kotlin", "RequiresOptIn$Level") {
+		t.Fatal("stdlib nested type was flattened without an archive callback")
 	}
 	if !f.nestedTypeShouldDot("java.util", "Map$Entry") {
 		t.Fatal("external stdlib nested type was flattened without an archive callback")
+	}
+
+	// A non-stdlib external type may still use the legacy resolver fallback.
+	f.SiblingSuperTypes = func(name string) ([]string, bool) {
+		return nil, name == "example/Outer"
+	}
+	if f.nestedTypeShouldDot("example", "Outer$Inner") {
+		t.Fatal("resolved third-party sibling was dotted without an archive callback")
 	}
 }
