@@ -2,7 +2,6 @@ package ir
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/yaklang/javajive/dex2jar/model"
@@ -45,19 +44,32 @@ func Build(in Input) (*Method, error) {
 	if err != nil {
 		return nil, err
 	}
+	result.exceptionTypes = exceptionTypes(method.Code)
 	if err := validateExceptionEntries(result); err != nil {
 		return nil, err
 	}
-	allocations, err := collectAllocations(result, in.File)
+	allocations, err := candidateAllocations(result, in.File)
 	if err != nil {
 		return nil, err
 	}
 	result.Allocations = allocations
-	result.RegisterTypes, err = analyzeCategories(result, in.File, allocations)
-	if err != nil {
-		return nil, err
+	for pass := 0; pass <= len(result.Instructions)+2; pass++ {
+		result.RegisterTypes, err = analyzeCategories(result, in.File, result.Allocations)
+		if err != nil {
+			return nil, err
+		}
+		changed, err := resolveAllocationSites(result, in.File)
+		if err != nil {
+			return nil, err
+		}
+		if !changed {
+			if err := validateAllocationSites(result, in.File); err != nil {
+				return nil, err
+			}
+			return result, nil
+		}
 	}
-	return result, nil
+	return nil, diagnostic(result.Context, nil, "allocations", fmt.Errorf("allocation site inference did not converge"))
 }
 
 func validateInstructions(method *Method, file *model.File) error {
@@ -336,68 +348,234 @@ func validateExceptionEntries(method *Method) error {
 	return nil
 }
 
-// collectAllocations validates and indexes every new-instance/constructor pair.
-func collectAllocations(method *Method, file *model.File) ([]Allocation, error) {
+// candidateAllocations records every new-instance before the constructor sites
+// are known. The category analysis types the uninitialized values, and
+// resolveAllocationSites then finds the constructor calls that consume them.
+func candidateAllocations(method *Method, file *model.File) ([]Allocation, error) {
 	allocations := make([]Allocation, 0)
 	for index := range method.Instructions {
-		if method.Instructions[index].Opcode != 0x22 {
+		instruction := method.Instructions[index]
+		if instruction.Opcode != 0x22 {
 			continue
 		}
-		allocation, err := validateAllocation(method, file, index)
-		if err != nil {
-			return nil, err
+		descriptor := file.Types[instruction.Index].Descriptor
+		if !strings.HasPrefix(descriptor, "L") {
+			return nil, diagnostic(method.Context, &instruction, "", fmt.Errorf("new-instance type %q is not an object", descriptor))
+		}
+		allocation := Allocation{
+			ID: instruction.Offset + 1, Descriptor: descriptor, NewInstruction: index,
+		}
+		// Seed the first constructor site with a linear scan so the first
+		// category pass already retires the uninitialized aliases. The
+		// category-based discovery below then corrects and extends the set.
+		if site, aliases, fused := seedAllocationSite(method, file, index); site >= 0 {
+			allocation.Constructors = []int{site}
+			allocation.Constructor = site
+			allocation.AliasRegisters = aliases
+			allocation.Fused = fused
 		}
 		allocations = append(allocations, allocation)
 	}
 	return allocations, nil
 }
 
-func validateAllocation(method *Method, file *model.File, newIndex int) (Allocation, error) {
-	newInstruction := method.Instructions[newIndex]
-	descriptor := file.Types[newInstruction.Index].Descriptor
-	if !strings.HasPrefix(descriptor, "L") {
-		return Allocation{}, diagnostic(method.Context, &newInstruction, "", fmt.Errorf("new-instance type %q is not an object", descriptor))
-	}
-	aliases := map[uint16]bool{newInstruction.Regs[0]: true}
-	constructor := -1
+// seedAllocationSite finds the first constructor call with a linear scan that
+// follows alias moves. It is only a seed for the first category pass; the
+// category-based discovery is authoritative.
+func seedAllocationSite(method *Method, file *model.File, newIndex int) (site int, aliases []uint16, fused bool) {
+	registers := map[uint16]bool{method.Instructions[newIndex].Regs[0]: true}
 	interleaved := false
 	for index := newIndex + 1; index < len(method.Instructions); index++ {
 		instruction := method.Instructions[index]
-		if instruction.Opcode >= 0x07 && instruction.Opcode <= 0x09 && aliases[instruction.Regs[1]] {
-			aliases[instruction.Regs[0]] = true
+		if isDirectInvoke(instruction.Opcode) && len(instruction.Regs) > 0 && registers[instruction.Regs[0]] {
+			if file.Methods[instruction.Index].Name == "<init>" {
+				return index, sortedRegisters(registers), !interleaved
+			}
+		}
+		if instruction.Opcode >= 0x01 && instruction.Opcode <= 0x09 && registers[instruction.Regs[1]] {
+			registers[instruction.Regs[0]] = true
 			continue
 		}
-		if isDirectInvoke(instruction.Opcode) && len(instruction.Regs) > 0 && aliases[instruction.Regs[0]] {
-			callee := file.Methods[instruction.Index]
-			if callee.Name != "<init>" || callee.Class != descriptor {
-				return Allocation{}, diagnostic(method.Context, &instruction, "", fmt.Errorf("allocation must be initialized by %s.<init>", descriptor))
+		uses, definitions := method.EffectsAt(index)
+		for _, register := range uses {
+			if registers[register] {
+				return -1, nil, false
 			}
-			constructor = index
-			break
 		}
-		// Any other instruction may sit between allocation and initialization as
-		// long as it never touches the uninitialized value: d8 interleaves
-		// argument computation here.
+		for _, register := range definitions {
+			delete(registers, register)
+		}
+		if len(registers) == 0 {
+			return -1, nil, false
+		}
 		interleaved = true
-		for _, register := range instruction.Regs {
-			if aliases[register] {
-				return Allocation{}, diagnostic(method.Context, &instruction, "", fmt.Errorf("unsafe uninitialized allocation use or escape before constructor"))
+	}
+	return -1, nil, false
+}
+
+// resolveAllocationSites derives each allocation's constructor sites from the
+// register categories: a direct constructor call whose receiver still holds an
+// uninitialized value of that allocation. This is path-sensitive, so a
+// conditional constructor call or a branch that reuses a register cannot
+// confuse the pairing. It reports whether anything changed.
+func resolveAllocationSites(method *Method, file *model.File) (bool, error) {
+	position := make(map[uint32]int, len(method.Allocations))
+	for index := range method.Allocations {
+		position[method.Allocations[index].ID] = index
+	}
+	sites := make([][]int, len(method.Allocations))
+	aliases := make([]map[uint16]bool, len(method.Allocations))
+	for index := range method.Instructions {
+		instruction := &method.Instructions[index]
+		if !isDirectInvoke(instruction.Opcode) || len(instruction.Regs) == 0 {
+			continue
+		}
+		if file.Methods[instruction.Index].Name != "<init>" {
+			continue
+		}
+		receiver := method.CategoryAt(index, instruction.Regs[0])
+		if receiver.Kind != Uninitialized {
+			continue
+		}
+		allocation, ok := position[receiver.Allocation]
+		if !ok {
+			continue
+		}
+		sites[allocation] = append(sites[allocation], index)
+		if aliases[allocation] == nil {
+			aliases[allocation] = uninitializedRegisters(method, index, receiver.Allocation)
+		}
+	}
+	changed := false
+	for index := range method.Allocations {
+		allocation := &method.Allocations[index]
+		aliasRegisters := sortedRegisters(aliases[index])
+		fused := len(sites[index]) == 1 && fusedAllocationShape(method, allocation, sites[index][0])
+		if !sameInstructionList(allocation.Constructors, sites[index]) || !sameRegisters(allocation.AliasRegisters, aliasRegisters) || allocation.Fused != fused {
+			allocation.Constructors = sites[index]
+			if len(sites[index]) > 0 {
+				allocation.Constructor = sites[index][0]
+			}
+			allocation.AliasRegisters = aliasRegisters
+			allocation.Fused = fused
+			changed = true
+		}
+	}
+	return changed, nil
+}
+
+// uninitializedRegisters lists the registers that hold this allocation at an
+// instruction.
+func uninitializedRegisters(method *Method, index int, allocation uint32) map[uint16]bool {
+	registers := make(map[uint16]bool)
+	for register := 0; register < int(method.Code.RegistersSize); register++ {
+		category := method.CategoryAt(index, uint16(register))
+		if category.Kind == Uninitialized && category.Allocation == allocation {
+			registers[uint16(register)] = true
+		}
+	}
+	return registers
+}
+
+// fusedAllocationShape reports whether the allocation and its single
+// constructor call share a block with only alias moves in between.
+func fusedAllocationShape(method *Method, allocation *Allocation, constructor int) bool {
+	if blockOf(method, allocation.NewInstruction) != blockOf(method, constructor) {
+		return false
+	}
+	for index := allocation.NewInstruction + 1; index < constructor; index++ {
+		instruction := method.Instructions[index]
+		if instruction.Opcode < 0x01 || instruction.Opcode > 0x09 {
+			return false
+		}
+		source := method.CategoryAt(index, instruction.Regs[1])
+		if source.Kind != Uninitialized || source.Allocation != allocation.ID {
+			return false
+		}
+	}
+	return true
+}
+
+func blockOf(method *Method, instruction int) int {
+	for index := range method.Blocks {
+		for _, candidate := range method.Blocks[index].Instructions {
+			if candidate == instruction {
+				return index
 			}
 		}
 	}
-	if constructor < 0 {
-		return Allocation{}, diagnostic(method.Context, &newInstruction, "", fmt.Errorf("new-instance has no adjacent safe constructor invocation"))
+	return -1
+}
+
+func sameInstructionList(left, right []int) bool {
+	if len(left) != len(right) {
+		return false
 	}
-	aliasRegisters := make([]uint16, 0, len(aliases))
-	for register := range aliases {
-		aliasRegisters = append(aliasRegisters, register)
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
 	}
-	sort.Slice(aliasRegisters, func(i, j int) bool { return aliasRegisters[i] < aliasRegisters[j] })
-	return Allocation{
-		ID: newInstruction.Offset + 1, Descriptor: descriptor,
-		NewInstruction: newIndex, Constructor: constructor,
-		AliasRegisters: aliasRegisters, Fused: !interleaved,
-	}, nil
+	return true
+}
+
+func sameRegisters(left, right []uint16) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+// validateAllocationSites checks the converged allocation model: every
+// allocation is initialized, every constructor matches its type, and no
+// instruction reads an uninitialized value except through an alias move or the
+// constructor that consumes it.
+func validateAllocationSites(method *Method, file *model.File) error {
+	// Report the reading instruction first: an uninitialized value that escapes
+	// is more precise than the missing constructor call.
+	for index := range method.Instructions {
+		instruction := &method.Instructions[index]
+		uses, _ := method.EffectsAt(index)
+		for _, register := range uses {
+			if method.CategoryAt(index, register).Kind != Uninitialized {
+				continue
+			}
+			if isDirectInvoke(instruction.Opcode) && len(instruction.Regs) > 0 && instruction.Regs[0] == register {
+				continue
+			}
+			if instruction.Opcode >= 0x01 && instruction.Opcode <= 0x09 && instruction.Regs[1] == register {
+				continue
+			}
+			return diagnostic(method.Context, instruction, "", fmt.Errorf("unsafe uninitialized allocation use or escape before constructor"))
+		}
+	}
+	for index := range method.Allocations {
+		allocation := &method.Allocations[index]
+		instruction := &method.Instructions[allocation.NewInstruction]
+		// An allocation may be dead (for example an API outline that overwrites
+		// the value immediately). The use scan above already rejects any read of
+		// an uninitialized value; an unreferenced allocation needs no constructor.
+		_ = instruction
+		for _, site := range allocation.Constructors {
+			constructor := &method.Instructions[site]
+			callee := file.Methods[constructor.Index]
+			if callee.Name != "<init>" || callee.Class != allocation.Descriptor {
+				return diagnostic(method.Context, constructor, "", fmt.Errorf("allocation must be initialized by %s.<init>", allocation.Descriptor))
+			}
+			for _, argument := range constructor.Regs[1:] {
+				category := method.CategoryAt(site, argument)
+				if category.Kind == Uninitialized && category.Allocation == allocation.ID {
+					return diagnostic(method.Context, constructor, "", fmt.Errorf("uninitialized allocation is also a constructor argument"))
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func mergeCategory(left, right Category) (Category, bool, error) {
@@ -409,6 +587,19 @@ func mergeCategory(left, right Category) (Category, bool, error) {
 	}
 	if left.Kind == Unknown {
 		return right, true, nil
+	}
+	// The second register of a category-2 value is not a value of its own. When
+	// a join pairs it with a real category, the wide value died on that path and
+	// the real category wins.
+	if left.Kind == WideUpper || right.Kind == WideUpper {
+		other := left
+		if left.Kind == WideUpper {
+			other = right
+		}
+		if other.Kind == WideUpper || other.Kind == Unknown {
+			return Category{Kind: WideUpper}, left.Kind != WideUpper, nil
+		}
+		return other, left.Kind == WideUpper, nil
 	}
 	if left.Kind.isUntyped() || right.Kind.isUntyped() {
 		return mergeUntyped(left, right)
@@ -463,7 +654,7 @@ func mergeUntyped(left, right Category) (Category, bool, error) {
 		if typed.Kind.Words() == 2 {
 			return Category{Kind: Conflict}, true, fmt.Errorf("null constant cannot become %s", typed.Kind)
 		}
-		if typed.Kind == Int || typed.Kind == Float || typed.Kind == Reference {
+		if typed.Kind == Int || typed.Kind == Float || typed.Kind == Reference || typed.Kind == Uninitialized {
 			return typed, true, nil
 		}
 	case Bits32:
@@ -476,4 +667,32 @@ func mergeUntyped(left, right Category) (Category, bool, error) {
 		}
 	}
 	return Category{Kind: Conflict}, true, fmt.Errorf("constant category %s cannot become %s", untyped.Kind, typed.Kind)
+}
+
+// exceptionTypes maps every handler address to the catch type that dispatches
+// to it. A typed handler wins over a catch-all sharing the same entry.
+func exceptionTypes(code *model.Code) map[uint32]string {
+	types := make(map[uint32]string)
+	for _, try := range code.Tries {
+		for _, handler := range try.Handler.Handlers {
+			if _, ok := types[handler.Address]; !ok {
+				types[handler.Address] = handler.Type
+			}
+		}
+		if try.Handler.CatchAllAddress != nil {
+			if _, ok := types[*try.Handler.CatchAllAddress]; !ok {
+				types[*try.Handler.CatchAllAddress] = "Ljava/lang/Throwable;"
+			}
+		}
+	}
+	return types
+}
+
+// ExceptionType returns the declared catch type of a handler address, or
+// java.lang.Throwable when the handler is a catch-all or unknown.
+func (m *Method) ExceptionType(address uint32) string {
+	if descriptor, ok := m.exceptionTypes[address]; ok && descriptor != "" {
+		return descriptor
+	}
+	return "Ljava/lang/Throwable;"
 }

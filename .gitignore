@@ -53,3 +53,6 @@ javac.*.args
 # Generated task-pack evidence (not goldens). Override with JAVAJIVE_EVIDENCE_DIR.
 tools/**/evidence/**
 !tools/milestone_ledger/evidence/historical_cli_seeds.json
+
+# CI and local benchmark artifacts
+/artifacts/

@@ -6,8 +6,13 @@ import (
 )
 
 const (
-	classMagic   = 0xcafebabe
-	majorVersion = 49
+	classMagic = 0xcafebabe
+	// VersionJava5 is the default class file version: the verifier still uses
+	// inference, so generated methods need no StackMapTable.
+	VersionJava5 uint16 = 49
+	// VersionJava8 is required for static and default interface methods.
+	VersionJava8   uint16 = 52
+	highestVersion uint16 = 65
 )
 
 type member struct {
@@ -27,6 +32,7 @@ type Method struct{ member }
 
 // Class is a deterministic Java 5 classfile builder.
 type Class struct {
+	major                 uint16
 	pool                  *ConstantPool
 	access                uint16
 	thisClass, superClass uint16
@@ -50,7 +56,7 @@ type Class struct {
 // NewClass creates a Java 5 class. Names use JVM internal form. superName may
 // be empty only for java/lang/Object.
 func NewClass(name, superName string, access uint16) *Class {
-	class := &Class{pool: newConstantPool(), access: access}
+	class := &Class{major: VersionJava5, pool: newConstantPool(), access: access}
 	if err := validateInternalName(name); err != nil {
 		class.fail("class name %q: %v", name, err)
 		return class
@@ -217,6 +223,22 @@ func (c *Class) SetSourceDebugExtension(value string) *Class {
 	c.sourceDebug = value
 	return c
 }
+
+// SetVersion selects the class file major version. The default is Java 5 (49),
+// whose inference verifier needs no StackMapTable. Java 8 (52) is required for
+// static and default interface methods; only methods without control flow or
+// exception handlers may use it without stack maps.
+func (c *Class) SetVersion(major uint16) *Class {
+	if major < VersionJava5 || major > highestVersion {
+		c.fail("class file version %d is outside %d..%d", major, VersionJava5, highestVersion)
+		return c
+	}
+	c.major = major
+	return c
+}
+
+// Version returns the class file major version.
+func (c *Class) Version() uint16 { return c.major }
 
 // AddInterface appends an implemented interface in declaration order.
 func (c *Class) AddInterface(name string) *Class {
@@ -499,7 +521,7 @@ func (c *Class) Bytes() ([]byte, error) {
 	out := &byteWriter{}
 	out.u4(classMagic)
 	out.u2(0)
-	out.u2(majorVersion)
+	out.u2(c.major)
 	if err := c.pool.write(out); err != nil {
 		return nil, err
 	}

@@ -198,7 +198,7 @@ func AnalyzeWithOptions(data []byte, name string, options Options) Report {
 	switch report.Artifact.Magic {
 	case "dex":
 		report.Artifact.Format = "dex"
-		report.DEXFiles = append(report.DEXFiles, analyzeDEX(data, DEXProvenance{
+		report.DEXFiles = append(report.DEXFiles, analyzeDEX(data, nil, DEXProvenance{
 			Container: "standalone", Entry: "classes.dex", MultidexIndex: 1, Canonical: false,
 		}, options))
 		report.Status = report.DEXFiles[0].Status
@@ -323,8 +323,9 @@ func analyzeArchive(report *Report, data []byte, name string, options Options) {
 	if report.Artifact.Format != "apk" {
 		return
 	}
+	hierarchy := dexHierarchy(retained)
 	for _, item := range retained {
-		dex := analyzeDEX(item.data, DEXProvenance{Container: "apk", Entry: item.name, MultidexIndex: item.index, Canonical: true}, options)
+		dex := analyzeDEX(item.data, hierarchy, DEXProvenance{Container: "apk", Entry: item.name, MultidexIndex: item.index, Canonical: true}, options)
 		report.DEXFiles = append(report.DEXFiles, dex)
 		report.Diagnostics = append(report.Diagnostics, dex.Diagnostics...)
 		if dex.Status != StatusComplete && report.Status == StatusComplete {
@@ -412,7 +413,7 @@ func multidexIndex(name string) (int, bool) {
 	return index, true
 }
 
-func analyzeDEX(data []byte, provenance DEXProvenance, options Options) DEXFile {
+func analyzeDEX(data []byte, hierarchy map[string]*model.Class, provenance DEXProvenance, options Options) DEXFile {
 	sum := sha256.Sum256(data)
 	dex := DEXFile{
 		Status: StatusComplete, Provenance: provenance, Version: dexVersion(data), Size: uint64(len(data)),
@@ -434,7 +435,7 @@ func analyzeDEX(data []byte, provenance DEXProvenance, options Options) DEXFile 
 		class := Class{
 			Descriptor: classModel.Descriptor, AccessFlags: classModel.AccessFlags, Superclass: classModel.Superclass,
 			SourceFile: classModel.SourceFile, Methods: []Method{},
-			Translation: analyzeTranslation(parsed, classModel, fileErr),
+			Translation: analyzeTranslation(parsed, classModel, fileErr, hierarchy),
 		}
 		methods := append([]model.EncodedMethod(nil), classModel.DirectMethods...)
 		methods = append(methods, classModel.VirtualMethods...)
@@ -464,10 +465,10 @@ func analyzeDEX(data []byte, provenance DEXProvenance, options Options) DEXFile 
 // analyzeTranslation reports whether the strict translator can recover this
 // class on its own. It never emits a classfile: the verdict tells a reverse
 // engineer which classes are recoverable and why the others are not.
-func analyzeTranslation(file *model.File, class *model.Class, fileErr error) Translation {
+func analyzeTranslation(file *model.File, class *model.Class, fileErr error, hierarchy map[string]*model.Class) Translation {
 	err := fileErr
 	if err == nil {
-		_, err = lower.ClassWithOptions(file, class, lower.ClassOptions{FileValidated: true})
+		_, err = lower.ClassWithOptions(file, class, lower.ClassOptions{FileValidated: true, Hierarchy: hierarchy})
 	}
 	if err != nil {
 		message := err.Error()
@@ -636,4 +637,24 @@ func diagnosticFromError(source string, err error) Diagnostic {
 		}
 	}
 	return diagnostic
+}
+
+// dexHierarchy indexes the classes of every DEX entry in an application so a
+// class can prove assignability to a supertype declared in another multidex
+// file.
+func dexHierarchy(entries []retainedDEX) map[string]*model.Class {
+	index := make(map[string]*model.Class)
+	for _, item := range entries {
+		parsed, err := input.ParseDEX(item.data, item.name)
+		if err != nil {
+			continue
+		}
+		for position := range parsed.Classes {
+			class := &parsed.Classes[position]
+			if _, exists := index[class.Descriptor]; !exists {
+				index[class.Descriptor] = class
+			}
+		}
+	}
+	return index
 }

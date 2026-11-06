@@ -204,6 +204,14 @@ func walkBlock(method *Method, file *model.File, allocations []Allocation, block
 			record = append(record, demand{register: register, category: category})
 			merged, _, err := mergeCategory(state[register], category)
 			if err != nil {
+				if !final {
+					// A conflicting use during the fixpoint usually means a
+					// predecessor entry is still unresolved. Drop the stale value
+					// and let the final walk judge the converged state.
+					state[register] = Category{}
+					delete(untypedLifetime, register)
+					continue
+				}
 				return nil, diagnostic(method.Context, instruction, "", fmt.Errorf("v%d: %w", register, err))
 			}
 			if state[register].Kind.isUntyped() && merged.Kind != state[register].Kind {
@@ -227,7 +235,20 @@ func walkBlock(method *Method, file *model.File, allocations []Allocation, block
 		for _, register := range sortedCategoryRegisters(defs) {
 			category := defs[register]
 			if category.Kind == Unknown {
+				// The instruction redefined the register but the analysis cannot
+				// type the new value yet (for example a move from an unresolved
+				// source). The previous lifetime no longer describes it, so clear
+				// it instead of keeping a stale category.
+				state[register] = Category{}
+				delete(untypedLifetime, register)
 				continue
+			}
+			// Redefining a wide register narrowly retires the pair, so a stale
+			// high-half marker must not survive into later joins.
+			if previous := state[register]; previous.Kind.Words() == 2 && category.Kind.Words() == 1 {
+				if int(register)+1 < len(state) && state[register+1].Kind == WideUpper {
+					state[register+1] = Category{}
+				}
 			}
 			state[register] = category
 			definition = Definition{Register: int32(register), Category: category}
@@ -299,7 +320,31 @@ func analyzeCategories(method *Method, file *model.File, allocations []Allocatio
 			}
 		}
 	}
+	// A throwing instruction exposes the register file to its handler, so every
+	// register the handler needs is live in the protected block. The handler's
+	// live-in set depends on liveness, so compute it once and refresh.
+	blockOfInstruction := make([]int, len(method.Instructions))
+	for blockIndex := range method.Blocks {
+		for _, instructionIndex := range method.Blocks[blockIndex].Instructions {
+			blockOfInstruction[instructionIndex] = blockIndex
+		}
+	}
 	liveIn, liveOut := computeLiveness(method, usedBeforeDef, definedIn)
+	for handlerIndex := range method.Blocks {
+		if !method.Blocks[handlerIndex].Handler {
+			continue
+		}
+		for _, instructionIndex := range method.Blocks[handlerIndex].Protected {
+			blockIndex := blockOfInstruction[instructionIndex]
+			for register := range liveIn[handlerIndex] {
+				usedBeforeDef[blockIndex][register] = true
+			}
+			for register := range usedBeforeDef[handlerIndex] {
+				usedBeforeDef[blockIndex][register] = true
+			}
+		}
+	}
+	liveIn, liveOut = computeLiveness(method, usedBeforeDef, definedIn)
 	// propagate holds the registers whose category must be merged at the join:
 	// everything read before a local definition plus everything that stays live
 	// across the block without being redefined.
@@ -356,7 +401,9 @@ func solveCategories(method *Method, file *model.File, allocations []Allocation,
 	if len(method.Blocks) > 0 {
 		copy(entries[0], entry)
 	}
+	var joinErr error
 	for pass := 0; pass <= len(method.Blocks)+1; pass++ {
+		joinErr = nil
 		changed := false
 		for blockIndex := 1; blockIndex < len(method.Blocks); blockIndex++ {
 			next := append([]Category(nil), entries[blockIndex]...)
@@ -394,24 +441,35 @@ func solveCategories(method *Method, file *model.File, allocations []Allocation,
 			}
 			for _, register := range registers {
 				merged := Category{}
+				conflict := false
 				for _, predecessor := range runs {
 					incoming := predecessor.run.exit[register]
 					if predecessor.exception != nil {
-						// Only registers that a protected instruction actually
-						// types are replaced; the rest keep the block exit state.
-						if replacement := predecessor.exception[register]; replacement.Kind != Unknown {
-							incoming = replacement
-						}
+						// An exception edge observes the protected instruction's
+						// pre-state, never the block exit; an untyped register is
+						// simply unknown at the throw point.
+						incoming = predecessor.exception[register]
 					}
 					if incoming.Kind == Unknown {
 						continue
 					}
 					result, _, err := mergeCategory(merged, incoming)
 					if err != nil {
-						instruction := &method.Instructions[firstInstruction(method, blockIndex)]
-						return nil, diagnostic(method.Context, instruction, "", fmt.Errorf("v%d has incompatible categories at a control-flow join: %w", register, err))
+						// A conflict during the fixpoint can come from a predecessor
+						// that has not converged yet. Record it and retry with the
+						// register unknown; only a conflict that persists at
+						// convergence is a real type error.
+						if joinErr == nil {
+							instruction := &method.Instructions[firstInstruction(method, blockIndex)]
+							joinErr = diagnostic(method.Context, instruction, "", fmt.Errorf("v%d has incompatible categories at a control-flow join: %w", register, err))
+						}
+						conflict = true
+						break
 					}
 					merged = result
+				}
+				if conflict {
+					merged = Category{}
 				}
 				next[register] = merged
 			}
@@ -421,6 +479,9 @@ func solveCategories(method *Method, file *model.File, allocations []Allocation,
 			}
 		}
 		if !changed {
+			if joinErr != nil {
+				return nil, joinErr
+			}
 			break
 		}
 	}

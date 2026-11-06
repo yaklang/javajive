@@ -7,6 +7,21 @@ import (
 	"github.com/yaklang/javajive/dex2jar/model"
 )
 
+// mayThrow reports whether an instruction can transfer control to an exception
+// handler. Moves, constants, comparisons, branches and returns cannot.
+func mayThrow(opcode byte) bool {
+	switch {
+	case opcode == 0x00:
+		return false
+	case opcode >= 0x01 && opcode <= 0x19:
+		return false
+	case opcode >= 0x28 && opcode <= 0x3d:
+		return false
+	default:
+		return true
+	}
+}
+
 func isGoto(opcode byte) bool { return opcode >= 0x28 && opcode <= 0x2a }
 func isIf(opcode byte) bool   { return opcode >= 0x32 && opcode <= 0x3d }
 func isSwitch(opcode byte) bool {
@@ -204,6 +219,20 @@ func buildBlocks(instructions []Instruction, codeUnits uint32, ctx Context, site
 			if blocks[index].Start < site.start || blocks[index].Start >= site.end {
 				continue
 			}
+			// Only a block with a potentially throwing instruction can dispatch
+			// to the handler. A block of moves or returns inside the protected
+			// range does not create an exception edge.
+			throwing := false
+			for _, instructionIndex := range blocks[index].Instructions {
+				instruction := instructions[instructionIndex]
+				if instruction.Offset >= site.start && instruction.Offset < site.end && mayThrow(instruction.Opcode) {
+					throwing = true
+					break
+				}
+			}
+			if !throwing {
+				continue
+			}
 			for _, target := range site.targets {
 				handler := handlerBlock[target.address]
 				addSuccessor(&blocks[index], handler)
@@ -211,7 +240,11 @@ func buildBlocks(instructions []Instruction, codeUnits uint32, ctx Context, site
 					recorded[handler] = make(map[int]bool)
 				}
 				for _, instructionIndex := range blocks[index].Instructions {
-					if instructions[instructionIndex].Offset >= site.start && instructions[instructionIndex].Offset < site.end {
+					instruction := instructions[instructionIndex]
+					// Only instructions that can throw dispatch to the handler.
+					// Merging the state of a return or a move would describe a
+					// register value the handler never observes.
+					if instruction.Offset >= site.start && instruction.Offset < site.end && mayThrow(instruction.Opcode) {
 						recorded[handler][instructionIndex] = true
 					}
 				}

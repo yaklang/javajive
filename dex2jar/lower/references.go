@@ -42,8 +42,15 @@ func (l *methodLowerer) validateReferenceUses() error {
 		for blockIndex, block := range l.method.Blocks {
 			if blockIndex != 0 {
 				merged := newReferenceState(len(entry))
-				for _, predecessor := range block.Predecessors {
-					mergeReferenceState(merged, out[predecessor])
+				if block.Handler {
+					merged = l.handlerReferenceEntry(blockIndex, in, out)
+				} else {
+					for _, predecessor := range block.Predecessors {
+						if !l.method.Blocks[predecessor].Reachable {
+							continue
+						}
+						mergeReferenceState(merged, out[predecessor])
+					}
 				}
 				if !referenceStatesEqual(in[blockIndex], merged) {
 					in[blockIndex] = merged
@@ -67,6 +74,9 @@ func (l *methodLowerer) validateReferenceUses() error {
 		}
 	}
 	for blockIndex, block := range l.method.Blocks {
+		if !block.Reachable {
+			continue
+		}
 		state := copyReferenceState(in[blockIndex])
 		for _, instructionIndex := range block.Instructions {
 			if err := l.checkReferenceInstruction(instructionIndex, state); err != nil {
@@ -76,6 +86,47 @@ func (l *methodLowerer) validateReferenceUses() error {
 		}
 	}
 	return nil
+}
+
+// handlerReferenceEntry merges the descriptor state observed at the start of
+// every protected instruction that dispatches to this handler. A protected
+// block's exit state can describe a later lifetime, which would invent types
+// the handler never observes.
+func (l *methodLowerer) handlerReferenceEntry(blockIndex int, in, out []referenceState) referenceState {
+	merged := newReferenceState(len(in[0]))
+	protected := l.method.Blocks[blockIndex].Protected
+	if len(protected) == 0 {
+		for _, predecessor := range l.method.Blocks[blockIndex].Predecessors {
+			mergeReferenceState(merged, out[predecessor])
+		}
+		return merged
+	}
+	byBlock := make(map[int]map[int]bool)
+	for _, instructionIndex := range protected {
+		block := l.blockOfInstruction(instructionIndex)
+		if block < 0 {
+			continue
+		}
+		if byBlock[block] == nil {
+			byBlock[block] = make(map[int]bool)
+		}
+		byBlock[block][instructionIndex] = true
+	}
+	for _, predecessor := range l.method.Blocks[blockIndex].Predecessors {
+		if byBlock[predecessor] == nil && l.method.Blocks[predecessor].Reachable {
+			mergeReferenceState(merged, out[predecessor])
+		}
+	}
+	for block, wanted := range byBlock {
+		state := copyReferenceState(in[block])
+		for _, instructionIndex := range l.method.Blocks[block].Instructions {
+			if wanted[instructionIndex] {
+				mergeReferenceState(merged, state)
+			}
+			l.transferReferences(instructionIndex, state)
+		}
+	}
+	return merged
 }
 
 func (l *methodLowerer) checkReferenceInstruction(index int, state referenceState) error {
@@ -116,12 +167,11 @@ func (l *methodLowerer) checkReferenceInstruction(index int, state referenceStat
 			return err
 		}
 		if instruction.Opcode == 0x4d {
-			for array := range state[instruction.Regs[1]] {
-				if array != nullDescriptor {
-					if err := check(instruction.Regs[0], array[1:], "array value"); err != nil {
-						return err
-					}
-				}
+			// aastore performs a runtime array-store check, so the verifier
+			// accepts any reference value; only the array itself must be a
+			// reference array.
+			if kind := l.method.CategoryAt(index, instruction.Regs[0]).Kind; !isReferenceKind(kind) {
+				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("array value v%d is not a reference", instruction.Regs[0]))
 			}
 		}
 	case instruction.Opcode >= 0x52 && instruction.Opcode <= 0x5f:
@@ -188,7 +238,7 @@ func (l *methodLowerer) transferReferences(index int, state referenceState) {
 		return
 	}
 	switch {
-	case instruction.Opcode >= 0x07 && instruction.Opcode <= 0x09:
+	case instruction.Opcode >= 0x01 && instruction.Opcode <= 0x09:
 		set(instruction.Regs[0], state[instruction.Regs[1]])
 	case instruction.Opcode == 0x0c:
 		if index > 0 {
@@ -209,7 +259,7 @@ func (l *methodLowerer) transferReferences(index int, state referenceState) {
 			setOne(instruction.Regs[0], nullDescriptor)
 		}
 	case instruction.Opcode == 0x0d:
-		setOne(instruction.Regs[0], "Ljava/lang/Throwable;")
+		setOne(instruction.Regs[0], l.method.ExceptionType(instruction.Offset))
 	case instruction.Opcode == 0x1a || instruction.Opcode == 0x1b:
 		setOne(instruction.Regs[0], "Ljava/lang/String;")
 	case instruction.Opcode == 0x1c:
@@ -266,6 +316,15 @@ var hierarchyCache = struct {
 	entries map[*model.File]map[string]*model.Class
 	order   []*model.File
 }{entries: make(map[*model.File]map[string]*model.Class)}
+
+// classIndex returns the application-wide hierarchy when the caller provided
+// one, and otherwise the classes of the file being lowered.
+func (l *methodLowerer) classIndex() map[string]*model.Class {
+	if l.hierarchy != nil {
+		return l.hierarchy
+	}
+	return classHierarchy(l.file)
+}
 
 // classHierarchy indexes one DEX file's classes once. Rebuilding the graph for
 // every method would be quadratic on large applications.
@@ -332,7 +391,7 @@ func (l *methodLowerer) provablyAssignable(actual, expected string) bool {
 			}
 		}
 	}
-	index := classHierarchy(l.file)
+	index := l.classIndex()
 	if _, ok := index[expected]; !ok {
 		// The expected type lives outside the application. Proving the relation
 		// needs the platform classpath the input was verified against, which the

@@ -28,23 +28,34 @@ func (l *methodLowerer) validateInvokes() error {
 				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("constructor uses an invalid invoke form"))
 			}
 			if allocation, ok := l.allocationByCtor[index]; ok {
-				if err := l.validateFusedConstructor(instruction, allocation); err != nil {
-					return err
+				if allocation.Fused {
+					if err := l.validateFusedConstructor(instruction, allocation); err != nil {
+						return err
+					}
 				}
 				continue
 			}
 			if !isConstructor {
+				// A conditional constructor call may initialize an allocation on
+				// a different path; the receiver still aliases that allocation
+				// and its static type names the class being initialized.
+				if l.isAllocationAlias(instruction.Regs[0], callee.Class) {
+					continue
+				}
 				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("constructor receiver v%d is not a fused new-instance allocation", instruction.Regs[0]))
 			}
-			if instruction.Regs[0] != thisRegister {
+			// The receiver may name any register that still aliases uninitialized
+			// this; d8 moves this into a low register for range invokes.
+			aliases := l.thisAliasSet(index, thisRegister)
+			if !aliases[instruction.Regs[0]] {
 				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("constructor receiver v%d is initialized; delegation requires uninitialized this v%d", instruction.Regs[0], thisRegister))
 			}
 			if callee.Class != l.class.Descriptor && callee.Class != l.class.Superclass {
 				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("uninitialized this may only delegate to %s.<init> or %s.<init>", l.class.Descriptor, l.class.Superclass))
 			}
 			for _, argument := range instruction.Regs[1:] {
-				if argument == thisRegister {
-					return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("uninitialized this v%d is also a constructor argument", thisRegister))
+				if aliases[argument] {
+					return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("uninitialized this v%d is also a constructor argument", argument))
 				}
 			}
 			if delegation >= 0 {
@@ -118,42 +129,121 @@ func (l *methodLowerer) isSuperclass(target string) bool {
 	return false
 }
 
+// thisAliasSet returns the registers that alias uninitialized this after the
+// instructions before limit. A move-object from a known alias creates one;
+// defining the register with anything else destroys it.
+func (l *methodLowerer) thisAliasSet(limit int, thisRegister uint16) map[uint16]bool {
+	aliases := map[uint16]bool{thisRegister: true}
+	for index := 0; index < limit && index < len(l.method.Instructions); index++ {
+		instruction := &l.method.Instructions[index]
+		if instruction.Opcode >= 0x01 && instruction.Opcode <= 0x09 && aliases[instruction.Regs[1]] {
+			aliases[instruction.Regs[0]] = true
+			continue
+		}
+		_, definitions := l.method.EffectsAt(index)
+		for _, register := range definitions {
+			if register != thisRegister {
+				delete(aliases, register)
+			}
+		}
+	}
+	return aliases
+}
+
+// blockOfInstruction returns the index of the block containing an instruction.
+func (l *methodLowerer) blockOfInstruction(instructionIndex int) int {
+	for index := range l.method.Blocks {
+		for _, candidate := range l.method.Blocks[index].Instructions {
+			if candidate == instructionIndex {
+				return index
+			}
+		}
+	}
+	return -1
+}
+
+// dominates reports whether every path from the method entry to afterBlock
+// passes through beforeBlock. Instructions in the same block dominate in
+// program order, which the caller checks separately.
+func (l *methodLowerer) dominates(beforeBlock, afterBlock int) bool {
+	if beforeBlock == afterBlock || beforeBlock == 0 {
+		return true
+	}
+	seen := make([]bool, len(l.method.Blocks))
+	seen[0] = true
+	queue := []int{0}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		if current == afterBlock {
+			return false
+		}
+		for _, successor := range l.method.Blocks[current].Successors {
+			if successor == beforeBlock || seen[successor] {
+				continue
+			}
+			seen[successor] = true
+			queue = append(queue, successor)
+		}
+	}
+	return true
+}
+
 func (l *methodLowerer) validateDelegationShape(delegation int, thisRegister uint16) error {
 	delegationOffset := l.method.Instructions[delegation].Offset
 	l.delegationIndex = delegation
+	aliases := map[uint16]bool{thisRegister: true}
+	isThis := func(register uint16) bool { return aliases[register] }
+	hasBranch := false
 	for index := range l.method.Instructions {
 		instruction := &l.method.Instructions[index]
 		if index < delegation {
-			if instruction.Target >= 0 {
-				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("branch before this initialization is unsupported"))
+			uses, definitions := l.method.EffectsAt(index)
+			aliasMove := instruction.Opcode >= 0x01 && instruction.Opcode <= 0x09 && isThis(instruction.Regs[1])
+			if isBranchOpcode(instruction.Opcode) {
+				// Branches before delegation are argument computation; they may
+				// not touch uninitialized this, and deferred stores must still
+				// dominate the constructor call.
+				for _, register := range uses {
+					if isThis(register) {
+						return l.uninitializedThisUse(instruction, register)
+					}
+				}
+				hasBranch = true
+				continue
 			}
+			// Only the registers the instruction reads matter; defining an alias
+			// register (for example moving a parameter into it) retires the alias.
 			usesThis := false
-			for _, register := range instruction.Regs {
-				if register == thisRegister {
+			aliased := uint16(0)
+			for _, register := range uses {
+				if isThis(register) {
 					usesThis = true
+					aliased = register
 					break
 				}
 			}
 			if usesThis {
 				switch {
-				case instruction.Opcode >= 0x07 && instruction.Opcode <= 0x09 && instruction.Regs[1] == thisRegister:
+				case aliasMove:
 					// Aliasing uninitialized this is inert; the alias is only
 					// meaningful once it is used, which is checked separately.
-				case instruction.Opcode >= 0x59 && instruction.Opcode <= 0x5f && instruction.Regs[1] == thisRegister:
+				case instruction.Opcode >= 0x59 && instruction.Opcode <= 0x5f && isThis(instruction.Regs[1]) && !isThis(instruction.Regs[0]):
 					// DEX permits field stores on uninitialized this before
-					// super(). The JVM does not, so these move after delegation;
-					// the super constructor cannot observe subclass fields.
-					// Moving a store is only value-preserving while the stored
-					// register is not redefined before the delegation point.
-					valueRegister := instruction.Regs[0]
-					for probe := index + 1; probe < delegation; probe++ {
-						if _, definitions := l.registerEffects(probe); containsRegister(definitions, valueRegister) {
-							return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("field store before delegation reads v%d, which is reassigned before super()", valueRegister))
-						}
-					}
-					l.deferredStores = append(l.deferredStores, index)
+					// super(). The JVM does not, so the value is captured at the
+					// original position and the store is emitted after delegation.
+					l.deferredStores = append(l.deferredStores, deferredStore{index: index, register: instruction.Regs[0]})
 				default:
-					return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("uninitialized this v%d is used before constructor delegation", thisRegister))
+					return l.uninitializedThisUse(instruction, aliased)
+				}
+			}
+			if aliasMove {
+				aliases[instruction.Regs[0]] = true
+			} else {
+				for _, register := range definitions {
+					if register != thisRegister {
+						delete(aliases, register)
+					}
 				}
 			}
 		}
@@ -161,16 +251,40 @@ func (l *methodLowerer) validateDelegationShape(delegation int, thisRegister uin
 			return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("control flow may repeat constructor delegation"))
 		}
 	}
+	if hasBranch {
+		delegationBlock := l.blockOfInstruction(delegation)
+		for _, store := range l.deferredStores {
+			storeBlock := l.blockOfInstruction(store.index)
+			if storeBlock < 0 || delegationBlock < 0 || storeBlock == delegationBlock && store.index > delegation {
+				return methodDiagnostic(l.method.Context, &l.method.Instructions[store.index], "", fmt.Errorf("field store before delegation is not on every path to the constructor call"))
+			}
+			if storeBlock != delegationBlock && !l.dominates(storeBlock, delegationBlock) {
+				return methodDiagnostic(l.method.Context, &l.method.Instructions[store.index], "", fmt.Errorf("field store before delegation is not on every path to the constructor call"))
+			}
+		}
+	}
 	return nil
 }
 
-func containsRegister(registers []uint16, want uint16) bool {
-	for _, register := range registers {
-		if register == want {
-			return true
+// isAllocationAlias reports whether the register still aliases an allocation
+// of the given class. A direct constructor call on such a register is a second
+// initialization site on another path.
+func (l *methodLowerer) isAllocationAlias(register uint16, descriptor string) bool {
+	for _, allocation := range l.method.Allocations {
+		if allocation.Descriptor != descriptor {
+			continue
+		}
+		for _, alias := range allocation.AliasRegisters {
+			if alias == register {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+func (l *methodLowerer) uninitializedThisUse(instruction *ir.Instruction, register uint16) error {
+	return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("uninitialized this v%d is used before constructor delegation", register))
 }
 
 func (l *methodLowerer) validateDefinedDirectTarget(instruction *ir.Instruction, callee model.MethodID) error {

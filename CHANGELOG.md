@@ -2,6 +2,37 @@
 
 ## Unreleased — 2026-11-06
 
+Complete real-application DEX translation.
+
+- Discover constructor sites from the register categories: an allocation's
+  constructor is any direct `<init>` call whose receiver still holds that
+  allocation. This is path-sensitive, so conditional constructors with
+  different arguments on different branches work, and an allocation that is
+  never constructed (dead API outlines) no longer fails the class.
+- Capture the value of a field store that DEX places before `super()` into a
+  fresh local, and emit the store after delegation, so the stored value
+  survives register reuse. Constructor delegation accepts `this` aliases
+  created by any move opcode, aliases retired by redefinition, and branches
+  before delegation when the deferred stores dominate the constructor call.
+- Model exception edges precisely: only instructions that can throw dispatch
+  to a handler, the handler entry merges the register state at the start of
+  each protected instruction, handler live-ins are made live in the protected
+  blocks, and the backward constant analysis injects handler demands at those
+  instructions. Registers that are dead at a throw point no longer conflict.
+- The reference analysis uses the same exception entries, ignores unreachable
+  blocks, and only requires a reference value for object array stores, since
+  `aastore` performs the runtime element check.
+- Array element typing follows the opcode family; a tracked component that
+  contradicts the opcode (a stale descriptor from another lifetime) no longer
+  rejects the method.
+- Interfaces with static or default methods are emitted as Java 8 class files
+  when every method is branch-free and handler-free (the translator does not
+  emit stack maps), and interface method access is validated per version.
+- On the Termux APK all 2,696 classes and on the F-Droid APK all 19,701
+  classes now translate strictly (100%).
+
+## Unreleased — 2026-11-06
+
 Translate switches, array literals, monitors, and discarding exception handlers.
 
 - Decode switch and fill-array-data payloads as data instead of rejecting the
