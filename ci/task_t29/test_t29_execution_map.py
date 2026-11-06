@@ -85,7 +85,7 @@ class TestExecutionEventMapping(unittest.TestCase):
     def test_pr_ci_stays_a_single_fast_algorithm_gate(self) -> None:
         snap = required_coverage_snapshot(ROOT)
         self.assertEqual(snap["jobs"]["ci.yml"], list(BASELINE_CI_JOBS))
-        self.assertEqual(snap["jobs"]["ci.yml"], ["source", "regression"])
+        self.assertEqual(snap["jobs"]["ci.yml"], ["scope", "source", "regression", "gate"])
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         self.assertIn("name: Algorithm regression", workflow)
         self.assertRegex(workflow, r"(?m)^\s+timeout-minutes:\s+(?:[1-9]|1[0-5])\s*$")
@@ -126,13 +126,20 @@ class TestExecutionEventMapping(unittest.TestCase):
     def test_ci_summary_requires_every_source_shard(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         source, summary = workflow.split("  regression:\n", 1)
-        self.assertRegex(source, r"shard:\s*\[0,\s*1,\s*2,\s*3,\s*4,\s*5,\s*6,\s*7,\s*8,\s*9,\s*10,\s*11,\s*12,\s*13,\s*14,\s*15\]")
-        self.assertIn('SOURCE_SHARDS: "16"', source)
+        self.assertRegex(source, r"shard:\s*\[0,\s*1,\s*2,\s*3,\s*4,\s*5,\s*6,\s*7,\s*8,\s*9\]")
+        self.assertIn('SOURCE_SHARDS: "10"', source)
+        self.assertIn('SOURCE_WORKERS: "5"', source)
         self.assertIn("fail-fast: false", source)
-        self.assertIn("needs: [source]", summary)
+        self.assertIn("needs: [scope, source, regression]", summary)
         self.assertIn("if: always()", summary)
+        self.assertIn("SCOPE_RESULT: ${{ needs.scope.result }}", summary)
         self.assertIn("SOURCE_RESULT: ${{ needs.source.result }}", summary)
-        self.assertIn('test "$SOURCE_RESULT" = success', summary)
+        self.assertIn("REGRESSION_RESULT: ${{ needs.regression.result }}", summary)
+        self.assertIn("CLASSPARSER: ${{ needs.scope.outputs.classparser }}", summary)
+        self.assertIn('test "$SCOPE_RESULT" = success', summary)
+        self.assertIn('test "$REGRESSION_RESULT" = success', summary)
+        self.assertIn('true) test "$SOURCE_RESULT" = success', summary)
+        self.assertIn("skipped|success", summary)
 
     def test_slow_contracts_remain_manual_and_discoverable(self) -> None:
         workflows = ROOT / ".github" / "workflows"

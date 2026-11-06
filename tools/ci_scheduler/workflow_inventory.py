@@ -46,10 +46,12 @@ def required_coverage_snapshot(repo_root: Path) -> dict[str, Any]:
     }
 
 
-# Four source shards feed one required algorithm-regression summary. Full task
-# contracts, platform builds, and historical-JAR audits remain available through
-# the explicit task-gates / extended / untrusted-oracle workflows.
-BASELINE_CI_JOBS = ("source", "regression")
+# One scope decision gates the classparser matrix (ten shards when the diff
+# touches its closure), which feeds the required algorithm-regression summary
+# together with the concurrently running regression suite. Full task contracts,
+# platform builds, and historical-JAR audits remain available through the
+# explicit task-gates / extended / untrusted-oracle workflows.
+BASELINE_CI_JOBS = ("scope", "source", "regression", "gate")
 
 # These are reviewed authored-fixture suites, not a promotion of the external
 # historical corpus. Keep every selector explicit: a prefix could accidentally
