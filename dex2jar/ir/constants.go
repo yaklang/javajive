@@ -82,7 +82,11 @@ func refineConstants(method *Method, file *model.File) (bool, error) {
 				}
 				for _, handler := range protectedHandlers[index] {
 					for register := 0; register < registers; register++ {
-						if err := joinDemand(&demands[register], demandIn[handler][register]); err != nil {
+						demand := demandIn[handler][register]
+						if demand.Kind == Unknown {
+							continue
+						}
+						if err := joinDemand(&demands[register], demand); err != nil {
 							return false, diagnostic(method.Context, instruction, "", fmt.Errorf("v%d: %w", register, err))
 						}
 					}

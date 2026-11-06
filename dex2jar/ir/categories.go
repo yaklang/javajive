@@ -360,29 +360,46 @@ func solveCategories(method *Method, file *model.File, allocations []Allocation,
 		changed := false
 		for blockIndex := 1; blockIndex < len(method.Blocks); blockIndex++ {
 			next := append([]Category(nil), entries[blockIndex]...)
-			for _, register := range sortedRegisters(propagate[blockIndex]) {
-				merged := Category{}
-				for _, predecessor := range method.Blocks[blockIndex].Predecessors {
-					if !method.Blocks[predecessor].Reachable {
-						// Dead code may fall through into a live block; its register
-						// state is not part of any real path.
-						continue
-					}
-					predecessorRun, err := walkBlock(method, file, allocations, predecessor, entries[predecessor], false)
+			registers := sortedRegisters(propagate[blockIndex])
+			// Walking a predecessor is independent of the register, so do it once
+			// per block instead of once per register.
+			type predecessorRun struct {
+				index     int
+				run       *blockRun
+				exception []Category
+			}
+			runs := make([]predecessorRun, 0, len(method.Blocks[blockIndex].Predecessors))
+			for _, predecessor := range method.Blocks[blockIndex].Predecessors {
+				if !method.Blocks[predecessor].Reachable {
+					// Dead code may fall through into a live block; its register
+					// state is not part of any real path.
+					continue
+				}
+				run, err := walkBlock(method, file, allocations, predecessor, entries[predecessor], false)
+				if err != nil {
+					return nil, err
+				}
+				entry := predecessorRun{index: predecessor, run: run}
+				if protected[blockIndex] != nil {
+					// A handler observes the register file as it was when the
+					// protected instruction started, so use those pre-states
+					// instead of the protected block's exit state.
+					entry.exception, err = protectedStates(method, run, predecessor, protected[blockIndex], registerCount, propagate[blockIndex])
 					if err != nil {
-						return nil, err
+						instruction := &method.Instructions[firstInstruction(method, blockIndex)]
+						return nil, diagnostic(method.Context, instruction, "", err)
 					}
-					incoming := predecessorRun.exit[register]
-					if protected[blockIndex] != nil {
-						// A handler observes the register file as it was when the
-						// protected instruction started, so use those pre-states
-						// instead of the protected block's exit state.
-						replacement, ok, err := protectedState(method, predecessorRun, predecessor, protected[blockIndex], register)
-						if err != nil {
-							instruction := &method.Instructions[firstInstruction(method, blockIndex)]
-							return nil, diagnostic(method.Context, instruction, "", fmt.Errorf("v%d has incompatible exception states: %w", register, err))
-						}
-						if ok {
+				}
+				runs = append(runs, entry)
+			}
+			for _, register := range registers {
+				merged := Category{}
+				for _, predecessor := range runs {
+					incoming := predecessor.run.exit[register]
+					if predecessor.exception != nil {
+						// Only registers that a protected instruction actually
+						// types are replaced; the rest keep the block exit state.
+						if replacement := predecessor.exception[register]; replacement.Kind != Unknown {
 							incoming = replacement
 						}
 					}
@@ -439,27 +456,35 @@ func solveCategories(method *Method, file *model.File, allocations []Allocation,
 
 // computeLiveness runs the standard backward live-variable analysis over the
 // block graph using the per-instruction use/define table.
-// protectedState joins the pre-instruction categories of the protected
-// instructions that live in one predecessor block.
-func protectedState(method *Method, run *blockRun, predecessor int, protected map[int]bool, register uint16) (Category, bool, error) {
-	merged := Category{}
+// protectedStates joins, for every register, the pre-instruction categories of
+// the protected instructions that live in one predecessor block. It returns nil
+// when the block protects nothing for the handler.
+func protectedStates(method *Method, run *blockRun, predecessor int, protected map[int]bool, registers int, propagate map[uint16]bool) ([]Category, error) {
+	joined := make([]Category, registers)
 	found := false
 	for offset, instructionIndex := range method.Blocks[predecessor].Instructions {
 		if !protected[instructionIndex] {
 			continue
 		}
-		incoming := run.states[offset][register]
-		if incoming.Kind == Unknown {
-			continue
-		}
-		result, _, err := mergeCategory(merged, incoming)
-		if err != nil {
-			return Category{}, false, err
-		}
-		merged = result
 		found = true
+		// Only registers that the join needs can conflict here; a register the
+		// handler never reads is not part of the handler entry state.
+		for register := range propagate {
+			incoming := run.states[offset][register]
+			if incoming.Kind == Unknown {
+				continue
+			}
+			merged, _, err := mergeCategory(joined[register], incoming)
+			if err != nil {
+				return nil, fmt.Errorf("v%d has incompatible exception states: %w", register, err)
+			}
+			joined[register] = merged
+		}
 	}
-	return merged, found, nil
+	if !found {
+		return nil, nil
+	}
+	return joined, nil
 }
 
 func computeLiveness(method *Method, usedBeforeDef, definedIn []map[uint16]bool) ([]map[uint16]bool, []map[uint16]bool) {
