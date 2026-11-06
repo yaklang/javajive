@@ -25,7 +25,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -70,17 +70,18 @@ jobs:
       - name: Source algorithm regression tests
         env:
           SOURCE_SHARD: ${{ matrix.shard }}
-          SOURCE_SHARDS: "8"
-          SOURCE_WORKERS: "6"
+          SOURCE_SHARDS: "10"
+          SOURCE_WORKERS: "4"
           EDGE_TEST_PATTERN: '^Test(Native|InheritedBridgeAnnotationPolicy|LexicalFormalSignature|InterfaceWrappedArrayRequires|MemberArity|PackageDescriptor|MemberGenericSupertype|ConstructorFinalizerSeal|ScopedClassNameBinding|CheckedEscape|CheckedConstructor|BindingPlan|CtorArrayThisSpillsRoundTrip|CtorArrayThisSpillPreservesEarlierArgumentOrder|CtorDelegationNestedArrayTempRoundTrip|CtorDelegationArgumentSpills|SuperDelegationTrailingArgumentSpills|SuperDelegationSpillAcrossSafePostSuperPrelude|ConditionalThisCtorCheckcastRoundTrip|TernaryCheckcastInvocationReceiverRoundTrip|CtorNPECheckBeforeThis|EnumArrayConstructorArgsRoundTrip|EnumClinit|ZxingEnum|GenericNull|GenericFieldElementOpsRoundTrip|GenericFunctionalThrows|GenericFunctionalValueKeepsErasedCallDescriptor|MaterializedBiFunctionErasureRoundTrip|SameClassBiFunctionTypeVariablesRoundTrip|SameClassFunctionAndSupplierErasureRoundTrip|SiblingClassFunctionalErasureRoundTrip|ChainedSiblingReturnFunctionalErasureRoundTrip|LowerBoundedFunctionalArgumentsRoundTrip|CapturedLowerBoundedFunctionalArgumentsRoundTrip|CapturedParameterizedLowerBoundRoundTrip|LambdaCaptureCopiesStayInsideGenericMethod|ClassCacheTernaryStoreRoundTrip|MapCacheTernaryLocalRoundTrip|ImmediateZeroArgCheckcastInvoke|NonConditionalForkDiamond|InheritedJDK|InvocationMetadata|JDKListNull|MemberLedger|MethodReferenceKeepsPolyTargetTypeRoundTrip|DirectoryStreamFilterKeepsInstantiatedMethodRefTypeRoundTrip|T04ExternalOverloadBindingRoundTrip|LogbackPutUninterruptibly|ProtobufRemainingReconstructs|ProtobufLazyStringArrayListThis|PublicSuffixDatabase|ThisCtorOverloadCast|GenericVarargsConstructorArrayRoundTrip|ShiftedThisCtorGenericArrayRoundTrip|ConditionalArrayCloneStoreRoundTrip|ToListSingleCallableCast|JacksonRemainingMapEntryDeserializerCast|JoinStreamCtorCast|RawGenericReceiver|SyntaxObservation|RetryRollback|ShadowBuilder|ShadowIRRunsFrameSSAAndLowering|T11_C01|Sentinels|Request|R06|T04|T05|T06|T07|T08|T18|T19|T27|TaskT20|TernaryCheckcastMergeRoundTrip|SelfCastNullMergeRoundTrip|ShortCircuitVarargsArraysRoundTrip|SharedFalseTargetFallthroughRoundTrip)'
         run: |
           set -o pipefail
           mkdir -p artifacts
           go test ./classparser -c -o "$RUNNER_TEMP/adversarial.test"
-          # Eight disjoint shards halve the runner count; six concurrent
-          # batches per shard keep the fixed-deadline phase inside the job
-          # budget. Parent groups run concurrently on the same pinned JDK.
-          # Six serial processes per shard isolate environment-changing tests.
+          # Ten disjoint shards cut the runner count; four concurrent
+          # batches per shard match the four available cores (six workers
+          # measured no extra throughput and pushed the phase to its
+          # deadline). Parent groups run concurrently on the same pinned JDK.
+          # Four serial processes per shard isolate environment-changing tests.
           # Exact original parent and nested-policy inventories remain checked;
           # the required summary waits for every shard and the trusted fixtures.
           python3 - <<'PYTHON'
@@ -101,7 +102,7 @@ jobs:
               raise SystemExit("incomplete nested-capture scope inventory")
           shard, count = int(os.environ["SOURCE_SHARD"]), int(os.environ["SOURCE_SHARDS"])
           worker_count = int(os.environ["SOURCE_WORKERS"])
-          if count != 8 or worker_count != 6 or not 0 <= shard < count:
+          if count != 10 or worker_count != 4 or not 0 <= shard < count:
               raise SystemExit("invalid source regression shard")
           all_ordinary = [name for name in names if name != heavy]
           # Measured costs affect placement only. The binary's complete test
@@ -128,7 +129,7 @@ jobs:
               "shard": shard, "shards": count, "all_parents": names, "all_scopes": scopes,
               "parents": ordinary, "scopes": selected_scopes}, indent=2))
           # Keep all batches/coverage mandatory. Leave measured runner
-          # variance headroom above the ~22m consolidated source phase; the
+          # variance headroom above the ~20m consolidated source phase; the
           # 35m job limit also includes tool setup and binary compilation.
           deadline = time.monotonic() + 28 * 60
           def run_batch(item):

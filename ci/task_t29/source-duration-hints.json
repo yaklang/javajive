@@ -112,7 +112,7 @@
     "4ae1722cb3a5f515676469227f2e13bda45e42e3"
   ],
   "measured_completed_parents": 2628,
-  "partial_measurement_note": "Exact-head completed parents only; incomplete/deadline batches remain mandatory. Costs affect placement only. Eight disjoint shards, each with six serial batches, retain the complete discovered inventory and unchanged deadlines.",
+  "partial_measurement_note": "Exact-head completed parents only; incomplete/deadline batches remain mandatory. Costs affect placement only. Ten disjoint shards, each with four serial batches, retain the complete discovered inventory and unchanged deadlines.",
   "seconds": {
     "TestAdversarialAbsentParameterTableDoesNotRequireConstructorNamingProof": 0,
     "TestAdversarialAcyclicOwnerOverCyclicDependenciesRoundTrip": 8.99,
