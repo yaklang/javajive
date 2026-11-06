@@ -608,6 +608,70 @@ func TestConstantPoolValidationIsIndependent(t *testing.T) {
 	}
 }
 
+func TestSourceDebugAndConstantValueAttributes(t *testing.T) {
+	class := NewClass("DebugMeta", "java/lang/Object", ACC_PUBLIC|ACC_SUPER).SetSourceFile("DebugMeta.java")
+	class.SetConstantInt(class.AddField(ACC_PUBLIC|ACC_STATIC|ACC_FINAL, "ANSWER", "I"), 42)
+	class.SetConstantString(class.AddField(ACC_PUBLIC|ACC_STATIC|ACC_FINAL, "TEXT", "Ljava/lang/String;"), "metadata")
+	code := class.AddMethod(ACC_PUBLIC|ACC_STATIC, "twice", "(I)I").Code()
+	start, body, end := code.NewLabel(), code.NewLabel(), code.NewLabel()
+	code.Mark(start).Line(start, 7).Load(IntLocal, 0).Mark(body).Line(body, 8).Load(IntLocal, 0).Emit(IADD).Emit(IRETURN).Mark(end)
+	code.Local(start, end, "value", "I", 0)
+	class.AddMethod(ACC_PUBLIC|ACC_STATIC, "main", "([Ljava/lang/String;)V").Code().Emit(RETURN)
+
+	raw, err := class.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := javaclassparser.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Attributes) != 1 {
+		t.Fatalf("class attributes = %d", len(parsed.Attributes))
+	}
+	source, ok := parsed.Attributes[0].(*javaclassparser.SourceFileAttribute)
+	if !ok {
+		t.Fatalf("SourceFile = %#v", parsed.Attributes[0])
+	}
+	if got := parsed.ConstantPoolManager.GetUtf8(int(source.SourceFileIndex)); got == nil || got.Value != "DebugMeta.java" {
+		t.Fatalf("SourceFile constant = %#v", got)
+	}
+	for i := range []string{"42", "metadata"} {
+		if len(parsed.Fields[i].Attributes) != 1 {
+			t.Fatalf("field %d attributes = %d", i, len(parsed.Fields[i].Attributes))
+		}
+		if _, ok := parsed.Fields[i].Attributes[0].(*javaclassparser.ConstantValueAttribute); !ok {
+			t.Fatalf("field %d ConstantValue = %#v", i, parsed.Fields[i].Attributes[0])
+		}
+	}
+	codeAttribute := parsed.Methods[0].Attributes[0].(*javaclassparser.CodeAttribute)
+	if len(codeAttribute.Attributes) != 2 {
+		t.Fatalf("Code attributes = %d", len(codeAttribute.Attributes))
+	}
+	lines, ok := codeAttribute.Attributes[0].(*javaclassparser.LineNumberTableAttribute)
+	if !ok || len(lines.LineNumberTable) != 2 || lines.LineNumberTable[0].StartPc != 0 || lines.LineNumberTable[0].LineNumber != 7 || lines.LineNumberTable[1].StartPc != 1 || lines.LineNumberTable[1].LineNumber != 8 {
+		t.Fatalf("LineNumberTable = %#v", codeAttribute.Attributes[0])
+	}
+	local, ok := codeAttribute.Attributes[1].(*javaclassparser.UnparsedAttribute)
+	if !ok || local.Name != "LocalVariableTable" || len(local.Info) != 12 {
+		t.Fatalf("LocalVariableTable = %#v", codeAttribute.Attributes[1])
+	}
+	again, err := class.Bytes()
+	if err != nil || !bytes.Equal(raw, again) {
+		t.Fatalf("metadata output is not deterministic: %v", err)
+	}
+	java, err := exec.LookPath("java")
+	if err == nil {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "DebugMeta.class"), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if output, err := exec.Command(java, "-Xverify:all", "-cp", dir, "DebugMeta").CombinedOutput(); err != nil {
+			t.Fatalf("java verification failed: %v\n%s", err, output)
+		}
+	}
+}
+
 func TestJavaVerifyAll(t *testing.T) {
 	java, err := exec.LookPath("java")
 	if err != nil {

@@ -39,11 +39,15 @@ func Build(in Input) (*Method, error) {
 	if err != nil {
 		return nil, err
 	}
-	result.RegisterTypes, result.Allocations, err = analyzeRegisters(result, in.File)
+	allocations, err := collectAllocations(result, in.File)
 	if err != nil {
 		return nil, err
 	}
-	populateBlockEntries(result)
+	result.Allocations = allocations
+	result.RegisterTypes, err = analyzeCategories(result, in.File, allocations)
+	if err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
@@ -66,6 +70,18 @@ func validateInstructions(method *Method, file *model.File) error {
 		if instruction.Opcode == 0x1a || instruction.Opcode == 0x1b {
 			if instruction.Index >= uint32(len(file.Strings)) {
 				return diagnostic(method.Context, instruction, "", fmt.Errorf("string index %d is out of range", instruction.Index))
+			}
+		}
+		if instruction.Opcode == 0x24 || instruction.Opcode == 0x25 {
+			if instruction.Index >= uint32(len(file.Types)) {
+				return diagnostic(method.Context, instruction, "", fmt.Errorf("type index %d is out of range", instruction.Index))
+			}
+			descriptor := file.Types[instruction.Index].Descriptor
+			if len(descriptor) < 2 || descriptor[0] != '[' {
+				return diagnostic(method.Context, instruction, "", fmt.Errorf("filled-new-array type %q is not an array", descriptor))
+			}
+			if component := descriptor[1:]; component == "J" || component == "D" || component == "F" {
+				return diagnostic(method.Context, instruction, "", fmt.Errorf("unsupported opcode family: wide/float/double"))
 			}
 		}
 		if instruction.Opcode == 0x1c || instruction.Opcode == 0x1f || instruction.Opcode == 0x20 || instruction.Opcode == 0x22 || instruction.Opcode == 0x23 {
@@ -122,6 +138,9 @@ func validateInstructions(method *Method, file *model.File) error {
 			if len(instruction.Regs) != wordCount {
 				return diagnostic(method.Context, instruction, "", fmt.Errorf("invoke has %d register words; descriptor requires %d", len(instruction.Regs), wordCount))
 			}
+			if wordCount > int(method.Code.OutsSize) {
+				return diagnostic(method.Context, instruction, "", fmt.Errorf("invoke requires %d outgoing register words; outs_size is %d", wordCount, method.Code.OutsSize))
+			}
 			if _, err := DescriptorCategory(proto.ReturnType); err != nil {
 				return diagnostic(method.Context, instruction, "", err)
 			}
@@ -130,10 +149,20 @@ func validateInstructions(method *Method, file *model.File) error {
 			}
 		}
 		if isMoveResult(instruction.Opcode) {
-			if index == 0 || !isInvoke(method.Instructions[index-1].Opcode) {
-				return diagnostic(method.Context, instruction, "", fmt.Errorf("move-result must immediately follow an invoke"))
+			if index == 0 {
+				return diagnostic(method.Context, instruction, "", fmt.Errorf("move-result must immediately follow an invoke or filled-new-array"))
 			}
-			kind, err := invokeResultCategory(method.Instructions[index-1], file)
+			previous := method.Instructions[index-1]
+			if !isInvoke(previous.Opcode) && previous.Opcode != 0x24 && previous.Opcode != 0x25 {
+				return diagnostic(method.Context, instruction, "", fmt.Errorf("move-result must immediately follow an invoke or filled-new-array"))
+			}
+			if previous.Opcode == 0x24 || previous.Opcode == 0x25 {
+				if instruction.Opcode != 0x0c {
+					return diagnostic(method.Context, instruction, "", fmt.Errorf("filled-new-array result requires move-result-object"))
+				}
+				continue
+			}
+			kind, err := invokeResultCategory(previous, file)
 			if err != nil {
 				return diagnostic(method.Context, instruction, "", err)
 			}
@@ -252,54 +281,20 @@ func invokeResultCategory(instruction Instruction, file *model.File) (CategoryKi
 	return DescriptorCategory(file.Protos[callee.ProtoIndex].ReturnType)
 }
 
-func analyzeRegisters(method *Method, file *model.File) ([]Category, []Allocation, error) {
-	registers := make([]Category, method.Code.RegistersSize)
-	parameterBase := int(method.Code.RegistersSize - method.Code.InsSize)
-	parameter := parameterBase
-	if method.AccessFlags&dexAccessStatic == 0 {
-		registers[parameter] = Category{Kind: Reference, Descriptor: method.Context.Class}
-		parameter++
-	}
-	for _, descriptor := range method.Proto.Parameters {
-		kind, _ := DescriptorCategory(descriptor)
-		registers[parameter] = Category{Kind: kind, Descriptor: descriptor}
-		parameter++
-	}
+// collectAllocations validates and indexes every new-instance/constructor pair.
+func collectAllocations(method *Method, file *model.File) ([]Allocation, error) {
 	allocations := make([]Allocation, 0)
 	for index := range method.Instructions {
-		instruction := method.Instructions[index]
-		if instruction.Opcode == 0x22 {
-			allocation, err := validateAllocation(method, file, index)
-			if err != nil {
-				return nil, nil, err
-			}
-			allocations = append(allocations, allocation)
+		if method.Instructions[index].Opcode != 0x22 {
+			continue
 		}
+		allocation, err := validateAllocation(method, file, index)
+		if err != nil {
+			return nil, err
+		}
+		allocations = append(allocations, allocation)
 	}
-	for pass := 0; pass <= len(method.Instructions); pass++ {
-		changed := false
-		for index := range method.Instructions {
-			instruction := method.Instructions[index]
-			constraints, err := instructionConstraints(method, file, index, registers, allocations)
-			if err != nil {
-				return nil, nil, diagnostic(method.Context, &instruction, "", err)
-			}
-			for register, category := range constraints {
-				if category.Kind == Unknown {
-					continue
-				}
-				merged, didChange, err := mergeCategory(registers[register], category)
-				if err != nil {
-					return nil, nil, diagnostic(method.Context, &instruction, "", fmt.Errorf("v%d: %w", register, err))
-				}
-				registers[register], changed = merged, changed || didChange
-			}
-		}
-		if !changed {
-			break
-		}
-	}
-	return registers, allocations, nil
+	return allocations, nil
 }
 
 func validateAllocation(method *Method, file *model.File, newIndex int) (Allocation, error) {
@@ -310,6 +305,7 @@ func validateAllocation(method *Method, file *model.File, newIndex int) (Allocat
 	}
 	aliases := map[uint16]bool{newInstruction.Regs[0]: true}
 	constructor := -1
+	interleaved := false
 	for index := newIndex + 1; index < len(method.Instructions); index++ {
 		instruction := method.Instructions[index]
 		if instruction.Opcode >= 0x07 && instruction.Opcode <= 0x09 && aliases[instruction.Regs[1]] {
@@ -324,7 +320,15 @@ func validateAllocation(method *Method, file *model.File, newIndex int) (Allocat
 			constructor = index
 			break
 		}
-		return Allocation{}, diagnostic(method.Context, &instruction, "", fmt.Errorf("unsafe uninitialized allocation use or escape before constructor"))
+		// Any other instruction may sit between allocation and initialization as
+		// long as it never touches the uninitialized value: d8 interleaves
+		// argument computation here.
+		interleaved = true
+		for _, register := range instruction.Regs {
+			if aliases[register] {
+				return Allocation{}, diagnostic(method.Context, &instruction, "", fmt.Errorf("unsafe uninitialized allocation use or escape before constructor"))
+			}
+		}
 	}
 	if constructor < 0 {
 		return Allocation{}, diagnostic(method.Context, &newInstruction, "", fmt.Errorf("new-instance has no adjacent safe constructor invocation"))
@@ -334,128 +338,11 @@ func validateAllocation(method *Method, file *model.File, newIndex int) (Allocat
 		aliasRegisters = append(aliasRegisters, register)
 	}
 	sort.Slice(aliasRegisters, func(i, j int) bool { return aliasRegisters[i] < aliasRegisters[j] })
-	return Allocation{ID: newInstruction.Offset + 1, Descriptor: descriptor, NewInstruction: newIndex, Constructor: constructor, AliasRegisters: aliasRegisters}, nil
-}
-
-func instructionConstraints(method *Method, file *model.File, index int, current []Category, allocations []Allocation) (map[uint16]Category, error) {
-	instruction := method.Instructions[index]
-	constraints := make(map[uint16]Category)
-	intCategory := Category{Kind: IntLike}
-	refCategory := Category{Kind: Reference}
-	set := func(register uint16, category Category) { constraints[register] = category }
-	switch {
-	case instruction.Opcode >= 0x01 && instruction.Opcode <= 0x03 || instruction.Opcode >= 0x07 && instruction.Opcode <= 0x09:
-		source := current[instruction.Regs[1]]
-		if instruction.Opcode >= 0x07 {
-			if source.Kind == Unknown {
-				source = refCategory
-			}
-		} else if source.Kind == Unknown {
-			source = current[instruction.Regs[0]]
-		}
-		set(instruction.Regs[0], source)
-		set(instruction.Regs[1], source)
-	case instruction.Opcode == 0x0a:
-		set(instruction.Regs[0], intCategory)
-	case instruction.Opcode == 0x0c:
-		set(instruction.Regs[0], refCategory)
-	case instruction.Opcode == 0x0f:
-		set(instruction.Regs[0], intCategory)
-	case instruction.Opcode == 0x11 || instruction.Opcode == 0x27:
-		set(instruction.Regs[0], refCategory)
-	case instruction.Opcode >= 0x12 && instruction.Opcode <= 0x15:
-		if instruction.Literal == 0 {
-			set(instruction.Regs[0], Category{Kind: Null})
-		} else {
-			set(instruction.Regs[0], intCategory)
-		}
-	case instruction.Opcode == 0x1a || instruction.Opcode == 0x1b:
-		set(instruction.Regs[0], Category{Kind: Reference, Descriptor: "Ljava/lang/String;"})
-	case instruction.Opcode == 0x1c:
-		set(instruction.Regs[0], Category{Kind: Reference, Descriptor: "Ljava/lang/Class;"})
-	case instruction.Opcode == 0x1f:
-		set(instruction.Regs[0], Category{Kind: Reference, Descriptor: file.Types[instruction.Index].Descriptor})
-	case instruction.Opcode == 0x20:
-		set(instruction.Regs[0], intCategory)
-		set(instruction.Regs[1], refCategory)
-	case instruction.Opcode == 0x21:
-		set(instruction.Regs[0], intCategory)
-		set(instruction.Regs[1], refCategory)
-	case instruction.Opcode == 0x22:
-		allocation := allocationAt(allocations, index)
-		set(instruction.Regs[0], Category{Kind: Uninitialized, Descriptor: allocation.Descriptor, Allocation: allocation.ID})
-	case instruction.Opcode == 0x23:
-		set(instruction.Regs[0], Category{Kind: Reference, Descriptor: file.Types[instruction.Index].Descriptor})
-		set(instruction.Regs[1], intCategory)
-	case instruction.Opcode >= 0x32 && instruction.Opcode <= 0x37:
-		left, right := current[instruction.Regs[0]], current[instruction.Regs[1]]
-		if instruction.Opcode >= 0x34 || left.Kind == IntLike || right.Kind == IntLike {
-			set(instruction.Regs[0], intCategory)
-			set(instruction.Regs[1], intCategory)
-		} else if left.Kind != Unknown {
-			set(instruction.Regs[1], left)
-		} else if right.Kind != Unknown {
-			set(instruction.Regs[0], right)
-		}
-	case instruction.Opcode >= 0x38 && instruction.Opcode <= 0x3d:
-		if instruction.Opcode >= 0x3a {
-			set(instruction.Regs[0], intCategory)
-		}
-	case instruction.Opcode >= 0x44 && instruction.Opcode <= 0x51:
-		set(instruction.Regs[1], refCategory)
-		set(instruction.Regs[2], intCategory)
-		if instruction.Opcode == 0x46 || instruction.Opcode == 0x4d {
-			set(instruction.Regs[0], refCategory)
-		} else {
-			set(instruction.Regs[0], intCategory)
-		}
-	case instruction.Opcode >= 0x52 && instruction.Opcode <= 0x6d:
-		field := file.Fields[instruction.Index]
-		kind, _ := DescriptorCategory(field.Type)
-		category := Category{Kind: kind, Descriptor: field.Type}
-		set(instruction.Regs[0], category)
-		if instruction.Opcode <= 0x5f {
-			set(instruction.Regs[1], refCategory)
-		}
-	case isInvoke(instruction.Opcode):
-		callee := file.Methods[instruction.Index]
-		proto := file.Protos[callee.ProtoIndex]
-		register := 0
-		if !isStaticInvoke(instruction.Opcode) {
-			set(instruction.Regs[0], Category{Kind: Reference, Descriptor: callee.Class})
-			register++
-		}
-		for _, descriptor := range proto.Parameters {
-			kind, _ := DescriptorCategory(descriptor)
-			set(instruction.Regs[register], Category{Kind: kind, Descriptor: descriptor})
-			register++
-		}
-	case instruction.Opcode == 0x7b || instruction.Opcode == 0x7c || instruction.Opcode >= 0x8d && instruction.Opcode <= 0x8f:
-		set(instruction.Regs[0], intCategory)
-		set(instruction.Regs[1], intCategory)
-	case instruction.Opcode >= 0x90 && instruction.Opcode <= 0x9a:
-		for _, register := range instruction.Regs {
-			set(register, intCategory)
-		}
-	case instruction.Opcode >= 0xb0 && instruction.Opcode <= 0xba:
-		for _, register := range instruction.Regs {
-			set(register, intCategory)
-		}
-	case instruction.Opcode >= 0xd0 && instruction.Opcode <= 0xe2:
-		for _, register := range instruction.Regs {
-			set(register, intCategory)
-		}
-	}
-	return constraints, nil
-}
-
-func allocationAt(allocations []Allocation, instruction int) Allocation {
-	for _, allocation := range allocations {
-		if allocation.NewInstruction == instruction {
-			return allocation
-		}
-	}
-	return Allocation{}
+	return Allocation{
+		ID: newInstruction.Offset + 1, Descriptor: descriptor,
+		NewInstruction: newIndex, Constructor: constructor,
+		AliasRegisters: aliasRegisters, Fused: !interleaved,
+	}, nil
 }
 
 func mergeCategory(left, right Category) (Category, bool, error) {
@@ -484,10 +371,4 @@ func mergeCategory(left, right Category) (Category, bool, error) {
 		return left, true, nil
 	}
 	return left, false, nil
-}
-
-func populateBlockEntries(method *Method) {
-	for index := range method.Blocks {
-		method.Blocks[index].Entry = append([]Category(nil), method.RegisterTypes...)
-	}
 }

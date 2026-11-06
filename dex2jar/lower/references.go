@@ -3,8 +3,10 @@ package lower
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/yaklang/javajive/dex2jar/ir"
+	"github.com/yaklang/javajive/dex2jar/model"
 )
 
 const nullDescriptor = "<null>"
@@ -82,7 +84,7 @@ func (l *methodLowerer) checkReferenceInstruction(index int, state referenceStat
 		}
 	}
 	check := func(register uint16, expected, role string) error {
-		if !isReferenceKind(l.method.RegisterTypes[register].Kind) {
+		if !isReferenceKind(l.method.CategoryAt(index, register).Kind) {
 			return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("%s v%d is not a reference", role, register))
 		}
 		if len(state[register]) == 0 {
@@ -171,7 +173,10 @@ func (l *methodLowerer) transferReferences(index int, state referenceState) {
 		}
 		return
 	}
-	if _, ok := l.allocationByNew[index]; ok || l.allocationAliasOps[index] {
+	if allocation, ok := l.allocationByNew[index]; ok {
+		if !allocation.Fused {
+			setOne(instruction.Regs[0], allocation.Descriptor)
+		}
 		return
 	}
 	switch {
@@ -179,12 +184,20 @@ func (l *methodLowerer) transferReferences(index int, state referenceState) {
 		set(instruction.Regs[0], state[instruction.Regs[1]])
 	case instruction.Opcode == 0x0c:
 		if index > 0 {
-			invoke := l.method.Instructions[index-1]
-			callee := l.file.Methods[invoke.Index]
+			previous := l.method.Instructions[index-1]
+			if previous.Opcode == 0x24 || previous.Opcode == 0x25 {
+				// filled-new-array yields the array type itself; its Index names
+				// a type, not a method.
+				setOne(instruction.Regs[0], l.file.Types[previous.Index].Descriptor)
+				break
+			}
+			callee := l.file.Methods[previous.Index]
 			setOne(instruction.Regs[0], l.file.Protos[callee.ProtoIndex].ReturnType)
 		}
 	case instruction.Opcode >= 0x12 && instruction.Opcode <= 0x15 && instruction.Literal == 0:
-		if isReferenceKind(l.method.RegisterTypes[instruction.Regs[0]].Kind) {
+		// The null constant types the register it defines, not its previous
+		// lifetime, so the definition category decides.
+		if definition, ok := l.method.DefinitionAt(index); ok && isReferenceKind(definition.Category.Kind) {
 			setOne(instruction.Regs[0], nullDescriptor)
 		}
 	case instruction.Opcode == 0x1a || instruction.Opcode == 0x1b:
@@ -233,6 +246,49 @@ func (l *methodLowerer) checkArrayDescriptors(instruction *ir.Instruction, descr
 	return nil
 }
 
+// maxHierarchyCacheEntries bounds the per-file class graphs kept alive while an
+// application is lowered; inspect walks one file at a time, so a small window is
+// enough and a long-lived process cannot grow this without limit.
+const maxHierarchyCacheEntries = 8
+
+var hierarchyCache = struct {
+	sync.Mutex
+	entries map[*model.File]map[string]*model.Class
+	order   []*model.File
+}{entries: make(map[*model.File]map[string]*model.Class)}
+
+// classHierarchy indexes one DEX file's classes once. Rebuilding the graph for
+// every method would be quadratic on large applications.
+func classHierarchy(file *model.File) map[string]*model.Class {
+	hierarchyCache.Lock()
+	if cached, ok := hierarchyCache.entries[file]; ok {
+		hierarchyCache.Unlock()
+		return cached
+	}
+	hierarchyCache.Unlock()
+
+	index := make(map[string]*model.Class, len(file.Classes))
+	for position := range file.Classes {
+		class := &file.Classes[position]
+		index[class.Descriptor] = class
+	}
+
+	hierarchyCache.Lock()
+	if len(hierarchyCache.order) >= maxHierarchyCacheEntries {
+		evicted := hierarchyCache.order[0]
+		hierarchyCache.order = hierarchyCache.order[1:]
+		delete(hierarchyCache.entries, evicted)
+	}
+	hierarchyCache.entries[file] = index
+	hierarchyCache.order = append(hierarchyCache.order, file)
+	hierarchyCache.Unlock()
+	return index
+}
+
+// maxAssignabilityDepth bounds the ancestry walk so pathological or cyclic
+// hierarchies cannot stall translation.
+const maxAssignabilityDepth = 32
+
 func (l *methodLowerer) provablyAssignable(actual, expected string) bool {
 	if actual == nullDescriptor || actual == expected || expected == "Ljava/lang/Object;" {
 		return true
@@ -249,6 +305,37 @@ func (l *methodLowerer) provablyAssignable(actual, expected string) bool {
 				return true
 			}
 		}
+	}
+	// Follow the application hierarchy declared in the same DEX file. External
+	// ancestors stay unproven, so no unverified assignment is invented.
+	index := classHierarchy(l.file)
+	visited := map[string]bool{actual: true}
+	queue := []string{actual}
+	for depth := 0; depth < maxAssignabilityDepth && len(queue) > 0; depth++ {
+		var next []string
+		for _, current := range queue {
+			class, ok := index[current]
+			if !ok {
+				continue
+			}
+			if class.Superclass == expected {
+				return true
+			}
+			for _, implemented := range class.Interfaces {
+				if implemented == expected {
+					return true
+				}
+			}
+			candidates := append([]string{class.Superclass}, class.Interfaces...)
+			for _, candidate := range candidates {
+				if candidate == "" || visited[candidate] {
+					continue
+				}
+				visited[candidate] = true
+				next = append(next, candidate)
+			}
+		}
+		queue = next
 	}
 	return false
 }

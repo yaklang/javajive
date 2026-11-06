@@ -29,9 +29,23 @@ func fixture(code []uint16, registers, ins uint16, proto model.Proto, flags uint
 	method := &model.EncodedMethod{
 		AccessFlags: flags,
 		Method:      file.Methods[0],
-		Code:        &model.Code{RegistersSize: registers, InsSize: ins, Instructions: code},
+		Code:        &model.Code{RegistersSize: registers, InsSize: ins, OutsSize: 8, Instructions: code},
 	}
 	return Input{File: file, Class: class, Method: method}
+}
+
+func TestBuildRejectsInsufficientOutsSize(t *testing.T) {
+	// invoke-direct {v0},LFoo;-><init>()V needs one outgoing word.
+	in := fixture([]uint16{0x1070, 0x0002, 0x0000, 0x000e}, 1, 0, model.Proto{ReturnType: "V"}, dexAccessStatic)
+	in.Method.Code.OutsSize = 0
+	_, err := Build(in)
+	if err == nil || !strings.Contains(err.Error(), "outs_size is 0") {
+		t.Fatalf("error = %v", err)
+	}
+	diagnostic, ok := report.AsDiagnostic(err)
+	if !ok || diagnostic.Offset != 0 {
+		t.Fatalf("diagnostic = %#v", diagnostic)
+	}
 }
 
 func TestDescriptorValidationAcceptsLegalDEXTypes(t *testing.T) {
@@ -320,8 +334,16 @@ func TestBuildCFGAndRegisterCategories(t *testing.T) {
 	if got := method.Blocks[0].Successors; len(got) != 2 || got[0] != 2 || got[1] != 1 {
 		t.Fatalf("entry successors = %v", got)
 	}
-	if method.RegisterTypes[0].Kind != IntLike || method.RegisterTypes[1].Kind != IntLike {
-		t.Fatalf("register categories = %#v", method.RegisterTypes)
+	if method.RegisterTypes[1].Kind != IntLike {
+		t.Fatalf("parameter category = %#v", method.RegisterTypes)
+	}
+	// const/4 v0, #0 starts as a null constant and adopts the int type of its
+	// first use, so the definition is refined to int.
+	if definition, ok := method.DefinitionAt(0); !ok || definition.Category.Kind != IntLike {
+		t.Fatalf("entry definition = %#v, %v", definition, ok)
+	}
+	if definition, ok := method.DefinitionAt(2); !ok || definition.Category.Kind != IntLike {
+		t.Fatalf("second definition = %#v, %v", definition, ok)
 	}
 	for _, block := range method.Blocks {
 		if len(block.Entry) != 2 {
@@ -395,8 +417,12 @@ func TestBuildMoveResultAndNullReferenceInference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if method.RegisterTypes[0].Kind != Reference || method.RegisterTypes[1].Kind != Reference {
-		t.Fatalf("register categories = %#v", method.RegisterTypes)
+	if definition, ok := method.DefinitionAt(1); !ok || definition.Register != 0 || definition.Category.Kind != Reference {
+		t.Fatalf("move-result definition = %#v, %v", definition, ok)
+	}
+	// v1 is first a null constant and is promoted to a reference by the compare.
+	if category := method.CategoryAt(5, 1); category.Kind != Reference {
+		t.Fatalf("v1 category before compare = %#v", category)
 	}
 }
 
@@ -418,8 +444,10 @@ func TestBuildConstructorAllocationIdentity(t *testing.T) {
 	if got := method.Allocations[0].AliasRegisters; len(got) != 2 || got[0] != 0 || got[1] != 1 {
 		t.Fatalf("aliases = %v", got)
 	}
-	if method.RegisterTypes[0].Allocation == 0 || method.RegisterTypes[0].Allocation != method.RegisterTypes[1].Allocation {
-		t.Fatalf("register identities = %#v", method.RegisterTypes)
+	first, firstOK := method.DefinitionAt(0)
+	second, secondOK := method.DefinitionAt(1)
+	if !firstOK || !secondOK || first.Category.Allocation == 0 || first.Category.Allocation != second.Category.Allocation {
+		t.Fatalf("allocation identities = %#v / %#v", first, second)
 	}
 }
 
@@ -438,15 +466,116 @@ func TestBuildRejectsUnsafeConstructorShape(t *testing.T) {
 	}
 }
 
-func TestBuildRejectsStableLocalCategoryConflict(t *testing.T) {
-	// v0 is first an int, then a string reference.
+// Reusing one register for an int and later for a reference is ordinary DEX and
+// JVM practice, so it must translate rather than be rejected.
+func TestBuildAllowsRegisterLifetimeReuse(t *testing.T) {
 	in := fixture([]uint16{
-		0x1012,
-		0x001a, 0x0000,
-		0x0011,
+		0x1012,         // const/4 v0, #1
+		0x001a, 0x0000, // const-string v0, "hello"
+		0x0011, // return-object v0
+	}, 1, 0, model.Proto{ReturnType: "Ljava/lang/String;"}, dexAccessStatic)
+	method, err := Build(in)
+	if err != nil {
+		t.Fatalf("Build() rejected legal register reuse: %v", err)
+	}
+	if definition, ok := method.DefinitionAt(1); !ok || definition.Category.Kind != Reference {
+		t.Fatalf("second lifetime = %#v, %v", definition, ok)
+	}
+}
+
+// A register that is live across a join with two different categories is a real
+// type conflict and must still be rejected.
+func TestBuildRejectsIncompatibleCategoriesAtJoin(t *testing.T) {
+	// const/4 v0,#1; if-eqz v0,+5; const-string v0,"x"; goto +2; const/4 v0,#2;
+	// return-object v0. Both branches reach the return with different categories.
+	in := fixture([]uint16{
+		0x1012,         // const/4 v0, #1
+		0x0038, 0x0005, // if-eqz v0, +5
+		0x001a, 0x0000, // const-string v0, "hello"
+		0x0228, // goto +2
+		0x2012, // const/4 v0, #2
+		0x0011, // return-object v0
 	}, 1, 0, model.Proto{ReturnType: "Ljava/lang/String;"}, dexAccessStatic)
 	_, err := Build(in)
-	if err == nil || !strings.Contains(err.Error(), "incompatible stable local categories") {
+	if err == nil || !strings.Contains(err.Error(), "incompatible categories at a control-flow join") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func filledArrayInput(typeDescriptor string, words []uint16) Input {
+	file := &model.File{
+		Entry:   "classes.dex",
+		Types:   []model.Type{{Descriptor: typeDescriptor}},
+		Protos:  []model.Proto{{ReturnType: "[I"}},
+		Methods: []model.MethodID{{Class: "LFoo;", Name: "test", ProtoIndex: 0}},
+	}
+	class := &model.Class{Descriptor: "LFoo;"}
+	method := &model.EncodedMethod{
+		AccessFlags: dexAccessStatic,
+		Method:      file.Methods[0],
+		Code:        &model.Code{RegistersSize: 2, OutsSize: 2, Instructions: words},
+	}
+	return Input{File: file, Class: class, Method: method}
+}
+
+func TestBuildRejectsMalformedFilledNewArray(t *testing.T) {
+	tests := []struct {
+		name  string
+		kind  string
+		words []uint16
+		part  string
+	}{
+		{
+			name:  "type index out of range",
+			kind:  "[I",
+			words: []uint16{0x1024, 0x0005, 0x0000, 0x000c, 0x0011},
+			part:  "type index 5 is out of range",
+		},
+		{
+			name:  "non array type",
+			kind:  "I",
+			words: []uint16{0x1024, 0x0000, 0x0000, 0x000c, 0x0011},
+			part:  "is not an array",
+		},
+		{
+			name:  "wide element",
+			kind:  "[J",
+			words: []uint16{0x1024, 0x0000, 0x0000, 0x000c, 0x0011},
+			part:  "wide/float/double",
+		},
+		{
+			name:  "missing move-result-object",
+			kind:  "[I",
+			words: []uint16{0x1024, 0x0000, 0x0000, 0x000a, 0x0011},
+			part:  "requires move-result-object",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Build(filledArrayInput(test.kind, test.words))
+			if err == nil || !strings.Contains(err.Error(), test.part) {
+				t.Fatalf("error = %v, want substring %q", err, test.part)
+			}
+		})
+	}
+}
+
+func TestBuildRejectsIncompleteInput(t *testing.T) {
+	valid := fixture([]uint16{0x000e}, 0, 0, model.Proto{ReturnType: "V"}, dexAccessStatic)
+	cases := map[string]Input{
+		"nil file":   {Class: valid.Class, Method: valid.Method},
+		"nil class":  {File: valid.File, Method: valid.Method},
+		"nil method": {File: valid.File, Class: valid.Class},
+		"nil code": {
+			File: valid.File, Class: valid.Class,
+			Method: &model.EncodedMethod{AccessFlags: dexAccessStatic, Method: valid.Method.Method},
+		},
+	}
+	for name, in := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Build(in); err == nil || !strings.Contains(err.Error(), "incomplete method input") {
+				t.Fatalf("error = %v", err)
+			}
+		})
 	}
 }

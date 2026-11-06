@@ -89,6 +89,14 @@ func NewJarFSFromLocalWithSourceVersion(path string, target int, resolve func(st
 	return NewJarFSFromLocalWithCompilerProfile(path, target, "", resolve)
 }
 
+// SetAnalysisBudget applies a per-method reaching-definition budget to classes
+// read from this archive. Nested archives opened afterwards inherit it.
+func (z *JarFS) SetAnalysisBudget(maxAnalysisUpdates int) {
+	if z != nil {
+		z.maxAnalysisUpdates = maxAnalysisUpdates
+	}
+}
+
 // NewJarFSFromLocalWithAnalysisBudget is NewJarFSFromLocalWithSourceVersion
 // with an explicit per-method reaching-definition budget. A positive value
 // above the public 1M default also scales the derived graph caps.

@@ -30,7 +30,7 @@ func TestOpcodeTableExhaustiveContract(t *testing.T) {
 		{"const-string", "21c", 2, true, true}, {"const-string/jumbo", "31c", 3, true, true}, {"const-class", "21c", 2, true, true},
 		{"monitor-enter", "11x", 1, false, true}, {"monitor-exit", "11x", 1, false, true}, {"check-cast", "21c", 2, true, true}, {"instance-of", "22c", 2, true, true},
 		{"array-length", "12x", 1, true, true}, {"new-instance", "21c", 2, true, true}, {"new-array", "22c", 2, true, true},
-		{"filled-new-array", "35c", 3, false, true}, {"filled-new-array/range", "3rc", 3, false, true}, {"fill-array-data", "31t", 3, false, true}, {"throw", "11x", 1, true, true},
+		{"filled-new-array", "35c", 3, true, true}, {"filled-new-array/range", "3rc", 3, true, true}, {"fill-array-data", "31t", 3, false, true}, {"throw", "11x", 1, true, true},
 		{"goto", "10t", 1, true, true}, {"goto/16", "20t", 2, true, true}, {"goto/32", "30t", 3, true, true},
 		{"packed-switch", "31t", 3, false, true}, {"sparse-switch", "31t", 3, false, true},
 		{"cmpl-float", "23x", 2, false, true}, {"cmpg-float", "23x", 2, false, true}, {"cmpl-double", "23x", 2, false, true}, {"cmpg-double", "23x", 2, false, true}, {"cmp-long", "23x", 2, false, true},
@@ -48,7 +48,7 @@ func TestOpcodeTableExhaustiveContract(t *testing.T) {
 		}
 	}
 	array := []string{"aget", "aget-wide", "aget-object", "aget-boolean", "aget-byte", "aget-char", "aget-short", "aput", "aput-wide", "aput-object", "aput-boolean", "aput-byte", "aput-char", "aput-short"}
-	defineRange(0x44, array, "23x", 2, func(opcode byte) bool { return opcode == 0x44 || opcode == 0x46 || opcode == 0x4b || opcode == 0x4d })
+	defineRange(0x44, array, "23x", 2, func(opcode byte) bool { return opcode != 0x45 && opcode != 0x4c })
 	instanceFields := []string{"iget", "iget-wide", "iget-object", "iget-boolean", "iget-byte", "iget-char", "iget-short", "iput", "iput-wide", "iput-object", "iput-boolean", "iput-byte", "iput-char", "iput-short"}
 	defineRange(0x52, instanceFields, "22c", 2, func(opcode byte) bool { return opcode != 0x53 && opcode != 0x5a })
 	staticFields := []string{"sget", "sget-wide", "sget-object", "sget-boolean", "sget-byte", "sget-char", "sget-short", "sput", "sput-wide", "sput-object", "sput-boolean", "sput-byte", "sput-char", "sput-short"}
@@ -100,7 +100,7 @@ func TestOpcodeTableExhaustiveContract(t *testing.T) {
 			}
 		}
 	}
-	if known != 224 || supported != 124 || reserved != 32 {
+	if known != 224 || supported != 134 || reserved != 32 {
 		t.Fatalf("opcode classification known=%d supported=%d reserved=%d", known, supported, reserved)
 	}
 }

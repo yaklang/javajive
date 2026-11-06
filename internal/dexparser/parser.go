@@ -2,9 +2,13 @@
 package dexparser
 
 import (
+	"bytes"
+	"crypto/sha1"
 	"encoding/binary"
 	"fmt"
+	"hash/adler32"
 	"math"
+	"strings"
 	"unicode/utf16"
 
 	"github.com/yaklang/javajive/dex2jar/model"
@@ -13,11 +17,12 @@ import (
 )
 
 const (
-	headerSize          = 0x70
-	maxEncodedDepth     = 64
-	maxVariableBytes    = 5
-	supportedDEXVersion = "035"
+	headerSize       = 0x70
+	maxEncodedDepth  = 64
+	maxVariableBytes = 5
 )
+
+var supportedDEXVersions = map[string]bool{"035": true, "037": true, "038": true, "039": true}
 
 type parser struct {
 	data   []byte
@@ -44,8 +49,8 @@ func (p *parser) parse() (*model.File, error) {
 		return nil, p.fail(0, "header", "invalid DEX magic")
 	}
 	version := string(p.data[4:7])
-	if version != supportedDEXVersion {
-		return nil, p.fail(4, "header", "unsupported DEX version %q; only %q is supported", version, supportedDEXVersion)
+	if !supportedDEXVersions[version] {
+		return nil, p.fail(4, "header", "unsupported DEX version %q; supported versions are 035, 037, 038, and 039", version)
 	}
 	h := model.Header{
 		Version:       version,
@@ -82,7 +87,15 @@ func (p *parser) parse() (*model.File, error) {
 	if err := p.rangeCheck(h.DataOff, h.DataSize, "data section"); err != nil {
 		return nil, err
 	}
+	if version != "035" && h.MapOffset == 0 {
+		return nil, p.fail(52, "header", "DEX version %q requires map_list evidence for feature admission", version)
+	}
 	p.file = &model.File{Entry: p.entry, Header: h}
+	if h.MapOffset != 0 {
+		if err := p.validateMapList(h.MapOffset, version); err != nil {
+			return nil, err
+		}
+	}
 	if err := p.parseStrings(); err != nil {
 		return nil, err
 	}
@@ -101,7 +114,67 @@ func (p *parser) parse() (*model.File, error) {
 	if err := p.parseClasses(); err != nil {
 		return nil, err
 	}
+	p.fillInnerClassOuters()
+	if err := p.checkAnnotationMethodMembership(); err != nil {
+		return nil, err
+	}
+	wantSignature := sha1.Sum(p.data[32:])
+	if !bytes.Equal(h.Signature[:], wantSignature[:]) {
+		return nil, p.fail(12, "header signature", "SHA-1 signature mismatch")
+	}
+	wantChecksum := adler32.Checksum(p.data[12:])
+	if h.Checksum != wantChecksum {
+		return nil, p.fail(8, "header checksum", "Adler-32 checksum=%08x, computed=%08x", h.Checksum, wantChecksum)
+	}
 	return p.file, nil
+}
+
+func (p *parser) validateMapList(off uint32, version string) error {
+	if err := p.rangeCheck(off, 4, "map_list"); err != nil {
+		return err
+	}
+	count := binary.LittleEndian.Uint32(p.data[off : off+4])
+	if uint64(count)*12 > math.MaxUint32 {
+		return p.fail(int(off), "map_list", "item count %d overflows", count)
+	}
+	if err := p.rangeCheck(off+4, count*12, "map_list"); err != nil {
+		return err
+	}
+	for i := uint32(0); i < count; i++ {
+		itemOff := int(off + 4 + i*12)
+		itemType := binary.LittleEndian.Uint16(p.data[itemOff : itemOff+2])
+		if name, unsupported := unsupportedMapItem(itemType); unsupported {
+			return p.fail(itemOff, "map_list", "unsupported %s section (type=%#04x) in DEX version %q", name, itemType, version)
+		}
+		if !knownMapItem(itemType) {
+			return p.fail(itemOff, "map_list", "unsupported section type=%#04x in DEX version %q", itemType, version)
+		}
+	}
+	return nil
+}
+
+func unsupportedMapItem(itemType uint16) (string, bool) {
+	switch itemType {
+	case 0x0007:
+		return "call_site_id", true
+	case 0x0008:
+		return "method_handle", true
+	case 0xf000:
+		return "hiddenapi_class_data", true
+	default:
+		return "", false
+	}
+}
+
+func knownMapItem(itemType uint16) bool {
+	switch itemType {
+	case 0x0000, 0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006,
+		0x1000, 0x1001, 0x1002, 0x1003,
+		0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006:
+		return true
+	default:
+		return false
+	}
 }
 
 func (p *parser) rangeCheck(off, size uint32, what string) error {
@@ -238,9 +311,33 @@ func (p *parser) parseProtos() error {
 		if err != nil {
 			return err
 		}
-		p.file.Protos[i] = model.Proto{ShortyIndex: shorty, Shorty: p.file.Strings[shorty], ReturnTypeIndex: ret, ReturnType: p.file.Types[ret].Descriptor, ParameterTypes: indices, Parameters: names}
+		shortyValue := p.file.Strings[shorty]
+		wantShorty := protoShorty(p.file.Types[ret].Descriptor, names)
+		if shortyValue != wantShorty {
+			return p.fail(off, "proto_ids", "shorty %q does not match prototype; want %q", shortyValue, wantShorty)
+		}
+		p.file.Protos[i] = model.Proto{ShortyIndex: shorty, Shorty: shortyValue, ReturnTypeIndex: ret, ReturnType: p.file.Types[ret].Descriptor, ParameterTypes: indices, Parameters: names}
 	}
 	return nil
+}
+
+func protoShorty(returnType string, parameters []string) string {
+	var out strings.Builder
+	out.WriteByte(shortyType(returnType))
+	for _, parameter := range parameters {
+		out.WriteByte(shortyType(parameter))
+	}
+	return out.String()
+}
+
+func shortyType(descriptor string) byte {
+	if descriptor == "" {
+		return 0
+	}
+	if descriptor[0] == 'L' || descriptor[0] == '[' {
+		return 'L'
+	}
+	return descriptor[0]
 }
 
 func (p *parser) typeList(off uint32) ([]uint32, []string, error) {

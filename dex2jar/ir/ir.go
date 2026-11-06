@@ -100,18 +100,31 @@ type Allocation struct {
 	NewInstruction int
 	Constructor    int
 	AliasRegisters []uint16
+	// Fused reports that only alias moves separate allocation from
+	// initialization, so the translator may emit one fused new/dup/invokespecial
+	// sequence instead of keeping the uninitialized value in a local.
+	Fused bool
 }
 
 // Method is the validated intermediate representation of one DEX method.
 type Method struct {
-	Code          *model.Code
-	Instructions  []Instruction
-	Blocks        []Block
+	Code         *model.Code
+	Instructions []Instruction
+	Blocks       []Block
+	// RegisterTypes holds the method-entry category of each register (parameters
+	// and the receiver). Per-instruction categories live in Categories.
 	RegisterTypes []Category
-	Allocations   []Allocation
-	Context       Context
-	Proto         model.Proto
-	AccessFlags   uint32
+	// Categories is a flat table of value categories, indexed by
+	// instruction*CategoryStride + register. It is the category of that register
+	// immediately before the instruction executes.
+	Categories     []Category
+	CategoryStride int
+	// Definitions records the category each instruction writes, if any.
+	Definitions []Definition
+	Allocations []Allocation
+	Context     Context
+	Proto       model.Proto
+	AccessFlags uint32
 }
 
 func contextFor(in Input) Context {

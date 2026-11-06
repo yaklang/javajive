@@ -90,14 +90,39 @@ func (l *methodLowerer) validateFusedConstructor(instruction *ir.Instruction, al
 
 func (l *methodLowerer) validateDelegationShape(delegation int, thisRegister uint16) error {
 	delegationOffset := l.method.Instructions[delegation].Offset
+	l.delegationIndex = delegation
 	for index := range l.method.Instructions {
 		instruction := &l.method.Instructions[index]
 		if index < delegation {
 			if instruction.Target >= 0 {
 				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("branch before this initialization is unsupported"))
 			}
+			usesThis := false
 			for _, register := range instruction.Regs {
 				if register == thisRegister {
+					usesThis = true
+					break
+				}
+			}
+			if usesThis {
+				switch {
+				case instruction.Opcode >= 0x07 && instruction.Opcode <= 0x09 && instruction.Regs[1] == thisRegister:
+					// Aliasing uninitialized this is inert; the alias is only
+					// meaningful once it is used, which is checked separately.
+				case instruction.Opcode >= 0x59 && instruction.Opcode <= 0x5f && instruction.Regs[1] == thisRegister:
+					// DEX permits field stores on uninitialized this before
+					// super(). The JVM does not, so these move after delegation;
+					// the super constructor cannot observe subclass fields.
+					// Moving a store is only value-preserving while the stored
+					// register is not redefined before the delegation point.
+					valueRegister := instruction.Regs[0]
+					for probe := index + 1; probe < delegation; probe++ {
+						if _, definitions := l.registerEffects(probe); containsRegister(definitions, valueRegister) {
+							return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("field store before delegation reads v%d, which is reassigned before super()", valueRegister))
+						}
+					}
+					l.deferredStores = append(l.deferredStores, index)
+				default:
 					return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("uninitialized this v%d is used before constructor delegation", thisRegister))
 				}
 			}
@@ -107,6 +132,15 @@ func (l *methodLowerer) validateDelegationShape(delegation int, thisRegister uin
 		}
 	}
 	return nil
+}
+
+func containsRegister(registers []uint16, want uint16) bool {
+	for _, register := range registers {
+		if register == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (l *methodLowerer) validateDefinedDirectTarget(instruction *ir.Instruction, callee model.MethodID) error {
@@ -239,11 +273,17 @@ func (l *methodLowerer) validateDefiniteAssignments() error {
 
 func (l *methodLowerer) registerEffects(index int) (uses, definitions []uint16) {
 	instruction := l.method.Instructions[index]
-	if _, ok := l.allocationByNew[index]; ok || l.allocationAliasOps[index] {
-		return nil, nil
+	if allocation, ok := l.allocationByNew[index]; ok {
+		if allocation.Fused {
+			return nil, nil
+		}
+		return nil, []uint16{allocation.AliasRegisters[0]}
 	}
 	if allocation, ok := l.allocationByCtor[index]; ok {
-		return append([]uint16(nil), instruction.Regs[1:]...), append([]uint16(nil), allocation.AliasRegisters...)
+		if allocation.Fused {
+			return append([]uint16(nil), instruction.Regs[1:]...), append([]uint16(nil), allocation.AliasRegisters...)
+		}
+		return append([]uint16(nil), instruction.Regs...), nil
 	}
 	switch {
 	case instruction.Opcode == 0x00 || instruction.Opcode == 0x0e || instruction.Opcode >= 0x28 && instruction.Opcode <= 0x2a:
@@ -264,9 +304,12 @@ func (l *methodLowerer) registerEffects(index int) (uses, definitions []uint16) 
 		return append([]uint16(nil), instruction.Regs...), nil
 	case instruction.Opcode >= 0x38 && instruction.Opcode <= 0x3d:
 		return []uint16{instruction.Regs[0]}, nil
-	case instruction.Opcode >= 0x44 && instruction.Opcode <= 0x46:
+	case instruction.Opcode == 0x24 || instruction.Opcode == 0x25:
+		// filled-new-array results are assigned by the following move-result.
+		return append([]uint16(nil), instruction.Regs...), nil
+	case instruction.Opcode >= 0x44 && instruction.Opcode <= 0x4a:
 		return []uint16{instruction.Regs[1], instruction.Regs[2]}, []uint16{instruction.Regs[0]}
-	case instruction.Opcode >= 0x4b && instruction.Opcode <= 0x4d:
+	case instruction.Opcode >= 0x4b && instruction.Opcode <= 0x51:
 		return []uint16{instruction.Regs[0], instruction.Regs[1], instruction.Regs[2]}, nil
 	case instruction.Opcode >= 0x52 && instruction.Opcode <= 0x58:
 		return []uint16{instruction.Regs[1]}, []uint16{instruction.Regs[0]}

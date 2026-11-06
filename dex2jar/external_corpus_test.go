@@ -13,12 +13,14 @@ import (
 	"github.com/yaklang/javajive/dex2jar/report"
 )
 
-func TestExternalRejectionCorpus(t *testing.T) {
+func TestExternalCorpusVerdicts(t *testing.T) {
 	tests := []struct {
 		name           string
 		file           string
 		sha256         string
 		size           int
+		accepted       bool
+		classes        int
 		reasonCategory string
 		entry          string
 		class          string
@@ -28,39 +30,42 @@ func TestExternalRejectionCorpus(t *testing.T) {
 		reason         string
 	}{
 		{
-			name:           "Arsylk dexfile tiny annotations",
-			file:           "arsylk-dexfile-tiny.dex",
-			sha256:         "613fc5ffac5c463f250d86be2355acdd2c261b052d2cdb12ce63efb479469145",
-			size:           1072,
-			reasonCategory: "annotations",
-			entry:          "classes.dex",
-			class:          "Lfixtures/tiny/Hello;",
-			offset:         0x13c,
-			op:             "class_defs",
-			reason:         "unsupported annotations_off=0x354; must be zero",
+			// Debug info and annotations are decoded now, so this real-world
+			// fixture must translate instead of being rejected at the door.
+			name:     "Arsylk dexfile tiny annotations",
+			file:     "arsylk-dexfile-tiny.dex",
+			sha256:   "613fc5ffac5c463f250d86be2355acdd2c261b052d2cdb12ce63efb479469145",
+			size:     1072,
+			accepted: true,
+			classes:  1,
 		},
 		{
-			name:           "Arsylk dexfile multidex annotations",
+			// classes.dex translates; classes2.dex redefines a descriptor, which
+			// is an integrity error in the APK itself.
+			name:           "Arsylk dexfile multidex duplicate class",
 			file:           "arsylk-dexfile-multidex.apk",
 			sha256:         "eb3c68fa2b12819e8388000422963ed13d08dce5b2dde4b78472239356036577",
 			size:           278319,
-			reasonCategory: "annotations",
-			entry:          "classes.dex",
-			class:          "Lfixtures/Arith;",
-			offset:         0x41b4,
-			op:             "class_defs",
-			reason:         "unsupported annotations_off=0x42694; must be zero",
+			reasonCategory: "duplicate",
+			entry:          "classes2.dex",
+			class:          "Lfixtures/multidex/Dup;",
+			offset:         -1,
+			op:             "duplicate class",
+			reason:         `descriptor already defined in "classes.dex"`,
 		},
 		{
-			name:           "pxb1988 dex2jar DEX 038",
+			// DEX 038 is admitted by version only when map_list proves the file
+			// carries no dynamic-linking sections. This fixture does, so the
+			// rejection must name the exact section instead of the version.
+			name:           "pxb1988 dex2jar DEX 038 call sites",
 			file:           "pxb1988-dex2jar-dex038.dex",
 			sha256:         "368dd6e8ea8aaee26ad46438ccbef42d28295a4f4957379e34843472b2f13ea4",
 			size:           1376,
-			reasonCategory: "version",
+			reasonCategory: "call_site",
 			entry:          "classes.dex",
-			offset:         4,
-			op:             "header",
-			reason:         `unsupported DEX version "038"; only "035" is supported`,
+			offset:         1280,
+			op:             "map_list",
+			reason:         `unsupported call_site_id section (type=0x0007) in DEX version "038"`,
 		},
 	}
 
@@ -76,6 +81,21 @@ func TestExternalRejectionCorpus(t *testing.T) {
 			}
 			if got := fmt.Sprintf("%x", sha256.Sum256(data)); got != test.sha256 {
 				t.Fatalf("SHA-256 = %s, want %s", got, test.sha256)
+			}
+
+			if test.accepted {
+				jar, conversionReport, err := dex2jar.DexToJar(data, dex2jar.Options{})
+				if err != nil {
+					t.Fatalf("DexToJar rejected accepted input: %v", err)
+				}
+				if len(jar) == 0 || conversionReport.Classes != test.classes {
+					t.Fatalf("jar bytes=%d report=%#v, want %d classes", len(jar), conversionReport, test.classes)
+				}
+				again, againReport, err := dex2jar.DexToJar(data, dex2jar.Options{})
+				if err != nil || !bytes.Equal(jar, again) || againReport != conversionReport {
+					t.Fatalf("accepted conversion is not deterministic: %v", err)
+				}
+				return
 			}
 
 			jar, conversionReport, err := dex2jar.DexToJar(data, dex2jar.Options{})
@@ -135,6 +155,12 @@ func externalCorpusReasonCategory(reason string) string {
 		return "annotations"
 	case strings.HasPrefix(reason, `unsupported DEX version "`):
 		return "version"
+	case strings.HasPrefix(reason, "unsupported call_site_id section"):
+		return "call_site"
+	case strings.HasPrefix(reason, "unsupported method_handle section"):
+		return "method_handle"
+	case strings.Contains(reason, "already defined in"):
+		return "duplicate"
 	default:
 		return "unknown"
 	}

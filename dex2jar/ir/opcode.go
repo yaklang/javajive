@@ -44,8 +44,8 @@ var opcodeTable = map[byte]opcodeInfo{
 	0x21: {"array-length", "12x", 1, true},
 	0x22: {"new-instance", "21c", 2, true},
 	0x23: {"new-array", "22c", 2, true},
-	0x24: {"filled-new-array", "35c", 3, false},
-	0x25: {"filled-new-array/range", "3rc", 3, false},
+	0x24: {"filled-new-array", "35c", 3, true},
+	0x25: {"filled-new-array/range", "3rc", 3, true},
 	0x26: {"fill-array-data", "31t", 3, false},
 	0x27: {"throw", "11x", 1, true},
 	0x28: {"goto", "10t", 1, true},
@@ -79,7 +79,9 @@ func init() {
 	}
 	for index, name := range array {
 		opcode := byte(0x44 + index)
-		supported := opcode == 0x44 || opcode == 0x46 || opcode == 0x4b || opcode == 0x4d
+		// int, object and the narrow primitive element kinds are supported; the
+		// wide (long/double) aget/aput forms stay outside the slice.
+		supported := opcode != 0x45 && opcode != 0x4c
 		opcodeTable[opcode] = opcodeInfo{name, "23x", 2, supported}
 	}
 	instanceFields := []string{

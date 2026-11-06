@@ -47,6 +47,30 @@ type jarEntry struct {
 	data []byte
 }
 
+// InputKind identifies reverse-toolchain input by content magic.
+type InputKind uint8
+
+const (
+	InputUnknown InputKind = iota
+	InputClass
+	InputDEX
+	InputZIP
+)
+
+// DetectInputKind classifies supported reverse-toolchain input by content magic.
+func DetectInputKind(data []byte) InputKind {
+	switch {
+	case hasDEXMagic(data):
+		return InputDEX
+	case hasZIPMagic(data):
+		return InputZIP
+	case len(data) >= 4 && data[0] == 0xca && data[1] == 0xfe && data[2] == 0xba && data[3] == 0xbe:
+		return InputClass
+	default:
+		return InputUnknown
+	}
+}
+
 // DexToJar translates either a raw DEX file or an APK, selected by input magic.
 // On any parse or translation failure it returns no JAR bytes.
 func DexToJar(data []byte, options Options) ([]byte, Report, error) {
@@ -129,14 +153,14 @@ func inputOptions(options Options) input.Options {
 
 func parseApplication(data []byte, options Options) (*model.Application, error) {
 	inputOptions := inputOptions(options)
-	switch {
-	case hasDEXMagic(data):
+	switch DetectInputKind(data) {
+	case InputDEX:
 		file, err := input.ParseDEXWithOptions(data, "classes.dex", inputOptions)
 		if err != nil {
 			return nil, err
 		}
 		return &model.Application{Files: []*model.File{file}}, nil
-	case hasZIPMagic(data):
+	case InputZIP:
 		return input.ParseAPKWithOptions(data, inputOptions)
 	default:
 		return nil, errors.New("dex2jar: unsupported input magic (want DEX or APK/ZIP)")
