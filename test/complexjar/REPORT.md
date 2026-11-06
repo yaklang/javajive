@@ -1,0 +1,191 @@
+# Complex JAR adversarial evaluation
+
+This report records the JAR-level coverage added after the irreducible-CFG and
+adversarial-classfile rounds. It answers two questions directly:
+
+1. How many JARs are in the evaluated corpus?
+2. Are they fully decompilable, recompilable, verifiable and behaviorally
+   equivalent?
+
+The numbers below are the checked-in CI claims. Historical-corpus numbers are
+the durable audit in `docs/historical-jar-audit.md`; this report adds the new
+complex corpus.
+
+## Corpus inventory
+
+| Corpus | JARs | Classes / units | Result |
+|---|---:|---:|---|
+| Historical libraries (`test/cross/testdata/historical-jars.lock.json`) | 38 | 24,883 classes / 24,359 units | 26/38 full tree compile; 4 stub units; 12 packages retain baseline residual errors |
+| Checked-in small fixtures | 4 | — | used by archive/unit tests |
+| New complex corpus (this suite) | 7 | 151 decompiled units | all tree-compile, verify and (where a driver exists) behavior-match |
+| **Total JAR inputs** | **49 paths / 48 unique files** | | plexus-cipher is mirrored in two test roots |
+| External Kotlin stdlib 2.0.21 stress test (not gated) | +1 | 994 classes | 8 whole-class stubs, 103 method stubs |
+
+The historical 38 are not vendored; CI downloads and SHA-256-pins them. The
+four checked-in fixtures are
+`classparser/jarwar/testdata/plexus-cipher-2.0.jar`,
+`javajive_tests/jarwar/testdata/plexus-cipher-2.0.jar`,
+`classparser/testdata/regression/Join-declarations.jar`, and
+`classparser/classes/static/test.jar`.
+
+This round did not re-run the complete 38-JAR audit. A local smoke check of
+commons-codec 1.15 passed with 106 units, 0 tree errors and 106/106 verified.
+The historical figures above remain the durable v0.4.0 audit baseline.
+
+## New complex corpus
+
+`JAVAJIVE_COMPLEX_JAR_EVAL=1 go test ./test/complexjar -count=1 -v`
+
+| Case | JAR content | Result |
+|---|---|---|
+| `TestComplexModernJarRoundTrip` | Java 21 records, sealed interfaces, guarded pattern switch, switch expressions/yield, text blocks, lambdas/method refs, local/anonymous classes, generics/bridges, interface private/default/static methods, enum constant bodies, try-with-resources, annotations, synchronized, method handles | 16 units; tree compile; `-Xverify:all`; outputs byte-identical |
+| `TestComplexControlFlowJarRoundTrip` | nested/labeled loops, switch-in-loop, dense/sparse/fall-through switches, string/enum switch, try/finally/return, try-with-resources, monitor blocks, exception loops, state machine, recursion, ternaries, short-circuit, arrays, evaluation order | 12 units; outputs byte-identical |
+| `TestComplexLegacyJarRoundTrip` | Java 8 bytecode: enum constant bodies (legacy synthetic bridge shape), lambdas, anonymous classes, string switch, try-with-resources, generics, nested loops | 9 units; enum bodies folded into owner; outputs byte-identical |
+| `TestComplexScaleJarRoundTrip` | 100 generated package classes, each with loop/switch/array/string methods, plus a chunked driver | 101 units; outputs byte-identical |
+| `TestComplexMultiReleaseJar` | base `--release 8`, `META-INF/versions/17`, `META-INF/versions/21`, `Multi-Release: true` | 3 units; each release recompiled with its own `--release` and run; outputs identical |
+| `TestComplexModuleJar` | `module-info.class` + exported package | 2 units; module descriptor reconstructed; classpath and module-path runs identical |
+| `TestComplexIrreducibleJarArchive` | checked-in major-49 multi-entry/irreducible classes packed as a JAR | 8 classes; tree compile; behavior is covered by `TestRoundTripIrreducibleCFGCorpus` |
+
+The suite asserts **zero decompiler stub markers** in the produced sources, so
+a method that silently degrades to a throwing stub fails the case instead of
+being counted as success.
+
+## Defects found and fixed in this round
+
+1. **Switch-expression values were silently discarded.** javac leaves each
+   arm's value on the operand stack and jumps to one join. The decompiler used
+   one predecessor's stack snapshot, so `return switch (x) { case 0 -> "zero";
+   ... }` emitted empty cases and returned only the default. Acyclic stack
+   joins now materialize the selected word in a synthetic local on each
+   incoming edge. Null arms, try-protected arms, long/double values, and
+   stored/local-consumer joins are covered.
+2. **A multi-arm join whose arms are ternaries was mistaken for one ternary.**
+   The combiner built a condition tree from independent case predicates and
+   dropped all but the first arm. Multi-source joins now require the closed
+   routing-tree certificate; otherwise the stack-phi path handles every arm.
+3. **Cross-scope phi locals could split into sibling names.** The synthetic
+   join local was first named inside a guarded arm and again in sibling cases.
+   The join now gets one method-root declaration before `RewriteVar`.
+4. **Pattern-switch restart variable lost its rebinding.** The `typeSwitch`
+   selector and restart operands live only inside a render closure; the restart
+   kept its unnamed pre-rewrite id and rendered with a depth-derived name that
+   collided with the selector. The closure now forwards `ReplaceVar`, and it
+   streams through the request output budget. The no-match sentinel is
+   `labels.length`, so `case null` no longer aliases the default arm.
+5. **Whole-method pattern-switch reconstruction was applied to stored
+   switches.** T21 emitted `return switch (...)` for a pattern switch nested in
+   a loop or assigned to a local, replacing the entire method body. It now
+   requires the switch result to be the method return; other shapes keep their
+   surrounding statements and use the core dispatcher.
+6. **A switch that is the whole infinite-loop body used unlabeled breaks.**
+   Each case break exited only the switch, so the loop spun forever and the
+   post-loop return was unreachable. Direct case breaks are now labeled
+   `break LOOP_n` when the switch is the sole loop body.
+7. **Record `implements` clauses were dropped.** Dropping `extends Record` for
+   a record declaration also cleared `implements Shape`. Only the extends part
+   is removed now.
+8. **Record compact constructors could contain illegal `return`.** The
+   decompiler falls back to an explicit canonical constructor, renames its
+   parameters to the component names, and keeps the required field
+   assignments.
+9. **Promoted nested records had package-private canonical constructors.**
+   Flattening can promote a package-private nested record to public; its
+   canonical constructor must then be public. The dumper now aligns the
+   constructor access with the rendered record declaration.
+10. **Private interface methods rendered `private default`.** Java 9+ private
+   interface methods have bodies but are not default methods.
+11. **Modern enum constant bodies were rejected.** Java 9+ classfiles omit the
+    legacy synthetic trailing constructor argument, use a private body
+    constructor and carry `NestHost`; Kotlin also encodes array clone with
+    `java/lang/Object`. The proof now accepts both forwarding shapes and the
+    modern nest metadata.
+12. **Discarded static field reads produced invalid Java.** A `getstatic; pop`
+    (Kotlin's `Result.Companion;` idiom) rendered a bare field expression, which
+    is not a Java statement. It is now evaluated in a boolean sink
+    (`(Owner.FIELD == null)` / `== 0`) so `<clinit>` and exceptional exits are
+    preserved without inventing a field-statement.
+13. **Int-to-boolean coercion was rejected under an output budget.** The
+    `(word) != (0)` sandbox renderer now streams through the request writer
+    instead of being classified as an unbounded opaque value.
+
+14. **Kotlin enum `$ENTRIES` views were rejected.** Kotlin initializes
+    `$ENTRIES` from `EnumEntriesKt.enumEntries($VALUES)` after the backing-array
+    packet. The enum-regeneration proof treated that read as an escaping use of
+    the erased field and stubbed the whole class. The exact
+    `getstatic/checkcast/invokestatic/putstatic` shape is now certified, source
+    regenerates the argument as `values()`, and `getEntries()` keeps declaration
+    order and identity. The external Kotlin stdlib observation drops from 29 to
+    8 whole-class stubs (103 method stubs remain).
+15. **Very large methods had no explicit budget control.** A 55 KB generated
+    class (22,709 instructions) fails `DecompileWithOptions` at the default
+    1,000,000 `set_element_work` cap after ~17 s even though the solver used only
+    334,911 analysis updates; a 2,000,000 budget completes in ~28 s and emits
+    179,710 bytes. `MaxAnalysisUpdates` above 1,000,000 now scales the derived
+    graph/scan/set/node caps by 64x (64M ceiling), and the new CLI/API surfaces
+    route that policy through single classes, directories, archives and DEX
+    translation. The default remains the conservative 1M policy.
+16. **Module descriptors were emitted as comments.** `ConstantModuleInfo` and
+    `ConstantPackageInfo` used value receivers, so their `NameIndex` stayed zero
+    and the `Module` attribute could not be decoded. The receivers are fixed and
+    the attribute is now rendered as a real `module-info.java`: `open module`,
+    `requires` (including transitive/static), `exports ... to`, `opens ... to`,
+    `uses`, and `provides ... with`. The fixture compiles and runs identically
+    on both the classpath and the module path.
+17. **Constructor switch expressions lost their selected value.** Acyclic stack
+    joins were disabled for every `<init>`, so a switch expression in a
+    constructor produced empty cases and only the last arm reached the
+    assignment. Body joins now materialize the value and place its declaration
+    immediately after the `this()`/`super()` delegation. Prefix joins (a switch
+    expression passed to `super(...)`) cannot be declared before delegation;
+    they now fail the method closed with
+    `constructor prefix stack join cannot be expressed before super()/this()`
+    instead of returning uncompilable source.
+
+## Remaining boundaries
+
+- **Kotlin/JVM metadata is not a supported source target.** The external
+  `kotlin-stdlib-2.0.21.jar` observation decompiles 994 classes and now leaves
+  8 whole-class stub comments and 103 method stubs. Kotlin enums with a
+  synthetic `$ENTRIES` view reconstruct and preserve `getEntries()`; the
+  remaining whole-class stubs are inline `Sequence`/`Iterable` classes.
+  Remaining javac errors are dominated by methods overloaded only by return
+  type (`maxOf(Float)` vs `maxOf(Double)`), which Java source cannot declare
+  without renaming. This JAR is an observation, not a CI gate.
+- **Pattern switches without a source-level reconstruction.** When javac emits
+  `MatchException`/complex deconstruction, the decompiler may emit an
+  equivalent `instanceof`/state-dispatch form instead of a Java 21 pattern
+  switch. The complex JAR and adversarial suites compile, verify and compare
+  behavior for these outputs; they are not pretty-printed back to the exact
+  source form.
+- **Java 21 record-deconstruction patterns are partially supported.** The
+  checked-in T21-C06 fixture reconstructs its shape. A separate adversarial
+  shape (`case Circle(double r)` over a nested sealed hierarchy) compiles its
+  accessor calls under shared `Throwable` handlers that wrap failures in
+  `MatchException`; the current shared-handler structurer rejects that shape
+  and emits a method stub with an `exception-handler structuring failed`
+  diagnostic. It does not emit silently wrong source. Simple type patterns,
+  `case null`, guards, and equivalent-dispatcher forms are covered.
+- **Very large single methods use an opt-in budget.** The public default keeps
+  `MaxAnalysisUpdates=1,000,000` and its 1M graph/set caps. A generated 55 KB
+  class with 22,709 instructions hits `set_element_work` at the default after
+  ~17 s; `-analysis-budget 2000000` completes the same method in ~28 s and emits
+  179,710 bytes. The CLI flag and the budgeted archive/DEX/JarFS APIs select
+  this policy explicitly. Without it, the method degrades with a
+  `resource_limit` status rather than a silent miscompile.
+- **Constructor prefixes and discarded values.** A join in the prefix of a
+  constructor cannot use a synthetic local; such methods fail closed with a
+  diagnostic. Constructor-body joins are recovered by declaring the local after
+  the delegation. Discarded-value sinks remain disabled inside constructors.
+- **Module descriptors cover source-level directives.** `requires`,
+  `exports`, `opens`, `uses`, and `provides` reconstruct, but module
+  annotations, `module_version`, `ModuleMainClass` and `ModulePackages` are not
+  emitted (source cannot express all of them). Classes still compile and run on
+  both the classpath and module path.
+- **Flattened nested names.** `Outer$Inner` is emitted as a top-level
+  `Outer$Inner.java`. This is the established archive design; reflection
+  (`getDeclaringClass`) and record `toString` prefixes can differ even when
+  method behavior is identical. The behavior driver avoids class-name text.
+- **Multi-release JARs require per-release compilation.** The decompiler keeps
+  base and `META-INF/versions/N` units separate, but one javac invocation
+  cannot compile two classes with the same binary name. The suite compiles
+  each release in its own pass.

@@ -40,7 +40,8 @@ func enumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAllocatio
 		return nil
 	}
 	obj, known := resolve(plan.allocatedClass)
-	if !known || obj == nil || obj.GetClassName() != plan.allocatedClass || obj.AccessFlags != 0x4030 || obj.GetSupperClassName() != parent.GetClassName() || len(obj.Fields) > 1 || len(obj.Interfaces) != 0 || !nativeAccessorVersion(obj, work) || !nativeDeclarationNamesCompatible(obj, work) {
+	versionCompatible := obj != nil && (nativeAccessorVersion(obj, work) || nativeModernSourceNestVersion(obj, work))
+	if !known || obj == nil || obj.GetClassName() != plan.allocatedClass || obj.AccessFlags != 0x4030 || obj.GetSupperClassName() != parent.GetClassName() || len(obj.Fields) > 1 || len(obj.Interfaces) != 0 || !versionCompatible || !nativeDeclarationNamesCompatible(obj, work) {
 		return nil
 	}
 	// MethodParameters is optional, including on Java 8. The supported
@@ -66,7 +67,7 @@ func enumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAllocatio
 			return nil
 		}
 	}
-	selfRows, innerTables, enclosing, source, bootstrap := 0, 0, 0, 0, 0
+	selfRows, innerTables, enclosing, source, bootstrap, nestHost := 0, 0, 0, 0, 0, 0
 	for _, a := range obj.Attributes {
 		if !nativeProofWork(work, 1) {
 			return nil
@@ -115,10 +116,30 @@ func enumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAllocatio
 				}
 			}
 		case *UnparsedAttribute:
-			if a == nil || a.Name != "EnclosingMethod" || enclosing != 0 {
+			if a == nil {
 				return nil
 			}
-			enclosing++
+			switch a.Name {
+			case "EnclosingMethod":
+				if enclosing != 0 {
+					return nil
+				}
+				enclosing++
+			case "NestHost":
+				// Java 11+ javac emits NestHost on the constant-specific
+				// subclass. It grants private access to the nest's top-level
+				// host and does not alter constructor forwarding. Require one
+				// well-formed host whose binary name encloses the original
+				// allocation owner (the enum class).
+				hosts, ok := originalNestAttribute(obj, "NestHost")
+				if !ok || len(hosts) != 1 || hosts[0] == "" || hosts[0] == obj.GetClassName() || nestHost != 0 ||
+					hosts[0] != owner && !strings.HasPrefix(owner, hosts[0]+"$") {
+					return nil
+				}
+				nestHost++
+			default:
+				return nil
+			}
 		case *BootstrapMethodsAttribute:
 			if !flat || bootstrap != 0 || !flatEnumBodyBootstrapTable(obj, a, work) {
 				return nil
@@ -156,7 +177,11 @@ func enumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAllocatio
 			return nil
 		}
 		if name == "<init>" {
-			if ctor != nil || descriptor != plan.descriptor || m.AccessFlags != 0 {
+			// The compiler-generated constant-body constructor is not a
+			// source member. Older javac emits it package-private; modern
+			// javac emits the same forwarding packet as private. Both keep
+			// the allocation inaccessible outside the body class.
+			if ctor != nil || descriptor != plan.descriptor || m.AccessFlags != 0 && m.AccessFlags != 0x2 {
 				return nil
 			}
 			ctor = m
@@ -165,8 +190,8 @@ func enumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAllocatio
 	if ctor == nil {
 		return nil
 	}
-	params, result, err := callbinding.Descriptor(plan.descriptor)
-	if err != nil || result != "V" || len(params) < 2 || params[0] != "Ljava/lang/String;" || params[1] != "I" {
+	params, bridgeReturn, err := callbinding.Descriptor(plan.descriptor)
+	if err != nil || bridgeReturn != "V" || len(params) < 2 || params[0] != "Ljava/lang/String;" || params[1] != "I" {
 		return nil
 	}
 	var code *CodeAttribute
@@ -209,7 +234,14 @@ func enumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAllocatio
 			return nil
 		}
 	}
-	if (!parametersSeen && !legacyMetadata) || (parametersSeen && obj.MajorVersion < 52) || code == nil || len(code.ExceptionTable) != 0 || len(code.Code) > 512 || !nativeProofWork(work, int64(len(code.Code))) || code.MaxLocals != uint16(nativeMemberParameterWidth(params)+1) || code.MaxStack != uint16(nativeMemberParameterWidth(params)+2) {
+	maxStack := nativeMemberParameterWidth(params) + 2
+	if obj.MajorVersion >= 53 {
+		// Java 9+ dropped the synthetic trailing constant-body argument from
+		// the enum constructor. The subclass forwards exactly its own
+		// receiver and parameters, so its peak stack is one word lower.
+		maxStack = nativeMemberParameterWidth(params) + 1
+	}
+	if (!parametersSeen && !legacyMetadata) || (parametersSeen && obj.MajorVersion < 52) || code == nil || len(code.ExceptionTable) != 0 || len(code.Code) > 512 || !nativeProofWork(work, int64(len(code.Code))) || code.MaxLocals != uint16(nativeMemberParameterWidth(params)+1) || code.MaxStack != uint16(maxStack) {
 		return nil
 	}
 	debugTables := map[string]bool{}
@@ -243,7 +275,9 @@ func enumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAllocatio
 		return nil
 	}
 	ops := constructorMotionOps(dec)
-	if len(ops) != len(params)+4 || !constructorMotionLoad(ops[0], "Ljava/lang/Object;") || core.GetRetrieveIdx(ops[0]) != 0 {
+	legacyForwarding := len(ops) == len(params)+4
+	modernForwarding := len(ops) == len(params)+3
+	if !legacyForwarding && !modernForwarding || !constructorMotionLoad(ops[0], "Ljava/lang/Object;") || core.GetRetrieveIdx(ops[0]) != 0 {
 		return nil
 	}
 	slot := 1
@@ -253,21 +287,67 @@ func enumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAllocatio
 		}
 		slot += constructorEffectType(p).width()
 	}
-	null, call, ret := ops[len(ops)-3], ops[len(ops)-2], ops[len(ops)-1]
-	if !nativeEnumOpcode(null, core.OP_ACONST_NULL) || !nativeEnumOpcode(ret, core.OP_RETURN) {
+	var call, ret *core.OpCode
+	if legacyForwarding {
+		null, forwardingCall, forwardingRet := ops[len(ops)-3], ops[len(ops)-2], ops[len(ops)-1]
+		if !nativeEnumOpcode(null, core.OP_ACONST_NULL) {
+			return nil
+		}
+		call, ret = forwardingCall, forwardingRet
+	} else {
+		// Java 9+ nestmate access removed the synthetic trailing argument;
+		// the body calls the enum's own private constructor directly.
+		call, ret = ops[len(ops)-2], ops[len(ops)-1]
+	}
+	if !nativeEnumOpcode(ret, core.OP_RETURN) {
 		return nil
 	}
 	target := constructorMotionMember(obj, call, core.OP_INVOKESPECIAL)
 	if target == nil || target.Name != owner || target.Member != "<init>" || !nativeEnumMemberOperand(obj, call, core.OP_INVOKESPECIAL, owner, "<init>", target.Description) {
 		return nil
 	}
-	bridge := bridges[target.Description]
-	if bridge == nil || bridge.target != plan.descriptor {
-		return nil
-	}
-	bridgeParams, bridgeResult, err := callbinding.Descriptor(bridge.descriptor)
-	if err != nil || bridgeResult != "V" || len(bridgeParams) != len(params)+1 || !slices.Equal(bridgeParams[:len(params)], params) {
-		return nil
+	var superDescriptor string
+	var superTarget *MemberInfo
+	if legacyForwarding {
+		bridge := bridges[target.Description]
+		if bridge == nil || bridge.target != plan.descriptor {
+			return nil
+		}
+		bridgeParams, bridgeResult, err := callbinding.Descriptor(bridge.descriptor)
+		if err != nil || bridgeResult != "V" || len(bridgeParams) != len(params)+1 || !slices.Equal(bridgeParams[:len(params)], params) {
+			return nil
+		}
+		superDescriptor = bridge.descriptor
+		superTarget = bridge.method
+	} else {
+		// The direct target is the enum declaration's private canonical
+		// constructor. Prove its exact descriptor and source-private flag;
+		// no synthetic access bridge exists in this classfile version.
+		if target.Description != plan.descriptor {
+			return nil
+		}
+		var parentCtor *MemberInfo
+		for _, m := range parent.Methods {
+			if m == nil || !nativeProofWork(work, 1) {
+				return nil
+			}
+			name, nk := sourceBridgeUTF8(parent, m.NameIndex)
+			descriptor, dk := sourceBridgeUTF8(parent, m.DescriptorIndex)
+			if !nk || !dk {
+				return nil
+			}
+			if name == "<init>" && descriptor == target.Description {
+				if parentCtor != nil {
+					return nil
+				}
+				parentCtor = m
+			}
+		}
+		if parentCtor == nil || parentCtor.AccessFlags != 0x2 {
+			return nil
+		}
+		superDescriptor = target.Description
+		superTarget = parentCtor
 	}
 	// Exceptions are part of the generated constructor ABI, even when its body
 	// is a pure forwarding packet. Source regeneration inherits the enum target.
@@ -298,11 +378,11 @@ func enumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAllocatio
 		return names, count <= 1
 	}
 	a, ak := exceptions(obj, ctor)
-	b, bk := exceptions(parent, bridge.method)
+	b, bk := exceptions(parent, superTarget)
 	if !ak || !bk || !slices.Equal(a, b) {
 		return nil
 	}
-	return &nativeEnumConstantBody{object: obj, owner: owner, descriptor: plan.descriptor, plan: plan, superDescriptor: bridge.descriptor, superPC: int(call.CurrentOffset), legacyConstructorMetadata: legacyMetadata && (!parametersSeen || selfMetadataDifferent), assertions: assertions}
+	return &nativeEnumConstantBody{object: obj, owner: owner, descriptor: plan.descriptor, plan: plan, superDescriptor: superDescriptor, superPC: int(call.CurrentOffset), legacyConstructorMetadata: legacyMetadata && (!parametersSeen || selfMetadataDifferent), assertions: assertions}
 }
 
 func nativeEnumConstantConstructorOwned(p *nativeMemberFamily, obj *ClassObject, descriptor string) bool {

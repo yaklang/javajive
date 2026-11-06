@@ -45,6 +45,72 @@ Add a native, pure-Go DEX/APK-to-JAR path as a strict first vertical slice.
   `invalid_constant_pool_reference` method diagnostic instead of a recovered
   runtime panic.
 
+### Complex JAR hardening
+
+- Recover stack-carried values at acyclic control-flow joins. Java switch
+  expressions and ordinary shared-return joins now write the selected arm into
+  a synthetic local; previously the decompiler emitted empty cases and silently
+  returned only one arm. Null arms, try-protected arms, and joins whose
+  producers are themselves ternaries are included.
+- Do not classify a multi-source join whose value producers are independent
+  switch arms as a ternary. The ternary combiner treated all arm conditions as
+  one routing tree and dropped every arm except the one it picked; these joins
+  now use the stack-phi path.
+- Render int-to-boolean argument coercions through the streaming writer so a
+  request output budget cannot reject an otherwise valid method.
+- Give those synthetic join locals one method-root declaration before variable
+  naming, so a value defined first inside a guarded arm cannot acquire sibling
+  names.
+- Forward variable rebindings through the `typeSwitch` selector/restart closure
+  and render it through the request output budget, fixing colliding
+  pattern-switch locals and bounded-render failures. The rendered no-match
+  sentinel is `labels.length`, not `-1`, so a `case null` arm is no longer
+  aliased with the default arm.
+- Reconstruct a source-level pattern switch only when its value is the method
+  return. A pattern switch nested in a loop or stored to a local now keeps the
+  surrounding statements and uses the core dispatcher.
+- Label direct switch-case breaks when a switch is the whole infinite-loop body,
+  so the loop exits and the post-loop continuation stays reachable.
+- Preserve record `implements` clauses when removing `extends Record`; emit an
+  explicit canonical constructor when a compact constructor would contain an
+  illegal `return`; and align canonical-constructor access with a flattened
+  record's rendered visibility.
+- Stop rendering private interface methods as `private default`, and materialize
+  discarded static field reads in a boolean sink so `getstatic; pop` remains
+  legal Java without losing class initialization.
+- Accept modern enum constant-body classfiles (Java 9+ direct forwarding and
+  `NestHost`; Kotlin's `java/lang/Object.clone` array encoding).
+- Reconstruct Kotlin enums that publish their backing array through
+  `EnumEntriesKt.enumEntries($VALUES)`: the `$ENTRIES` read is certified, the
+  erased backing field is regenerated as `values()`, and `getEntries()` keeps
+  declaration order and identity. Kotlin stdlib whole-class stubs drop from 29
+  to 8 in the external stress observation.
+- Resolve nested-type spelling from the archive's own emitted sibling units
+  before applying stdlib dotted shortcuts, so Kotlin's flat `Outer$Inner`
+  classes compile while external `java.util.Map$Entry` stays dotted.
+- Add an opt-in large-method analysis budget: `DecompileOptions` values above
+  1,000,000 scale the derived graph/scan/set/node caps up to 64× (64M ceiling),
+  and the new `DecompileArchiveWithAnalysisBudget`,
+  `DecompileDEXFileWithAnalysisBudget`, `NewJarFSFromLocalWithAnalysisBudget`
+  and CLI `-analysis-budget` route the same policy through archives, DEX
+  translation and single classes. The default policy is unchanged.
+- Recover switch-expression joins in constructor bodies by placing the
+  synthetic join local immediately after the `this()`/`super()` delegation.
+  Joins in the constructor prefix (for example a switch expression passed to
+  `super(...)`) have no Java statement form and now fail that method closed
+  with a diagnostic instead of emitting empty cases that lose the value.
+- Reconstruct `module-info.class` as a real source module declaration instead
+  of a comment: `open module`, `requires` transitive/static, `exports ... to`,
+  `opens ... to`, `uses`, and `provides ... with`. Fix the value-receiver
+  `ConstantModuleInfo`/`ConstantPackageInfo` readers that left module and
+  package names empty. The modular JAR fixture now compiles and runs with
+  identical classpath and module-path behavior.
+- Add `test/complexjar` with seven round-trip JARs (Java 21 features,
+  control-flow torture, Java 8 legacy, 100-class scale, multi-release, module,
+  and packaged irreducible classes) covering decompile → tree recompile → JVM
+  verify → behavior comparison, plus Java 21 adversarial source shapes in the
+  existing CI-gated suite. See `test/complexjar/REPORT.md`.
+
 ## v0.4.0 — 2026-09-19
 
 Preserve bytecode semantics and separate decompilation results from independent

@@ -188,6 +188,12 @@ func NewCaughtExceptionValue(pc int, typ types.JavaType) *CustomValue {
 		Flag: "exception", OriginPC: pc, HasOriginPC: true, TypeFunc: func() types.JavaType { return typ }}
 }
 
+// IsSourceCaught reports a handler-entry exception binding. Reading or
+// discarding that local has no side effect.
+func (v *CustomValue) IsSourceCaught() bool {
+	return v != nil && v.sourceCaught
+}
+
 func (v *CustomValue) SourceCaughtExceptionEntry() (int, bool) {
 	if v == nil || !v.sourceCaught || !v.sourceCaughtTyped || v.sourceCaughtPC < 0 || v.sourceCaughtPC > 65535 ||
 		v.Flag != "exception" || !v.HasOriginPC || v.OriginPC != v.sourceCaughtPC {

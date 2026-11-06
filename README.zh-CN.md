@@ -57,6 +57,14 @@
 
 完整方法学、逐 jar 表格与复现命令见 [BENCHMARK.md](BENCHMARK.md)。
 
+### 复杂 JAR 语料
+
+另有一套 CI 强制的复杂 JAR 语料，覆盖历史 Java 8 库之外的语言目标：Java 21 的
+record/sealed/模式 switch/switch 表达式、控制流压力样例、Java 8 enum 常量体、
+100 个类的规模 JAR、多版本 JAR、模块化 JAR，以及打包后的非规约样例。每个用例都会
+反编译、整树重编译、`java -Xverify:all` 校验，并与原始程序输出做行为对比。清单、
+已修复缺陷与剩余边界见 [test/complexjar/REPORT.md](test/complexjar/REPORT.md)。
+
 ## 安装
 
 ```bash
@@ -109,6 +117,11 @@ javajive decompile app.apk -o ./app-src
 
 # 目录：递归反编译其中的 .class（必须用 -o 指定输出目录）
 javajive decompile ./classes -o ./src
+
+# 超大生成方法：显式提高单方法分析预算。
+# 大于 1,000,000 的取值同时按比例放大图/扫描上限。
+javajive decompile Big.class -analysis-budget 2000000
+javajive decompile app.jar -o ./app-src -analysis-budget 2000000
 ```
 
 ### dex2jar
@@ -213,9 +226,11 @@ out := javajive.MarshalSerialized(restored...)
 | `DecompileFile(path) (string, error)` | 从磁盘反编译单个 `.class` |
 | `DecompileWithResolver(classBytes, resolve)` | 带「类字节解析器」的反编译 |
 | `DecompileArchive(src, dst) error` | 将 `.jar`/`.war`/`.zip` 反编译到目录 |
+| `DecompileArchiveWithAnalysisBudget(src, dst, budget) error` | 带显式单方法分析预算的归档反编译 |
 | `DexToJar(input, options) ([]byte, DexReport, error)` | 将 DEX/APK 字节转为确定性 JAR |
 | `DexFileToJar(src, dst, options) (DexReport, error)` | 使用目标目录中的临时文件转换 DEX/APK |
 | `DecompileDEXFile(src, dst, options) error` | 经私有临时 JAR 转换并反编译 DEX/APK |
+| `DecompileDEXFileWithAnalysisBudget(src, dst, options, budget) error` | DEX/APK 转换并带预算反编译归档 |
 | `ParseClass(classBytes) (*ClassObject, error)` | 解析单个 `.class` 字节 |
 | `ParseClassFile(path) (*ClassObject, error)` | 从磁盘解析单个 `.class` |
 | `ParseSerialized(raw) ([]JavaSerializable, error)` | 解析序列化流 |

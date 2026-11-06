@@ -98,6 +98,13 @@ func DecompileArchive(src, dst string) error {
 	return jarwar.AutoDecompile(src, dst)
 }
 
+// DecompileArchiveWithAnalysisBudget is DecompileArchive with an explicit
+// per-method analysis budget. Values above 1,000,000 opt into the scaled graph
+// caps needed by very large generated methods; zero keeps the default policy.
+func DecompileArchiveWithAnalysisBudget(src, dst string, maxAnalysisUpdates int) error {
+	return jarwar.AutoDecompileWithAnalysisBudget(src, dst, maxAnalysisUpdates)
+}
+
 // DexToJar converts raw DEX or APK bytes into a deterministic JAR.
 func DexToJar(input []byte, options DexOptions) ([]byte, DexReport, error) {
 	return nativedex.DexToJar(input, options)
@@ -113,6 +120,12 @@ func DexFileToJar(src, dst string, options DexOptions) (DexReport, error) {
 // decompiles that archive into dst, and always removes the temporary JAR.
 // Archive decompilation may write part of dst before returning an error.
 func DecompileDEXFile(src, dst string, options DexOptions) error {
+	return DecompileDEXFileWithAnalysisBudget(src, dst, options, 0)
+}
+
+// DecompileDEXFileWithAnalysisBudget is DecompileDEXFile with an explicit
+// per-method analysis budget for the translated JAR's decompilation.
+func DecompileDEXFileWithAnalysisBudget(src, dst string, options DexOptions, maxAnalysisUpdates int) error {
 	tempDir, err := os.MkdirTemp("", "javajive-dex-decompile-*")
 	if err != nil {
 		return err
@@ -123,7 +136,7 @@ func DecompileDEXFile(src, dst string, options DexOptions) error {
 	if _, err := DexFileToJar(src, jarPath, options); err != nil {
 		return err
 	}
-	return DecompileArchive(jarPath, dst)
+	return DecompileArchiveWithAnalysisBudget(jarPath, dst, maxAnalysisUpdates)
 }
 
 // ---------------------------------------------------------------------------

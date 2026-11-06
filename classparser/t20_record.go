@@ -303,7 +303,7 @@ func applyRecordSkips(c *ClassObjectDumper, layout *RecordLayout, comps []record
 			continue
 		}
 		if name == "<init>" && desc == canonical && !isDefaultCanonicalCtor(c.obj, m, comps) {
-			dumped.code = rewriteCompactCtor(dumped.code, comps)
+			dumped.code = rewriteCompactCtor(dumped.code, comps, c.recordTypeSourcePublic())
 			dumped.bodyCode = dumped.code
 			continue
 		}
@@ -433,7 +433,7 @@ func isDefaultCanonicalCtor(obj *ClassObject, m *MemberInfo, comps []recordCompo
 	return other == 0 && putfields == len(comps)
 }
 
-func rewriteCompactCtor(code string, comps []recordComponent) string {
+func rewriteCompactCtor(code string, comps []recordComponent, forcePublic bool) string {
 	// public RecordCustom(int var1, String var2) { body } → public RecordCustom { body without this.x=... }
 	open := strings.Index(code, "(")
 	blk := strings.Index(code, "{")
@@ -441,7 +441,11 @@ func rewriteCompactCtor(code string, comps []recordComponent) string {
 		return code
 	}
 	header := strings.TrimSpace(code[:open])
+	if forcePublic {
+		header = ensurePublicCompactHeader(header)
+	}
 	body := code[blk:]
+	originalBody := body
 	paramsPart := code[open+1 : blk]
 	if i := strings.LastIndex(paramsPart, ")"); i >= 0 {
 		paramsPart = paramsPart[:i]
@@ -463,7 +467,70 @@ func rewriteCompactCtor(code string, comps []recordComponent) string {
 	}
 	reSuper := regexp.MustCompile(`(?m)^\s*super\s*\(\s*\)\s*;\s*\n?`)
 	body = reSuper.ReplaceAllString(body, "")
+	if regexp.MustCompile(`(?m)^\s*return\s*;\s*$`).MatchString(body) {
+		// A compact constructor body may not contain a return statement (JLS
+		// 8.10.4.2), but the decompiler emits one for the terminal constructor
+		// return on some branches. Fall back to an explicit canonical
+		// constructor: it keeps the original parameter list (code[:blk]),
+		// component assignments and legal return. Canonical constructor
+		// parameter names must match the record component names, so rename the
+		// header and body parameters exactly as the compact path does. Only the
+		// implicit super() call is removed.
+		explicit := reSuper.ReplaceAllString(originalBody, "")
+		explicitHeader := code[:blk]
+		for i, p := range params {
+			if i >= len(comps) {
+				break
+			}
+			name := paramIdent(p)
+			if name == "" {
+				continue
+			}
+			explicitHeader = wordReplace(explicitHeader, name, comps[i].Name)
+			explicit = wordReplace(explicit, name, comps[i].Name)
+		}
+		if forcePublic {
+			explicitHeader = ensurePublicExplicitHeader(explicitHeader)
+		}
+		return strings.TrimSpace(explicitHeader) + " " + strings.TrimSpace(explicit)
+	}
 	return header + " " + strings.TrimSpace(body)
+}
+
+func ensurePublicCompactHeader(header string) string {
+	re := regexp.MustCompile(`(?m)^(\s*)(?:(?:public|protected|private)\s+)?([A-Za-z_$][\w$]*)\s*$`)
+	return re.ReplaceAllString(header, "${1}public ${2}")
+}
+
+func ensurePublicExplicitHeader(header string) string {
+	re := regexp.MustCompile(`(?m)^(\s*)(?:(?:public|protected|private)\s+)?([A-Za-z_$][\w$]*)\s*\(`)
+	return re.ReplaceAllString(header, "${1}public ${2}(")
+}
+
+// recordTypeSourcePublic reports the visibility the record declaration will
+// carry after flattening. A nested record's real visibility lives in
+// InnerClasses; package-private nested types are promoted to public by the
+// standalone-unit renderer unless the corresponding kill switch is set. The
+// canonical constructor must have at least that access (JLS 8.10.4), even when
+// javac encoded the original ctor as package-private.
+func (c *ClassObjectDumper) recordTypeSourcePublic() bool {
+	if c == nil || c.obj == nil {
+		return false
+	}
+	if c.obj.AccessFlags&0x0001 != 0 {
+		return true
+	}
+	if !strings.Contains(c.obj.GetClassName(), "$") || c.getenv("JDEC_NESTED_PUBLIC_OFF") != "" {
+		return false
+	}
+	flags, nested := c.selfInnerClassAccessFlags()
+	if !nested {
+		return false
+	}
+	if flags&0x0001 != 0 || flags&0x0004 != 0 {
+		return true
+	}
+	return c.getenv("JDEC_NESTED_PACKAGE_PUBLIC_OFF") == ""
 }
 
 func splitParams(s string) []string {

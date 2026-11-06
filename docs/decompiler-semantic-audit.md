@@ -12,8 +12,11 @@ completion of measurements alone never counts as a passing comparison.
 result, err := javajive.DecompileWithOptions(classBytes, javajive.DecompileOptions{
     Mode: javajive.Precision,
     MaxAnalysisUpdates: 1_000_000, // per method; zero selects this default
-    Resolve: resolveClassBytes,   // optional JVM internal-name resolver
+    Resolve: resolveClassBytes,    // optional JVM internal-name resolver
 })
+// Values above 1,000,000 opt into 64x-scaled graph/scan/set/node caps:
+// javajive decompile Big.class -analysis-budget 2000000
+// javajive.DecompileArchiveWithAnalysisBudget("app.jar", "src", 2_000_000)
 ```
 
 `Precision` is the default for this new API. It excludes the registered class/method source-recovery pipeline. `Compatibility` retains that pipeline, recording rule IDs, phases and before/after hashes for every applied rule. The original `Decompile` and archive APIs retain their compatibility behavior.
@@ -43,6 +46,55 @@ Requests own their mode, analysis budget, resolver, result and rewrite history. 
 | P2-01 cost control | Slot queries reuse a method-local fixed point; declaration-placement probes cache within an invalidated mutation epoch; stack Size is O(1). | General graph-versioned dominator/postdominator caches are not implemented. |
 | P2-02 contexts | Per-request options and diagnostics, explicit analysis budget, panic-safe lambda context restoration, concurrent request race test. | Old environment-controlled core behavior is not fully replaced by options. |
 | P2-03 adversarial validation | Generated legal classfiles, metamorphic debug/no-debug and key-renaming tests, two policies, multiple Java compiler versions in CI, decoder fuzzing and durable evidence. | No claim of a complete random-program generator, ECJ matrix, or external holdout benchmark. |
+
+## Modern JAR coverage and boundaries
+
+`test/complexjar` round-trips seven JARs with the same independent protocol
+(decompile → tree `javac` → `java -Xverify:all` → runtime comparison):
+Java 21 records/sealed/pattern switches/switch expressions, control-flow
+torture, Java 8 enum constant bodies, a 100-class scale JAR, a multi-release
+JAR, a modular JAR, and the packaged irreducible fixtures. The run rejects any
+source containing a decompiler stub marker. A Java 21 source-shape subtest is
+also part of the CI-gated adversarial suite (`SwitchExpressionShape` and
+`ModernShape`), including an equivalent-dispatcher path for pattern switches
+that T21 cannot rewrite to a source-level pattern switch.
+
+Reported but not claimed as clean:
+
+- **Kotlin/JVM bytecode.** `kotlin-stdlib-2.0.21.jar` decompiles 994 classes
+  with 8 whole-class stubs and 103 method stubs. Enums that publish
+  `$ENTRIES = EnumEntriesKt.enumEntries($VALUES)` now reconstruct, and flat
+  `Outer$Inner` sibling names are resolved from the archive before stdlib
+  dotted shortcuts. Remaining whole-class stubs are inline `Sequence`/`Iterable`
+  classes; remaining javac errors are dominated by return-type-only overloads
+  that Java cannot declare without renaming. This is an external stress
+  observation, not a corpus acceptance target.
+- **Large single methods use an explicit budget.** The default
+  `MaxAnalysisUpdates=1,000,000` policy still stops a 55 KB generated method
+  (22,709 instructions) at the 1M `set_element_work` cap. Passing
+  `MaxAnalysisUpdates=2_000_000` (CLI `-analysis-budget 2000000`, or the
+  budgeted archive/DEX APIs) scales the derived caps to 64M and completes the
+  method. The default remains conservative for untrusted input.
+- **Constructor prefixes.** A stack join in a constructor prefix cannot use a
+  synthetic local before `super()`/`this()`; those methods fail closed with
+  `constructor prefix stack join cannot be expressed before super()/this()`.
+  Body joins are recovered by placing the synthetic declaration immediately
+  after the delegation. Discarded-value sinks remain disabled inside
+  constructors.
+- **Record-deconstruction patterns.** T21-C06 covers a supported
+  reconstruction. A separate adversarial shape whose record accessor calls
+  share `Throwable` handlers that wrap failures in `MatchException` is
+  currently rejected by the shared-handler structurer and emits a method stub
+  with a diagnostic (fail-closed). Simple type patterns, `case null`, guards,
+  and equivalent-dispatcher forms are covered.
+- **Module descriptors.** Source-level `open module` / `requires` /
+  `exports` / `opens` / `uses` / `provides` directives are reconstructed from
+  the `Module` attribute and verified on both the classpath and module path.
+  Module annotations, `module_version`, `ModuleMainClass` and `ModulePackages`
+  metadata have no reconstructed source spelling.
+- **Flattened names.** `Outer$Inner` is emitted as a standalone top-level unit,
+  as documented for the archive path; reflection and record `toString` text can
+  differ even when method behavior is identical.
 
 ## Adversarial families
 

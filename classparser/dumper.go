@@ -879,9 +879,13 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 		}
 	}
 	c.sourceDeclarationAccessKnown = true
-	// Module declarations require a separate JPMS reconstruction contract.
-	// Package descriptors are rendered below with their actual annotations.
+	// Module declarations have their own source grammar and no ordinary class
+	// body. Reconstruct the Module attribute when present; fall back to a
+	// synthetic-descriptor comment when the classfile carries no usable bytes.
 	if rawClassName == "module-info" {
+		if descriptor, ok := c.renderModuleDescriptor(); ok {
+			return descriptor, nil
+		}
 		var sb strings.Builder
 		sb.WriteString(fmt.Sprintf("// decompiled from a synthetic %s descriptor\n", rawClassName))
 		out := sb.String()
@@ -1677,7 +1681,15 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 				classTypeParams = layout.Components
 			}
 			if layout.DropExtendsRecord {
-				superStr = ""
+				// A record declaration has no explicit `extends Record`, but it
+				// may still implement interfaces. Drop only the extends clause;
+				// clearing the whole suffix loses `implements Shape` and makes
+				// every use of the record as its sealed interface fail javac.
+				if idx := strings.Index(superStr, " implements "); idx >= 0 {
+					superStr = superStr[idx:]
+				} else {
+					superStr = ""
+				}
 			}
 			c.recordSkipMethods = layout.SkipMethodKeys
 			c.recordSkipFields = layout.SkipFieldNames
@@ -2217,6 +2229,16 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 	full = c.sourceRewrite("fixEnumClinitIllegalNew", "class_source", full, func(source string) string {
 		return stripEnumBackingAssignment(fixEnumClinitIllegalNew(source), backingField)
 	})
+	if backingField != "" && c.nativeEnumBacking != nil && c.nativeEnumBacking.entriesField != "" {
+		// Kotlin publishes the same backing array as an EnumEntries view. The
+		// backing field is source-erased; values() regenerates an identical
+		// declaration-order copy. Shield literals/comments while replacing.
+		full = c.sourceRewrite("fixKotlinEnumEntries", "class_source", full, func(source string) string {
+			return rewriteJavaCode(source, func(code string) string {
+				return strings.ReplaceAll(code, backingField, "values()")
+			})
+		})
+	}
 	full = c.sourceRewrite("fixBareNestedImports", "class_source", full, fixBareNestedImports)
 	full = c.sourceRewrite("fixHardjarShapes", "class_source", full, fixHardjarShapes)
 	// boolean local used as `*`/`+` operand. Kill-switch: JDEC_BOOL_ARITH_OPERAND_OFF=1.
@@ -5558,9 +5580,12 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 		if accessFlags != "" {
 			methodSourceBuffer.Write([]byte(accessFlags + " "))
 		}
-		// A non-abstract, non-static instance method declared in an interface is a default
-		// method and must carry the `default` keyword, otherwise javac rejects the body.
-		if isInterfaceType && !abstractMethod && name != "<init>" && name != "<clinit>" && !strings.Contains(accessFlags, "static") {
+		// A non-abstract, non-static, non-private instance method declared in an interface
+		// is a default method and must carry the `default` keyword. A private interface
+		// method (Java 9+) has a body but is not a default method; `private default` is
+		// an illegal modifier combination.
+		if isInterfaceType && !abstractMethod && name != "<init>" && name != "<clinit>" &&
+			!strings.Contains(accessFlags, "static") && !strings.Contains(accessFlags, "private") {
 			methodSourceBuffer.Write([]byte("default "))
 		}
 	}
@@ -12538,8 +12563,8 @@ func (c *ClassObjectDumper) dumpStubMethod(method *MemberInfo, name, descriptor,
 	if accessFlags != "" {
 		prefix = accessFlags + " "
 	}
-	// A non-abstract, non-static interface method is a default method.
-	if isInterface && !isAbstract && name != "<clinit>" && !strings.Contains(prefix, "static") {
+	// A non-abstract, non-static, non-private interface method is a default method.
+	if isInterface && !isAbstract && name != "<clinit>" && !strings.Contains(prefix, "static") && !strings.Contains(prefix, "private") {
 		prefix += "default "
 	}
 	throwBody := fmt.Sprintf(" { throw new RuntimeException(%s); /* %s %s */ }",

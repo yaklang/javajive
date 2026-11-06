@@ -534,6 +534,19 @@ func LoopRewriter(manager *RewriteManager, node *core.Node) error {
 	doWhileSt := statements.NewDoWhileStatement(values.NewJavaLiteral(true, types.NewJavaPrimer(types.JavaBoolean)), nil)
 	doWhileSt.Label = circleNode.Statement.(*statements.DoWhileStatement).Label
 	doWhileSt.Body = append(doWhileSt.Body, body...)
+	// A switch that is the entire body of this (infinite) loop captures an
+	// unlabeled `break` in each case. Those breaks are the loop's only normal
+	// exits, so without the loop label the body would spin forever and the
+	// post-loop continuation would be unreachable. Retarget only top-level
+	// case-body breaks; a nested switch or loop owns its own breaks.
+	if len(doWhileSt.Body) == 1 && len(endNodes) > 0 && jdecenv.Get("JDEC_SWITCH_LOOP_BREAK_OFF") == "" {
+		if sw, ok := doWhileSt.Body[0].(*statements.SwitchStatement); ok {
+			if doWhileSt.Label == "" {
+				doWhileSt.Label = manager.NewLoopLabel()
+			}
+			retargetSwitchExitBreaks(sw, doWhileSt.Label)
+		}
+	}
 	//allSource := slices.Clone(node.Source)
 	//node.RemoveAllSource()
 	//for _, n := range allSource {
@@ -556,6 +569,43 @@ func LoopRewriter(manager *RewriteManager, node *core.Node) error {
 }
 func getCircleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*core.Node][]*core.Node) *utils2.Set[*core.Node] {
 	return circleElementSet(circleNode, loopStart, domTree, false)
+}
+
+// retargetSwitchExitBreaks labels unlabeled breaks in the direct case bodies of
+// a switch that forms the whole infinite loop body. A case break then leaves
+// both the switch and the loop, which is what the original CFG edge to the
+// post-loop continuation records. Nested loops and switches keep their own
+// break scope and are not traversed.
+func retargetSwitchExitBreaks(sw *statements.SwitchStatement, label string) {
+	if sw == nil || label == "" {
+		return
+	}
+	var walk func([]statements.Statement)
+	walk = func(body []statements.Statement) {
+		for _, st := range body {
+			switch x := st.(type) {
+			case *statements.CustomStatement:
+				if kind, target, ok := x.SourceTransferProtocol(); ok && kind == "break" && target == "" {
+					x.RetargetSourceTransfer("break", label)
+				}
+			case *statements.IfStatement:
+				walk(x.IfBody)
+				walk(x.ElseBody)
+			case *statements.TryCatchStatement:
+				walk(x.TryBody)
+				for _, handler := range x.CatchBodies {
+					walk(handler)
+				}
+			case *statements.SynchronizedStatement:
+				walk(x.Body)
+			}
+		}
+	}
+	for _, item := range sw.Cases {
+		if item != nil {
+			walk(item.Body)
+		}
+	}
 }
 
 // circleElementSet computes the loop body for the loop whose header is circleNode (its original header

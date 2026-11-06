@@ -34,6 +34,12 @@ type JavaRef struct {
 	originalStackMaterialization       bool
 	originalStackPC, originalStackKind int
 	originalStackValue                 JavaValue
+	// stackMergePhi marks a synthetic local that materializes a stack-carried
+	// value at an acyclic control-flow join (a switch expression's selected
+	// arm). The declaration must dominate every incoming edge; RewriteVar
+	// hoists it to the method root before naming so the same identity cannot
+	// acquire sibling-scope names.
+	stackMergePhi bool
 	// IsParam marks a ref that was seeded from a method parameter (declared at method scope, live
 	// for the whole body). A parameter reassigned with an assignable reference value (`seq = str`
 	// where seq is a CharSequence param and str a String) must stay the SAME variable; splitting it
@@ -1117,4 +1123,16 @@ func (r *JavaRef) OriginalStackMaterializationWitness(value JavaValue) (pc, kind
 		return 0, 0, false
 	}
 	return r.originalStackPC, r.originalStackKind, true
+}
+
+// MarkStackMergePhi identifies the synthetic result local of an acyclic
+// stack join. This is a declaration-placement marker, not a value proof.
+func (r *JavaRef) MarkStackMergePhi() {
+	if r != nil {
+		r.stackMergePhi = true
+	}
+}
+
+func (r *JavaRef) IsStackMergePhi() bool {
+	return r != nil && r.stackMergePhi
 }

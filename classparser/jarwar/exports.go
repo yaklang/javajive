@@ -1,6 +1,7 @@
 package jarwar
 
 import (
+	"fmt"
 	"os"
 	"strings"
 
@@ -25,11 +26,20 @@ import (
 // err = java.Decompile("a.class", "a.java"); die(err)   // 反编译单个 class 到文件
 // ```
 func AutoDecompile(from, to string) error {
+	return AutoDecompileWithAnalysisBudget(from, to, 0)
+}
+
+// AutoDecompileWithAnalysisBudget is AutoDecompile with an explicit per-method
+// reaching-definition/graph budget for large generated methods.
+func AutoDecompileWithAnalysisBudget(from, to string, maxAnalysisUpdates int) error {
+	if maxAnalysisUpdates < 0 {
+		return fmt.Errorf("negative analysis budget: %d", maxAnalysisUpdates)
+	}
 	fromLower := strings.ToLower(from)
 	switch {
 	case strings.HasSuffix(fromLower, ".jar"), strings.HasSuffix(fromLower, ".war"),
 		strings.HasSuffix(fromLower, ".ear"), strings.HasSuffix(fromLower, ".zip"):
-		jar, err := New(from)
+		jar, err := NewWithAnalysisBudget(from, maxAnalysisUpdates)
 		if err != nil {
 			return utils.Errorf("create archive failed: %v", err)
 		}
@@ -40,13 +50,28 @@ func AutoDecompile(from, to string) error {
 		if err != nil {
 			return utils.Errorf("read class file failed: %v", err)
 		}
-		stm, err := javaclassparser.Parse(raw)
-		if err != nil {
-			return utils.Errorf("decompile class failed: %v", err)
-		}
-		decompiled, err := stm.Dump()
-		if err != nil {
-			return utils.Errorf("dump class file failed: %v", err)
+		var decompiled string
+		if maxAnalysisUpdates > 0 {
+			result, derr := javaclassparser.DecompileWithOptions(raw, javaclassparser.DecompileOptions{
+				Mode:               javaclassparser.Compatibility,
+				MaxAnalysisUpdates: maxAnalysisUpdates,
+			})
+			if derr != nil {
+				return utils.Errorf("decompile class failed: %v", derr)
+			}
+			if result.Source == "" {
+				return utils.Errorf("decompile class produced no source (status=%s)", result.Status)
+			}
+			decompiled = result.Source
+		} else {
+			stm, err := javaclassparser.Parse(raw)
+			if err != nil {
+				return utils.Errorf("decompile class failed: %v", err)
+			}
+			decompiled, err = stm.Dump()
+			if err != nil {
+				return utils.Errorf("dump class file failed: %v", err)
+			}
 		}
 
 		// 检查并确保输出文件有 .java 后缀

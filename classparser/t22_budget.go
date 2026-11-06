@@ -42,12 +42,20 @@ func applySecureGraphBounds(opts *DecompileOptions) {
 		derived = defaultGraphBound
 		if int64(opts.MaxAnalysisUpdates) <= defaultGraphBound/analysisGraphFactor {
 			derived = int64(opts.MaxAnalysisUpdates) * analysisGraphFactor
+		} else if int64(opts.MaxAnalysisUpdates) > defaultGraphBound {
+			// An explicit budget above the public default is an opt-in request
+			// for a large method. Scale the graph/set caps with it, with a hard
+			// 64x ceiling so malformed input cannot ask for unbounded work.
+			derived = int64(opts.MaxAnalysisUpdates) * analysisGraphFactor
+			if derived > defaultGraphBound*analysisGraphFactor {
+				derived = defaultGraphBound * analysisGraphFactor
+			}
 		}
 		if derived < analysisGraphFactor {
 			derived = analysisGraphFactor
 		}
-		if derived > defaultGraphBound {
-			derived = defaultGraphBound
+		if derived > defaultGraphBound*analysisGraphFactor {
+			derived = defaultGraphBound * analysisGraphFactor
 		}
 	}
 	if opts.Limits.MaxGraphEdges == 0 {
@@ -62,6 +70,18 @@ func applySecureGraphBounds(opts *DecompileOptions) {
 	if opts.Limits.MaxNodeCopies == 0 {
 		opts.Limits.MaxNodeCopies = derived
 	}
+}
+
+// largeMethodWorkBudget installs the scaled graph caps for an explicit archive
+// budget above the public default. Smaller budgets keep the archive path's
+// established unlimited-graph behavior. A nil result means "no new ceiling".
+func largeMethodWorkBudget(maxAnalysisUpdates int) *workbudget.Budget {
+	if maxAnalysisUpdates <= 0 || int64(maxAnalysisUpdates) <= defaultGraphBound {
+		return nil
+	}
+	opts := DecompileOptions{MaxAnalysisUpdates: maxAnalysisUpdates}
+	applySecureGraphBounds(&opts)
+	return workbudget.New(nil, opts.Limits)
 }
 
 func wrapResolve(ctx context.Context, budget *workbudget.Budget, snap map[string]string, resolve func(internalName string) ([]byte, bool)) func(internalName string) ([]byte, bool) {
