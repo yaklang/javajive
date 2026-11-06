@@ -53,7 +53,7 @@ func TestAdversarialBareIfMissesOldUnique(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(source, "boolean var3") || !strings.Contains(source, "if ((var3) != (0)){") || !strings.Contains(source, "var3++;") {
+		if strings.Contains(source, "boolean var3") || !strings.Contains(source, "if ((var3) != (0)){") || !strings.Contains(source, "var3++") {
 			t.Fatalf("counter must stay int with explicit numeric zero test (recovery off=%q):\n%s", disabled, source)
 		}
 	}

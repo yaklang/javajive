@@ -95,3 +95,53 @@ func TestFinallyArrayCleanupBindsOnlyOriginalScopedMaterializations(t *testing.T
 		})
 	}
 }
+
+func TestFinallyCleanupBindingsTraversesNormalizedLoopForms(t *testing.T) {
+	boolean := types.NewJavaPrimer(types.JavaBoolean)
+	bound := values.NewJavaRef(utils.NewRootVariableId(), nil, boolean.Copy())
+	other := values.NewJavaRef(utils.NewRootVariableId(), nil, boolean.Copy())
+	bindings := map[*utils.VariableId]int{bound.Id: 1}
+	condition := func(v values.JavaValue) *statements.ConditionStatement {
+		return &statements.ConditionStatement{Condition: v}
+	}
+	store := func(ref *values.JavaRef) statements.Statement {
+		return statements.NewAssignStatement(ref, values.NewJavaLiteral(true, boolean.Copy()), false)
+	}
+
+	while := &statements.WhileStatement{
+		ConditionValue: values.NewJavaLiteral(true, boolean.Copy()),
+		Body:           []statements.Statement{store(other)},
+	}
+	if !finallyCleanupBindingsScoped([]statements.Statement{while}, nil, bindings) {
+		t.Fatal("unrelated while body was rejected")
+	}
+	while.Body = []statements.Statement{store(bound)}
+	if finallyCleanupBindingsScoped([]statements.Statement{while}, nil, bindings) {
+		t.Fatal("bound variable in while body was admitted")
+	}
+
+	forLoop := func(init, update statements.Statement, body []statements.Statement, cond values.JavaValue) *statements.ForStatement {
+		return &statements.ForStatement{
+			InitVar:       init,
+			Condition:     condition(cond),
+			EndExp:        update,
+			SubStatements: body,
+		}
+	}
+	cond := values.NewJavaLiteral(true, boolean.Copy())
+	for _, variant := range []struct {
+		name   string
+		loop   *statements.ForStatement
+		expect bool
+	}{
+		{"unrelated parts", forLoop(store(other), store(other), []statements.Statement{store(other)}, cond), true},
+		{"bound init", forLoop(store(bound), store(other), []statements.Statement{store(other)}, cond), false},
+		{"bound update", forLoop(store(other), store(bound), []statements.Statement{store(other)}, cond), false},
+		{"bound body", forLoop(store(other), store(other), []statements.Statement{store(bound)}, cond), false},
+		{"bound condition", forLoop(store(other), store(other), []statements.Statement{store(other)}, bound), false},
+	} {
+		if got := finallyCleanupBindingsScoped([]statements.Statement{variant.loop}, nil, bindings); got != variant.expect {
+			t.Fatalf("%s: got %v want %v", variant.name, got, variant.expect)
+		}
+	}
+}

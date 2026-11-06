@@ -360,6 +360,37 @@ func (p *finallyProof) block(input []statements.Statement, mustExit bool, covere
 				return nil, false, false
 			}
 			st = &clone
+		case *statements.WhileStatement:
+			// NormalizeLoopForms converts a top-tested do-while into this form.
+			// The finally proof must traverse the normalized body with the same
+			// loop/continue ownership; otherwise a safe finally is left desugared
+			// and its normal close tail is duplicated inside the catch-all.
+			if x == nil || !finallyCoveredValue(x.ConditionValue, covered) {
+				return nil, false, false
+			}
+			clone := *x
+			p.loopDepth++
+			var ok bool
+			clone.Body, _, ok = p.block(x.Body, false, covered)
+			p.loopDepth--
+			if !ok {
+				return nil, false, false
+			}
+			st = &clone
+		case *statements.ForStatement:
+			if x == nil || x.Condition == nil || x.Condition.Callback != nil || !finallyCoveredValue(x.Condition.Condition, covered) ||
+				!finallyLoopPartCovered(x.InitVar, covered) || !finallyLoopPartCovered(x.EndExp, covered) {
+				return nil, false, false
+			}
+			clone := *x
+			p.loopDepth++
+			var ok bool
+			clone.SubStatements, _, ok = p.block(x.SubStatements, false, covered)
+			p.loopDepth--
+			if !ok {
+				return nil, false, false
+			}
+			st = &clone
 		case *statements.SwitchStatement:
 			if !p.internalSwitchCovered(x, covered) {
 				return nil, false, false
@@ -632,6 +663,28 @@ func finallyCoveredValue(root values.JavaValue, covered func(int) bool) bool {
 		return true
 	}
 	return visit(root)
+}
+
+// finallyLoopPartCovered proves a for-loop init/update part stays inside the
+// same protected domain as the loop body. NormalizeLoopForms may turn a
+// protected do-while into a for loop, so the finally proof must accept the
+// source forms it can produce without weakening the effect-domain check.
+func finallyLoopPartCovered(st statements.Statement, covered func(int) bool) bool {
+	if st == nil {
+		return true
+	}
+	switch x := st.(type) {
+	case *statements.AssignStatement:
+		return finallyCoveredAssignment(x, covered)
+	case *statements.ExpressionStatement:
+		return x != nil && finallyCoveredValue(x.Expression, covered)
+	case *values.JavaExpression:
+		return finallyCoveredValue(x, covered)
+	case *statements.ConditionStatement:
+		return x != nil && finallyCoveredValue(x.Condition, covered)
+	default:
+		return false
+	}
 }
 
 // Match only bounded cleanup syntax with stable operands and original PCs
