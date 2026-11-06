@@ -82,12 +82,13 @@ Reported but not claimed as clean:
   after the delegation. Discarded-value sinks remain disabled inside
   constructors.
 - **Record-deconstruction patterns.** T21-C06 covers a supported
-  reconstruction, and simple record patterns whose accessor prefix matches the
+  reconstruction, and record patterns whose accessor prefix matches the
   target's declared `Record` attribute now reconstruct from the shared
-  `Throwable`/`MatchException` handler. Nested patterns, array components,
-  guards combined with deconstruction, and records without metadata still fail
-  closed. Simple type patterns, `case null`, guards, and equivalent-dispatcher
-  forms remain covered.
+  `Throwable`/`MatchException` handler. Nested record components are parsed
+  recursively and array components keep a `T[]` binding. Guards combined with
+  deconstruction, nested interface/subtype components, and records without
+  metadata still fail closed. Simple type patterns, `case null`, guards, and
+  equivalent-dispatcher forms remain covered.
 - **Module descriptors.** Source-level `open module` / `requires` /
   `exports` / `opens` / `uses` / `provides` directives are reconstructed from
   the `Module` attribute and verified on both the classpath and module path.
