@@ -20,6 +20,17 @@ type patternWork struct {
 
 var patternWorkByObj sync.Map // *ClassObject -> *patternWork
 
+// applyPatternSwitchSource applies the T21 source rewrite to a completed dump.
+// The dumper is still alive here, unlike the deferred bootstrap report hook,
+// which runs after per-class scratch has been released.
+func applyPatternSwitchSource(d *ClassObjectDumper, result *DecompileResult) {
+	if d == nil || result == nil || d.obj == nil || !d.patternReconstructionOK || result.Source == "" {
+		return
+	}
+	result.Source = rewritePatternSwitchSource(d, result.Source)
+	pruneReconstructedPatternStubs(d)
+}
+
 func patternSwitchReconstructionComplete(obj *ClassObject) bool {
 	if obj == nil {
 		return false
@@ -28,6 +39,7 @@ func patternSwitchReconstructionComplete(obj *ClassObject) bool {
 		applyPatternSwitchRewrites(d)
 		if d.report != nil && d.report.Source != "" {
 			d.report.Source = rewritePatternSwitchSource(d, d.report.Source)
+			pruneReconstructedPatternStubs(d)
 		}
 	}
 	if v, ok := patternWorkByObj.Load(obj); ok {
@@ -44,7 +56,7 @@ func applyPatternSwitchRewrites(c *ClassObjectDumper) {
 	if target == 0 {
 		target = core.ClassMajorToSourceVersion(c.obj.MajorVersion)
 	}
-	hasType, hasEnum, hasComplex := classSwitchFamilies(c.obj)
+	hasType, hasEnum := classSwitchFamilies(c.obj)
 	if hasEnum && !hasType {
 		patternWorkByObj.Store(c.obj, &patternWork{complete: false, reason: "enumSwitch unsupported"})
 		return
@@ -54,10 +66,6 @@ func applyPatternSwitchRewrites(c *ClassObjectDumper) {
 	}
 	if target < 21 {
 		patternWorkByObj.Store(c.obj, &patternWork{complete: false, reason: "target < 21"})
-		return
-	}
-	if hasComplex {
-		patternWorkByObj.Store(c.obj, &patternWork{complete: false, reason: "complex/deconstruction pattern"})
 		return
 	}
 
@@ -93,6 +101,47 @@ func applyPatternSwitchRewrites(c *ClassObjectDumper) {
 		}
 	}
 	patternWorkByObj.Store(c.obj, &patternWork{complete: allOK, reason: reason})
+}
+
+// pruneReconstructedPatternStubs removes a method from the stub ledger when the
+// pattern rewrite replaced its entire body with complete source. The legacy
+// method structurer still fails on the original deconstruction handler, but the
+// reconstructed switch is the emitted body and javac regenerates that handler.
+func pruneReconstructedPatternStubs(c *ClassObjectDumper) {
+	if c == nil || c.obj == nil || c.report == nil || len(c.report.StubMethods) == 0 {
+		return
+	}
+	reconstructed := map[string]bool{}
+	for _, m := range c.obj.Methods {
+		name, err1 := c.obj.getUtf8(m.NameIndex)
+		desc, err2 := c.obj.getUtf8(m.DescriptorIndex)
+		if err1 != nil || err2 != nil || !methodHasTypeSwitch(c.obj, m) {
+			continue
+		}
+		if _, ok, _ := reconstructPatternMethod(c, m, name, desc); ok {
+			reconstructed[name+desc] = true
+		}
+	}
+	if len(reconstructed) == 0 {
+		return
+	}
+	kept := c.report.StubMethods[:0]
+	for _, stub := range c.report.StubMethods {
+		if !reconstructed[stub] {
+			kept = append(kept, stub)
+		}
+	}
+	c.report.StubMethods = kept
+	for i := range c.report.Members {
+		row := &c.report.Members[i]
+		if row.Owner != c.obj.GetClassName() || row.Kind != "method" {
+			continue
+		}
+		if reconstructed[row.Name+row.Descriptor] {
+			row.State = "preserved"
+			row.Evidence = "method emitted from reconstructed pattern switch"
+		}
+	}
 }
 
 func rewritePatternSwitchSource(c *ClassObjectDumper, src string) string {
@@ -145,6 +194,16 @@ func reconstructPatternMethod(c *ClassObjectDumper, m *MemberInfo, name, desc st
 		default:
 			return 0, "", ""
 		}
+	}
+	d.RecordComponents = c.recordComponentsForType
+	for _, entry := range methodCodeAttribute(m).ExceptionTable {
+		if entry == nil {
+			continue
+		}
+		d.ExceptionTable = append(d.ExceptionTable, &core.ExceptionTableEntry{
+			StartPc: entry.StartPc, EndPc: entry.EndPc,
+			HandlerPc: entry.HandlerPc, CatchType: entry.CatchType,
+		})
 	}
 	attachBootstrap(d, c.obj)
 	if c.FuncCtx != nil {
@@ -210,7 +269,56 @@ func methodHasTypeSwitch(obj *ClassObject, m *MemberInfo) bool {
 	return false
 }
 
-func classSwitchFamilies(obj *ClassObject) (hasType, hasEnum, complex bool) {
+// recordComponentsForType resolves a record type through the same archive
+// resolver used for enum folding. The Record attribute is the authority for
+// component order and erased descriptors; an arbitrary no-arg accessor is not
+// accepted as a deconstruction component.
+func (c *ClassObjectDumper) recordComponentsForType(typeName string) ([]core.RecordComponent, bool) {
+	if c == nil || c.obj == nil || typeName == "" {
+		return nil, false
+	}
+	internal := strings.ReplaceAll(typeName, ".", "/")
+	var object *ClassObject
+	if internal == strings.ReplaceAll(c.obj.GetClassName(), ".", "/") {
+		object = c.obj
+	} else if c.foldSiblingResolver != nil {
+		raw, ok := c.foldSiblingResolver(internal)
+		if !ok || len(raw) == 0 {
+			return nil, false
+		}
+		parsed, err := Parse(raw)
+		if err != nil || parsed == nil {
+			return nil, false
+		}
+		object = parsed
+	}
+	if object == nil {
+		return nil, false
+	}
+	components, ok := parseRecordComponents(object)
+	if !ok || len(components) == 0 {
+		return nil, false
+	}
+	out := make([]core.RecordComponent, 0, len(components))
+	for _, component := range components {
+		out = append(out, core.RecordComponent{Name: component.Name, Descriptor: component.Descriptor})
+	}
+	return out, true
+}
+
+func methodCodeAttribute(m *MemberInfo) *CodeAttribute {
+	if m == nil {
+		return nil
+	}
+	for _, a := range m.Attributes {
+		if c, ok := a.(*CodeAttribute); ok && c != nil {
+			return c
+		}
+	}
+	return nil
+}
+
+func classSwitchFamilies(obj *ClassObject) (hasType, hasEnum bool) {
 	ids := classBootstrapIdentities(obj)
 	for _, id := range ids {
 		if fam, ok := core.LookupBuiltin(id); ok {
@@ -222,45 +330,7 @@ func classSwitchFamilies(obj *ClassObject) (hasType, hasEnum, complex bool) {
 			}
 		}
 	}
-	for _, m := range obj.Methods {
-		if methodHasMatchException(obj, m) {
-			complex = true
-		}
-	}
-	return hasType, hasEnum, complex
-}
-
-func methodHasMatchException(obj *ClassObject, m *MemberInfo) bool {
-	code := methodCodeBytes(m)
-	if len(code) == 0 {
-		return false
-	}
-	d := core.NewDecompiler(code, func(id int) values.JavaValue {
-		return GetValueFromCP(obj.ConstantPool, id)
-	})
-	if err := d.ParseOpcode(); err != nil {
-		return false
-	}
-	for _, op := range d.Opcodes() {
-		if op == nil || op.Instr == nil || len(op.Data) < 2 {
-			continue
-		}
-		switch op.Instr.OpCode {
-		case core.OP_NEW, core.OP_CHECKCAST, core.OP_INVOKESPECIAL:
-			v := GetValueFromCP(obj.ConstantPool, int(core.Convert2bytesToInt(op.Data)))
-			switch t := v.(type) {
-			case *values.JavaClassValue:
-				if t != nil && t.JavaType != nil && strings.Contains(strings.ReplaceAll(fmt.Sprint(t.JavaType), "/", "."), "MatchException") {
-					return true
-				}
-			case *values.JavaClassMember:
-				if t != nil && strings.Contains(strings.ReplaceAll(t.Name, "/", "."), "MatchException") {
-					return true
-				}
-			}
-		}
-	}
-	return false
+	return hasType, hasEnum
 }
 
 func replaceMethodBody(methodCode, newBody string) string {

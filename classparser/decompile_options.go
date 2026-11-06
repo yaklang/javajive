@@ -274,6 +274,11 @@ func decompileWithBudget(data []byte, options DecompileOptions) (result Decompil
 		noteUnsupportedBootstraps(&result, obj)
 		return result, budget, err
 	}
+	// Pattern-switch reconstruction replaces a whole method body after the
+	// legacy structurer has already recorded a deconstruction-handler stub.
+	// Apply the final source rewrite and prune that superseded stub before the
+	// result status and member ledger are finalized.
+	applyPatternSwitchSource(d, &result)
 	result.Status = "complete"
 	if d.overloadFamilyUnproven || (d.FuncCtx != nil && d.FuncCtx.OverloadFamilyUnproven) {
 		result.Status = "unsupported"

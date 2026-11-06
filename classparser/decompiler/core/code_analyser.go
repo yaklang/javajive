@@ -45,6 +45,12 @@ type branchArrayCall struct {
 	requiresInvocationSourceView bool
 }
 
+// RecordComponent is one declared component of a record type.
+type RecordComponent struct {
+	Name       string
+	Descriptor string
+}
+
 type Decompiler struct {
 	// OriginalOwnStaticFinalStore proves the exact original CP field identity
 	// and own blank-final declaration for a PUTSTATIC. Display names alone
@@ -64,7 +70,12 @@ type Decompiler struct {
 	constructorDelegationPC      int
 	constructorDelegationKnown   bool
 	unsupportedConstructorPrefix string
-	FunctionType                 *types.JavaFuncType
+	// RecordComponents supplies the declared component order and descriptors
+	// for a record type. Pattern-switch reconstruction uses it to distinguish a
+	// deconstruction accessor prefix from an ordinary method call in the case
+	// body. Nil means the type's Record attribute is unavailable.
+	RecordComponents func(typeName string) ([]RecordComponent, bool)
+	FunctionType     *types.JavaFuncType
 	// Physical lambda capture parameters, in their original descriptor
 	// order. This restricts source motion; it grants no factory/binding role.
 	LambdaCaptureOrderSlots []int

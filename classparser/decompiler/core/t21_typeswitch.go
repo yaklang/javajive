@@ -131,6 +131,7 @@ type patternCase struct {
 	isDef    bool
 	typeName string
 	bind     string
+	pattern  string
 	guard    string
 	body     string
 }
@@ -147,10 +148,6 @@ func TryReconstructPatternSwitch(d *Decompiler) (PatternSwitchRewrite, bool) {
 			out.Reason = err.Error()
 			return out, false
 		}
-	}
-	if patternHasMatchException(d) {
-		out.Reason = "record/deconstruction pattern (MatchException)"
-		return out, false
 	}
 	byOff := map[int]*OpCode{}
 	var ops []*OpCode
@@ -180,6 +177,10 @@ func TryReconstructPatternSwitch(d *Decompiler) (PatternSwitchRewrite, bool) {
 	}
 	if indyIdx < 0 {
 		out.Reason = "no typeSwitch"
+		return out, false
+	}
+	if anyMatchExceptionType(d) && !hasCompilerDeconstructionHandler(d, byOff) {
+		out.Reason = "MatchException shape is not a javac deconstruction handler"
 		return out, false
 	}
 	if indyIdx+1 >= len(ops) {
@@ -252,7 +253,7 @@ func TryReconstructPatternSwitch(d *Decompiler) (PatternSwitchRewrite, bool) {
 		}
 		pc := patternCase{typeName: shortType(d, lab.TypeName)}
 		pc.bind = nextBindName(pc.typeName, bindSeq)
-		body, guard, decon, ok := recoverTypeCase(d, byOff, int(target), mergePC, loopPC, restartSlot, selectorSlot, pc.bind, i)
+		body, guard, pattern, decon, ok := recoverTypeCase(d, byOff, int(target), mergePC, loopPC, restartSlot, selectorSlot, lab.TypeName, pc.bind, i)
 		if decon {
 			out.Reason = "record deconstruction / nested pattern"
 			return out, false
@@ -263,11 +264,17 @@ func TryReconstructPatternSwitch(d *Decompiler) (PatternSwitchRewrite, bool) {
 		}
 		pc.body = body
 		pc.guard = guard
+		pc.pattern = pattern
 		cases = append(cases, pc)
 	}
 	defOff := int(sw.SwitchDefaultOffset)
 	if defBody, ok := evalExprToGoto(d, byOff, defOff, mergePC, selectorSlot, nil); ok {
 		cases = append(cases, patternCase{isDef: true, body: defBody})
+	} else if isCompilerMatchDefault(d, byOff, defOff) {
+		// The compiler default throws MatchException(null, null). Emit it
+		// explicitly so the reconstructed switch is exhaustive even when the
+		// original sealed/permits metadata is not part of the flat source units.
+		cases = append(cases, patternCase{isDef: true, body: "throw new MatchException(null, null)"})
 	} else {
 		out.Reason = "cannot recover default body"
 		return out, false
@@ -296,8 +303,14 @@ func TryReconstructPatternSwitch(d *Decompiler) (PatternSwitchRewrite, bool) {
 		default:
 			b.WriteString("case ")
 			b.WriteString(c.typeName)
-			b.WriteString(" ")
-			b.WriteString(c.bind)
+			if c.pattern != "" {
+				b.WriteString("(")
+				b.WriteString(c.pattern)
+				b.WriteString(")")
+			} else {
+				b.WriteString(" ")
+				b.WriteString(c.bind)
+			}
 			if c.guard != "" {
 				b.WriteString(" when ")
 				b.WriteString(c.guard)
@@ -311,42 +324,6 @@ func TryReconstructPatternSwitch(d *Decompiler) (PatternSwitchRewrite, bool) {
 	out.Body = b.String()
 	out.Complete = true
 	return out, true
-}
-
-func patternHasMatchException(d *Decompiler) bool {
-	for _, e := range d.ExceptionTable {
-		if e == nil {
-			continue
-		}
-		// Handler that constructs MatchException is recorded as catch_type of Throwable
-		// plus later new MatchException; scan opcodes for MatchException class.
-	}
-	for _, op := range d.opCodes {
-		if op == nil || op.Instr == nil {
-			continue
-		}
-		if op.Instr.OpCode == OP_NEW || op.Instr.OpCode == OP_CHECKCAST || op.Instr.OpCode == OP_INSTANCEOF {
-			if len(op.Data) < 2 || d.constantPoolGetter == nil {
-				continue
-			}
-			v := d.constantPoolGetter(int(Convert2bytesToInt(op.Data)))
-			if cv, ok := v.(*values.JavaClassValue); ok && cv != nil && cv.JavaType != nil {
-				n := strings.ReplaceAll(cv.JavaType.String(&class_context.ClassContext{}), "/", ".")
-				if strings.Contains(n, "MatchException") {
-					return true
-				}
-			}
-		}
-		if op.Instr.OpCode == OP_INVOKESPECIAL && d.constantPoolGetter != nil && len(op.Data) >= 2 {
-			v := d.constantPoolGetter(int(Convert2bytesToInt(op.Data)))
-			if m, ok := v.(*values.JavaClassMember); ok && m != nil {
-				if strings.Contains(strings.ReplaceAll(m.Name, "/", "."), "MatchException") {
-					return true
-				}
-			}
-		}
-	}
-	return false
 }
 
 func typeSwitchLabelsFromOp(d *Decompiler, op *OpCode) ([]TypeSwitchLabel, bool) {
@@ -475,64 +452,54 @@ func evalStackAtStore(d *Decompiler, ops []*OpCode, store *OpCode, selectorSlot 
 	return "", false
 }
 
-func recoverTypeCase(d *Decompiler, byOff map[int]*OpCode, start, mergePC, loopPC, restartSlot, selectorSlot int, bind string, caseIndex int) (body, guard string, decon, ok bool) {
+func recoverTypeCase(d *Decompiler, byOff map[int]*OpCode, start, mergePC, loopPC, restartSlot, selectorSlot int, recordType, bind string, caseIndex int) (body, guard, pattern string, decon, ok bool) {
 	op := byOff[start]
 	if op == nil {
-		return "", "", false, false
+		return "", "", "", false, false
 	}
 	// Expected: aload selector; checkcast T; astore bind
 	if GetRetrieveIdx(op) != selectorSlot {
-		return "", "", false, false
+		return "", "", "", false, false
 	}
 	op = nextOp(op, byOff)
 	if op == nil || op.Instr.OpCode != OP_CHECKCAST {
-		return "", "", false, false
+		return "", "", "", false, false
 	}
 	op = nextOp(op, byOff)
 	bindSlot := GetStoreIdx(op)
 	if bindSlot < 0 {
-		return "", "", false, false
+		return "", "", "", false, false
 	}
 	env := map[int]string{bindSlot: bind, selectorSlot: localName(d, selectorSlot)}
 	cur := nextOp(op, byOff)
 	if cur == nil {
-		return "", "", false, false
+		return "", "", "", false, false
 	}
 
-	// Detect record deconstruction: two or more invokevirtual on the binding stored to fresh locals.
-	if isDeconstructionPrefix(cur, byOff, bindSlot, mergePC, loopPC) {
-		return "", "", true, false
+	// A record deconstruction prefix is proven against the record's declared
+	// component list. Without that metadata, a multi-accessor prefix is still
+	// rejected rather than rendered as a simple type pattern.
+	if recordPattern, bodyStart, bodyEnv, recovered := d.recoverRecordPattern(cur, byOff, bindSlot, recordType, mergePC, env); recovered {
+		b, ok := evalExprToGoto(d, byOff, int(bodyStart.CurrentOffset), mergePC, selectorSlot, bodyEnv)
+		if !ok {
+			return "", "", "", true, false
+		}
+		return b, "", recordPattern, false, true
+	}
+	if patternDeconstructionPrefix(cur, byOff, bindSlot, mergePC, loopPC) {
+		return "", "", "", true, false
 	}
 
 	// Guard: compute boolean/int then if* to success, fail path stores restart and goto loop.
 	if g, success, hasGuard := recoverGuard(d, cur, byOff, mergePC, loopPC, restartSlot, env, caseIndex); hasGuard {
 		b, ok := evalExprToGoto(d, byOff, success, mergePC, selectorSlot, env)
 		if !ok {
-			return "", "", false, false
+			return "", "", "", false, false
 		}
-		return b, g, false, true
+		return b, g, "", false, true
 	}
 	b, ok := evalExprToGoto(d, byOff, int(cur.CurrentOffset), mergePC, selectorSlot, env)
-	return b, "", false, ok
-}
-
-func isDeconstructionPrefix(start *OpCode, byOff map[int]*OpCode, bindSlot, mergePC, loopPC int) bool {
-	invokes := 0
-	op := start
-	for i := 0; i < 16 && op != nil; i++ {
-		pc := int(op.CurrentOffset)
-		if pc == mergePC || pc == loopPC {
-			break
-		}
-		if op.Instr.OpCode == OP_GOTO || op.Instr.OpCode == OP_GOTO_W || isReturnOp(op.Instr.OpCode) {
-			break
-		}
-		if op.Instr.OpCode == OP_INVOKEVIRTUAL || op.Instr.OpCode == OP_INVOKEINTERFACE {
-			invokes++
-		}
-		op = nextOp(op, byOff)
-	}
-	return invokes >= 2
+	return b, "", "", false, ok
 }
 
 func recoverGuard(d *Decompiler, start *OpCode, byOff map[int]*OpCode, mergePC, loopPC, restartSlot int, env map[int]string, caseIndex int) (guard string, successPC int, ok bool) {
