@@ -488,13 +488,40 @@ func TestComplexModuleJar(t *testing.T) {
 	decRoot := t.TempDir()
 	decFiles := decompileJar(t, origJar, decRoot, 21)
 	assertNoDecompileStubs(t, decFiles)
+	moduleSource := ""
+	for _, file := range decFiles {
+		if filepath.Base(file) == "module-info.java" {
+			raw, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			moduleSource = string(raw)
+		}
+	}
+	if moduleSource == "" {
+		t.Fatal("module-info.class produced no source unit")
+	}
+	if strings.Contains(moduleSource, "synthetic module-info descriptor") {
+		t.Fatalf("module descriptor was not reconstructed:\n%s", moduleSource)
+	}
+	if !strings.Contains(moduleSource, "module m.example") || !strings.Contains(moduleSource, "exports pkg;") {
+		t.Fatalf("unexpected module source:\n%s", moduleSource)
+	}
 	rebuiltClasses := filepath.Join(t.TempDir(), "rebuilt")
 	compileTree(t, javac, decFiles, rebuiltClasses, 21)
 	got := runMain(t, java, rebuiltClasses, "pkg.Api")
 	if got != want {
 		t.Fatalf("module JAR behavior changed: got %q want %q", got, want)
 	}
-	t.Logf("module JAR: %d units (module-info rendered as a synthetic-descriptor comment)", len(decFiles))
+	moduleRun := exec.Command(java, "-Xverify:all", "--module-path", rebuiltClasses, "--module", "m.example/pkg.Api")
+	moduleOut, err := moduleRun.CombinedOutput()
+	if err != nil {
+		t.Fatalf("rebuilt module failed on the module path: %v\n%s", err, moduleOut)
+	}
+	if string(moduleOut) != want {
+		t.Fatalf("module-path behavior changed: got %q want %q", moduleOut, want)
+	}
+	t.Logf("module JAR: %d units; module descriptor reconstructed; classpath and module-path behavior identical", len(decFiles))
 }
 
 func TestComplexIrreducibleJarArchive(t *testing.T) {

@@ -94,6 +94,12 @@ Add a native, pure-Go DEX/APK-to-JAR path as a strict first vertical slice.
   `DecompileDEXFileWithAnalysisBudget`, `NewJarFSFromLocalWithAnalysisBudget`
   and CLI `-analysis-budget` route the same policy through archives, DEX
   translation and single classes. The default policy is unchanged.
+- Reconstruct `module-info.class` as a real source module declaration instead
+  of a comment: `open module`, `requires` transitive/static, `exports ... to`,
+  `opens ... to`, `uses`, and `provides ... with`. Fix the value-receiver
+  `ConstantModuleInfo`/`ConstantPackageInfo` readers that left module and
+  package names empty. The modular JAR fixture now compiles and runs with
+  identical classpath and module-path behavior.
 - Add `test/complexjar` with seven round-trip JARs (Java 21 features,
   control-flow torture, Java 8 legacy, 100-class scale, multi-release, module,
   and packaged irreducible classes) covering decompile → tree recompile → JVM

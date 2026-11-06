@@ -879,9 +879,13 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 		}
 	}
 	c.sourceDeclarationAccessKnown = true
-	// Module declarations require a separate JPMS reconstruction contract.
-	// Package descriptors are rendered below with their actual annotations.
+	// Module declarations have their own source grammar and no ordinary class
+	// body. Reconstruct the Module attribute when present; fall back to a
+	// synthetic-descriptor comment when the classfile carries no usable bytes.
 	if rawClassName == "module-info" {
+		if descriptor, ok := c.renderModuleDescriptor(); ok {
+			return descriptor, nil
+		}
 		var sb strings.Builder
 		sb.WriteString(fmt.Sprintf("// decompiled from a synthetic %s descriptor\n", rawClassName))
 		out := sb.String()

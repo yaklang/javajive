@@ -43,7 +43,7 @@ The historical figures above remain the durable v0.4.0 audit baseline.
 | `TestComplexLegacyJarRoundTrip` | Java 8 bytecode: enum constant bodies (legacy synthetic bridge shape), lambdas, anonymous classes, string switch, try-with-resources, generics, nested loops | 9 units; enum bodies folded into owner; outputs byte-identical |
 | `TestComplexScaleJarRoundTrip` | 100 generated package classes, each with loop/switch/array/string methods, plus a chunked driver | 101 units; outputs byte-identical |
 | `TestComplexMultiReleaseJar` | base `--release 8`, `META-INF/versions/17`, `META-INF/versions/21`, `Multi-Release: true` | 3 units; each release recompiled with its own `--release` and run; outputs identical |
-| `TestComplexModuleJar` | `module-info.class` + exported package | 1 source unit; classpath compile/run identical; module descriptor is rendered as a synthetic-descriptor comment |
+| `TestComplexModuleJar` | `module-info.class` + exported package | 2 units; module descriptor reconstructed; classpath and module-path runs identical |
 | `TestComplexIrreducibleJarArchive` | checked-in major-49 multi-entry/irreducible classes packed as a JAR | 8 classes; tree compile; behavior is covered by `TestRoundTripIrreducibleCFGCorpus` |
 
 The suite asserts **zero decompiler stub markers** in the produced sources, so
@@ -124,6 +124,13 @@ being counted as success.
     graph/scan/set/node caps by 64x (64M ceiling), and the new CLI/API surfaces
     route that policy through single classes, directories, archives and DEX
     translation. The default remains the conservative 1M policy.
+16. **Module descriptors were emitted as comments.** `ConstantModuleInfo` and
+    `ConstantPackageInfo` used value receivers, so their `NameIndex` stayed zero
+    and the `Module` attribute could not be decoded. The receivers are fixed and
+    the attribute is now rendered as a real `module-info.java`: `open module`,
+    `requires` (including transitive/static), `exports ... to`, `opens ... to`,
+    `uses`, and `provides ... with`. The fixture compiles and runs identically
+    on both the classpath and the module path.
 
 ## Remaining boundaries
 
@@ -160,9 +167,11 @@ being counted as success.
   `super()`/`this()` delegation, so acyclic stack phis and discarded-value
   sinks are disabled inside constructors; constructor switch-expression joins
   remain on the established prefix path.
-- **`module-info.class` is inspected but not regenerated.** The archive path
-  emits a comment-only unit; modular descriptors are not reconstructed. The
-  exported classes still compile and run on the classpath.
+- **Module descriptors cover source-level directives.** `requires`,
+  `exports`, `opens`, `uses`, and `provides` reconstruct, but module
+  annotations, `module_version`, `ModuleMainClass` and `ModulePackages` are not
+  emitted (source cannot express all of them). Classes still compile and run on
+  both the classpath and module path.
 - **Flattened nested names.** `Outer$Inner` is emitted as a top-level
   `Outer$Inner.java`. This is the established archive design; reflection
   (`getDeclaringClass`) and record `toString` prefixes can differ even when

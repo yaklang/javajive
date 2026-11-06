@@ -85,9 +85,11 @@ Reported but not claimed as clean:
   currently rejected by the shared-handler structurer and emits a method stub
   with a diagnostic (fail-closed). Simple type patterns, `case null`, guards,
   and equivalent-dispatcher forms are covered.
-- **Module descriptors.** `module-info.class` is inspected but emitted only as
-  a synthetic-descriptor comment; classpath compilation and behavior remain
-  verified.
+- **Module descriptors.** Source-level `open module` / `requires` /
+  `exports` / `opens` / `uses` / `provides` directives are reconstructed from
+  the `Module` attribute and verified on both the classpath and module path.
+  Module annotations, `module_version`, `ModuleMainClass` and `ModulePackages`
+  metadata have no reconstructed source spelling.
 - **Flattened names.** `Outer$Inner` is emitted as a standalone top-level unit,
   as documented for the archive path; reflection and record `toString` text can
   differ even when method behavior is identical.

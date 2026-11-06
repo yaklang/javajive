@@ -6,7 +6,7 @@ type ConstantModuleInfo struct {
 	NameIndexVerbose string
 }
 
-func (c ConstantModuleInfo) readInfo(parser *ClassParser) {
+func (c *ConstantModuleInfo) readInfo(parser *ClassParser) {
 	c.NameIndex = parser.reader.readUint16()
 }
 
@@ -16,6 +16,6 @@ type ConstantPackageInfo struct {
 	NameIndexVerbose string
 }
 
-func (c ConstantPackageInfo) readInfo(parser *ClassParser) {
+func (c *ConstantPackageInfo) readInfo(parser *ClassParser) {
 	c.NameIndex = parser.reader.readUint16()
 }
