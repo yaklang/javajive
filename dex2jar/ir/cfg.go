@@ -187,8 +187,46 @@ func buildBlocks(instructions []Instruction, codeUnits uint32, ctx Context, site
 			addSuccessor(block, index+1)
 		}
 	}
-	// Only reachable code must end in a terminator; a trailing dead block is
-	// emitted as unverifiable dead code rather than rejected.
+	// Exception dispatch is an edge from every protected block to each handler
+	// entry. Protected ranges align with block boundaries because their start
+	// and end offsets are leaders.
+	handlerBlock := make(map[uint32]int, len(sites))
+	for _, site := range sites {
+		for _, target := range site.targets {
+			blockIndex := blockAt[target.address]
+			handlerBlock[target.address] = blockIndex
+			blocks[blockIndex].Handler = true
+		}
+	}
+	recorded := make(map[int]map[int]bool, len(sites))
+	for _, site := range sites {
+		for index := range blocks {
+			if blocks[index].Start < site.start || blocks[index].Start >= site.end {
+				continue
+			}
+			for _, target := range site.targets {
+				handler := handlerBlock[target.address]
+				addSuccessor(&blocks[index], handler)
+				if recorded[handler] == nil {
+					recorded[handler] = make(map[int]bool)
+				}
+				for _, instructionIndex := range blocks[index].Instructions {
+					if instructions[instructionIndex].Offset >= site.start && instructions[instructionIndex].Offset < site.end {
+						recorded[handler][instructionIndex] = true
+					}
+				}
+			}
+		}
+	}
+	for handler, set := range recorded {
+		for instructionIndex := range set {
+			blocks[handler].Protected = append(blocks[handler].Protected, instructionIndex)
+		}
+		sort.Ints(blocks[handler].Protected)
+	}
+	// Reachability follows every edge, including exception dispatch, so handler
+	// blocks are live. Only reachable code must end in a terminator; a trailing
+	// dead block is emitted as unverifiable dead code rather than rejected.
 	reachable := make([]bool, len(blocks))
 	reachable[0] = true
 	queue := []int{0}
@@ -211,27 +249,6 @@ func buildBlocks(instructions []Instruction, codeUnits uint32, ctx Context, site
 		last := instructions[block.Instructions[len(block.Instructions)-1]]
 		if !isBranch(last.Opcode) && !isSwitch(last.Opcode) && !isTerminal(last.Opcode) && index+1 >= len(blocks) {
 			return nil, diagnostic(ctx, &last, "", fmt.Errorf("reachable execution may fall off end of code"))
-		}
-	}
-	// Exception dispatch is an edge from every protected block to each handler
-	// entry. Protected ranges align with block boundaries because their start
-	// and end offsets are leaders.
-	handlerBlock := make(map[uint32]int, len(sites))
-	for _, site := range sites {
-		for _, target := range site.targets {
-			blockIndex := blockAt[target.address]
-			handlerBlock[target.address] = blockIndex
-			blocks[blockIndex].Handler = true
-		}
-	}
-	for _, site := range sites {
-		for index := range blocks {
-			if blocks[index].Start < site.start || blocks[index].Start >= site.end {
-				continue
-			}
-			for _, target := range site.targets {
-				addSuccessor(&blocks[index], handlerBlock[target.address])
-			}
 		}
 	}
 	for index := range blocks {

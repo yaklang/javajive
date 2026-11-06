@@ -338,6 +338,17 @@ func analyzeCategories(method *Method, file *model.File, allocations []Allocatio
 // solveCategories runs the forward category fixpoint and materializes the
 // per-instruction states, definitions and operand demands.
 func solveCategories(method *Method, file *model.File, allocations []Allocation, entry []Category, registerCount int, propagate []map[uint16]bool) ([][]Category, error) {
+	protected := make([]map[int]bool, len(method.Blocks))
+	for index := range method.Blocks {
+		if len(method.Blocks[index].Protected) == 0 {
+			continue
+		}
+		set := make(map[int]bool, len(method.Blocks[index].Protected))
+		for _, instructionIndex := range method.Blocks[index].Protected {
+			set[instructionIndex] = true
+		}
+		protected[index] = set
+	}
 	entries := make([][]Category, len(method.Blocks))
 	for index := range entries {
 		entries[index] = make([]Category, registerCount)
@@ -352,11 +363,29 @@ func solveCategories(method *Method, file *model.File, allocations []Allocation,
 			for _, register := range sortedRegisters(propagate[blockIndex]) {
 				merged := Category{}
 				for _, predecessor := range method.Blocks[blockIndex].Predecessors {
+					if !method.Blocks[predecessor].Reachable {
+						// Dead code may fall through into a live block; its register
+						// state is not part of any real path.
+						continue
+					}
 					predecessorRun, err := walkBlock(method, file, allocations, predecessor, entries[predecessor], false)
 					if err != nil {
 						return nil, err
 					}
 					incoming := predecessorRun.exit[register]
+					if protected[blockIndex] != nil {
+						// A handler observes the register file as it was when the
+						// protected instruction started, so use those pre-states
+						// instead of the protected block's exit state.
+						replacement, ok, err := protectedState(method, predecessorRun, predecessor, protected[blockIndex], register)
+						if err != nil {
+							instruction := &method.Instructions[firstInstruction(method, blockIndex)]
+							return nil, diagnostic(method.Context, instruction, "", fmt.Errorf("v%d has incompatible exception states: %w", register, err))
+						}
+						if ok {
+							incoming = replacement
+						}
+					}
 					if incoming.Kind == Unknown {
 						continue
 					}
@@ -410,6 +439,29 @@ func solveCategories(method *Method, file *model.File, allocations []Allocation,
 
 // computeLiveness runs the standard backward live-variable analysis over the
 // block graph using the per-instruction use/define table.
+// protectedState joins the pre-instruction categories of the protected
+// instructions that live in one predecessor block.
+func protectedState(method *Method, run *blockRun, predecessor int, protected map[int]bool, register uint16) (Category, bool, error) {
+	merged := Category{}
+	found := false
+	for offset, instructionIndex := range method.Blocks[predecessor].Instructions {
+		if !protected[instructionIndex] {
+			continue
+		}
+		incoming := run.states[offset][register]
+		if incoming.Kind == Unknown {
+			continue
+		}
+		result, _, err := mergeCategory(merged, incoming)
+		if err != nil {
+			return Category{}, false, err
+		}
+		merged = result
+		found = true
+	}
+	return merged, found, nil
+}
+
 func computeLiveness(method *Method, usedBeforeDef, definedIn []map[uint16]bool) ([]map[uint16]bool, []map[uint16]bool) {
 	liveIn := make([]map[uint16]bool, len(method.Blocks))
 	liveOut := make([]map[uint16]bool, len(method.Blocks))

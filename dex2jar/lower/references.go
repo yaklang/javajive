@@ -314,7 +314,9 @@ func (l *methodLowerer) provablyAssignable(actual, expected string) bool {
 			if actualComponent == expectedComponent {
 				return true
 			}
-			if strings.HasPrefix(actualComponent, "L") && strings.HasPrefix(expectedComponent, "L") {
+			actualReference := strings.HasPrefix(actualComponent, "L") || strings.HasPrefix(actualComponent, "[")
+			expectedReference := strings.HasPrefix(expectedComponent, "L") || strings.HasPrefix(expectedComponent, "[")
+			if actualReference && expectedReference {
 				return l.provablyAssignable(actualComponent, expectedComponent)
 			}
 		}

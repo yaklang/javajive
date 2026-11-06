@@ -16,6 +16,27 @@ func refineConstants(method *Method, file *model.File) (bool, error) {
 	for index := range demandIn {
 		demandIn[index] = make([]Category, registers)
 	}
+	// Exception edges carry the demand observed at the protected instruction, not
+	// at the end of the protected block, so they are injected at the instruction
+	// during the reverse walk instead of joined from the block exit.
+	protectedHandlers := make([][]int, len(method.Instructions))
+	blockOf := make([]int, len(method.Instructions))
+	for blockIndex := range method.Blocks {
+		for _, instructionIndex := range method.Blocks[blockIndex].Instructions {
+			blockOf[instructionIndex] = blockIndex
+		}
+	}
+	exceptionEdge := make([]map[int]bool, len(method.Blocks))
+	for handler := range method.Blocks {
+		for _, instructionIndex := range method.Blocks[handler].Protected {
+			protectedHandlers[instructionIndex] = append(protectedHandlers[instructionIndex], handler)
+			blockIndex := blockOf[instructionIndex]
+			if exceptionEdge[blockIndex] == nil {
+				exceptionEdge[blockIndex] = make(map[int]bool)
+			}
+			exceptionEdge[blockIndex][handler] = true
+		}
+	}
 	changed := false
 	for pass := 0; pass <= len(method.Blocks)+1; pass++ {
 		iteration := false
@@ -23,6 +44,9 @@ func refineConstants(method *Method, file *model.File) (bool, error) {
 			// The demand leaving a block is the join of every successor entry.
 			next := make([]Category, registers)
 			for _, successor := range method.Blocks[blockIndex].Successors {
+				if exceptionEdge[blockIndex][successor] {
+					continue
+				}
 				for register := 0; register < registers; register++ {
 					if err := joinDemand(&next[register], demandIn[successor][register]); err != nil {
 						instruction := method.Instructions[firstInstruction(method, blockIndex)]
@@ -53,6 +77,13 @@ func refineConstants(method *Method, file *model.File) (bool, error) {
 					for _, operand := range method.demands[index] {
 						if err := joinDemand(&demands[operand.register], operand.category); err != nil {
 							return false, diagnostic(method.Context, instruction, "", fmt.Errorf("v%d: %w", operand.register, err))
+						}
+					}
+				}
+				for _, handler := range protectedHandlers[index] {
+					for register := 0; register < registers; register++ {
+						if err := joinDemand(&demands[register], demandIn[handler][register]); err != nil {
+							return false, diagnostic(method.Context, instruction, "", fmt.Errorf("v%d: %w", register, err))
 						}
 					}
 				}

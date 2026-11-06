@@ -36,7 +36,16 @@ Translate switches, array literals, monitors, and discarding exception handlers.
   poison later passes and produce spurious join conflicts.
 - Walk invoke arguments by register words in the reference analysis, so the
   second half of a long or double argument is not checked as a reference.
-- On the Termux APK this raises strictly translatable classes to 2620 (97.2%).
+- Model exception edges precisely: a handler entry merges the register state at
+  the start of every protected instruction, and the backward demand analysis
+  injects handler demands at those instructions instead of at the protected
+  block exit. Definitions that happen after the last throwing instruction no
+  longer leak into the handler.
+- Compute block reachability after exception edges are added, and ignore
+  unreachable predecessors when joining register categories.
+- Read sparse switch payloads as a key array followed by a target array, and
+  treat nested reference arrays as covariant in their components.
+- On the Termux APK this raises strictly translatable classes to 2628 (97.5%).
 
 ## Unreleased — 2026-11-06
 

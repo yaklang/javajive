@@ -150,6 +150,10 @@ type Block struct {
 	// entry. Unreachable blocks are dead code: DEX emitted them, but neither
 	// translation nor the JVM verifier ever executes them.
 	Reachable bool
+	// Protected lists, for a handler block, the instructions whose exceptions
+	// dispatch to it. The handler entry observes each instruction's pre-state,
+	// not the state at the end of the protected block.
+	Protected []int
 }
 
 // Allocation describes a verifier-safe new-instance/constructor pair.
