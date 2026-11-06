@@ -24,6 +24,15 @@ func BuildSemanticCFG(d *Decompiler) (*SemanticCFG, error) {
 	return d.BuildSemanticCFG()
 }
 
+// SemanticCFGForEvidence exposes the immutable semantic CFG built for this
+// method to the installed SSA evidence provider.
+func (d *Decompiler) SemanticCFGForEvidence() *SemanticCFG {
+	if d == nil {
+		return nil
+	}
+	return d.semanticCFG
+}
+
 func (d *Decompiler) TestBytecodes() []byte {
 	if d == nil {
 		return nil

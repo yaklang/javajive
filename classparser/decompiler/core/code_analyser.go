@@ -45,6 +45,28 @@ type branchArrayCall struct {
 	requiresInvocationSourceView bool
 }
 
+// StackPhiKind is the coarse type category proved by the SSA stack model.
+type StackPhiKind uint8
+
+const (
+	StackPhiUnknown StackPhiKind = iota
+	StackPhiPrimitive
+	StackPhiReference
+	StackPhiNull
+)
+
+// StackPhiEvidence is production evidence from MethodIR/SSA for a stack-carried
+// acyclic join. Class is the SSA reference class (internal or dotted).
+type StackPhiEvidence struct {
+	Kind  StackPhiKind
+	Class string
+}
+
+// StackPhiEvidenceProvider is installed by the classparser package. It must be
+// side-effect free apart from the Decompiler-local cache; nil disables SSA
+// validation.
+var StackPhiEvidenceProvider func(d *Decompiler, merge *OpCode) (StackPhiEvidence, bool)
+
 // RecordComponent is one declared component of a record type.
 type RecordComponent struct {
 	Name       string
@@ -75,7 +97,14 @@ type Decompiler struct {
 	// deconstruction accessor prefix from an ordinary method call in the case
 	// body. Nil means the type's Record attribute is unavailable.
 	RecordComponents func(typeName string) ([]RecordComponent, bool)
-	FunctionType     *types.JavaFuncType
+	// TypeSupertypes resolves direct supertypes by internal name for nested
+	// record-pattern subtype proofs. Nil keeps the exact-type requirement.
+	TypeSupertypes func(internalName string) ([]string, bool)
+	FunctionType   *types.JavaFuncType
+	// StackPhiEvidenceCache is owned by the installed SSA provider. Core treats
+	// it as opaque so the core package does not import the SSA package.
+	StackPhiEvidenceCache any
+	unsupportedStackJoin  string
 	// Physical lambda capture parameters, in their original descriptor
 	// order. This restricts source motion; it grants no factory/binding role.
 	LambdaCaptureOrderSlots []int
@@ -6407,6 +6436,9 @@ func (d *Decompiler) ParseStatement() error {
 	}
 	if d.unsupportedConstructorPrefix != "" {
 		return fmt.Errorf("%s", d.unsupportedConstructorPrefix)
+	}
+	if d.unsupportedStackJoin != "" {
+		return fmt.Errorf("%s", d.unsupportedStackJoin)
 	}
 	if d.semanticCFG != nil && d.semanticCFG.IrreducibleError != nil && !d.irreducibleEdgesHaveEmptyStack() {
 		return d.semanticCFG.IrreducibleError

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
@@ -199,6 +200,10 @@ func (d *Decompiler) lowerAcyclicStackPhi(merge *OpCode, slot *values.SlotValue)
 		// Every edge carries the same already-evaluated word; no phi is needed.
 		return false
 	}
+	if evidence, known := stackPhiEvidence(d, merge); known && !stackPhiKindMatches(typ, evidence) {
+		d.unsupportedStackJoin = fmt.Sprintf("ssa stack join type mismatch at pc %d", merge.CurrentOffset)
+		return false
+	}
 	ref := sim.NewVar(values.NewJavaLiteral(nil, typ))
 	ref.ResetVarType(typ)
 	ref.WebDeclType = typ.Copy()
@@ -224,4 +229,26 @@ func (d *Decompiler) lowerAcyclicStackPhi(merge *OpCode, slot *values.SlotValue)
 	}
 	d.disFoldRef = append(d.disFoldRef, ref)
 	return true
+}
+
+func stackPhiEvidence(d *Decompiler, merge *OpCode) (StackPhiEvidence, bool) {
+	if d == nil || merge == nil || StackPhiEvidenceProvider == nil {
+		return StackPhiEvidence{}, false
+	}
+	return StackPhiEvidenceProvider(d, merge)
+}
+
+func stackPhiKindMatches(typ types.JavaType, evidence StackPhiEvidence) bool {
+	if typ == nil {
+		return false
+	}
+	_, primitive := typ.RawType().(*types.JavaPrimer)
+	switch evidence.Kind {
+	case StackPhiPrimitive:
+		return primitive
+	case StackPhiReference, StackPhiNull:
+		return !primitive
+	default:
+		return true
+	}
 }
