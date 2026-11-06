@@ -438,9 +438,12 @@ type widenSafety struct {
 	number bool
 }
 
-func analyzeWidenSafety(sts []statements.Statement, ref *values.JavaRef, funcCtx *class_context.ClassContext) widenSafety {
+// collectRefUses returns every structural use of ref in the statement tree.
+// The slice is a copy; callers may inspect contexts without mutating walker
+// state.
+func collectRefUses(sts []statements.Statement, ref *values.JavaRef, funcCtx *class_context.ClassContext) []refUse {
 	if ref == nil {
-		return widenSafety{}
+		return nil
 	}
 	name := ref.String(&class_context.ClassContext{})
 	w := &refUseWalker{uid: ref.VarUid, name: name}
@@ -450,10 +453,17 @@ func analyzeWidenSafety(sts []statements.Statement, ref *values.JavaRef, funcCtx
 		}
 	}
 	w.walkStatements(sts)
+	return append([]refUse(nil), w.uses...)
+}
+
+func analyzeWidenSafety(sts []statements.Statement, ref *values.JavaRef, funcCtx *class_context.ClassContext) widenSafety {
+	if ref == nil {
+		return widenSafety{}
+	}
 	out := widenSafety{object: true, number: true}
 	objectType := types.NewJavaClass("java.lang.Object")
 	numberType := types.NewJavaClass("java.lang.Number")
-	for _, use := range w.uses {
+	for _, use := range collectRefUses(sts, ref, funcCtx) {
 		switch use.kind {
 		case refUseWrite, refUseInstanceOf, refUseCast, refUseMonitor, refUseStringConcat:
 			// Legal under both candidates.
@@ -487,6 +497,10 @@ func analyzeWidenSafety(sts []statements.Statement, ref *values.JavaRef, funcCtx
 // typeAcceptsValue reports whether a declaration of type `decl` can hold the
 // value required by `expected`. Missing type evidence is never accepted.
 func typeAcceptsValue(decl, expected types.JavaType) bool {
+	return typeAcceptsValueWithProvider(decl, expected, nil)
+}
+
+func typeAcceptsValueWithProvider(decl, expected types.JavaType, provider types.SuperTypeProvider) bool {
 	if decl == nil || expected == nil || isPrimitiveType(expected) {
 		return false
 	}
@@ -509,7 +523,7 @@ func typeAcceptsValue(decl, expected types.JavaType) bool {
 	if declName == expectedName || expectedName == "java.lang.Object" {
 		return true
 	}
-	return types.IsReferenceSubtypeBridged(declName, expectedName, nil)
+	return types.IsReferenceSubtypeBridged(declName, expectedName, provider)
 }
 
 var objectMethodWhitelist = map[string]bool{
