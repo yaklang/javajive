@@ -45,6 +45,13 @@ Requests own their mode, analysis budget, resolver, result and rewrite history. 
 - **Generic constraints.** `solveBareMethodTypeConstraints` accumulates lower
   bounds for bare method type variables and meets them at a hierarchy LUB.
   Nested invariant occurrences remain on the strict structural binder.
+- **Irreducible boundary carriers.** The dispatcher no longer requires every
+  state-machine boundary to be stack-empty. A per-word certificate accepts
+  constants, materialized locals and effectful values whose producer reaches
+  the boundary through an effect-free carrier path. A target-merge certificate
+  additionally requires structurally equal incoming words or a materialized
+  stack-phi local; unequal literals and reordered effectful reads fail closed,
+  so moving evaluation into a target case cannot silently change behavior.
 
 ## Report-to-code mapping
 
@@ -61,7 +68,7 @@ Requests own their mode, analysis budget, resolver, result and rewrite history. 
 | P1-03 variable identity | Reference web coalescing follows immutable reaching definitions, separately joins RHS types, and preserves parameter entry, null, array and catch-variable identities. Embedded assignment declarations use variable identity. | Some older variable repairs remain; this is not complete SSA destruction. |
 | P1-04 explicit expressions | Cast and embedded-assignment nodes expose dependencies; a cycle-safe visitor records reference uses and effects. | Other CustomValue nodes remain opaque barriers. |
 | P1-05 type identity | Joins use binary class identity, accessible hierarchy providers and descriptor-derived use bounds; method witnesses use the full descriptor to distinguish overloads. | Full member/overload constraints, intersection types and all legacy suffix rules remain a future type-system migration. |
-| P1-06 regions | Switch preparation is idempotent; shared continuations take precedence over interior candidates; merge identity follows node replacement; switch-only loops materialize back edges and label loop exits captured by switches; unsupported multi-entry normal regions produce diagnostics. | Exclusive exception-table boundaries constrain Throwable cleanup regions; shared-handler retry and monitor cases retain distinct handling. General irreducible restructuring/state machines remain unimplemented. |
+| P1-06 regions | Switch preparation is idempotent; shared continuations take precedence over interior candidates; merge identity follows node replacement; switch-only loops materialize back edges and label loop exits captured by switches; unsupported multi-entry normal regions produce diagnostics; normal-flow state dispatch handles multiple entries, switch entries, shared exits and stable stack carriers. | Exclusive exception-table boundaries constrain Throwable cleanup regions; shared-handler retry and monitor cases retain distinct handling. Exception-entry, allocation/monitor and unproven stack-carrier boundaries still fail closed. |
 | P1-07 effects | Array initializer folding checks dependencies, distinct entry paths and exception-table coverage; preserves self reads and partially filled arrays observed by handlers. | A universal motion/scheduling proof for every rewrite is not implemented. |
 | P1-08 rewrite contracts | Precision/compatibility policy, rule/phase provenance, class-source oscillation rejection, and regression tests that allow proven patch retirement. | All older structural passes have not been migrated to declarative preconditions/postconditions. |
 | P2-01 cost control | Slot queries reuse a method-local fixed point; declaration-placement probes cache within an invalidated mutation epoch; stack Size is O(1). | General graph-versioned dominator/postdominator caches are not implemented. |

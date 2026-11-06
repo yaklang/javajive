@@ -516,6 +516,482 @@ func buildStackCarryEntry(class *cf.Class) error {
 	})
 }
 
+// Every edge into the kernel carries an immediate static-field read. The read
+// is effectful but its producer is adjacent to the control boundary, so the
+// dispatcher may evaluate it in the target case without crossing another
+// observable operation.
+func buildStackCarryField(class *cf.Class) error {
+	class.AddField(cf.ACC_PUBLIC|cf.ACC_STATIC, "CARRY", "I")
+	field, err := class.Pool().Fieldref("StackCarryField", "CARRY", "I")
+	if err != nil {
+		return err
+	}
+	return addRun(class, func(code *cf.Code) error {
+		a, b, exit := code.NewLabel(), code.NewLabel(), code.NewLabel()
+		if err := initAccum(class, code); err != nil {
+			return err
+		}
+		code.Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.CP(cf.GETSTATIC, field)
+		code.Load(cf.IntLocal, 0).Branch(cf.IFEQ, a).Branch(cf.GOTO, b)
+		code.Mark(a)
+		code.Store(cf.IntLocal, 4)
+		code.Load(cf.IntLocal, 3).Load(cf.IntLocal, 4).Emit(cf.IADD).Store(cf.IntLocal, 3)
+		if err := addConst(class, code, 3, 1); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.CP(cf.GETSTATIC, field).Branch(cf.GOTO, b)
+		code.Mark(b)
+		code.Store(cf.IntLocal, 4)
+		code.Load(cf.IntLocal, 3).Load(cf.IntLocal, 4).Emit(cf.IADD).Store(cf.IntLocal, 3)
+		if err := addConst(class, code, 3, 2); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.CP(cf.GETSTATIC, field).Branch(cf.GOTO, a)
+		code.Mark(exit)
+		returnAcc(code)
+		return nil
+	})
+}
+
+// Every boundary carries the result of a helper invocation. The call is the
+// last evaluation before the branch; delaying it into the target case is
+// observationally equivalent because no other user instruction intervenes.
+func buildStackCarryCall(class *cf.Class) error {
+	class.AddField(cf.ACC_PUBLIC|cf.ACC_STATIC, "COUNTER", "I")
+	counter, err := class.Pool().Fieldref("StackCarryCall", "COUNTER", "I")
+	if err != nil {
+		return err
+	}
+	bump, err := class.Pool().Methodref("StackCarryCall", "bump", "()I")
+	if err != nil {
+		return err
+	}
+	bumpCode := class.AddMethod(cf.ACC_PUBLIC|cf.ACC_STATIC, "bump", "()I").Code()
+	bumpCode.CP(cf.GETSTATIC, counter).Emit(cf.ICONST_1).Emit(cf.IADD).CP(cf.PUTSTATIC, counter)
+	bumpCode.CP(cf.GETSTATIC, counter).Emit(cf.IRETURN)
+	return addRun(class, func(code *cf.Code) error {
+		a, b, exit := code.NewLabel(), code.NewLabel(), code.NewLabel()
+		if err := initAccum(class, code); err != nil {
+			return err
+		}
+		code.Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.CP(cf.INVOKESTATIC, bump)
+		code.Load(cf.IntLocal, 0).Branch(cf.IFEQ, a).Branch(cf.GOTO, b)
+		code.Mark(a)
+		code.Store(cf.IntLocal, 4)
+		code.Load(cf.IntLocal, 3).Load(cf.IntLocal, 4).Emit(cf.IADD).Store(cf.IntLocal, 3)
+		if err := addConst(class, code, 3, 1); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.CP(cf.INVOKESTATIC, bump).Branch(cf.GOTO, b)
+		code.Mark(b)
+		code.Store(cf.IntLocal, 4)
+		code.Load(cf.IntLocal, 3).Load(cf.IntLocal, 4).Emit(cf.IADD).Store(cf.IntLocal, 3)
+		if err := addConst(class, code, 3, 2); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.CP(cf.INVOKESTATIC, bump).Branch(cf.GOTO, a)
+		code.Mark(exit)
+		returnAcc(code)
+		return nil
+	})
+}
+
+// The entry field read is carried across an invocation which mutates the same
+// field. Re-evaluating the read in the dispatcher target would observe the new
+// value, so this shape must fail closed instead of silently changing behavior.
+func buildStackCarryReordered(class *cf.Class) error {
+	class.AddField(cf.ACC_PUBLIC|cf.ACC_STATIC, "CARRY", "I")
+	field, err := class.Pool().Fieldref("StackCarryReordered", "CARRY", "I")
+	if err != nil {
+		return err
+	}
+	touch, err := class.Pool().Methodref("StackCarryReordered", "touch", "()V")
+	if err != nil {
+		return err
+	}
+	touchCode := class.AddMethod(cf.ACC_PUBLIC|cf.ACC_STATIC, "touch", "()V").Code()
+	touchCode.CP(cf.GETSTATIC, field).Emit(cf.ICONST_1).Emit(cf.IADD).CP(cf.PUTSTATIC, field).Emit(cf.RETURN)
+	return addRun(class, func(code *cf.Code) error {
+		a, b, exit := code.NewLabel(), code.NewLabel(), code.NewLabel()
+		if err := initAccum(class, code); err != nil {
+			return err
+		}
+		code.Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.CP(cf.GETSTATIC, field).CP(cf.INVOKESTATIC, touch)
+		code.Load(cf.IntLocal, 0).Branch(cf.IFEQ, a).Branch(cf.GOTO, b)
+		code.Mark(a)
+		code.Store(cf.IntLocal, 4)
+		code.Load(cf.IntLocal, 3).Load(cf.IntLocal, 4).Emit(cf.IADD).Store(cf.IntLocal, 3)
+		if err := addConst(class, code, 3, 1); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.CP(cf.GETSTATIC, field).Branch(cf.GOTO, b)
+		code.Mark(b)
+		code.Store(cf.IntLocal, 4)
+		code.Load(cf.IntLocal, 3).Load(cf.IntLocal, 4).Emit(cf.IADD).Store(cf.IntLocal, 3)
+		if err := addConst(class, code, 3, 2); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.CP(cf.GETSTATIC, field).Branch(cf.GOTO, a)
+		code.Mark(exit)
+		returnAcc(code)
+		return nil
+	})
+}
+
+// Reference words use the same carrier proof. The static field is null for the
+// whole run, so both branches exercise a real null check on the carried word.
+func buildStackCarryReference(class *cf.Class) error {
+	class.AddField(cf.ACC_PUBLIC|cf.ACC_STATIC, "OBJ", "Ljava/lang/Object;")
+	field, err := class.Pool().Fieldref("StackCarryReference", "OBJ", "Ljava/lang/Object;")
+	if err != nil {
+		return err
+	}
+	return addRun(class, func(code *cf.Code) error {
+		a, b, skipA, skipB, exit := code.NewLabel(), code.NewLabel(), code.NewLabel(), code.NewLabel(), code.NewLabel()
+		if err := initAccum(class, code); err != nil {
+			return err
+		}
+		code.Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.CP(cf.GETSTATIC, field)
+		code.Load(cf.IntLocal, 0).Branch(cf.IFEQ, a).Branch(cf.GOTO, b)
+		code.Mark(a)
+		code.Store(cf.RefLocal, 4)
+		code.Load(cf.RefLocal, 4).Branch(cf.IFNULL, skipA)
+		if err := addConst(class, code, 3, 100); err != nil {
+			return err
+		}
+		code.Mark(skipA)
+		if err := addConst(class, code, 3, 1); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.CP(cf.GETSTATIC, field).Branch(cf.GOTO, b)
+		code.Mark(b)
+		code.Store(cf.RefLocal, 4)
+		code.Load(cf.RefLocal, 4).Branch(cf.IFNULL, skipB)
+		if err := addConst(class, code, 3, 100); err != nil {
+			return err
+		}
+		code.Mark(skipB)
+		if err := addConst(class, code, 3, 2); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.CP(cf.GETSTATIC, field).Branch(cf.GOTO, a)
+		code.Mark(exit)
+		returnAcc(code)
+		return nil
+	})
+}
+
+// Every edge carries the same local identity (the initialized null local).
+// The merge certificate may reuse one JavaRef because all incoming paths name
+// the same variable.
+func buildStackCarryLocalRef(class *cf.Class) error {
+	return addRun(class, func(code *cf.Code) error {
+		a, b, skipA, skipB, exit := code.NewLabel(), code.NewLabel(), code.NewLabel(), code.NewLabel(), code.NewLabel()
+		if err := initAccum(class, code); err != nil {
+			return err
+		}
+		code.Emit(cf.ACONST_NULL).Store(cf.RefLocal, 4)
+		code.Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.Load(cf.RefLocal, 4)
+		code.Load(cf.IntLocal, 0).Branch(cf.IFEQ, a).Branch(cf.GOTO, b)
+		code.Mark(a)
+		code.Store(cf.RefLocal, 5)
+		code.Load(cf.RefLocal, 5).Branch(cf.IFNULL, skipA)
+		if err := addConst(class, code, 3, 100); err != nil {
+			return err
+		}
+		code.Mark(skipA)
+		if err := addConst(class, code, 3, 1); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.Load(cf.RefLocal, 4).Branch(cf.GOTO, b)
+		code.Mark(b)
+		code.Store(cf.RefLocal, 5)
+		code.Load(cf.RefLocal, 5).Branch(cf.IFNULL, skipB)
+		if err := addConst(class, code, 3, 100); err != nil {
+			return err
+		}
+		code.Mark(skipB)
+		if err := addConst(class, code, 3, 2); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.Load(cf.RefLocal, 4).Branch(cf.GOTO, a)
+		code.Mark(exit)
+		returnAcc(code)
+		return nil
+	})
+}
+
+// Equal category-2 constants on every boundary edge need no stack phi.
+func buildStackCarryLongSame(class *cf.Class) error {
+	return addRun(class, func(code *cf.Code) error {
+		a, b, exit := code.NewLabel(), code.NewLabel(), code.NewLabel()
+		if err := initAccum(class, code); err != nil {
+			return err
+		}
+		code.Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.Emit(cf.LCONST_1)
+		code.Load(cf.IntLocal, 0).Branch(cf.IFEQ, a).Branch(cf.GOTO, b)
+		code.Mark(a)
+		code.Store(cf.LongLocal, 4)
+		code.Load(cf.LongLocal, 4).Emit(cf.L2I)
+		code.Load(cf.IntLocal, 3).Emit(cf.IADD).Store(cf.IntLocal, 3)
+		if err := addConst(class, code, 3, 1); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.Emit(cf.LCONST_1).Branch(cf.GOTO, b)
+		code.Mark(b)
+		code.Store(cf.LongLocal, 4)
+		code.Load(cf.LongLocal, 4).Emit(cf.L2I)
+		code.Load(cf.IntLocal, 3).Emit(cf.IADD).Store(cf.IntLocal, 3)
+		if err := addConst(class, code, 3, 2); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.Emit(cf.LCONST_1).Branch(cf.GOTO, a)
+		code.Mark(exit)
+		returnAcc(code)
+		return nil
+	})
+}
+
+// The entry read of OBJ is carried across setObj(), which replaces the field.
+// Delaying the read would make the null test see a non-null object.
+func buildStackCarryReferenceReordered(class *cf.Class) error {
+	class.AddField(cf.ACC_PUBLIC|cf.ACC_STATIC, "OBJ", "Ljava/lang/Object;")
+	field, err := class.Pool().Fieldref("StackCarryReferenceReordered", "OBJ", "Ljava/lang/Object;")
+	if err != nil {
+		return err
+	}
+	objectRef, err := class.Pool().Class("java/lang/Object")
+	if err != nil {
+		return err
+	}
+	initRef, err := class.Pool().Methodref("java/lang/Object", "<init>", "()V")
+	if err != nil {
+		return err
+	}
+	setObj, err := class.Pool().Methodref("StackCarryReferenceReordered", "setObj", "()V")
+	if err != nil {
+		return err
+	}
+	setCode := class.AddMethod(cf.ACC_PUBLIC|cf.ACC_STATIC, "setObj", "()V").Code()
+	setCode.CP(cf.NEW, objectRef).Emit(cf.DUP).CP(cf.INVOKESPECIAL, initRef).CP(cf.PUTSTATIC, field).Emit(cf.RETURN)
+	return addRun(class, func(code *cf.Code) error {
+		a, b, skipA, skipB, exit := code.NewLabel(), code.NewLabel(), code.NewLabel(), code.NewLabel(), code.NewLabel()
+		if err := initAccum(class, code); err != nil {
+			return err
+		}
+		code.Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.CP(cf.GETSTATIC, field).CP(cf.INVOKESTATIC, setObj)
+		code.Load(cf.IntLocal, 0).Branch(cf.IFEQ, a).Branch(cf.GOTO, b)
+		code.Mark(a)
+		code.Store(cf.RefLocal, 4)
+		code.Load(cf.RefLocal, 4).Branch(cf.IFNULL, skipA)
+		if err := addConst(class, code, 3, 100); err != nil {
+			return err
+		}
+		code.Mark(skipA)
+		if err := addConst(class, code, 3, 1); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.CP(cf.GETSTATIC, field).Branch(cf.GOTO, b)
+		code.Mark(b)
+		code.Store(cf.RefLocal, 4)
+		code.Load(cf.RefLocal, 4).Branch(cf.IFNULL, skipB)
+		if err := addConst(class, code, 3, 100); err != nil {
+			return err
+		}
+		code.Mark(skipB)
+		if err := addConst(class, code, 3, 2); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.CP(cf.GETSTATIC, field).Branch(cf.GOTO, a)
+		code.Mark(exit)
+		returnAcc(code)
+		return nil
+	})
+}
+
+// The entry path falls through into the loop header with a call result already
+// on the stack. The producer is the boundary source itself, so the lowering must
+// materialize the result instead of invoking the helper again in the target
+// case.
+func buildStackCarryCallFallthrough(class *cf.Class) error {
+	class.AddField(cf.ACC_PUBLIC|cf.ACC_STATIC, "COUNTER", "I")
+	counter, err := class.Pool().Fieldref("StackCarryCallFallthrough", "COUNTER", "I")
+	if err != nil {
+		return err
+	}
+	bump, err := class.Pool().Methodref("StackCarryCallFallthrough", "bump", "()I")
+	if err != nil {
+		return err
+	}
+	bumpCode := class.AddMethod(cf.ACC_PUBLIC|cf.ACC_STATIC, "bump", "()I").Code()
+	bumpCode.CP(cf.GETSTATIC, counter).Emit(cf.ICONST_1).Emit(cf.IADD).CP(cf.PUTSTATIC, counter)
+	bumpCode.CP(cf.GETSTATIC, counter).Emit(cf.IRETURN)
+	return addRun(class, func(code *cf.Code) error {
+		h, m, exit := code.NewLabel(), code.NewLabel(), code.NewLabel()
+		if err := initAccum(class, code); err != nil {
+			return err
+		}
+		code.Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.Load(cf.IntLocal, 0).Branch(cf.IFEQ, m)
+		code.CP(cf.INVOKESTATIC, bump)
+		// fallthrough into H with one int on the stack
+		code.Mark(h)
+		code.Store(cf.IntLocal, 4)
+		code.Load(cf.IntLocal, 3).Load(cf.IntLocal, 4).Emit(cf.IADD).Store(cf.IntLocal, 3)
+		if err := addConst(class, code, 3, 1); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit).Branch(cf.GOTO, m)
+		code.Mark(m)
+		if err := addConst(class, code, 3, 2); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.CP(cf.INVOKESTATIC, bump).Branch(cf.GOTO, h)
+		code.Mark(exit)
+		returnAcc(code)
+		return nil
+	})
+}
+
+// Different constants arrive at the same entry target from the external edge
+// and the backedge. A correct lowering must preserve a per-path value instead
+// of folding the first source into every case.
+func buildStackCarryDifferingInt(class *cf.Class) error {
+	return addRun(class, func(code *cf.Code) error {
+		a, b, exit := code.NewLabel(), code.NewLabel(), code.NewLabel()
+		if err := initAccum(class, code); err != nil {
+			return err
+		}
+		code.Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.Emit(cf.ICONST_0)
+		code.Load(cf.IntLocal, 0).Branch(cf.IFEQ, a).Branch(cf.GOTO, b)
+		code.Mark(a)
+		code.Store(cf.IntLocal, 4)
+		code.Load(cf.IntLocal, 3).Load(cf.IntLocal, 4).Emit(cf.IADD).Store(cf.IntLocal, 3)
+		if err := addConst(class, code, 3, 1); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.Emit(cf.ICONST_1).Branch(cf.GOTO, b)
+		code.Mark(b)
+		code.Store(cf.IntLocal, 4)
+		code.Load(cf.IntLocal, 3).Load(cf.IntLocal, 4).Emit(cf.IADD).Store(cf.IntLocal, 3)
+		if err := addConst(class, code, 3, 2); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.Emit(cf.ICONST_2).Branch(cf.GOTO, a)
+		code.Mark(exit)
+		returnAcc(code)
+		return nil
+	})
+}
+
+// A category-2 word crosses the same boundaries. The carried long must remain
+// one value in the dispatcher, not be split into two independent int slots.
+func buildStackCarryLong(class *cf.Class) error {
+	return addRun(class, func(code *cf.Code) error {
+		a, b, exit := code.NewLabel(), code.NewLabel(), code.NewLabel()
+		if err := initAccum(class, code); err != nil {
+			return err
+		}
+		code.Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.Emit(cf.LCONST_0)
+		code.Load(cf.IntLocal, 0).Branch(cf.IFEQ, a).Branch(cf.GOTO, b)
+		code.Mark(a)
+		code.Store(cf.LongLocal, 4)
+		code.Load(cf.LongLocal, 4).Emit(cf.L2I)
+		code.Load(cf.IntLocal, 3).Emit(cf.IADD).Store(cf.IntLocal, 3)
+		if err := addConst(class, code, 3, 1); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.Emit(cf.LCONST_1).Branch(cf.GOTO, b)
+		code.Mark(b)
+		code.Store(cf.LongLocal, 4)
+		code.Load(cf.LongLocal, 4).Emit(cf.L2I)
+		code.Load(cf.IntLocal, 3).Emit(cf.IADD).Store(cf.IntLocal, 3)
+		if err := addConst(class, code, 3, 2); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.Emit(cf.LCONST_1).Branch(cf.GOTO, a)
+		code.Mark(exit)
+		returnAcc(code)
+		return nil
+	})
+}
+
+// The entry loads a non-null local, overwrites the same slot with null, then
+// carries the old reference across the boundary. Re-reading the local by name
+// in the target case would observe null and change the branch.
+func buildStackCarryStaleRef(class *cf.Class) error {
+	return addRun(class, func(code *cf.Code) error {
+		a, b, skipA, skipB, exit := code.NewLabel(), code.NewLabel(), code.NewLabel(), code.NewLabel(), code.NewLabel()
+		text, err := class.Pool().String("x")
+		if err != nil {
+			return err
+		}
+		if err := initAccum(class, code); err != nil {
+			return err
+		}
+		code.LDC(text).Store(cf.RefLocal, 4)
+		code.Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.Load(cf.RefLocal, 4)
+		code.Emit(cf.ACONST_NULL).Store(cf.RefLocal, 4)
+		code.Load(cf.IntLocal, 0).Branch(cf.IFEQ, a).Branch(cf.GOTO, b)
+		code.Mark(a)
+		code.Store(cf.RefLocal, 5)
+		code.Load(cf.RefLocal, 5).Branch(cf.IFNULL, skipA)
+		if err := addConst(class, code, 3, 100); err != nil {
+			return err
+		}
+		code.Mark(skipA)
+		if err := addConst(class, code, 3, 1); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.Load(cf.RefLocal, 4).Branch(cf.GOTO, b)
+		code.Mark(b)
+		code.Store(cf.RefLocal, 5)
+		code.Load(cf.RefLocal, 5).Branch(cf.IFNULL, skipB)
+		if err := addConst(class, code, 3, 100); err != nil {
+			return err
+		}
+		code.Mark(skipB)
+		if err := addConst(class, code, 3, 2); err != nil {
+			return err
+		}
+		code.IInc(2, -1).Load(cf.IntLocal, 2).Branch(cf.IFLE, exit)
+		code.Load(cf.RefLocal, 4).Branch(cf.GOTO, a)
+		code.Mark(exit)
+		returnAcc(code)
+		return nil
+	})
+}
+
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
@@ -533,7 +1009,18 @@ func cases() []evalCase {
 		{"TryCatchIrreducible", expectFailClosed, buildTryCatchIrreducible},
 		{"MonitorIrreducible", expectFailClosed, buildMonitorIrreducible},
 		{"NewIrreducible", expectFailClosed, buildNewIrreducible},
-		{"StackCarryEntry", expectFailClosed, buildStackCarryEntry},
+		{"StackCarryEntry", expectRecovered, buildStackCarryEntry},
+		{"StackCarryField", expectRecovered, buildStackCarryField},
+		{"StackCarryCall", expectRecovered, buildStackCarryCall},
+		{"StackCarryCallFallthrough", expectRecovered, buildStackCarryCallFallthrough},
+		{"StackCarryReference", expectRecovered, buildStackCarryReference},
+		{"StackCarryLocalRef", expectRecovered, buildStackCarryLocalRef},
+		{"StackCarryStaleRef", expectFailClosed, buildStackCarryStaleRef},
+		{"StackCarryLongSame", expectRecovered, buildStackCarryLongSame},
+		{"StackCarryDifferingInt", expectFailClosed, buildStackCarryDifferingInt},
+		{"StackCarryLong", expectFailClosed, buildStackCarryLong},
+		{"StackCarryReordered", expectFailClosed, buildStackCarryReordered},
+		{"StackCarryReferenceReordered", expectFailClosed, buildStackCarryReferenceReordered},
 	}
 }
 

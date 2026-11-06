@@ -27,7 +27,7 @@ JAVAJIVE_ADVERSARIAL_EVAL=1 go test ./test/adversarial \
 | 对抗性非规约形状 | **6 / 6** 完全恢复 |
 | 文档化 fail-closed 边界 | **5 / 5** 精确降级为 stub，无静默错误 |
 | 畸形输入 | 564 个变异：0 崩溃、0 超时；41 次内部 panic 被 recover 兜住 |
-| 既有 irreducible corpus | 8 / 8 源码 hash、行为、编译、校验全部不变 |
+| 既有 irreducible corpus | 8 / 8 行为、编译、校验通过；本轮修复后源码 hash 全不变（后续循环规范化另行更新了两个自然循环基线） |
 
 本轮修复了在合并后的 #18 代码上确认的三个缺陷：
 
@@ -202,3 +202,49 @@ record 解构形状；该对抗形状的 accessor 调用共享 `Throwable` handl
 栈值丢失、pattern-switch 变量重命名、switch 作为整个循环体时的 break 标签、
 record 接口/规范构造器、private interface 方法、现代 enum 常量体、以及丢弃
 static field read 生成非法语句等问题。
+
+## 七、2026-11-06 非空栈 irreducible 边界证书
+
+此前 irreducible 状态分派要求所有控制边界栈为空。该限制会拒绝合法字节码中
+“分支前压栈、目标块消费”的形状。本轮将 blanket gate 替换为两级证书：
+
+- **逐 word carrier 证书**：常量、已物化局部（`JavaRef`/`SlotValue`）直接放行。
+  有副作用的 word 仅当 producer 到边界的路径上不存在可观察操作时放行；
+  局部 store 对 primitive word 由既有 `preserveStackAcrossWrite` 快照保护，
+  reference word 未受快照保护，因此任何 store 都视为屏障。
+- **目标 merge 证书**：同一 target 的多条入边若携带不同的 word，则必须看到
+  一个真实的 stack-merge phi（`IsStackMergePhi`）。否则目标 case 会复用第一条
+  路径的常量/表达式，导致其他路径取错值。结构相同的 literal、local、
+  field read 和 static call 可以共享；不同常量或不同表达式拒绝。
+- `NEW`/未初始化对象仍拒绝；异常边、monitor、constructor 仍由更早的门拒绝。
+- 两级判定都基于 value 结构、producer/source 图可达性和 phi 证据，不依赖
+  类名、方法名或具体夹具。
+
+新增对抗矩阵（第二轮加入了不同常量 merge 与 category-2 形状）：
+
+| case | 边界携带值 | 预期 | 结果 |
+|---|---|---|---|
+| StackCarryEntry | 各边相同常量 | 恢复 | recovered, 10 dispatch 转移, 70 行 |
+| StackCarryField | 紧邻边界的相同 static field read | 恢复 | recovered, 11, 75 |
+| StackCarryCall | 紧邻边界的相同 helper call | 恢复 | recovered, 11, 79 |
+| StackCarryCallFallthrough | 边界源本身产生的 call 结果 | 恢复 | recovered, 7, 60 |
+| StackCarryReference | 各边相同的 static Object read | 恢复 | recovered, 15, 91 |
+| StackCarryLocalRef | 各边相同的局部引用 | 恢复 | recovered, 15, 89 |
+| StackCarryLongSame | 各边相同的 long 常量 | 恢复 | recovered, 11, 72 |
+| StackCarryStaleRef | 载入后覆盖同一局部槽再跨界 | fail-closed | fail-closed-stub，无静默错误 |
+| StackCarryDifferingInt | 不同 int 常量 merge，无 phi | fail-closed | fail-closed-stub，无静默错误 |
+| StackCarryLong | 不同 long 常量 merge，无 phi | fail-closed | fail-closed-stub，无静默错误 |
+| StackCarryReordered | field read 跨越修改同一字段的 call | fail-closed | fail-closed-stub，无静默错误 |
+| StackCarryReferenceReordered | Object read 跨越替换字段的 call | fail-closed | fail-closed-stub，无静默错误 |
+
+每个恢复用例均通过：原始 class `-Xverify:all` → 反编译 → 源码 `javac --release 8`
+→ 重建 class `-Xverify:all` → `run(int,int)` 反射矩阵行为逐项一致。
+
+第二轮对抗生成先确认了 `StackCarryDifferingInt` / `StackCarryLong` 在仅有
+carrier 证书时会静默 miscompile（目标 case 固定使用第一条入边的常量）；
+merge 证书加入后两者精确降级为 stub。五个 fail-closed 用例共同确认：放宽
+空栈限制不会把“可编译但语义漂移”的源码放出去。
+
+同一轮还将自然循环的 do-while(true) 形式规范化为 `while`，因此 irreducible
+corpus 中 `NaturalSingleEntry`、`NaturalMultipleLatch` 的源码 baseline
+（SHA256/行数/字节数）随输出改善而更新；8/8 的行为、编译与 JVM 校验保持通过。
