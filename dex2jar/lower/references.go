@@ -84,7 +84,7 @@ func (l *methodLowerer) checkReferenceInstruction(index int, state referenceStat
 		}
 	}
 	check := func(register uint16, expected, role string) error {
-		if !isReferenceKind(l.method.RegisterTypes[register].Kind) {
+		if !isReferenceKind(l.method.CategoryAt(index, register).Kind) {
 			return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("%s v%d is not a reference", role, register))
 		}
 		if len(state[register]) == 0 {
@@ -195,7 +195,9 @@ func (l *methodLowerer) transferReferences(index int, state referenceState) {
 			setOne(instruction.Regs[0], l.file.Protos[callee.ProtoIndex].ReturnType)
 		}
 	case instruction.Opcode >= 0x12 && instruction.Opcode <= 0x15 && instruction.Literal == 0:
-		if isReferenceKind(l.method.RegisterTypes[instruction.Regs[0]].Kind) {
+		// The null constant types the register it defines, not its previous
+		// lifetime, so the definition category decides.
+		if definition, ok := l.method.DefinitionAt(index); ok && isReferenceKind(definition.Category.Kind) {
 			setOne(instruction.Regs[0], nullDescriptor)
 		}
 	case instruction.Opcode == 0x1a || instruction.Opcode == 0x1b:

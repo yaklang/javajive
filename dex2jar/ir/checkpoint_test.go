@@ -166,8 +166,8 @@ func TestBuildValidatesMoveResultAndReturnCategories(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build() valid invoke error = %v", err)
 	}
-	if method.RegisterTypes[0].Kind != Int {
-		t.Fatalf("v0 category = %s, want int", method.RegisterTypes[0].Kind)
+	if definition, ok := method.DefinitionAt(1); !ok || definition.Register != 0 || definition.Category.Kind != Int {
+		t.Fatalf("move-result definition = %#v, %v", definition, ok)
 	}
 
 	badMove := testInput("V", nil, 1, 0, []uint16{0x0071, 0x0000, 0x0000, 0x000c, 0x000e})
@@ -201,8 +201,8 @@ func TestCategoryAnalysisSeedsParametersAndRetainsUnknownAndNull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build(null) error = %v", err)
 	}
-	if nullMethod.RegisterTypes[0].Kind != Null {
-		t.Fatalf("zero constant category = %s, want null", nullMethod.RegisterTypes[0].Kind)
+	if definition, ok := nullMethod.DefinitionAt(0); !ok || definition.Category.Kind != Null {
+		t.Fatalf("zero constant definition = %#v, %v", definition, ok)
 	}
 	if Conflict.String() != "conflict" {
 		t.Fatalf("Conflict.String() = %q", Conflict.String())

@@ -21,6 +21,7 @@ type methodLowerer struct {
 
 	labels             map[uint32]*classfilebuilder.Label
 	addressLabels      map[uint32]*classfilebuilder.Label
+	index              int
 	endLabel           *classfilebuilder.Label
 	allocationByNew    map[int]ir.Allocation
 	allocationByCtor   map[int]ir.Allocation
@@ -99,9 +100,13 @@ func (l *methodLowerer) lower() error {
 			}
 			if index == l.delegationIndex {
 				for _, store := range l.deferredStores {
+					// The deferred store keeps its own DEX position, so its
+					// category state is the one recorded for that instruction.
+					previous := l.index
 					if err := l.emitInstruction(store); err != nil {
 						return err
 					}
+					l.index = previous
 				}
 			}
 		}
@@ -292,6 +297,7 @@ func (l *methodLowerer) emitPrologue() error {
 }
 
 func (l *methodLowerer) emitInstruction(index int) error {
+	l.index = index
 	instruction := &l.method.Instructions[index]
 	if allocation, ok := l.allocationByNew[index]; ok {
 		if allocation.Fused {
@@ -371,9 +377,9 @@ func (l *methodLowerer) emitInstruction(index int) error {
 }
 
 func (l *methodLowerer) emitMove(instruction *ir.Instruction) error {
-	kind := l.method.RegisterTypes[instruction.Regs[0]].Kind
+	kind := l.method.CategoryAt(l.index, instruction.Regs[0]).Kind
 	if kind == ir.Unknown {
-		kind = l.method.RegisterTypes[instruction.Regs[1]].Kind
+		kind = l.method.CategoryAt(l.index, instruction.Regs[1]).Kind
 	}
 	if kind == ir.Unknown {
 		return nil
@@ -539,7 +545,7 @@ func (l *methodLowerer) emitFilledNewArray(index int, instruction *ir.Instructio
 	if next >= len(l.method.Instructions) || l.method.Instructions[next].Opcode != 0x0c {
 		return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("filled-new-array must be followed by move-result-object"))
 	}
-	l.store(l.method.Instructions[next].Regs[0])
+	l.storeAt(l.method.Instructions[next].Regs[0], next)
 	return nil
 }
 
@@ -660,8 +666,8 @@ func (l *methodLowerer) emitAllocationCtor(instruction *ir.Instruction, allocati
 func (l *methodLowerer) emitIf(instruction *ir.Instruction) error {
 	var opcode classfilebuilder.Opcode
 	if instruction.Opcode <= 0x37 {
-		left := l.method.RegisterTypes[instruction.Regs[0]].Kind
-		right := l.method.RegisterTypes[instruction.Regs[1]].Kind
+		left := l.method.CategoryAt(l.index, instruction.Regs[0]).Kind
+		right := l.method.CategoryAt(l.index, instruction.Regs[1]).Kind
 		leftReference, rightReference := isReferenceKind(left), isReferenceKind(right)
 		if leftReference != rightReference {
 			return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("comparison mixes reference and integer register homes"))
@@ -677,7 +683,7 @@ func (l *methodLowerer) emitIf(instruction *ir.Instruction) error {
 			opcode = classfilebuilder.IF_ICMPEQ + classfilebuilder.Opcode(instruction.Opcode-0x32)
 		}
 	} else {
-		kind := l.method.RegisterTypes[instruction.Regs[0]].Kind
+		kind := l.method.CategoryAt(l.index, instruction.Regs[0]).Kind
 		l.load(instruction.Regs[0])
 		if isReferenceKind(kind) {
 			if instruction.Opcode == 0x38 {
@@ -886,7 +892,12 @@ func (l *methodLowerer) emitInvoke(index int, instruction *ir.Instruction) error
 }
 
 func (l *methodLowerer) pushDexInt(register uint16, value int32) error {
-	kind := l.method.RegisterTypes[register].Kind
+	// The constant types the register it defines, so the definition category
+	// decides how a null constant is materialized.
+	kind := l.method.CategoryAt(l.index, register).Kind
+	if definition, ok := l.method.DefinitionAt(l.index); ok && definition.Register == int32(register) {
+		kind = definition.Category.Kind
+	}
 	if value == 0 && isReferenceKind(kind) {
 		l.code.Emit(classfilebuilder.ACONST_NULL)
 		return nil
@@ -932,11 +943,21 @@ func (l *methodLowerer) pushInt(value int32) error {
 func (l *methodLowerer) home(register uint16) uint16 { return l.homeBase + register }
 
 func (l *methodLowerer) load(register uint16) *classfilebuilder.Code {
-	return l.code.Load(localKind(l.method.RegisterTypes[register].Kind), l.home(register))
+	return l.code.Load(localKind(l.method.CategoryAt(l.index, register).Kind), l.home(register))
 }
 
 func (l *methodLowerer) store(register uint16) *classfilebuilder.Code {
-	return l.code.Store(localKind(l.method.RegisterTypes[register].Kind), l.home(register))
+	return l.storeAt(register, l.index)
+}
+
+// storeAt stores using the category defined by the given instruction, which is
+// how an invoke or filled-new-array writes its move-result destination.
+func (l *methodLowerer) storeAt(register uint16, index int) *classfilebuilder.Code {
+	category := l.method.CategoryAt(index, register)
+	if definition, ok := l.method.DefinitionAt(index); ok && definition.Register == int32(register) {
+		category = definition.Category
+	}
+	return l.code.Store(localKind(category.Kind), l.home(register))
 }
 
 func localKind(kind ir.CategoryKind) classfilebuilder.LocalKind {

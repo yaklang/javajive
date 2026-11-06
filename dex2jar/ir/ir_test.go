@@ -334,8 +334,16 @@ func TestBuildCFGAndRegisterCategories(t *testing.T) {
 	if got := method.Blocks[0].Successors; len(got) != 2 || got[0] != 2 || got[1] != 1 {
 		t.Fatalf("entry successors = %v", got)
 	}
-	if method.RegisterTypes[0].Kind != IntLike || method.RegisterTypes[1].Kind != IntLike {
-		t.Fatalf("register categories = %#v", method.RegisterTypes)
+	if method.RegisterTypes[1].Kind != IntLike {
+		t.Fatalf("parameter category = %#v", method.RegisterTypes)
+	}
+	// const/4 v0, #0 starts as a null constant and adopts the int type of its
+	// first use, so the definition is refined to int.
+	if definition, ok := method.DefinitionAt(0); !ok || definition.Category.Kind != IntLike {
+		t.Fatalf("entry definition = %#v, %v", definition, ok)
+	}
+	if definition, ok := method.DefinitionAt(2); !ok || definition.Category.Kind != IntLike {
+		t.Fatalf("second definition = %#v, %v", definition, ok)
 	}
 	for _, block := range method.Blocks {
 		if len(block.Entry) != 2 {
@@ -409,8 +417,12 @@ func TestBuildMoveResultAndNullReferenceInference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if method.RegisterTypes[0].Kind != Reference || method.RegisterTypes[1].Kind != Reference {
-		t.Fatalf("register categories = %#v", method.RegisterTypes)
+	if definition, ok := method.DefinitionAt(1); !ok || definition.Register != 0 || definition.Category.Kind != Reference {
+		t.Fatalf("move-result definition = %#v, %v", definition, ok)
+	}
+	// v1 is first a null constant and is promoted to a reference by the compare.
+	if category := method.CategoryAt(5, 1); category.Kind != Reference {
+		t.Fatalf("v1 category before compare = %#v", category)
 	}
 }
 
@@ -432,8 +444,10 @@ func TestBuildConstructorAllocationIdentity(t *testing.T) {
 	if got := method.Allocations[0].AliasRegisters; len(got) != 2 || got[0] != 0 || got[1] != 1 {
 		t.Fatalf("aliases = %v", got)
 	}
-	if method.RegisterTypes[0].Allocation == 0 || method.RegisterTypes[0].Allocation != method.RegisterTypes[1].Allocation {
-		t.Fatalf("register identities = %#v", method.RegisterTypes)
+	first, firstOK := method.DefinitionAt(0)
+	second, secondOK := method.DefinitionAt(1)
+	if !firstOK || !secondOK || first.Category.Allocation == 0 || first.Category.Allocation != second.Category.Allocation {
+		t.Fatalf("allocation identities = %#v / %#v", first, second)
 	}
 }
 
@@ -452,15 +466,38 @@ func TestBuildRejectsUnsafeConstructorShape(t *testing.T) {
 	}
 }
 
-func TestBuildRejectsStableLocalCategoryConflict(t *testing.T) {
-	// v0 is first an int, then a string reference.
+// Reusing one register for an int and later for a reference is ordinary DEX and
+// JVM practice, so it must translate rather than be rejected.
+func TestBuildAllowsRegisterLifetimeReuse(t *testing.T) {
 	in := fixture([]uint16{
-		0x1012,
-		0x001a, 0x0000,
-		0x0011,
+		0x1012,         // const/4 v0, #1
+		0x001a, 0x0000, // const-string v0, "hello"
+		0x0011, // return-object v0
+	}, 1, 0, model.Proto{ReturnType: "Ljava/lang/String;"}, dexAccessStatic)
+	method, err := Build(in)
+	if err != nil {
+		t.Fatalf("Build() rejected legal register reuse: %v", err)
+	}
+	if definition, ok := method.DefinitionAt(1); !ok || definition.Category.Kind != Reference {
+		t.Fatalf("second lifetime = %#v, %v", definition, ok)
+	}
+}
+
+// A register that is live across a join with two different categories is a real
+// type conflict and must still be rejected.
+func TestBuildRejectsIncompatibleCategoriesAtJoin(t *testing.T) {
+	// const/4 v0,#1; if-eqz v0,+5; const-string v0,"x"; goto +2; const/4 v0,#2;
+	// return-object v0. Both branches reach the return with different categories.
+	in := fixture([]uint16{
+		0x1012,         // const/4 v0, #1
+		0x0038, 0x0005, // if-eqz v0, +5
+		0x001a, 0x0000, // const-string v0, "hello"
+		0x0228, // goto +2
+		0x2012, // const/4 v0, #2
+		0x0011, // return-object v0
 	}, 1, 0, model.Proto{ReturnType: "Ljava/lang/String;"}, dexAccessStatic)
 	_, err := Build(in)
-	if err == nil || !strings.Contains(err.Error(), "incompatible stable local categories") {
+	if err == nil || !strings.Contains(err.Error(), "incompatible categories at a control-flow join") {
 		t.Fatalf("error = %v", err)
 	}
 }
