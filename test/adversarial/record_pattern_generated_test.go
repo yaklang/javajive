@@ -309,6 +309,7 @@ public class GuardedPattern {
 		}
 		t.Fatalf("guarded record decompile: %v", err)
 	}
+
 	rebuilt := t.TempDir()
 	var paths []string
 	for fileName, decompiled := range files {
