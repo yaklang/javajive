@@ -219,10 +219,6 @@ func validateInstructions(method *Method, file *model.File) error {
 
 func unsupportedFamily(opcode byte) string {
 	switch {
-	case opcode >= 0x1d && opcode <= 0x1e:
-		return "monitor"
-	case opcode == 0x26:
-		return "fill-array-data"
 	case opcode >= 0x2b && opcode <= 0x2c:
 		return "switch"
 	case opcode >= 0xfa && opcode <= 0xfd:
@@ -315,8 +311,10 @@ func invokeResultCategory(instruction Instruction, file *model.File) (CategoryKi
 	return DescriptorCategory(file.Protos[callee.ProtoIndex].ReturnType)
 }
 
-// validateExceptionEntries requires move-exception to open a handler block and
-// every handler block to start with one.
+// validateExceptionEntries requires move-exception to open a handler block. A
+// handler that never reads the caught exception does not begin with one: DEX
+// only binds the exception through move-exception, so such a handler simply
+// discards it.
 func validateExceptionEntries(method *Method) error {
 	handlerStarts := make(map[uint32]bool)
 	for index := range method.Blocks {
@@ -331,16 +329,6 @@ func validateExceptionEntries(method *Method) error {
 		}
 		if !handlerStarts[instruction.Offset] {
 			return diagnostic(method.Context, instruction, "", fmt.Errorf("move-exception is only valid as the first instruction of an exception handler"))
-		}
-	}
-	for blockIndex := range method.Blocks {
-		block := &method.Blocks[blockIndex]
-		if !block.Handler {
-			continue
-		}
-		first := method.Instructions[block.Instructions[0]]
-		if first.Opcode != 0x0d {
-			return diagnostic(method.Context, &first, "", fmt.Errorf("exception handler at offset %d does not start with move-exception", block.Start))
 		}
 	}
 	return nil

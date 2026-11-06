@@ -11,7 +11,7 @@ import (
 // operands (uses) from the category it writes into its destination (defs). The
 // distinction matters when one register is both: `new-array v1, v1` reads an int
 // size and writes an array reference into the same register.
-func instructionConstraints(method *Method, file *model.File, index int, current []Category, allocations []Allocation) (uses, defs map[uint16]Category, err error) {
+func instructionConstraints(method *Method, file *model.File, index int, current []Category, allocations []Allocation, final bool) (uses, defs map[uint16]Category, err error) {
 	instruction := method.Instructions[index]
 	uses = make(map[uint16]Category)
 	defs = make(map[uint16]Category)
@@ -19,6 +19,17 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 	refCategory := Category{Kind: Reference}
 	use := func(register uint16, category Category) { uses[register] = category }
 	define := func(register uint16, category Category) { defs[register] = category }
+
+	// The constructor initializes every alias that still points at the new
+	// object, so after it runs those registers hold an ordinary reference.
+	for _, allocation := range allocations {
+		if allocation.Constructor != index {
+			continue
+		}
+		for _, register := range allocation.AliasRegisters {
+			define(register, Category{Kind: Reference, Descriptor: allocation.Descriptor})
+		}
+	}
 
 	switch {
 	case instruction.Opcode >= 0x01 && instruction.Opcode <= 0x09:
@@ -78,6 +89,8 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 		define(instruction.Regs[0], Category{Kind: Reference, Descriptor: "Ljava/lang/String;"})
 	case instruction.Opcode == 0x1c:
 		define(instruction.Regs[0], Category{Kind: Reference, Descriptor: "Ljava/lang/Class;"})
+	case instruction.Opcode == 0x1d || instruction.Opcode == 0x1e:
+		use(instruction.Regs[0], refCategory)
 	case instruction.Opcode == 0x1f:
 		use(instruction.Regs[0], refCategory)
 		define(instruction.Regs[0], Category{Kind: Reference, Descriptor: file.Types[instruction.Index].Descriptor})
@@ -99,6 +112,30 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 		for _, register := range instruction.Regs {
 			use(register, Category{Kind: category, Descriptor: component})
 		}
+	case instruction.Opcode == 0x26:
+		array := current[instruction.Regs[0]]
+		if len(array.Descriptor) < 2 || array.Descriptor[0] != '[' {
+			if !final {
+				use(instruction.Regs[0], refCategory)
+				return uses, defs, nil
+			}
+			return nil, nil, fmt.Errorf("fill-array-data register v%d has no array type", instruction.Regs[0])
+		}
+		width, err := fillArrayElementWidth(array.Descriptor[1:])
+		if err != nil {
+			return nil, nil, err
+		}
+		if int(instruction.DataWidth) != width {
+			return nil, nil, fmt.Errorf("fill-array-data declares %d-byte elements; %q needs %d", instruction.DataWidth, array.Descriptor[1:], width)
+		}
+		if width > 0 && len(instruction.Data)%width != 0 {
+			return nil, nil, fmt.Errorf("fill-array-data has %d bytes, which is not a whole number of %d-byte elements", len(instruction.Data), width)
+		}
+		use(instruction.Regs[0], Category{Kind: Reference, Descriptor: array.Descriptor})
+	case instruction.Opcode == 0x2b || instruction.Opcode == 0x2c:
+		// The switch falls through when no case matches; the register only
+		// supplies the selector.
+		use(instruction.Regs[0], intCategory)
 	case instruction.Opcode >= 0x2d && instruction.Opcode <= 0x31:
 		var kind CategoryKind
 		switch instruction.Opcode {
@@ -131,6 +168,12 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 		// the array register's type, which the category analysis carries.
 		array := current[instruction.Regs[1]]
 		if len(array.Descriptor) < 2 || array.Descriptor[0] != '[' {
+			if !final {
+				// During the category fixpoint a predecessor entry may not be
+				// resolved yet; the final walk reports a genuinely untyped array.
+				use(instruction.Regs[1], refCategory)
+				return uses, defs, nil
+			}
 			return nil, nil, fmt.Errorf("array register v%d has no array type", instruction.Regs[1])
 		}
 		component := array.Descriptor[1:]

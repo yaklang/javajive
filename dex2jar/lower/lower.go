@@ -519,20 +519,23 @@ func methodAccess(flags uint32, name string) (uint16, error) {
 	if err := validateVisibility(flags); err != nil {
 		return 0, err
 	}
-	if flags&dexSynchronized != 0 && flags&dexNative == 0 {
-		return 0, fmt.Errorf("DEX synchronized flag requires native method")
-	}
 	if flags&dexAbstract != 0 && flags&(dexPrivate|dexStatic|dexFinal|dexSynchronized|dexNative|dexStrict|dexDeclaredSynchronized) != 0 {
 		return 0, fmt.Errorf("abstract method has incompatible access flags")
+	}
+	if name == "<clinit>" {
+		// The JVM ignores class-initializer access flags except ACC_STATIC, and
+		// DEX compilers routinely set public/private/synthetic/constructor bits
+		// that carry no JVM meaning.
+		return classfilebuilder.ACC_STATIC, nil
+	}
+	if flags&dexSynchronized != 0 && flags&dexNative == 0 {
+		return 0, fmt.Errorf("DEX synchronized flag requires native method")
 	}
 	if flags&dexConstructor != 0 && name != "<init>" && name != "<clinit>" {
 		return 0, fmt.Errorf("constructor access flag is set on %q", name)
 	}
 	if name == "<init>" && flags&(dexStatic|dexFinal|dexSynchronized|dexBridge|dexNative|dexAbstract|dexStrict|dexDeclaredSynchronized) != 0 {
 		return 0, fmt.Errorf("constructor has incompatible access flags")
-	}
-	if name == "<clinit>" && flags&(dexPublic|dexPrivate|dexProtected|dexFinal|dexSynchronized|dexBridge|dexVarargs|dexNative|dexAbstract|dexStrict|dexDeclaredSynchronized) != 0 {
-		return 0, fmt.Errorf("class initializer has incompatible access flags")
 	}
 	access := uint16(flags & 0xffff)
 	if flags&dexDeclaredSynchronized != 0 {

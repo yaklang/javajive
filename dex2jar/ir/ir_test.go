@@ -374,8 +374,8 @@ func TestBuildValidatesTargetsMoveResultRegistersAndUnsupported(t *testing.T) {
 			want: "outside register file",
 		},
 		{
-			name: "monitor",
-			in:   fixture([]uint16{0x001d, 0x000e}, 1, 0, model.Proto{ReturnType: "V"}, dexAccessStatic),
+			name: "method handle",
+			in:   fixture([]uint16{0x00fe, 0x0000}, 1, 0, model.Proto{ReturnType: "V"}, dexAccessStatic),
 			want: "outside the supported",
 		},
 		{

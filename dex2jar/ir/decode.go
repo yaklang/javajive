@@ -19,8 +19,14 @@ func Decode(code *model.Code, ctx Context) ([]Instruction, error) {
 		word := words[offset]
 		opcode := byte(word)
 		if opcode == 0 && word>>8 >= 1 && word>>8 <= 3 {
-			instruction := Instruction{Offset: offset, Opcode: opcode, Name: "payload", Width: 1, Target: -1}
-			return nil, diagnostic(ctx, &instruction, "payload(0x00)", fmt.Errorf("unsupported opcode family: switch/fill-array payload"))
+			// Payloads are data, not executable instructions: skip them and let
+			// the switch that references the payload decode its contents.
+			width, err := payloadUnits(words, offset, ctx)
+			if err != nil {
+				return nil, err
+			}
+			offset += width
+			continue
 		}
 		info, known := opcodeTable[opcode]
 		if !known {
@@ -125,6 +131,20 @@ func Decode(code *model.Code, ctx Context) ([]Instruction, error) {
 		case "31t":
 			instruction.Regs = []uint16{word >> 8}
 			instruction.Target = int64(offset) + int64(int32(uint32(word1())|uint32(word2())<<16))
+			if opcode == 0x2b || opcode == 0x2c {
+				targets, keys, firstKey, err := decodeSwitchPayload(words, uint32(instruction.Target), offset, opcode == 0x2c)
+				if err != nil {
+					return nil, diagnostic(ctx, &instruction, "", err)
+				}
+				instruction.Targets, instruction.Keys, instruction.FirstKey = targets, keys, firstKey
+			}
+			if opcode == 0x26 {
+				data, width, err := decodeFillArrayPayload(words, uint32(instruction.Target))
+				if err != nil {
+					return nil, diagnostic(ctx, &instruction, "", err)
+				}
+				instruction.Data, instruction.DataWidth = data, width
+			}
 		case "45cc", "4rcc":
 			// These are decoded only far enough to issue a precise unsupported
 			// diagnostic; their operands are deliberately not exposed in this IR.

@@ -2,6 +2,38 @@
 
 ## Unreleased — 2026-11-06
 
+Translate switches, array literals, monitors, and discarding exception handlers.
+
+- Decode switch and fill-array-data payloads as data instead of rejecting the
+  code stream. `packed-switch` carries a `first_key` followed by its targets,
+  `sparse-switch` carries key/target pairs (sorted on output), and
+  `fill-array-data` carries its element width and raw bytes.
+- Lower packed switches to `tableswitch`, sparse switches to `lookupswitch`,
+  and array literals to element stores selected by the array register's flow
+  type, so `int[]`, `byte[]`, `float[]` and `double[]` literals keep their
+  values.
+- Lower `monitor-enter`/`monitor-exit` directly; synchronized bodies and the
+  handler that releases the monitor and rethrows are JVM-verified.
+- Accept exception handlers that never bind the caught exception. DEX only
+  makes the exception available through `move-exception`, so a handler without
+  one discards it; the JVM still pushes it, and a `pop`/`goto` trampoline
+  discards it before the shared handler block runs.
+- Allow unreachable trailing blocks: DEX emits dead code after a terminator,
+  and it is emitted without being verified or executed.
+- Replace the reference descriptor of allocation aliases at `new-instance` and
+  the constructor instead of merging it with an earlier register lifetime.
+  This fixed false "not provably assignable" rejections for reused registers.
+- Prove assignability for types declared in the application and accept
+  relations whose expected type is outside it: the platform hierarchy the
+  input was verified against is not in the DEX. Reference arrays are covariant
+  in their components; primitive arrays stay invariant.
+- Resolve `invoke-super` targets through the application superclass chain
+  instead of requiring the direct superclass, and accept any DEX access flags
+  on `<clinit>` (the JVM ignores them).
+- On the Termux APK this raises strictly translatable classes to 2583 (95.8%).
+
+## Unreleased — 2026-11-06
+
 Translate long, float and double register values.
 
 - Add `Long`, `Double` and `Float` register categories. A category-2 value

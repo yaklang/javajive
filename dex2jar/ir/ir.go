@@ -119,6 +119,17 @@ type Instruction struct {
 	Index   uint32
 	Literal int64
 	Target  int64
+	// Targets holds the absolute case addresses of a switch; the instruction
+	// that follows the switch is its default case.
+	Targets []int64
+	// Keys holds the case keys of a sparse switch, in ascending order.
+	Keys []int32
+	// FirstKey is the lowest case value of a packed switch.
+	FirstKey int32
+	// Data holds the raw element bytes of a fill-array-data payload, and
+	// DataWidth the element width the payload declares.
+	Data      []byte
+	DataWidth uint16
 }
 
 func (i Instruction) End() uint32 { return i.Offset + uint32(i.Width) }
@@ -135,6 +146,10 @@ type Block struct {
 	// Handler marks a block entered by the JVM exception dispatcher. Its first
 	// instruction must be move-exception and the exception is on the stack.
 	Handler bool
+	// Reachable reports whether control can reach the block from the method
+	// entry. Unreachable blocks are dead code: DEX emitted them, but neither
+	// translation nor the JVM verifier ever executes them.
+	Reachable bool
 }
 
 // Allocation describes a verifier-safe new-instance/constructor pair.

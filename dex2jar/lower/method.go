@@ -1,6 +1,7 @@
 package lower
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math"
 	"strings"
@@ -32,6 +33,9 @@ type methodLowerer struct {
 	homeSlots []uint16
 	// homeLimit is the number of local slots the register homes occupy.
 	homeLimit uint16
+	// handlerTrampolines maps a handler address whose block never binds the
+	// caught exception to the stub that discards it.
+	handlerTrampolines map[uint32]*classfilebuilder.Label
 
 	// delegationIndex marks this-constructor delegation; field stores that DEX
 	// permits before it are emitted immediately after it.
@@ -119,6 +123,7 @@ func (l *methodLowerer) lower() error {
 	if l.endLabel != nil {
 		l.code.Mark(l.endLabel)
 	}
+	l.emitHandlerTrampolines()
 	if err := l.emitExceptionTable(); err != nil {
 		return err
 	}
@@ -220,6 +225,12 @@ func (l *methodLowerer) emitExceptionTable() error {
 			if handler == nil {
 				return methodDiagnostic(l.method.Context, nil, "try", fmt.Errorf("handler address %d is not a basic block", address))
 			}
+			// A handler that does not begin with move-exception never binds the
+			// caught exception. The JVM still pushes it, so enter through a
+			// trampoline that discards it before the shared block runs.
+			if trampoline, ok := l.handlerTrampolines[address]; ok {
+				handler = trampoline
+			}
 			class := ""
 			if catchType != "" {
 				name, err := objectInternalName(catchType)
@@ -243,6 +254,47 @@ func (l *methodLowerer) emitExceptionTable() error {
 		}
 	}
 	return nil
+}
+
+// emitHandlerTrampolines appends one stub per handler that never binds the
+// caught exception. DEX makes the exception available only through
+// move-exception, so a handler without one discards it; the JVM dispatcher
+// pushes it unconditionally, and the stub pops it before the shared handler
+// block runs.
+func (l *methodLowerer) emitHandlerTrampolines() {
+	l.handlerTrampolines = make(map[uint32]*classfilebuilder.Label)
+	first := make(map[uint32]byte, len(l.method.Blocks))
+	for _, block := range l.method.Blocks {
+		if len(block.Instructions) > 0 {
+			first[block.Start] = l.method.Instructions[block.Instructions[0]].Opcode
+		}
+	}
+	for _, try := range l.method.Code.Tries {
+		addresses := make([]uint32, 0, len(try.Handler.Handlers)+1)
+		for _, handler := range try.Handler.Handlers {
+			addresses = append(addresses, handler.Address)
+		}
+		if try.Handler.CatchAllAddress != nil {
+			addresses = append(addresses, *try.Handler.CatchAllAddress)
+		}
+		for _, address := range addresses {
+			if _, ok := l.handlerTrampolines[address]; ok {
+				continue
+			}
+			opcode, ok := first[address]
+			if !ok {
+				// Missing handler blocks are reported by emitExceptionTable.
+				continue
+			}
+			if opcode == 0x0d {
+				continue
+			}
+			label := l.code.NewLabel()
+			l.code.Mark(label).Emit(classfilebuilder.POP)
+			l.code.Branch(classfilebuilder.GOTO, l.labels[address])
+			l.handlerTrampolines[address] = label
+		}
+	}
 }
 
 // emitDebug records line numbers, local variable names and parameter names from
@@ -449,6 +501,10 @@ func (l *methodLowerer) emitInstruction(index int) error {
 		if err := l.emitConstClass(instruction); err != nil {
 			return err
 		}
+	case instruction.Opcode == 0x1d:
+		l.load(instruction.Regs[0]).Emit(classfilebuilder.MONITORENTER)
+	case instruction.Opcode == 0x1e:
+		l.load(instruction.Regs[0]).Emit(classfilebuilder.MONITOREXIT)
 	case instruction.Opcode == 0x1f:
 		return l.emitTypeInstruction(instruction, classfilebuilder.CHECKCAST)
 	case instruction.Opcode == 0x20:
@@ -458,12 +514,17 @@ func (l *methodLowerer) emitInstruction(index int) error {
 		l.store(instruction.Regs[0])
 	case instruction.Opcode == 0x23:
 		return l.emitNewArray(instruction)
-	case instruction.Opcode == 0x24 || instruction.Opcode == 0x25:
+	case instruction.Opcode >= 0x24 && instruction.Opcode <= 0x26:
+		if instruction.Opcode == 0x26 {
+			return l.emitFillArrayData(instruction)
+		}
 		return l.emitFilledNewArray(index, instruction)
 	case instruction.Opcode == 0x27:
 		l.load(instruction.Regs[0]).Emit(classfilebuilder.ATHROW)
 	case instruction.Opcode >= 0x28 && instruction.Opcode <= 0x2a:
 		l.code.Branch(classfilebuilder.GOTO, l.labels[uint32(instruction.Target)])
+	case instruction.Opcode == 0x2b || instruction.Opcode == 0x2c:
+		return l.emitSwitch(instruction)
 	case instruction.Opcode >= 0x2d && instruction.Opcode <= 0x31:
 		return l.emitCompare(instruction)
 	case instruction.Opcode >= 0x32 && instruction.Opcode <= 0x3d:
@@ -659,6 +720,98 @@ func arrayElementOpcode(opcode byte, component string) (classfilebuilder.Opcode,
 	return load, nil
 }
 
+// emitFillArrayData materializes a primitive array literal by storing every
+// payload element. The array register's flow type selects the element store,
+// and the payload width must agree with it.
+func (l *methodLowerer) emitFillArrayData(instruction *ir.Instruction) error {
+	array := l.method.CategoryAt(l.index, instruction.Regs[0])
+	if len(array.Descriptor) < 2 || array.Descriptor[0] != '[' {
+		return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("fill-array-data register v%d has no array type", instruction.Regs[0]))
+	}
+	component := array.Descriptor[1:]
+	width, store, err := fillArrayShape(component)
+	if err != nil {
+		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	if int(instruction.DataWidth) != width || len(instruction.Data)%width != 0 {
+		return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("fill-array-data payload does not match element type %q", component))
+	}
+	l.load(instruction.Regs[0])
+	for begin := 0; begin+width <= len(instruction.Data); begin += width {
+		l.code.Emit(classfilebuilder.DUP)
+		if err := l.pushInt(int32(begin / width)); err != nil {
+			return methodDiagnostic(l.method.Context, instruction, "", err)
+		}
+		if err := l.pushFillElement(component, instruction.Data[begin:begin+width]); err != nil {
+			return methodDiagnostic(l.method.Context, instruction, "", err)
+		}
+		l.code.Emit(store)
+	}
+	l.code.Emit(classfilebuilder.POP)
+	return nil
+}
+
+// fillArrayShape maps a fill-array-data component to its element width and the
+// JVM array store.
+func fillArrayShape(component string) (int, classfilebuilder.Opcode, error) {
+	switch component {
+	case "Z", "B":
+		return 1, classfilebuilder.BASTORE, nil
+	case "C":
+		return 2, classfilebuilder.CASTORE, nil
+	case "S":
+		return 2, classfilebuilder.SASTORE, nil
+	case "I":
+		return 4, classfilebuilder.IASTORE, nil
+	case "F":
+		return 4, classfilebuilder.FASTORE, nil
+	case "J":
+		return 8, classfilebuilder.LASTORE, nil
+	case "D":
+		return 8, classfilebuilder.DASTORE, nil
+	default:
+		return 0, 0, fmt.Errorf("fill-array-data requires a primitive array, not %q", component)
+	}
+}
+
+// pushFillElement pushes one little-endian payload element as the JVM value the
+// element store expects.
+func (l *methodLowerer) pushFillElement(component string, data []byte) error {
+	switch component {
+	case "Z":
+		return l.pushInt(int32(data[0]))
+	case "B":
+		return l.pushInt(int32(int8(data[0])))
+	case "C":
+		return l.pushInt(int32(binary.LittleEndian.Uint16(data)))
+	case "S":
+		return l.pushInt(int32(int16(binary.LittleEndian.Uint16(data))))
+	case "I":
+		return l.pushInt(int32(binary.LittleEndian.Uint32(data)))
+	case "F":
+		constant, err := l.builder.Pool().Float(binary.LittleEndian.Uint32(data))
+		if err != nil {
+			return err
+		}
+		l.code.LDC(constant)
+		return nil
+	case "J":
+		constant, err := l.builder.Pool().Long(int64(binary.LittleEndian.Uint64(data)))
+		if err != nil {
+			return err
+		}
+		l.code.LDC2(constant)
+		return nil
+	default:
+		constant, err := l.builder.Pool().Double(binary.LittleEndian.Uint64(data))
+		if err != nil {
+			return err
+		}
+		l.code.LDC2(constant)
+		return nil
+	}
+}
+
 // emitFilledNewArray builds an array literal. The DEX result register is only
 // assigned by the following move-result-object, which lowering consumes here.
 func (l *methodLowerer) emitFilledNewArray(index int, instruction *ir.Instruction) error {
@@ -834,6 +987,39 @@ func (l *methodLowerer) loadArguments(registers []uint16, proto model.Proto, pos
 		l.load(registers[position])
 		position += kind.Words()
 	}
+	return nil
+}
+
+// emitSwitch lowers a packed or sparse DEX switch. DEX switches have no
+// explicit default case: a value that matches no key falls through to the
+// instruction after the switch, which is the JVM default target.
+func (l *methodLowerer) emitSwitch(instruction *ir.Instruction) error {
+	defaultTarget := l.labels[instruction.End()]
+	if defaultTarget == nil {
+		return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("switch has no fall-through block"))
+	}
+	targets := make([]*classfilebuilder.Label, len(instruction.Targets))
+	for index, target := range instruction.Targets {
+		targets[index] = l.labels[uint32(target)]
+		if targets[index] == nil {
+			return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("switch target %d is not a basic block", target))
+		}
+	}
+	if kind := l.method.CategoryAt(l.index, instruction.Regs[0]).Kind; !isIntKind(kind) && kind != ir.Unknown {
+		return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("switch selector has category %s, want int", kind))
+	}
+	l.load(instruction.Regs[0])
+	if len(targets) == 0 {
+		// A table with no cases can only fall through.
+		l.code.Branch(classfilebuilder.GOTO, defaultTarget)
+		return nil
+	}
+	if instruction.Opcode == 0x2b {
+		// A packed switch's keys are consecutive starting at first_key.
+		l.code.TableSwitch(instruction.FirstKey, defaultTarget, targets...)
+		return nil
+	}
+	l.code.LookupSwitch(defaultTarget, instruction.Keys, targets...)
 	return nil
 }
 

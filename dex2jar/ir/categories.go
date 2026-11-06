@@ -47,6 +47,8 @@ func instructionEffects(instruction Instruction) (uses, defs []uint16) {
 		defs = []uint16{registers[0]}
 	case instruction.Opcode == 0x0f || instruction.Opcode == 0x10 || instruction.Opcode == 0x11:
 		uses = []uint16{registers[0]}
+	case instruction.Opcode == 0x1d || instruction.Opcode == 0x1e || instruction.Opcode == 0x27:
+		uses = []uint16{registers[0]}
 	case instruction.Opcode >= 0x12 && instruction.Opcode <= 0x1c || instruction.Opcode == 0x22:
 		defs = []uint16{registers[0]}
 	case instruction.Opcode == 0x1f:
@@ -55,6 +57,10 @@ func instructionEffects(instruction Instruction) (uses, defs []uint16) {
 		uses, defs = []uint16{registers[1]}, []uint16{registers[0]}
 	case instruction.Opcode == 0x24 || instruction.Opcode == 0x25:
 		uses = append([]uint16(nil), registers...)
+	case instruction.Opcode == 0x26:
+		uses = []uint16{registers[0]}
+	case instruction.Opcode == 0x2b || instruction.Opcode == 0x2c:
+		uses = []uint16{registers[0]}
 	case instruction.Opcode >= 0x2d && instruction.Opcode <= 0x31:
 		uses, defs = []uint16{registers[1], registers[2]}, []uint16{registers[0]}
 	case instruction.Opcode >= 0x32 && instruction.Opcode <= 0x37:
@@ -159,7 +165,7 @@ type blockRun struct {
 // walkBlock applies the instruction category constraints in program order.
 // Definitions replace the previous lifetime of a register; uses must agree with
 // the category already established for that register.
-func walkBlock(method *Method, file *model.File, allocations []Allocation, blockIndex int, entryState []Category) (*blockRun, error) {
+func walkBlock(method *Method, file *model.File, allocations []Allocation, blockIndex int, entryState []Category, final bool) (*blockRun, error) {
 	block := method.Blocks[blockIndex]
 	run := &blockRun{
 		states:      make([][]Category, 0, len(block.Instructions)),
@@ -183,7 +189,7 @@ func walkBlock(method *Method, file *model.File, allocations []Allocation, block
 		run.states = append(run.states, append([]Category(nil), state...))
 		position := len(run.states) - 1
 		instruction := &method.Instructions[instructionIndex]
-		uses, defs, err := instructionConstraints(method, file, instructionIndex, state, allocations)
+		uses, defs, err := instructionConstraints(method, file, instructionIndex, state, allocations, final)
 		if err != nil {
 			return nil, diagnostic(method.Context, instruction, "", err)
 		}
@@ -346,7 +352,7 @@ func solveCategories(method *Method, file *model.File, allocations []Allocation,
 			for _, register := range sortedRegisters(propagate[blockIndex]) {
 				merged := Category{}
 				for _, predecessor := range method.Blocks[blockIndex].Predecessors {
-					predecessorRun, err := walkBlock(method, file, allocations, predecessor, entries[predecessor])
+					predecessorRun, err := walkBlock(method, file, allocations, predecessor, entries[predecessor], false)
 					if err != nil {
 						return nil, err
 					}
@@ -383,7 +389,7 @@ func solveCategories(method *Method, file *model.File, allocations []Allocation,
 		method.Definitions[index].Register = -1
 	}
 	for blockIndex, block := range method.Blocks {
-		run, err := walkBlock(method, file, allocations, blockIndex, entries[blockIndex])
+		run, err := walkBlock(method, file, allocations, blockIndex, entries[blockIndex], method.Blocks[blockIndex].Reachable)
 		if err != nil {
 			return nil, err
 		}

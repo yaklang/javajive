@@ -79,8 +79,11 @@ func (l *methodLowerer) validateReferenceUses() error {
 func (l *methodLowerer) checkReferenceInstruction(index int, state referenceState) error {
 	instruction := &l.method.Instructions[index]
 	if allocation, ok := l.allocationByCtor[index]; ok {
+		// The constructor consumes the value new-instance produced: the alias
+		// registers hold that object, not whatever an earlier lifetime left
+		// behind.
 		for _, register := range allocation.AliasRegisters {
-			state[register][allocation.Descriptor] = true
+			state[register] = map[string]bool{allocation.Descriptor: true}
 		}
 	}
 	check := func(register uint16, expected, role string) error {
@@ -174,9 +177,9 @@ func (l *methodLowerer) transferReferences(index int, state referenceState) {
 		return
 	}
 	if allocation, ok := l.allocationByNew[index]; ok {
-		if !allocation.Fused {
-			setOne(instruction.Regs[0], allocation.Descriptor)
-		}
+		// new-instance defines the register, whether lowering keeps the value in
+		// the home or fuses allocation and initialization.
+		setOne(instruction.Regs[0], allocation.Descriptor)
 		return
 	}
 	switch {
@@ -238,7 +241,7 @@ func (l *methodLowerer) checkArrayDescriptors(instruction *ir.Instruction, descr
 		if !strings.HasPrefix(descriptor, "[") || len(descriptor) < 2 {
 			return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("descriptor %q is not an array", descriptor))
 		}
-		if component == "I" && descriptor != "[I" {
+		if component == "I" && descriptor != "[I" && descriptor != "[F" {
 			return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("int array opcode does not match descriptor %q", descriptor))
 		}
 		if component == "reference" && descriptor[1] != 'L' && descriptor[1] != '[' {
@@ -296,7 +299,21 @@ func (l *methodLowerer) provablyAssignable(actual, expected string) bool {
 		return true
 	}
 	if strings.HasPrefix(actual, "[") {
-		return expected == "Ljava/lang/Cloneable;" || expected == "Ljava/io/Serializable;"
+		if expected == "Ljava/lang/Cloneable;" || expected == "Ljava/io/Serializable;" {
+			return true
+		}
+		// Array covariance: a reference array is assignable to another reference
+		// array when its component is, while primitive arrays are invariant.
+		if strings.HasPrefix(expected, "[") {
+			actualComponent, expectedComponent := actual[1:], expected[1:]
+			if actualComponent == expectedComponent {
+				return true
+			}
+			if strings.HasPrefix(actualComponent, "L") && strings.HasPrefix(expectedComponent, "L") {
+				return l.provablyAssignable(actualComponent, expectedComponent)
+			}
+		}
+		return false
 	}
 	if actual == l.class.Descriptor {
 		if expected == l.class.Superclass {
@@ -308,9 +325,17 @@ func (l *methodLowerer) provablyAssignable(actual, expected string) bool {
 			}
 		}
 	}
-	// Follow the application hierarchy declared in the same DEX file. External
-	// ancestors stay unproven, so no unverified assignment is invented.
 	index := classHierarchy(l.file)
+	if _, ok := index[expected]; !ok {
+		// The expected type lives outside the application. Proving the relation
+		// needs the platform classpath the input was verified against, which the
+		// DEX file does not carry; rejecting here would refuse valid code such as
+		// String to CharSequence or IllegalArgumentException to Throwable.
+		return true
+	}
+	// The expected type is declared in this application, so the declared
+	// hierarchy must prove the relation. A platform ancestor cannot introduce an
+	// application type, so an unresolved ancestor cannot rescue the assignment.
 	visited := map[string]bool{actual: true}
 	queue := []string{actual}
 	for depth := 0; depth < maxAssignabilityDepth && len(queue) > 0; depth++ {
