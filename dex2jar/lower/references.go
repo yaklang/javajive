@@ -22,10 +22,12 @@ func (l *methodLowerer) validateReferenceUses() error {
 	}
 	for _, descriptor := range l.method.Proto.Parameters {
 		kind, _ := ir.DescriptorCategory(descriptor)
-		if kind == ir.Reference {
+		if kind == ir.Reference && parameter < len(entry) {
 			entry[parameter][descriptor] = true
 		}
-		parameter++
+		// A category-2 parameter occupies two registers, so later parameters
+		// start after both of them.
+		parameter += kind.Words()
 	}
 	in := make([]referenceState, len(l.method.Blocks))
 	out := make([]referenceState, len(l.method.Blocks))
@@ -151,12 +153,15 @@ func (l *methodLowerer) checkReferenceInstruction(index int, state referenceStat
 		}
 		for _, descriptor := range proto.Parameters {
 			kind, _ := ir.DescriptorCategory(descriptor)
+			if argument >= len(instruction.Regs) {
+				break
+			}
 			if kind == ir.Reference {
 				if err := check(instruction.Regs[argument], descriptor, "invoke argument"); err != nil {
 					return err
 				}
 			}
-			argument++
+			argument += kind.Words()
 		}
 	}
 	return nil

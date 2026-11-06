@@ -30,7 +30,12 @@ Translate switches, array literals, monitors, and discarding exception handlers.
 - Resolve `invoke-super` targets through the application superclass chain
   instead of requiring the direct superclass, and accept any DEX access flags
   on `<clinit>` (the JVM ignores them).
-- On the Termux APK this raises strictly translatable classes to 2583 (95.8%).
+- Leave an unresolved array register untouched during the category fixpoint
+  instead of merging an empty reference into it; the empty category used to
+  poison later passes and produce spurious join conflicts.
+- Walk invoke arguments by register words in the reference analysis, so the
+  second half of a long or double argument is not checked as a reference.
+- On the Termux APK this raises strictly translatable classes to 2607 (96.7%).
 
 ## Unreleased — 2026-11-06
 

@@ -116,7 +116,6 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 		array := current[instruction.Regs[0]]
 		if len(array.Descriptor) < 2 || array.Descriptor[0] != '[' {
 			if !final {
-				use(instruction.Regs[0], refCategory)
 				return uses, defs, nil
 			}
 			return nil, nil, fmt.Errorf("fill-array-data register v%d has no array type", instruction.Regs[0])
@@ -170,8 +169,9 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 		if len(array.Descriptor) < 2 || array.Descriptor[0] != '[' {
 			if !final {
 				// During the category fixpoint a predecessor entry may not be
-				// resolved yet; the final walk reports a genuinely untyped array.
-				use(instruction.Regs[1], refCategory)
+				// resolved yet. Leave the register untouched: merging an empty
+				// reference here would poison later passes. The final walk
+				// reports a genuinely untyped array.
 				return uses, defs, nil
 			}
 			return nil, nil, fmt.Errorf("array register v%d has no array type", instruction.Regs[1])
