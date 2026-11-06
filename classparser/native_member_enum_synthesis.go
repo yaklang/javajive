@@ -196,7 +196,7 @@ func nativeEnumRegeneratedMethod(obj *ClassObject, method *MemberInfo, name, des
 		generated, closed = true, nativeEnumValuesFactoryBackingWithParameterNames(obj, method, work, true) != nil
 	case name == "valueOf" && descriptor == "(Ljava/lang/String;)"+self:
 		generated, closed = true, nativeEnumValueOfFactoryProofWithParameterNames(obj, method, work, true)
-	case descriptor == "()["+self && method.AccessFlags == 0x100a:
+	case descriptor == "()["+self && (method.AccessFlags == 0x100a || method.AccessFlags == 0x101a):
 		generated = true
 		helperName, named := nativeEnumArrayHelperName(obj, work)
 		if !named || helperName != name {
@@ -217,9 +217,18 @@ func nativeEnumRegeneratedMethod(obj *ClassObject, method *MemberInfo, name, des
 			}
 		}
 		ops, known := nativeEnumMethodOps(obj, method, work)
+		// Kotlin emits the helper as `anewarray; astore_0; aload_0; ... aastore`
+		// and marks it final; javac uses `anewarray; dup; ... aastore`.
+		kotlinShape := len(ops) == 5+4*len(constants) && len(ops) >= 5 &&
+			nativeEnumOpcode(ops[2], core.OP_ASTORE_0) &&
+			nativeEnumOpcode(ops[len(ops)-2], core.OP_ALOAD_0) &&
+			nativeEnumOpcode(ops[len(ops)-1], core.OP_ARETURN)
 		stack := uint16(1)
 		if len(constants) > 0 {
 			stack = 4
+		}
+		if kotlinShape {
+			stack = 3
 		}
 		closed = known && len(ops) > 0 && nativeEnumOriginalFrameCapacity(method, stack, 0) && nativeEnumOpcode(ops[len(ops)-1], core.OP_ARETURN) && nativeEnumValuesArrayPacket(obj, ops[:len(ops)-1], constants, work)
 	}
@@ -423,17 +432,31 @@ func nativeEnumMemberOperand(obj *ClassObject, op *core.OpCode, code int, owner,
 func nativeEnumValuesArrayPacket(obj *ClassObject, ops []*core.OpCode, constants []string, work *workbudget.Budget) bool {
 	name := obj.GetClassName()
 	descriptor := "L" + name + ";"
-	if len(ops) != 2+4*len(constants) || !nativeProofWork(work, int64(len(ops))) {
+	if !nativeProofWork(work, int64(len(ops))) {
+		return false
+	}
+	kotlinShape := len(ops) == 4+4*len(constants) && len(ops) >= 4 &&
+		nativeEnumOpcode(ops[2], core.OP_ASTORE_0) &&
+		nativeEnumOpcode(ops[len(ops)-1], core.OP_ALOAD_0)
+	if !kotlinShape && len(ops) != 2+4*len(constants) {
 		return false
 	}
 	size, known := nativeEnumOriginalInt(obj, ops[0])
 	if !known || size != len(constants) || !nativeEnumOpcode(ops[1], core.OP_ANEWARRAY) || !nativeEnumClassOperand(obj, ops[1], name) {
 		return false
 	}
+	start := 2
+	if kotlinShape {
+		start = 3
+	}
 	for i, constant := range constants {
-		start := 2 + 4*i
-		index, known := nativeEnumOriginalInt(obj, ops[start+1])
-		if !nativeEnumOpcode(ops[start], core.OP_DUP) || !known || index != i || !nativeEnumMemberOperand(obj, ops[start+2], core.OP_GETSTATIC, name, constant, descriptor) || !nativeEnumOpcode(ops[start+3], core.OP_AASTORE) {
+		at := start + 4*i
+		index, known := nativeEnumOriginalInt(obj, ops[at+1])
+		prefix := core.OP_DUP
+		if kotlinShape {
+			prefix = core.OP_ALOAD_0
+		}
+		if !nativeEnumOpcode(ops[at], prefix) || !known || index != i || !nativeEnumMemberOperand(obj, ops[at+2], core.OP_GETSTATIC, name, constant, descriptor) || !nativeEnumOpcode(ops[at+3], core.OP_AASTORE) {
 			return false
 		}
 	}

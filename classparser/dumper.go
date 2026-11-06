@@ -2225,6 +2225,16 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 	full = c.sourceRewrite("fixEnumClinitIllegalNew", "class_source", full, func(source string) string {
 		return stripEnumBackingAssignment(fixEnumClinitIllegalNew(source), backingField)
 	})
+	if backingField != "" && c.nativeEnumBacking != nil && c.nativeEnumBacking.entriesField != "" {
+		// Kotlin publishes the same backing array as an EnumEntries view. The
+		// backing field is source-erased; values() regenerates an identical
+		// declaration-order copy. Shield literals/comments while replacing.
+		full = c.sourceRewrite("fixKotlinEnumEntries", "class_source", full, func(source string) string {
+			return rewriteJavaCode(source, func(code string) string {
+				return strings.ReplaceAll(code, backingField, "values()")
+			})
+		})
+	}
 	full = c.sourceRewrite("fixBareNestedImports", "class_source", full, fixBareNestedImports)
 	full = c.sourceRewrite("fixHardjarShapes", "class_source", full, fixHardjarShapes)
 	// boolean local used as `*`/`+` operand. Kill-switch: JDEC_BOOL_ARITH_OPERAND_OFF=1.

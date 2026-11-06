@@ -879,31 +879,24 @@ func (f *ClassContext) Import(name string) {
 	f.KeySet.Add(className)
 }
 
-// stdlibNestedDottedPackages enumerates the package prefixes whose nested types are guaranteed to be
-// JDK / standard-library types (never a Yak-emitted flat unit, and always present on the compile
-// classpath as genuinely nested Outer.Inner). For these a nested-type REFERENCE must use the dotted
-// Java source spelling (Map.Entry), not the binary flat name (Map$Entry) Yak uses for its own units.
 // nestedTypeShouldDot reports whether a `$`-nested binary type name (in package pkg) must be rendered
 // with the DOTTED source spelling (Outer.Inner) rather than Yak's flat `Outer$Inner`. Two cases:
 //
-//   - stdlib packages (java.*/javax.*/kotlin.*/...): always dotted (isStdlibNestedDottedPackage).
+//   - stdlib packages (java.*/javax.*/kotlin.*/...): dotted when no archive sibling proves a flat unit
+//     (isStdlibNestedDottedPackage).
 //   - EXTERNAL third-party nested types whose OUTER class is NOT one of the jar's own decompiled units
 //     (reactor.blockhound.BlockHound$Builder in spring-core): they only exist on the compile classpath
 //     as a genuinely nested `Outer.Inner`, so the flat `Outer$Inner` is unresolvable ("cannot find
 //     symbol: class BlockHound$Builder"). Yak NEVER emits a unit for a class outside the jar, so
-//     dotting these is safe. The jar-membership test is SiblingSuperTypes (reads the always-present
-//     super_class entry, so it resolves for EVERY jar-internal class, generic or not; ok=false means
-//     the class is external). When no cross-class resolver is wired (single-class decompile,
-//     SiblingSuperTypes==nil) the answer is "keep flat" -- unchanged legacy behavior.
+//     dotting these is safe. The archive-only SiblingClassAccessible callback decides membership when
+//     wired; SiblingSuperTypes is the legacy fallback (it also knows dependency declarations). With
+//     no cross-class resolver (single-class decompile) stdlib names are dotted and other names stay flat.
 //
 // Kill-switch JDEC_EXTERNAL_NESTED_DOT_OFF disables ONLY the external-class extension (stdlib dotting
 // is unaffected).
 func (f *ClassContext) nestedTypeShouldDot(pkg, className string) bool {
-	if isStdlibNestedDottedPackage(pkg) {
-		return true
-	}
 	if f == nil || f.SiblingSuperTypes == nil || f.Getenv("JDEC_EXTERNAL_NESTED_DOT_OFF") != "" {
-		return false
+		return isStdlibNestedDottedPackage(pkg)
 	}
 	// Same-package nested types are (almost always) Yak's own flat units; never dot them.
 	if pkg == f.PackageName {
@@ -914,12 +907,30 @@ func (f *ClassContext) nestedTypeShouldDot(pkg, className string) bool {
 		outerBin = pkg + "." + className[:i]
 	}
 	outerBin = strings.ReplaceAll(outerBin, ".", "/")
-	if _, ok := f.SiblingSuperTypes(outerBin); ok {
-		return false // outer class IS in the jar -> Yak emits it flat -> keep flat
+	// SiblingClassAccessible is backed by the archive-only resolver, unlike
+	// SiblingSuperTypes which also knows JDK/dependency declarations. Only an
+	// actual emitted sibling unit may use the flat `Outer$Inner` spelling.
+	if f.SiblingClassAccessible != nil {
+		if _, known := f.SiblingClassAccessible(outerBin); known {
+			return false
+		}
+		return true
 	}
-	return true // outer class is external -> genuinely nested -> dot it
+	if f.SiblingSuperTypes != nil {
+		if _, ok := f.SiblingSuperTypes(outerBin); ok {
+			return false
+		}
+	}
+	// The outer class is external. Standard-library nested types are available
+	// under their dotted source name; the kotlin.* shortcut must not override a
+	// sibling lookup when the input archive itself is Kotlin (kotlin-stdlib).
+	return true
 }
 
+// isStdlibNestedDottedPackage enumerates the package prefixes whose nested
+// types are JDK / standard-library types (absent an archive sibling). Their
+// nested-type references use the dotted Java source spelling (Map.Entry), not
+// the binary flat name (Map$Entry) Yak uses for its own units.
 func isStdlibNestedDottedPackage(pkg string) bool {
 	switch {
 	case pkg == "java" || strings.HasPrefix(pkg, "java."):
