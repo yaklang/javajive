@@ -390,7 +390,13 @@ func trailingGoto(start *OpCode, byOff map[int]*OpCode, maxHops int) (int, bool)
 		}
 		seen[op] = true
 		if op.Instr.OpCode == OP_GOTO || op.Instr.OpCode == OP_GOTO_W {
-			op = byOff[ifBranchPC(op)]
+			target := byOff[ifBranchPC(op)]
+			// A switch-expression arm reaches its merge through forward gotos.
+			// A backward edge is a loop and cannot be the value merge.
+			if target == nil || target.CurrentOffset <= op.CurrentOffset {
+				break
+			}
+			op = target
 			continue
 		}
 		if isReturnOp(op.Instr.OpCode) {
