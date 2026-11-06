@@ -174,9 +174,10 @@ being counted as success.
 - **Record deconstruction covers component and nested patterns.** A record
   whose component accessors match its declared `Record` attribute reconstructs
   to `case Record(component...)`; nested record components are parsed
-  recursively and array components keep a `T[]` binding. Guards combined with
-  deconstruction, components whose nested type is an interface/subtype rather
-  than the exact record, and records whose metadata is unavailable still fail
+  recursively and array components keep a `T[]` binding. Guarded
+  deconstruction may use the equivalent dispatcher instead of a source-level
+  `when` clause; components whose nested type is an interface/subtype rather
+  than the exact record, and records whose metadata is unavailable, still fail
   closed with a diagnostic. Simple type patterns, `case null`, guards, and
   equivalent-dispatcher forms remain covered.
 - **Very large single methods use an opt-in budget.** The public default keeps
