@@ -23,7 +23,14 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 	// The constructor initializes every alias that still points at the new
 	// object, so after it runs those registers hold an ordinary reference.
 	for _, allocation := range allocations {
-		if allocation.Constructor != index {
+		initializes := false
+		for _, site := range allocation.Constructors {
+			if site == index {
+				initializes = true
+				break
+			}
+		}
+		if !initializes {
 			continue
 		}
 		for _, register := range allocation.AliasRegisters {
@@ -46,9 +53,9 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 				source = Category{Kind: Bits64}
 			}
 		default:
-			if source.Kind == Unknown {
-				source = current[instruction.Regs[0]]
-			}
+			// A move copies exactly the source's category. If the source is not
+			// resolved yet, the destination is unresolved too; keeping the
+			// destination's previous category would carry a stale lifetime.
 		}
 		define(instruction.Regs[0], source)
 		use(instruction.Regs[1], source)
@@ -60,8 +67,9 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 	case instruction.Opcode == 0x0c:
 		define(instruction.Regs[0], moveResultCategory(method, file, index, refCategory))
 	case instruction.Opcode == 0x0d:
-		// The handler entry pushes the thrown exception; move-exception stores it.
-		define(instruction.Regs[0], Category{Kind: Reference, Descriptor: "Ljava/lang/Throwable;"})
+		// The handler entry pushes the thrown exception; move-exception binds it
+		// with the catch type that dispatched to this handler.
+		define(instruction.Regs[0], Category{Kind: Reference, Descriptor: method.ExceptionType(instruction.Offset)})
 	case instruction.Opcode == 0x0f:
 		// A 32-bit return is either an int or a float; the prototype decides.
 		kind, err := DescriptorCategory(method.Proto.ReturnType)
@@ -177,14 +185,7 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 			return nil, nil, fmt.Errorf("array register v%d has no array type", instruction.Regs[1])
 		}
 		component := array.Descriptor[1:]
-		if err := validateArrayElementKind(instruction.Opcode, component); err != nil {
-			return nil, nil, err
-		}
-		kind, err := DescriptorCategory(component)
-		if err != nil {
-			return nil, nil, err
-		}
-		value := Category{Kind: kind, Descriptor: component}
+		value := arrayElementCategory(instruction.Opcode, component)
 		use(instruction.Regs[1], Category{Kind: Reference, Descriptor: array.Descriptor})
 		use(instruction.Regs[2], intCategory)
 		if instruction.Opcode <= 0x4a {
@@ -272,6 +273,14 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 func moveResultCategory(method *Method, file *model.File, index int, fallback Category) Category {
 	if index > 0 {
 		previous := method.Instructions[index-1]
+		if previous.Opcode == 0x24 || previous.Opcode == 0x25 {
+			// filled-new-array yields an array of the named type, not a method
+			// result; its Index is a type index.
+			if int(previous.Index) < len(file.Types) {
+				return Category{Kind: Reference, Descriptor: file.Types[previous.Index].Descriptor}
+			}
+			return fallback
+		}
 		if isInvoke(previous.Opcode) && int(previous.Index) < len(file.Methods) {
 			callee := file.Methods[previous.Index]
 			if int(callee.ProtoIndex) < len(file.Protos) {

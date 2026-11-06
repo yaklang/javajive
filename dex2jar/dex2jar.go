@@ -175,6 +175,7 @@ func applicationToJar(app *model.Application) ([]byte, Report, error) {
 	report := Report{DEXFiles: len(app.Files)}
 	entries := make([]jarEntry, 0)
 	seen := make(map[string]string)
+	hierarchy := applicationHierarchy(app)
 	for _, file := range app.Files {
 		if file == nil {
 			return nil, report, errors.New("dex2jar: application contains a nil DEX file")
@@ -194,7 +195,7 @@ func applicationToJar(app *model.Application) ([]byte, Report, error) {
 			}
 			seen[name] = file.Entry
 
-			classBytes, err := lower.ClassWithOptions(file, class, lower.ClassOptions{FileValidated: true})
+			classBytes, err := lower.ClassWithOptions(file, class, lower.ClassOptions{FileValidated: true, Hierarchy: hierarchy})
 			if err != nil {
 				return nil, report, err
 			}
@@ -308,4 +309,23 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) (err error) {
 		return err
 	}
 	return nil
+}
+
+// applicationHierarchy indexes every class of the application so assignability
+// resolves across multidex files, where a superclass often lives in a
+// different DEX than its subclass.
+func applicationHierarchy(app *model.Application) map[string]*model.Class {
+	index := make(map[string]*model.Class)
+	for _, file := range app.Files {
+		if file == nil {
+			continue
+		}
+		for position := range file.Classes {
+			class := &file.Classes[position]
+			if _, exists := index[class.Descriptor]; !exists {
+				index[class.Descriptor] = class
+			}
+		}
+	}
+	return index
 }

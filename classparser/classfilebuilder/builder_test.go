@@ -782,3 +782,44 @@ func TestJavaVerifyAll(t *testing.T) {
 		}
 	}
 }
+
+func TestJava8InterfaceStaticMethodVerifies(t *testing.T) {
+	class := NewClass("IfaceStatics", "java/lang/Object", ACC_PUBLIC|ACC_INTERFACE|ACC_ABSTRACT)
+	class.SetVersion(VersionJava8)
+	code := class.AddMethod(ACC_PUBLIC|ACC_STATIC, "answer", "()I").Code()
+	code.Byte(BIPUSH, 42).Emit(IRETURN)
+	if class.Version() != VersionJava8 {
+		t.Fatalf("version = %d", class.Version())
+	}
+	raw, err := class.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := javaclassparser.Parse(raw); err != nil {
+		t.Fatalf("parse generated interface: %v", err)
+	}
+	javac, javacErr := exec.LookPath("javac")
+	java, javaErr := exec.LookPath("java")
+	if javacErr != nil || javaErr != nil {
+		t.Skip("javac/java unavailable")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "IfaceStatics.class"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	driver := filepath.Join(dir, "Driver.java")
+	source := `public class Driver {
+    public static void main(String[] args) {
+        if (IfaceStatics.answer() != 42) throw new AssertionError("static interface method");
+    }
+}`
+	if err := os.WriteFile(driver, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command(javac, "-cp", dir, "-d", dir, driver).CombinedOutput(); err != nil {
+		t.Fatalf("javac driver: %v\n%s", err, output)
+	}
+	if output, err := exec.Command(java, "-Xverify:all", "-cp", dir, "Driver").CombinedOutput(); err != nil {
+		t.Fatalf("java verification: %v\n%s", err, output)
+	}
+}

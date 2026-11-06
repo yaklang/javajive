@@ -163,41 +163,32 @@ func validateProto(proto model.Proto) error {
 	return nil
 }
 
-// validateArrayElementKind checks that the DEX element opcode matches the array
-// component descriptor. DEX shares aget/aput between int and float values, so
-// the descriptor is what selects the JVM element access.
-func validateArrayElementKind(opcode byte, component string) error {
+// arrayElementCategory types the value an array element opcode reads or
+// writes. The opcode fixes the access kind; the tracked component only picks
+// int versus float and long versus double. A component that contradicts the
+// opcode is a stale descriptor from another lifetime (for example a null that
+// adopted an array type), so the opcode wins.
+func arrayElementCategory(opcode byte, component string) Category {
+	reference := component != "" && (component[0] == 'L' || component[0] == '[')
 	switch opcode {
 	case 0x44, 0x4b:
-		if component == "I" || component == "F" {
-			return nil
+		if component == "F" {
+			return Category{Kind: Float, Descriptor: "F"}
 		}
+		return Category{Kind: Int, Descriptor: "I"}
 	case 0x45, 0x4c:
-		if component == "J" || component == "D" {
-			return nil
+		if component == "D" {
+			return Category{Kind: Double, Descriptor: "D"}
 		}
+		return Category{Kind: Long, Descriptor: "J"}
 	case 0x46, 0x4d:
-		if component != "" && (component[0] == 'L' || component[0] == '[') {
-			return nil
+		if reference {
+			return Category{Kind: Reference, Descriptor: component}
 		}
-	case 0x47, 0x4e:
-		if component == "Z" {
-			return nil
-		}
-	case 0x48, 0x4f:
-		if component == "B" {
-			return nil
-		}
-	case 0x49, 0x50:
-		if component == "C" {
-			return nil
-		}
-	case 0x4a, 0x51:
-		if component == "S" {
-			return nil
-		}
+		return Category{Kind: Reference}
+	default:
+		return Category{Kind: Int, Descriptor: "I"}
 	}
-	return fmt.Errorf("array opcode does not match element type %q", component)
 }
 
 func shortyDescriptor(descriptor string) byte {

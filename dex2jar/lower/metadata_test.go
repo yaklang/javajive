@@ -699,7 +699,7 @@ func TestLowerUsesApplicationHierarchyForAssignability(t *testing.T) {
 	}
 }
 
-func TestLowerRejectsDeferredStoreWithReassignedValue(t *testing.T) {
+func TestLowerCapturesDeferredStoreValueBeforeReassignment(t *testing.T) {
 	file, class := constructorStoreFixture()
 	// iput v1, v0, value; const/4 v1, #9; invoke-direct {v0}, Object.<init>()
 	class.DirectMethods[0].Code.Instructions = []uint16{
@@ -708,9 +708,60 @@ func TestLowerRejectsDeferredStoreWithReassignedValue(t *testing.T) {
 		0x1070, 0x0000, 0x0000,
 		0x000e,
 	}
-	_, err := Class(file, class)
-	if err == nil || !strings.Contains(err.Error(), "reassigned before super") {
-		t.Fatalf("error = %v", err)
+	raw, err := Class(file, class)
+	if err != nil {
+		t.Fatalf("Class: %v", err)
+	}
+	parsed, err := javaclassparser.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse generated class: %v", err)
+	}
+	var code []byte
+	for _, method := range parsed.Methods {
+		if parsed.ConstantPoolManager.GetUtf8(int(method.NameIndex)).Value == "<init>" {
+			code = method.Attributes[0].(*javaclassparser.CodeAttribute).Code
+		}
+	}
+	if code == nil {
+		t.Fatal("constructor has no code")
+	}
+	// The field store must follow the constructor call; the JVM rejects a
+	// putfield on uninitialized this, and the captured value keeps the original
+	// argument even though v1 is reassigned before delegation.
+	invoke := bytes.Index(code, []byte{0xb7})
+	store := bytes.LastIndex(code, []byte{0xb5})
+	if invoke < 0 || store < invoke {
+		t.Fatalf("code = % x, want putfield after invokespecial", code)
+	}
+
+	javac, javacErr := exec.LookPath("javac")
+	java, javaErr := exec.LookPath("java")
+	if javacErr != nil || javaErr != nil {
+		t.Skip("javac/java unavailable")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dex", "CtorStore.class")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	driver := filepath.Join(dir, "Driver.java")
+	source := `public class Driver {
+    public static void main(String[] args) {
+        dex.CtorStore value = new dex.CtorStore(7);
+        if (value.value() != 7) throw new AssertionError("stored " + value.value());
+    }
+}`
+	if err := os.WriteFile(driver, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command(javac, "-cp", dir, "-d", dir, driver).CombinedOutput(); err != nil {
+		t.Fatalf("javac driver: %v\n%s", err, output)
+	}
+	if output, err := exec.Command(java, "-Xverify:all", "-cp", dir, "Driver").CombinedOutput(); err != nil {
+		t.Fatalf("driver execution: %v\n%s", err, output)
 	}
 }
 
@@ -799,5 +850,58 @@ func TestLowerAcceptsReferenceArrayCovariance(t *testing.T) {
 	file.Protos[1].Parameters = []string{"[J"}
 	if _, err := Class(file, class); err == nil || !strings.Contains(err.Error(), "not provably assignable") {
 		t.Fatalf("primitive array covariance error = %v", err)
+	}
+}
+
+func TestLowerRejectsUninitializedThisUseBeforeDelegation(t *testing.T) {
+	file, class := constructorStoreFixture()
+	file.Protos = append(file.Protos, model.Proto{ReturnType: "I"})
+	file.Methods = append(file.Methods, model.MethodID{Class: "Ljava/lang/Object;", Name: "hashCode", ProtoIndex: 3})
+	// invoke-virtual {v0}, Object.hashCode(); invoke-direct {v0}, Object.<init>()
+	class.DirectMethods[0].Code.Instructions = []uint16{
+		0x106e, 0x0003, 0x0000, // invoke-virtual {v0}, Object.hashCode()
+		0x1070, 0x0000, 0x0000, // invoke-direct {v0}, Object.<init>()
+		0x000e,
+	}
+	if _, err := Class(file, class); err == nil || !strings.Contains(err.Error(), "is used before constructor delegation") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLowerRejectsDeferredStoreOutsideEveryPath(t *testing.T) {
+	file, class := constructorStoreFixture()
+	// The store only runs on the fall-through path, so it is skipped when the
+	// branch is taken straight to delegation.
+	class.DirectMethods[0].Code.Instructions = []uint16{
+		0x0138, 0x0006, // if-eqz v1, +6
+		0x0159, 0x0000, // iput v1, v0, value
+		0x0228,                 // goto +2
+		0x0000,                 // nop (unreachable padding)
+		0x1070, 0x0000, 0x0000, // invoke-direct {v0}, Object.<init>()
+		0x000e,
+	}
+	if _, err := Class(file, class); err == nil || !strings.Contains(err.Error(), "not on every path to the constructor call") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLowerAcceptsDeferredStoreDominatingBranch(t *testing.T) {
+	file, class := constructorStoreFixture()
+	// The store runs before the branch, so every path reaches delegation with
+	// the value already captured.
+	class.DirectMethods[0].Code.Instructions = []uint16{
+		0x0159, 0x0000, // iput v1, v0, value
+		0x0138, 0x0004, // if-eqz v1, +4
+		0x0228,                 // goto +2
+		0x0000,                 // nop (unreachable padding)
+		0x1070, 0x0000, 0x0000, // invoke-direct {v0}, Object.<init>()
+		0x000e,
+	}
+	raw, err := Class(file, class)
+	if err != nil {
+		t.Fatalf("Class: %v", err)
+	}
+	if _, err := javaclassparser.Parse(raw); err != nil {
+		t.Fatalf("parse generated class: %v", err)
 	}
 }

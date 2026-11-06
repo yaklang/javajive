@@ -187,11 +187,13 @@ initialization; int, reference, boolean, byte, char, and short arrays including
 `filled-new-array` and `fill-array-data` literals; `packed-switch` and
 `sparse-switch`; `monitor-enter`/`monitor-exit`; register lifetime reuse within
 one method; try/catch with `move-exception`, typed handlers, catch-all handlers,
-and handlers that discard the caught exception; unreachable dead code; and long,
+and handlers that discard the caught exception; unreachable dead code; long,
 float, and double values, including category-2 register pairs, wide constants,
-conversions, comparisons, wide fields, and wide array elements. Generated class
-files are parser-tested and JVM-verified, including executable branch, switch,
-field, invoke, constructor, array, numeric, monitor, and exception paths.
+conversions, comparisons, wide fields, and wide array elements; and interfaces
+with static or default methods, emitted as Java 8 class files when their methods
+are branch-free and handler-free. Generated class files are parser-tested and
+JVM-verified, including executable branch, switch, field, invoke, constructor,
+array, numeric, monitor, exception, and interface paths.
 Assignability between reference types is proven through the application
 hierarchy declared in the same DEX; a relation whose expected type is outside
 the application is accepted, because the platform hierarchy the input was

@@ -166,6 +166,9 @@ type Allocation struct {
 	Descriptor     string
 	NewInstruction int
 	Constructor    int
+	// Constructors lists every constructor call site. Different branches may
+	// initialize the same allocation with different arguments.
+	Constructors   []int
 	AliasRegisters []uint16
 	// Fused reports that only alias moves separate allocation from
 	// initialization, so the translator may emit one fused new/dup/invokespecial
@@ -195,6 +198,9 @@ type Method struct {
 	// constantKinds records the interpretation the backward refinement derived
 	// for constant definitions whose literal is a raw bit pattern.
 	constantKinds map[int]Category
+	// exceptionTypes maps a handler address to the catch type DEX dispatches to
+	// it. move-exception binds the caught value with that type.
+	exceptionTypes map[uint32]string
 	// demands records the categories each instruction requires of its operands.
 	demands [][]demand
 }

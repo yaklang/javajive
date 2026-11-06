@@ -33,6 +33,11 @@ type methodLowerer struct {
 	homeSlots []uint16
 	// homeLimit is the number of local slots the register homes occupy.
 	homeLimit uint16
+	// tempLimit is the number of extra local slots used to capture values that
+	// are stored to fields after constructor delegation.
+	tempLimit uint16
+	// hierarchy is the caller-provided application class index, if any.
+	hierarchy map[string]*model.Class
 	// handlerTrampolines maps a handler address whose block never binds the
 	// caught exception to the stub that discards it.
 	handlerTrampolines map[uint32]*classfilebuilder.Label
@@ -40,7 +45,7 @@ type methodLowerer struct {
 	// delegationIndex marks this-constructor delegation; field stores that DEX
 	// permits before it are emitted immediately after it.
 	delegationIndex int
-	deferredStores  []int
+	deferredStores  []deferredStore
 }
 
 func (l *methodLowerer) lower() error {
@@ -62,7 +67,9 @@ func (l *methodLowerer) lower() error {
 	l.allocationAliasOps = make(map[int]bool)
 	for _, allocation := range l.method.Allocations {
 		l.allocationByNew[allocation.NewInstruction] = allocation
-		l.allocationByCtor[allocation.Constructor] = allocation
+		for _, site := range allocation.Constructors {
+			l.allocationByCtor[site] = allocation
+		}
 		if allocation.Fused {
 			for index := allocation.NewInstruction + 1; index < allocation.Constructor; index++ {
 				l.allocationAliasOps[index] = true
@@ -88,9 +95,12 @@ func (l *methodLowerer) lower() error {
 		return err
 	}
 	l.prepareAddressLabels()
-	deferred := make(map[int]bool, len(l.deferredStores))
-	for _, index := range l.deferredStores {
-		deferred[index] = true
+	if err := l.assignDeferredTemps(); err != nil {
+		return err
+	}
+	deferred := make(map[int]*deferredStore, len(l.deferredStores))
+	for index := range l.deferredStores {
+		deferred[l.deferredStores[index].index] = &l.deferredStores[index]
 	}
 	for _, block := range l.method.Blocks {
 		l.code.Mark(l.labels[block.Start])
@@ -101,21 +111,18 @@ func (l *methodLowerer) lower() error {
 			if label := l.addressLabels[instruction.Offset]; label != nil && label != l.labels[block.Start] {
 				l.code.Mark(label)
 			}
-			if deferred[index] {
+			if store, ok := deferred[index]; ok {
+				l.captureDeferredValue(store)
 				continue
 			}
 			if err := l.emitInstruction(index); err != nil {
 				return err
 			}
 			if index == l.delegationIndex {
-				for _, store := range l.deferredStores {
-					// The deferred store keeps its own DEX position, so its
-					// category state is the one recorded for that instruction.
-					previous := l.index
-					if err := l.emitInstruction(store); err != nil {
+				for position := range l.deferredStores {
+					if err := l.emitDeferredStore(&l.deferredStores[position]); err != nil {
 						return err
 					}
-					l.index = previous
 				}
 			}
 		}
@@ -130,7 +137,7 @@ func (l *methodLowerer) lower() error {
 	if err := l.emitDebug(); err != nil {
 		return err
 	}
-	l.code.SetMaxLocals(l.homeBase + l.homeLimit)
+	l.code.SetMaxLocals(l.homeBase + l.homeLimit + l.tempLimit)
 	return nil
 }
 
@@ -369,26 +376,21 @@ func (l *methodLowerer) emitDebug() error {
 }
 
 func (l *methodLowerer) validateAllocationCFG(allocation ir.Allocation) error {
-	newBlock, ctorBlock := -1, -1
-	for _, block := range l.method.Blocks {
-		for _, index := range block.Instructions {
-			if index == allocation.NewInstruction {
-				newBlock = block.ID
-			}
-			if index == allocation.Constructor {
-				ctorBlock = block.ID
+	for _, site := range allocation.Constructors {
+		constructor := &l.method.Instructions[site]
+		if !allocation.Fused {
+			// The uninitialized object may travel through other blocks before its
+			// constructor runs; the receiver must still be exactly this allocation.
+			category := l.method.CategoryAt(site, constructor.Regs[0])
+			if category.Kind != ir.Uninitialized || category.Allocation != allocation.ID {
+				return methodDiagnostic(l.method.Context, constructor, "", fmt.Errorf("constructor receiver v%d does not hold the uninitialized allocation", constructor.Regs[0]))
 			}
 		}
-	}
-	instruction := &l.method.Instructions[allocation.NewInstruction]
-	if newBlock < 0 || newBlock != ctorBlock {
-		return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("new-instance and constructor must remain in one basic block"))
-	}
-	constructor := l.method.Instructions[allocation.Constructor]
-	for _, argument := range constructor.Regs[1:] {
-		for _, alias := range allocation.AliasRegisters {
-			if argument == alias {
-				return methodDiagnostic(l.method.Context, &constructor, "", fmt.Errorf("uninitialized allocation is also a constructor argument"))
+		for _, argument := range constructor.Regs[1:] {
+			for _, alias := range allocation.AliasRegisters {
+				if argument == alias {
+					return methodDiagnostic(l.method.Context, constructor, "", fmt.Errorf("uninitialized allocation is also a constructor argument"))
+				}
 			}
 		}
 	}
@@ -558,7 +560,9 @@ func (l *methodLowerer) emitMove(instruction *ir.Instruction) error {
 	}
 	switch {
 	case instruction.Opcode <= 0x03:
-		if kind != ir.Int && kind != ir.Float && kind != ir.Bits32 && kind != ir.Null {
+		// A plain move copies one 32-bit register; d8 also uses it for a
+		// reference alias, so any single-width category is valid.
+		if kind == ir.Long || kind == ir.Double || kind == ir.Bits64 || kind == ir.WideUpper || kind == ir.Unknown {
 			return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("move opcode does not match stable register category %s", kind))
 		}
 	case instruction.Opcode <= 0x06:
@@ -687,37 +691,57 @@ func primitiveArrayType(component string) (int, bool) {
 	return atype, ok
 }
 
-// arrayElementOpcode maps a DEX element opcode and the array component
-// descriptor to the JVM element access. DEX shares aget/aput between int and
-// float values, so the component type selects the JVM opcode.
+// arrayElementOpcode maps a DEX element opcode to the JVM access. The opcode
+// fixes the access width and reference-ness; the tracked component only picks
+// int versus float and long versus double.
 func arrayElementOpcode(opcode byte, component string) (classfilebuilder.Opcode, error) {
 	stores := opcode >= 0x4b
-	var load, store classfilebuilder.Opcode
-	switch component {
-	case "I":
-		load, store = classfilebuilder.IALOAD, classfilebuilder.IASTORE
-	case "F":
-		load, store = classfilebuilder.FALOAD, classfilebuilder.FASTORE
-	case "J":
-		load, store = classfilebuilder.LALOAD, classfilebuilder.LASTORE
-	case "D":
-		load, store = classfilebuilder.DALOAD, classfilebuilder.DASTORE
-	case "Z", "B":
-		load, store = classfilebuilder.BALOAD, classfilebuilder.BASTORE
-	case "C":
-		load, store = classfilebuilder.CALOAD, classfilebuilder.CASTORE
-	case "S":
-		load, store = classfilebuilder.SALOAD, classfilebuilder.SASTORE
-	default:
-		if component == "" || component[0] != 'L' && component[0] != '[' {
-			return 0, fmt.Errorf("unsupported array component %q", component)
+	switch opcode {
+	case 0x44, 0x4b:
+		if component == "F" {
+			if stores {
+				return classfilebuilder.FASTORE, nil
+			}
+			return classfilebuilder.FALOAD, nil
 		}
-		load, store = classfilebuilder.AALOAD, classfilebuilder.AASTORE
+		if stores {
+			return classfilebuilder.IASTORE, nil
+		}
+		return classfilebuilder.IALOAD, nil
+	case 0x45, 0x4c:
+		if component == "D" {
+			if stores {
+				return classfilebuilder.DASTORE, nil
+			}
+			return classfilebuilder.DALOAD, nil
+		}
+		if stores {
+			return classfilebuilder.LASTORE, nil
+		}
+		return classfilebuilder.LALOAD, nil
+	case 0x46, 0x4d:
+		if stores {
+			return classfilebuilder.AASTORE, nil
+		}
+		return classfilebuilder.AALOAD, nil
+	case 0x47, 0x48, 0x4e, 0x4f:
+		if stores {
+			return classfilebuilder.BASTORE, nil
+		}
+		return classfilebuilder.BALOAD, nil
+	case 0x49, 0x50:
+		if stores {
+			return classfilebuilder.CASTORE, nil
+		}
+		return classfilebuilder.CALOAD, nil
+	case 0x4a, 0x51:
+		if stores {
+			return classfilebuilder.SASTORE, nil
+		}
+		return classfilebuilder.SALOAD, nil
+	default:
+		return 0, fmt.Errorf("unsupported array element opcode %#x", opcode)
 	}
-	if stores {
-		return store, nil
-	}
-	return load, nil
 }
 
 // emitFillArrayData materializes a primitive array literal by storing every
@@ -1509,4 +1533,73 @@ func isDirectInvoke(opcode byte) bool    { return opcode == 0x70 || opcode == 0x
 func isInterfaceInvoke(opcode byte) bool { return opcode == 0x72 || opcode == 0x78 }
 func isSpecialInvoke(opcode byte) bool {
 	return opcode == 0x6f || opcode == 0x70 || opcode == 0x75 || opcode == 0x76
+}
+
+// deferredStore is a field store that DEX allows on uninitialized this before
+// super(). The JVM requires the store after the constructor call, so the value
+// is captured in a fresh local at the original position and stored afterwards.
+type deferredStore struct {
+	index    int
+	register uint16
+	temp     uint16
+	category ir.Category
+}
+
+func isBranchOpcode(opcode byte) bool {
+	return opcode >= 0x28 && opcode <= 0x2a || opcode >= 0x32 && opcode <= 0x3d
+}
+
+// assignDeferredTemps gives every deferred store a fresh local wide enough for
+// its value, after the DEX register homes.
+func (l *methodLowerer) assignDeferredTemps() error {
+	next := int(l.homeBase) + int(l.homeLimit)
+	for index := range l.deferredStores {
+		store := &l.deferredStores[index]
+		category := l.method.CategoryAt(store.index, store.register)
+		if category.Kind == ir.Unknown {
+			return methodDiagnostic(l.method.Context, &l.method.Instructions[store.index], "", fmt.Errorf("deferred field store value v%d has no category", store.register))
+		}
+		if next > math.MaxUint16 {
+			return methodDiagnostic(l.method.Context, &l.method.Instructions[store.index], "", fmt.Errorf("deferred field store values require too many locals"))
+		}
+		store.category = category
+		store.temp = uint16(next)
+		next += category.Kind.Words()
+	}
+	l.tempLimit = uint16(next - (int(l.homeBase) + int(l.homeLimit)))
+	return nil
+}
+
+// captureDeferredValue evaluates the stored value at its original DEX position
+// and keeps it in a local that survives until the constructor call.
+func (l *methodLowerer) captureDeferredValue(store *deferredStore) {
+	previous := l.index
+	l.index = store.index
+	l.load(store.register)
+	l.code.Store(localKind(store.category.Kind), store.temp)
+	l.index = previous
+}
+
+// emitDeferredStore performs the field store after this is initialized.
+func (l *methodLowerer) emitDeferredStore(store *deferredStore) error {
+	instruction := &l.method.Instructions[store.index]
+	field := l.file.Fields[instruction.Index]
+	owner, err := objectInternalName(field.Class)
+	if err != nil {
+		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	if err := validateFieldOpcode(instruction.Opcode, field.Type, store.category.Kind); err != nil {
+		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	constant, err := l.builder.Pool().Fieldref(owner, field.Name, field.Type)
+	if err != nil {
+		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	previous := l.index
+	l.index = store.index
+	l.load(instruction.Regs[1])
+	l.index = previous
+	l.code.Load(localKind(store.category.Kind), store.temp)
+	l.code.CP(classfilebuilder.PUTFIELD, constant)
+	return nil
 }

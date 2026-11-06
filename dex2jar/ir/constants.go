@@ -141,6 +141,10 @@ func resolveConstant(category, demand Category) (Category, error) {
 		case Int, Float, Reference:
 			// The zero constant is 32 bits and fits all three readings.
 			return demand, nil
+		case Bits32:
+			// A move chain left the interpretation open; the raw zero bits are
+			// an int constant.
+			return Category{Kind: Int}, nil
 		case Unknown, Null:
 			return category, nil
 		}

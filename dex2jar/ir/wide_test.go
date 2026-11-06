@@ -251,7 +251,8 @@ func TestWideOperandValidation(t *testing.T) {
 		t.Fatalf("mixed constant error = %v", err)
 	}
 
-	// Array element opcodes must match the array component.
+	// A tracked array component that contradicts the opcode is a stale
+	// descriptor from another lifetime; the opcode family wins.
 	arrayFile := &model.File{
 		Entry:  "classes.dex",
 		Types:  []model.Type{{Descriptor: "I"}},
@@ -261,12 +262,16 @@ func TestWideOperandValidation(t *testing.T) {
 	arrayMethod := &model.EncodedMethod{
 		AccessFlags: dexAccessStatic,
 		Method:      model.MethodID{Class: "LTest;", Name: "caller", ProtoIndex: 0},
-		Code: &model.Code{RegistersSize: 2, InsSize: 1, Instructions: []uint16{
-			0x0048, 0x0101, // aget-byte v0, v1, v1
+		Code: &model.Code{RegistersSize: 3, InsSize: 1, Instructions: []uint16{
+			0x0048, 0x0102, // aget-byte v0, v2, v1
 			0x000f,
 		}},
 	}
-	if _, err := Build(Input{File: arrayFile, Class: arrayClass, Method: arrayMethod}); err == nil || !strings.Contains(err.Error(), "array opcode does not match element type") {
-		t.Fatalf("mismatched array element error = %v", err)
+	arrayBuilt, err := Build(Input{File: arrayFile, Class: arrayClass, Method: arrayMethod})
+	if err != nil {
+		t.Fatalf("stale array component rejected: %v", err)
+	}
+	if definition, ok := arrayBuilt.DefinitionAt(0); !ok || definition.Category.Kind != Int {
+		t.Fatalf("aget-byte definition = %#v, %v", definition, ok)
 	}
 }

@@ -40,6 +40,11 @@ type ClassOptions struct {
 	// per-method whole-file metadata validation, which is quadratic on large
 	// applications.
 	FileValidated bool
+	// Hierarchy is the application-wide class index across every DEX file.
+	// Multidex applications split a superclass or interface from its subclass,
+	// so assignability must be provable across files. When nil, only the file
+	// being lowered is consulted.
+	Hierarchy map[string]*model.Class
 }
 
 // Class lowers one parser-neutral DEX class. It never returns partial bytes.
@@ -70,7 +75,64 @@ func ClassWithOptions(file *model.File, class *model.Class, options ClassOptions
 	if class.AccessFlags&dexInterface != 0 && class.Superclass != "Ljava/lang/Object;" {
 		return nil, classDiagnostic(file, class, "class", fmt.Errorf("interface superclass must be java/lang/Object"))
 	}
+	if interfaceNeedsJava8(class) {
+		// Static and default interface methods require a Java 8 class file. The
+		// translator does not emit StackMapTable, so only methods without
+		// control flow or handlers can use it.
+		if err := validateNoControlFlow(file, class); err != nil {
+			return nil, err
+		}
+		builder := classfilebuilder.NewClass(className, superName, access)
+		builder.SetVersion(classfilebuilder.VersionJava8)
+		return lowerClassBody(file, class, builder, options)
+	}
 	builder := classfilebuilder.NewClass(className, superName, access)
+	return lowerClassBody(file, class, builder, options)
+}
+
+// interfaceNeedsJava8 reports whether an interface carries a static or default
+// method, which a Java 5 class file cannot express.
+func interfaceNeedsJava8(class *model.Class) bool {
+	if class.AccessFlags&dexInterface == 0 {
+		return false
+	}
+	for _, method := range appendMethods(class.DirectMethods, class.VirtualMethods) {
+		if method.Method.Name == "<clinit>" {
+			continue
+		}
+		if method.Code != nil || method.AccessFlags&dexStatic != 0 || method.AccessFlags&dexAbstract == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// validateNoControlFlow rejects interface methods whose code would need a
+// StackMapTable, which the translator does not emit.
+func validateNoControlFlow(file *model.File, class *model.Class) error {
+	for _, method := range appendMethods(class.DirectMethods, class.VirtualMethods) {
+		if method.Code == nil {
+			continue
+		}
+		if len(method.Code.Tries) > 0 {
+			return classDiagnostic(file, class, "interface", fmt.Errorf("method %s has exception handlers, which need Java 8 stack maps", method.Method.Name))
+		}
+		instructions, err := ir.Decode(method.Code, methodContext(file, class, &method))
+		if err != nil {
+			return err
+		}
+		for _, instruction := range instructions {
+			if isBranchOpcode(instruction.Opcode) || instruction.Opcode == 0x2b || instruction.Opcode == 0x2c {
+				return classDiagnostic(file, class, "interface", fmt.Errorf("method %s has control flow, which needs Java 8 stack maps", method.Method.Name))
+			}
+		}
+	}
+	return nil
+}
+
+// lowerClassBody emits members and attributes into an already configured
+// builder.
+func lowerClassBody(file *model.File, class *model.Class, builder *classfilebuilder.Class, options ClassOptions) ([]byte, error) {
 	if class.SourceFile != "" {
 		builder.SetSourceFile(class.SourceFile)
 	}
@@ -352,8 +414,18 @@ func addMethod(file *model.File, class *model.Class, method *model.EncodedMethod
 			return methodDiagnostic(ctx, nil, "method", fmt.Errorf("class initializer must be static with descriptor ()V"))
 		}
 	}
-	if class.AccessFlags&dexInterface != 0 && method.Method.Name != "<clinit>" && method.AccessFlags&(dexPublic|dexAbstract) != dexPublic|dexAbstract {
-		return methodDiagnostic(ctx, nil, "method", fmt.Errorf("Java 5 interface method must be public abstract"))
+	if class.AccessFlags&dexInterface != 0 && method.Method.Name != "<clinit>" {
+		if builder.Version() >= classfilebuilder.VersionJava8 {
+			// Java 8 interfaces may carry public static and default methods.
+			if method.AccessFlags&dexPublic == 0 {
+				return methodDiagnostic(ctx, nil, "method", fmt.Errorf("Java 8 interface method must be public"))
+			}
+			if method.AccessFlags&dexAbstract == 0 && method.Code == nil {
+				return methodDiagnostic(ctx, nil, "method", fmt.Errorf("interface method has neither code nor the abstract flag"))
+			}
+		} else if method.AccessFlags&(dexPublic|dexAbstract) != dexPublic|dexAbstract {
+			return methodDiagnostic(ctx, nil, "method", fmt.Errorf("Java 5 interface method must be public abstract"))
+		}
 	}
 	member := builder.AddMethod(access, method.Method.Name, descriptor)
 	if annotations := methodAnnotationsOf(class, method.MethodIndex); len(annotations) > 0 {
@@ -411,6 +483,7 @@ func addMethod(file *model.File, class *model.Class, method *model.EncodedMethod
 		homeBase:         incomingWords(proto, method.AccessFlags),
 		allocationByNew:  make(map[int]ir.Allocation),
 		allocationByCtor: make(map[int]ir.Allocation),
+		hierarchy:        options.Hierarchy,
 	}
 	return lowerer.lower()
 }
