@@ -137,3 +137,129 @@ func TestAdversarialGeneratedRecordPatternsRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestAdversarialNestedRecordPatternRoundTrip(t *testing.T) {
+	if !envEnabled() {
+		t.Skip("set JAVAJIVE_ADVERSARIAL_EVAL=1 to run the adversarial evaluation")
+	}
+	javac, err := exec.LookPath("javac")
+	if err != nil {
+		t.Skip("javac not found")
+	}
+	java, err := exec.LookPath("java")
+	if err != nil {
+		t.Skip("java not found")
+	}
+	if javacMajor(t, javac) < 21 {
+		t.Skip("record deconstruction requires javac 21")
+	}
+	const name = "NestedPattern"
+	const source = `
+public class NestedPattern {
+    record Point(int x, int y) {}
+    record Line(Point a, Point b) {}
+    static int sum(Line line) {
+        return switch (line) {
+            case Line(Point(int x1, int y1), Point(int x2, int y2)) -> x1 + y1 + x2 + y2;
+        };
+    }
+    public static void main(String[] args) {
+        System.out.println(sum(new Line(new Point(1, 2), new Point(3, 4))));
+    }
+}
+`
+	dir := compileConstructorFixture(t, javac, name, source)
+	originalRun, err := exec.Command(java, "-Xverify:all", "-cp", dir, name).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run original: %v\n%s", err, originalRun)
+	}
+	files, err := modernDecompileTree(t, dir)
+	if err != nil {
+		t.Fatalf("nested record decompile: %v", err)
+	}
+	rebuilt := t.TempDir()
+	var paths []string
+	for fileName, decompiled := range files {
+		if strings.Contains(decompiled, "yak-decompiler: undecompilable") {
+			t.Fatalf("%s was stubbed:\n%s", fileName, decompiled)
+		}
+		path := filepath.Join(rebuilt, fileName)
+		if err := os.WriteFile(path, []byte(decompiled), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		rebuiltPaths := append(paths, path)
+		paths = rebuiltPaths
+	}
+	if err := compileTreeAt(t, javac, rebuilt, paths, 21); err != nil {
+		t.Fatalf("nested record tree does not compile: %v", err)
+	}
+	rebuiltRun, err := exec.Command(java, "-Xverify:all", "-cp", rebuilt, name).CombinedOutput()
+	if err != nil {
+		t.Fatalf("nested record run failed: %v\n%s", err, rebuiltRun)
+	}
+	if string(rebuiltRun) != string(originalRun) {
+		t.Fatalf("nested record behavior changed: got %q want %q", rebuiltRun, originalRun)
+	}
+}
+
+func TestAdversarialArrayRecordPatternRoundTrip(t *testing.T) {
+	if !envEnabled() {
+		t.Skip("set JAVAJIVE_ADVERSARIAL_EVAL=1 to run the adversarial evaluation")
+	}
+	javac, err := exec.LookPath("javac")
+	if err != nil {
+		t.Skip("javac not found")
+	}
+	java, err := exec.LookPath("java")
+	if err != nil {
+		t.Skip("java not found")
+	}
+	if javacMajor(t, javac) < 21 {
+		t.Skip("record deconstruction requires javac 21")
+	}
+	const name = "ArrayPattern"
+	const source = `
+public class ArrayPattern {
+    record Values(int[] xs, String label) {}
+    static String describe(Values values) {
+        return switch (values) {
+            case Values(int[] xs, String label) -> label + ":" + xs.length;
+        };
+    }
+    public static void main(String[] args) {
+        System.out.println(describe(new Values(new int[]{1, 2, 3}, "xs")));
+    }
+}
+`
+	dir := compileConstructorFixture(t, javac, name, source)
+	originalRun, err := exec.Command(java, "-Xverify:all", "-cp", dir, name).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run original: %v\n%s", err, originalRun)
+	}
+	files, err := modernDecompileTree(t, dir)
+	if err != nil {
+		t.Fatalf("array record decompile: %v", err)
+	}
+	rebuilt := t.TempDir()
+	var paths []string
+	for fileName, decompiled := range files {
+		if strings.Contains(decompiled, "yak-decompiler: undecompilable") {
+			t.Fatalf("%s was stubbed:\n%s", fileName, decompiled)
+		}
+		path := filepath.Join(rebuilt, fileName)
+		if err := os.WriteFile(path, []byte(decompiled), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, path)
+	}
+	if err := compileTreeAt(t, javac, rebuilt, paths, 21); err != nil {
+		t.Fatalf("array record tree does not compile: %v", err)
+	}
+	rebuiltRun, err := exec.Command(java, "-Xverify:all", "-cp", rebuilt, name).CombinedOutput()
+	if err != nil {
+		t.Fatalf("array record run failed: %v\n%s", err, rebuiltRun)
+	}
+	if string(rebuiltRun) != string(originalRun) {
+		t.Fatalf("array record behavior changed: got %q want %q", rebuiltRun, originalRun)
+	}
+}

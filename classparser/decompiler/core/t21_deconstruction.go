@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
@@ -123,8 +124,22 @@ func isCompilerMatchDefault(d *Decompiler, byOff map[int]*OpCode, pc int) bool {
 // wired; the common record shapes are primitives, strings, and record classes.
 func recordComponentSourceType(d *Decompiler, descriptor string) (string, bool) {
 	typ, err := types.ParseDescriptor(descriptor)
-	if err != nil || typ == nil || typ.IsArray() {
+	if err != nil || typ == nil {
 		return "", false
+	}
+	return recordComponentSourceTypeOf(d, typ)
+}
+
+func recordComponentSourceTypeOf(d *Decompiler, typ types.JavaType) (string, bool) {
+	if typ == nil {
+		return "", false
+	}
+	if typ.IsArray() {
+		element, ok := recordComponentSourceTypeOf(d, typ.ElementType())
+		if !ok {
+			return "", false
+		}
+		return element + "[]", true
 	}
 	if primer, ok := typ.RawType().(*types.JavaPrimer); ok && primer != nil {
 		if primer.Name == types.JavaVoid {
@@ -152,7 +167,8 @@ func recordComponentSourceType(d *Decompiler, descriptor string) (string, bool) 
 // declared component list is authoritative; an arbitrary no-arg method is
 // never mistaken for a component accessor.
 func (d *Decompiler) recoverRecordPattern(start *OpCode, byOff map[int]*OpCode, bindSlot int,
-	recordType string, mergePC int, env map[int]string) (pattern string, bodyStart *OpCode, outEnv map[int]string, ok bool) {
+	recordType string, mergePC, loopPC, restartSlot, caseIndex int, env map[int]string,
+	bindNames map[string]int) (pattern string, bodyStart *OpCode, outEnv map[int]string, ok bool) {
 	if d == nil || d.RecordComponents == nil || start == nil || env == nil {
 		return "", nil, nil, false
 	}
@@ -165,9 +181,15 @@ func (d *Decompiler) recoverRecordPattern(start *OpCode, byOff map[int]*OpCode, 
 	for slot, name := range env {
 		outEnv[slot] = name
 	}
-	rendered := make([]string, 0, len(components))
+	rendered := make([]string, len(components))
+	type nestedPlan struct {
+		index    int
+		typeName string
+		bindSlot int
+	}
+	var plans []nestedPlan
 	op := start
-	for _, component := range components {
+	for i, component := range components {
 		if op == nil || GetRetrieveIdx(op) != bindSlot {
 			return "", nil, nil, false
 		}
@@ -186,13 +208,26 @@ func (d *Decompiler) recoverRecordPattern(start *OpCode, byOff map[int]*OpCode, 
 		if store == nil || GetStoreIdx(store) < 0 {
 			return "", nil, nil, false
 		}
-		componentType, ok := recordComponentSourceType(d, component.Descriptor)
-		if !ok || class_context.SafeIdentifier(component.Name) != component.Name {
+		tempSlot := GetStoreIdx(store)
+		componentType, typeOK := recordComponentSourceType(d, component.Descriptor)
+		if !typeOK || class_context.SafeIdentifier(component.Name) != component.Name {
 			return "", nil, nil, false
 		}
-		rendered = append(rendered, componentType+" "+component.Name)
-		tempSlot := GetStoreIdx(store)
-		outEnv[tempSlot] = component.Name
+		if nestedType, nestedBind, next, isNested, nestedOK := d.detectNestedComponent(store, tempSlot, component,
+			byOff, loopPC, restartSlot, caseIndex); isNested {
+			if !nestedOK {
+				return "", nil, nil, false
+			}
+			// javac binds every nested object first, then destructures them in
+			// component order. Queue the recursive parse until the sibling
+			// accessor binds have been consumed.
+			plans = append(plans, nestedPlan{index: i, typeName: nestedType, bindSlot: nestedBind})
+			op = next
+			continue
+		}
+		bindName := nextPatternBindName(component.Name, bindNames)
+		rendered[i] = componentType + " " + bindName
+		outEnv[tempSlot] = bindName
 		cursor := nextOp(store, byOff)
 		// javac copies the accessor result into the source pattern variable.
 		// Multiple copies can occur when the body reads the component several
@@ -202,7 +237,7 @@ func (d *Decompiler) recoverRecordPattern(start *OpCode, byOff map[int]*OpCode, 
 			if copyStore == nil || GetStoreIdx(copyStore) < 0 {
 				break
 			}
-			outEnv[GetStoreIdx(copyStore)] = component.Name
+			outEnv[GetStoreIdx(copyStore)] = bindName
 			cursor = nextOp(copyStore, byOff)
 		}
 		op = cursor
@@ -213,6 +248,23 @@ func (d *Decompiler) recoverRecordPattern(start *OpCode, byOff map[int]*OpCode, 
 	if len(rendered) != len(components) || op == nil || int(op.CurrentOffset) >= mergePC {
 		return "", nil, nil, false
 	}
+	for _, plan := range plans {
+		componentType, typeOK := recordComponentSourceType(d, components[plan.index].Descriptor)
+		if !typeOK {
+			return "", nil, nil, false
+		}
+		nestedPattern, next, nestedEnv, nestedOK := d.recoverRecordPattern(op, byOff, plan.bindSlot, plan.typeName,
+			mergePC, loopPC, restartSlot, caseIndex, outEnv, bindNames)
+		if !nestedOK {
+			return "", nil, nil, false
+		}
+		rendered[plan.index] = componentType + "(" + nestedPattern + ")"
+		outEnv = nestedEnv
+		op = next
+		if op == nil || int(op.CurrentOffset) >= mergePC {
+			return "", nil, nil, false
+		}
+	}
 	// The pattern has no source binding for the whole record; a body that reads
 	// the record object outside the consumed accessor prefix cannot be rendered.
 	for cursor := op; cursor != nil && int(cursor.CurrentOffset) < mergePC; cursor = nextOp(cursor, byOff) {
@@ -221,6 +273,105 @@ func (d *Decompiler) recoverRecordPattern(start *OpCode, byOff map[int]*OpCode, 
 		}
 	}
 	return strings.Join(rendered, ", "), op, outEnv, true
+}
+
+func nextPatternBindName(base string, used map[string]int) string {
+	if used == nil {
+		return base
+	}
+	if used[base] == 0 {
+		used[base] = 1
+		return base
+	}
+	used[base]++
+	return fmt.Sprintf("%s_%d", base, used[base])
+}
+
+func seedPatternBindNames(env map[int]string, used map[string]int) {
+	for _, value := range env {
+		if value == "" || class_context.SafeIdentifier(value) != value {
+			continue
+		}
+		if used[value] == 0 {
+			used[value] = 1
+		}
+	}
+}
+
+// detectNestedComponent recognizes the nested-pattern binding suffix after an
+// accessor result has been stored in tempSlot:
+//
+//	aload temp; instanceof Nested; <restart fail>; aload temp; astore nestedBind
+//
+// It returns the nested bind slot and the opcode after the binding, but leaves
+// component destructuring to the caller's ordered plan. A scalar component
+// returns isNested=false.
+func (d *Decompiler) detectNestedComponent(afterStore *OpCode, tempSlot int, component RecordComponent,
+	byOff map[int]*OpCode, loopPC, restartSlot, caseIndex int) (nestedType string, bindSlot int, next *OpCode, isNested, ok bool) {
+	load := nextOp(afterStore, byOff)
+	if load == nil || GetRetrieveIdx(load) != tempSlot {
+		return "", 0, nil, false, true
+	}
+	instanceOf := nextOp(load, byOff)
+	if instanceOf == nil || instanceOf.Instr == nil || instanceOf.Instr.OpCode != OP_INSTANCEOF {
+		return "", 0, nil, false, true
+	}
+	isNested = true
+	nestedType, typeOK := recordComponentClass(component.Descriptor)
+	if !typeOK || !d.instanceOfClass(instanceOf, nestedType) {
+		return "", 0, nil, true, false
+	}
+	ifOp := nextOp(instanceOf, byOff)
+	if ifOp == nil || ifOp.Instr == nil || !isIfOp(ifOp.Instr.OpCode) {
+		return "", 0, nil, true, false
+	}
+	branch := byOff[ifBranchPC(ifOp)]
+	fall := nextOp(ifOp, byOff)
+	var success *OpCode
+	switch {
+	case isRestartFail(branch, byOff, loopPC, restartSlot, caseIndex+1):
+		success = fall
+	case isRestartFail(fall, byOff, loopPC, restartSlot, caseIndex+1):
+		success = branch
+	default:
+		return "", 0, nil, true, false
+	}
+	if success == nil || GetRetrieveIdx(success) != tempSlot {
+		return "", 0, nil, true, false
+	}
+	bindOp := nextOp(success, byOff)
+	if bindOp == nil || GetStoreIdx(bindOp) < 0 {
+		return "", 0, nil, true, false
+	}
+	return nestedType, GetStoreIdx(bindOp), nextOp(bindOp, byOff), true, true
+}
+
+func recordComponentClass(descriptor string) (string, bool) {
+	typ, err := types.ParseDescriptor(descriptor)
+	if err != nil || typ == nil || typ.IsArray() {
+		return "", false
+	}
+	name, ok := types.ClassFQNOf(typ)
+	if !ok {
+		return "", false
+	}
+	return strings.ReplaceAll(name, "/", "."), true
+}
+
+func (d *Decompiler) instanceOfClass(op *OpCode, want string) bool {
+	if op == nil || op.Instr == nil || op.Instr.OpCode != OP_INSTANCEOF ||
+		d.constantPoolGetter == nil || len(op.Data) < 2 {
+		return false
+	}
+	cv, ok := d.constantPoolGetter(int(Convert2bytesToInt(op.Data))).(*values.JavaClassValue)
+	if !ok || cv == nil || cv.JavaType == nil {
+		return false
+	}
+	name, ok := types.ClassFQNOf(cv.JavaType)
+	if !ok {
+		name = cv.JavaType.String(&class_context.ClassContext{})
+	}
+	return strings.ReplaceAll(name, "/", ".") == strings.ReplaceAll(want, "/", ".")
 }
 
 // patternDeconstructionPrefix is the legacy shape check used only to fail

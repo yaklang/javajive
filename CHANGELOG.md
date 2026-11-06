@@ -152,9 +152,11 @@ Add a native, pure-Go DEX/APK-to-JAR path as a strict first vertical slice.
   failing closed. T21 certifies javac's shared `Throwable`/`MatchException`
   handler, reads the target record's declared component list, emits
   `case Record(component...)` patterns, and reproduces the compiler default
-  throw. The adversarial shape now compiles, verifies and matches runtime
-  behavior, and a generated 3-round corpus exercises 1-3 records with 1-3
-  primitive components per case.
+  throw. Nested record components reconstruct recursively, array components
+  keep a `T[]` binding, and the compiler default throw is emitted explicitly.
+  The adversarial shape compiles, verifies and matches runtime behavior; a
+  generated 3-round corpus exercises 1-3 records with 1-3 primitive components
+  per case, plus nested and array component cases.
 - Recover switch-expression joins in constructor bodies by placing the
   synthetic join local immediately after the `this()`/`super()` delegation.
   Joins in the constructor prefix (for example a switch expression passed to
