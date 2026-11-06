@@ -128,7 +128,7 @@ class TestExecutionEventMapping(unittest.TestCase):
         source, summary = workflow.split("  regression:\n", 1)
         self.assertRegex(source, r"shard:\s*\[0,\s*1,\s*2,\s*3,\s*4,\s*5,\s*6,\s*7,\s*8,\s*9\]")
         self.assertIn('SOURCE_SHARDS: "10"', source)
-        self.assertIn('SOURCE_WORKERS: "4"', source)
+        self.assertIn('SOURCE_WORKERS: "5"', source)
         self.assertIn("fail-fast: false", source)
         self.assertIn("needs: [source, regression]", summary)
         self.assertIn("if: always()", summary)
