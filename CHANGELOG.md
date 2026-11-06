@@ -94,6 +94,11 @@ Add a native, pure-Go DEX/APK-to-JAR path as a strict first vertical slice.
   `DecompileDEXFileWithAnalysisBudget`, `NewJarFSFromLocalWithAnalysisBudget`
   and CLI `-analysis-budget` route the same policy through archives, DEX
   translation and single classes. The default policy is unchanged.
+- Recover switch-expression joins in constructor bodies by placing the
+  synthetic join local immediately after the `this()`/`super()` delegation.
+  Joins in the constructor prefix (for example a switch expression passed to
+  `super(...)`) have no Java statement form and now fail that method closed
+  with a diagnostic instead of emitting empty cases that lose the value.
 - Reconstruct `module-info.class` as a real source module declaration instead
   of a comment: `open module`, `requires` transitive/static, `exports ... to`,
   `opens ... to`, `uses`, and `provides ... with`. Fix the value-receiver

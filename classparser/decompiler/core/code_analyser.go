@@ -49,19 +49,22 @@ type Decompiler struct {
 	// OriginalOwnStaticFinalStore proves the exact original CP field identity
 	// and own blank-final declaration for a PUTSTATIC. Display names alone
 	// cannot certify a nonthrowing store (MUTF-8 names may share a source view).
-	OriginalOwnStaticFinalStore func(pc int, owner, name, descriptor string) bool
-	stackValueProducers         map[values.JavaValue]*OpCode
-	stackLifetimeUseViews       map[values.JavaValue][]*values.SlotValue
-	stackLifetimeCopies         map[values.JavaValue]*values.JavaRef
-	comparisonWordInputs        map[*OpCode][]*statements.AssignStatement
-	effectfulStackPhiEdges      map[*OpCode]*statements.AssignStatement
-	carriedPrimitivePhiSeeds    map[*OpCode]*statements.AssignStatement
-	stackPhiSources             map[*values.SlotValue]*OpCode
-	stackPhiTypes               map[*values.SlotValue]types.JavaType
-	stackPhiDefinitions         map[*values.JavaRef]*values.SlotValue
-	evaluationSnapshots         map[*OpCode][]EvaluationSnapshot
-	constructorInitialized      bool
-	FunctionType                *types.JavaFuncType
+	OriginalOwnStaticFinalStore  func(pc int, owner, name, descriptor string) bool
+	stackValueProducers          map[values.JavaValue]*OpCode
+	stackLifetimeUseViews        map[values.JavaValue][]*values.SlotValue
+	stackLifetimeCopies          map[values.JavaValue]*values.JavaRef
+	comparisonWordInputs         map[*OpCode][]*statements.AssignStatement
+	effectfulStackPhiEdges       map[*OpCode]*statements.AssignStatement
+	carriedPrimitivePhiSeeds     map[*OpCode]*statements.AssignStatement
+	stackPhiSources              map[*values.SlotValue]*OpCode
+	stackPhiTypes                map[*values.SlotValue]types.JavaType
+	stackPhiDefinitions          map[*values.JavaRef]*values.SlotValue
+	evaluationSnapshots          map[*OpCode][]EvaluationSnapshot
+	constructorInitialized       bool
+	constructorDelegationPC      int
+	constructorDelegationKnown   bool
+	unsupportedConstructorPrefix string
+	FunctionType                 *types.JavaFuncType
 	// Physical lambda capture parameters, in their original descriptor
 	// order. This restricts source motion; it grants no factory/binding role.
 	LambdaCaptureOrderSlots []int
@@ -6390,6 +6393,9 @@ func (d *Decompiler) ParseStatement() error {
 	err = d.CalcOpcodeStackInfo()
 	if err != nil {
 		return err
+	}
+	if d.unsupportedConstructorPrefix != "" {
+		return fmt.Errorf("%s", d.unsupportedConstructorPrefix)
 	}
 	if d.semanticCFG != nil && d.semanticCFG.IrreducibleError != nil && !d.irreducibleEdgesHaveEmptyStack() {
 		return d.semanticCFG.IrreducibleError

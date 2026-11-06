@@ -75,10 +75,12 @@ Reported but not claimed as clean:
   `MaxAnalysisUpdates=2_000_000` (CLI `-analysis-budget 2000000`, or the
   budgeted archive/DEX APIs) scales the derived caps to 64M and completes the
   method. The default remains conservative for untrusted input.
-- **Constructor prefixes.** Acyclic stack phis and discarded-value sinks are
-  disabled inside constructors because Java cannot declare a synthetic local
-  before `super()`/`this()`; constructor prefix joins use the established
-  lowering path.
+- **Constructor prefixes.** A stack join in a constructor prefix cannot use a
+  synthetic local before `super()`/`this()`; those methods fail closed with
+  `constructor prefix stack join cannot be expressed before super()/this()`.
+  Body joins are recovered by placing the synthetic declaration immediately
+  after the delegation. Discarded-value sinks remain disabled inside
+  constructors.
 - **Record-deconstruction patterns.** T21-C06 covers a supported
   reconstruction. A separate adversarial shape whose record accessor calls
   share `Throwable` handlers that wrap failures in `MatchException` is

@@ -3,11 +3,44 @@ package core
 import (
 	"reflect"
 	"sort"
+	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
+
+// constructorDelegationOffset returns the PC of the first super()/this()
+// invokespecial in an ordinary constructor, or -1 when the method is not a
+// constructor or no direct delegation exists. Object construction inside the
+// delegation arguments is deliberately not treated as the delegation.
+func (d *Decompiler) constructorDelegationOffset() int {
+	if d == nil || d.FunctionContext == nil || d.FunctionContext.FunctionName != "<init>" {
+		return -1
+	}
+	if d.constructorDelegationKnown {
+		return d.constructorDelegationPC
+	}
+	d.constructorDelegationKnown = true
+	d.constructorDelegationPC = -1
+	self := strings.ReplaceAll(d.FunctionContext.ClassName, ".", "/")
+	super := strings.ReplaceAll(d.CodeLimits.DirectSuperClass, ".", "/")
+	for _, op := range d.opCodes {
+		if op == nil || op.Instr == nil || op.Instr.OpCode != OP_INVOKESPECIAL || len(op.Data) != 2 {
+			continue
+		}
+		member := d.GetMethodFromPool(int(Convert2bytesToInt(op.Data)))
+		if member == nil || member.Member != "<init>" {
+			continue
+		}
+		owner := strings.ReplaceAll(member.Name, ".", "/")
+		if owner == self || (super != "" && owner == super) {
+			d.constructorDelegationPC = int(op.CurrentOffset)
+			break
+		}
+	}
+	return d.constructorDelegationPC
+}
 
 // A switch expression leaves its selected value on the operand stack at the
 // join shared by every arm. The same shape appears in ordinary conditional
@@ -30,11 +63,16 @@ func (d *Decompiler) prepareAcyclicStackMergeSlot(merge *OpCode, sources []*OpCo
 		return nil
 	}
 	// Constructor prefixes (the super()/this() call and its arguments) cannot
-	// declare or assign a synthetic local before the delegation. Keep the
-	// established constructor lowering path; an acyclic phi in an ordinary
-	// constructor body remains a follow-up boundary.
+	// declare or assign a synthetic local before the delegation. A non-ternary
+	// stack join there (for example a switch expression used as a delegation
+	// argument) has no representable statement form, so fail the method closed
+	// instead of emitting cases that silently lose their value. Joins in the
+	// constructor body are ordinary locals and use the normal phi path.
 	if d.FunctionContext != nil && d.FunctionContext.FunctionName == "<init>" {
-		return nil
+		if delegation := d.constructorDelegationOffset(); delegation < 0 || int(merge.CurrentOffset) <= delegation {
+			d.unsupportedConstructorPrefix = "constructor prefix stack join cannot be expressed before super()/this()"
+			return nil
+		}
 	}
 	if d.acyclicPhiHasProtectedJoin(merge) && !d.commonSwitchAncestor(merge) {
 		// A protected normal/catch merge belongs to the established protected

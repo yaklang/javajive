@@ -131,6 +131,15 @@ being counted as success.
     `requires` (including transitive/static), `exports ... to`, `opens ... to`,
     `uses`, and `provides ... with`. The fixture compiles and runs identically
     on both the classpath and the module path.
+17. **Constructor switch expressions lost their selected value.** Acyclic stack
+    joins were disabled for every `<init>`, so a switch expression in a
+    constructor produced empty cases and only the last arm reached the
+    assignment. Body joins now materialize the value and place its declaration
+    immediately after the `this()`/`super()` delegation. Prefix joins (a switch
+    expression passed to `super(...)`) cannot be declared before delegation;
+    they now fail the method closed with
+    `constructor prefix stack join cannot be expressed before super()/this()`
+    instead of returning uncompilable source.
 
 ## Remaining boundaries
 
@@ -163,10 +172,10 @@ being counted as success.
   179,710 bytes. The CLI flag and the budgeted archive/DEX/JarFS APIs select
   this policy explicitly. Without it, the method degrades with a
   `resource_limit` status rather than a silent miscompile.
-- **Constructor prefixes.** Java cannot declare a synthetic local before the
-  `super()`/`this()` delegation, so acyclic stack phis and discarded-value
-  sinks are disabled inside constructors; constructor switch-expression joins
-  remain on the established prefix path.
+- **Constructor prefixes and discarded values.** A join in the prefix of a
+  constructor cannot use a synthetic local; such methods fail closed with a
+  diagnostic. Constructor-body joins are recovered by declaring the local after
+  the delegation. Discarded-value sinks remain disabled inside constructors.
 - **Module descriptors cover source-level directives.** `requires`,
   `exports`, `opens`, `uses`, and `provides` reconstruct, but module
   annotations, `module_version`, `ModuleMainClass` and `ModulePackages` are not

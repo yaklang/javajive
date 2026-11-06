@@ -4,6 +4,7 @@ import (
 	"sort"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
@@ -17,7 +18,7 @@ import (
 // name. The join would then read a different variable. A root declaration with
 // a type default preserves the JVM proof that every incoming edge assigns the
 // value before the consumer.
-func hoistStackMergePhiDeclarations(sts *[]statements.Statement) {
+func hoistStackMergePhiDeclarations(sts *[]statements.Statement, funcCtx *class_context.ClassContext) {
 	if sts == nil || len(*sts) == 0 {
 		return
 	}
@@ -74,5 +75,39 @@ func hoistStackMergePhiDeclarations(sts *[]statements.Statement) {
 	if len(prefix) == 0 {
 		return
 	}
+	// A constructor cannot declare a local before its super()/this() call. A
+	// stack join in the constructor body is still an ordinary local, so place
+	// its declaration immediately after the delegation instead of at the
+	// method root. Prefix joins are rejected by the core before this pass.
+	if funcCtx != nil && funcCtx.FunctionName == "<init>" {
+		if index := constructorDelegationStatementIndex(*sts); index >= 0 {
+			inserted := make([]statements.Statement, 0, len(*sts)+len(prefix))
+			inserted = append(inserted, (*sts)[:index+1]...)
+			inserted = append(inserted, prefix...)
+			inserted = append(inserted, (*sts)[index+1:]...)
+			*sts = inserted
+			return
+		}
+	}
 	*sts = append(prefix, *sts...)
+}
+
+// constructorDelegationStatementIndex finds the top-level this(...)/super(...)
+// expression statement. Constructors always delegate before ordinary body
+// statements, so a body declaration may follow it directly.
+func constructorDelegationStatementIndex(sts []statements.Statement) int {
+	for i, st := range sts {
+		expr, ok := st.(*statements.ExpressionStatement)
+		if !ok || expr == nil {
+			continue
+		}
+		call, ok := core.UnpackSoltValue(expr.Expression).(*values.FunctionCallExpression)
+		if !ok || call == nil || call.FunctionName != "<init>" || call.Kind != values.InvokeSpecial {
+			continue
+		}
+		if ref, ok := core.UnpackSoltValue(call.Object).(*values.JavaRef); ok && ref != nil && ref.IsThis {
+			return i
+		}
+	}
+	return -1
 }
