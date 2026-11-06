@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased — 2026-11-06
+
+Add DEX try/catch exception-flow translation.
+
+- Validate the DEX try table: protected ranges must end on instruction
+  boundaries, handler addresses must be instruction boundaries, handler types
+  must be object descriptors, and empty or out-of-range items are rejected with
+  precise diagnostics.
+- Make every handler entry a basic block and add exception edges from the
+  protected blocks, so liveness, definite assignment and value-category
+  analysis see the same control flow the JVM will.
+- `move-exception` is decoded and modelled as the definition of the caught
+  exception (typed `java.lang.Throwable`), and must open a handler block.
+- Lowering emits the JVM exception table preserving DEX handler order (typed
+  handlers first, then catch-all), stores the dispatched exception at handler
+  entry, and labels try boundaries independently of debug metadata.
+- Lowering now consumes the IR's single use/define table instead of keeping a
+  second copy, which is what made `move-exception` look like a register read.
+- On the Termux APK this raises strictly translatable classes to 1433 (53.2%).
+
 ## Unreleased — 2026-11-05
 
 Complete the reverse-engineering toolchain for nested archives and real DEX input.

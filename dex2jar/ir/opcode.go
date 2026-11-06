@@ -21,7 +21,7 @@ var opcodeTable = map[byte]opcodeInfo{
 	0x0a: {"move-result", "11x", 1, true},
 	0x0b: {"move-result-wide", "11x", 1, false},
 	0x0c: {"move-result-object", "11x", 1, true},
-	0x0d: {"move-exception", "11x", 1, false},
+	0x0d: {"move-exception", "11x", 1, true},
 	0x0e: {"return-void", "10x", 1, true},
 	0x0f: {"return", "11x", 1, true},
 	0x10: {"return-wide", "11x", 1, false},

@@ -114,6 +114,9 @@ func (l *methodLowerer) lower() error {
 	if l.endLabel != nil {
 		l.code.Mark(l.endLabel)
 	}
+	if err := l.emitExceptionTable(); err != nil {
+		return err
+	}
 	if err := l.emitDebug(); err != nil {
 		return err
 	}
@@ -127,10 +130,6 @@ func (l *methodLowerer) prepareAddressLabels() {
 	l.addressLabels = make(map[uint32]*classfilebuilder.Label, len(l.method.Blocks))
 	for _, block := range l.method.Blocks {
 		l.addressLabels[block.Start] = l.labels[block.Start]
-	}
-	debug := l.method.Code.Debug
-	if debug == nil {
-		return
 	}
 	boundary := make(map[uint32]bool, len(l.method.Instructions)+1)
 	for index := range l.method.Instructions {
@@ -146,17 +145,63 @@ func (l *methodLowerer) prepareAddressLabels() {
 		}
 		l.addressLabels[address] = l.code.NewLabel()
 	}
-	for _, position := range debug.Positions {
-		need(position.Address)
+	// Exception table boundaries are needed even without debug information.
+	for _, try := range l.method.Code.Tries {
+		need(try.StartAddress)
+		need(try.StartAddress + uint32(try.InstructionCount))
 	}
-	for _, local := range debug.Locals {
-		need(local.Start)
-		need(local.End)
+	if debug := l.method.Code.Debug; debug != nil {
+		for _, position := range debug.Positions {
+			need(position.Address)
+		}
+		for _, local := range debug.Locals {
+			need(local.Start)
+			need(local.End)
+		}
 	}
 	need(codeUnits)
 	if label, ok := l.addressLabels[codeUnits]; ok {
 		l.endLabel = label
 	}
+}
+
+// emitExceptionTable records every DEX try item as JVM exception-table
+// entries. Handler order is preserved: typed handlers first, then catch-all.
+func (l *methodLowerer) emitExceptionTable() error {
+	for _, try := range l.method.Code.Tries {
+		start := l.addressLabels[try.StartAddress]
+		end := l.addressLabels[try.StartAddress+uint32(try.InstructionCount)]
+		if start == nil || end == nil {
+			return methodDiagnostic(l.method.Context, nil, "try", fmt.Errorf("try item [%d,%d) has no bound labels", try.StartAddress, try.StartAddress+uint32(try.InstructionCount)))
+		}
+		emit := func(address uint32, catchType string) error {
+			handler := l.labels[address]
+			if handler == nil {
+				return methodDiagnostic(l.method.Context, nil, "try", fmt.Errorf("handler address %d is not a basic block", address))
+			}
+			class := ""
+			if catchType != "" {
+				name, err := objectInternalName(catchType)
+				if err != nil {
+					return methodDiagnostic(l.method.Context, nil, "try", fmt.Errorf("handler type %q: %w", catchType, err))
+				}
+				class = name
+			}
+			l.code.Catch(start, end, handler, class)
+			return nil
+		}
+		for _, handler := range try.Handler.Handlers {
+			if err := emit(handler.Address, handler.Type); err != nil {
+				return err
+			}
+		}
+		if try.Handler.CatchAllAddress != nil {
+			if err := emit(*try.Handler.CatchAllAddress, ""); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // emitDebug records line numbers, local variable names and parameter names from
@@ -321,6 +366,9 @@ func (l *methodLowerer) emitInstruction(index int) error {
 		return l.emitMove(instruction)
 	case instruction.Opcode == 0x0a || instruction.Opcode == 0x0c:
 		// The preceding invoke stores directly into the stable register home.
+	case instruction.Opcode == 0x0d:
+		// The JVM pushes the caught exception at handler entry; store it.
+		l.store(instruction.Regs[0])
 	case instruction.Opcode == 0x0e:
 		l.code.Emit(classfilebuilder.RETURN)
 	case instruction.Opcode == 0x0f:

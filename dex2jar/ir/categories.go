@@ -40,7 +40,8 @@ func instructionEffects(instruction Instruction) (uses, defs []uint16) {
 		return nil, nil
 	case instruction.Opcode >= 0x01 && instruction.Opcode <= 0x03 || instruction.Opcode >= 0x07 && instruction.Opcode <= 0x09:
 		return []uint16{instruction.Regs[1]}, []uint16{instruction.Regs[0]}
-	case instruction.Opcode == 0x0a || instruction.Opcode == 0x0c:
+	case instruction.Opcode == 0x0a || instruction.Opcode == 0x0c || instruction.Opcode == 0x0d:
+		// move-result and move-exception store an already-produced value.
 		return nil, []uint16{instruction.Regs[0]}
 	case instruction.Opcode == 0x0f || instruction.Opcode == 0x11 || instruction.Opcode == 0x27:
 		return []uint16{instruction.Regs[0]}, nil
