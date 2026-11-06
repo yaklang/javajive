@@ -56,3 +56,7 @@ tools/**/evidence/**
 
 # CI and local benchmark artifacts
 /artifacts/
+
+# Python bytecode caches from local contract runs
+__pycache__/
+*.pyc
