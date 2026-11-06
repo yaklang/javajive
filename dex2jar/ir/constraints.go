@@ -1,6 +1,7 @@
 package ir
 
 import (
+	"fmt"
 	"sort"
 
 	"github.com/yaklang/javajive/dex2jar/model"
@@ -20,34 +21,59 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 	define := func(register uint16, category Category) { defs[register] = category }
 
 	switch {
-	case instruction.Opcode >= 0x01 && instruction.Opcode <= 0x03 || instruction.Opcode >= 0x07 && instruction.Opcode <= 0x09:
+	case instruction.Opcode >= 0x01 && instruction.Opcode <= 0x09:
 		source := current[instruction.Regs[1]]
-		if instruction.Opcode >= 0x07 {
+		switch {
+		case instruction.Opcode >= 0x07:
 			if source.Kind == Unknown {
 				source = refCategory
 			}
-		} else if source.Kind == Unknown {
-			source = current[instruction.Regs[0]]
+		case instruction.Opcode >= 0x04:
+			// move-wide carries a category-2 value; only its interpretation is
+			// still open.
+			if source.Kind == Unknown {
+				source = Category{Kind: Bits64}
+			}
+		default:
+			if source.Kind == Unknown {
+				source = current[instruction.Regs[0]]
+			}
 		}
 		define(instruction.Regs[0], source)
 		use(instruction.Regs[1], source)
 	case instruction.Opcode == 0x0a:
-		define(instruction.Regs[0], intCategory)
+		// A 32-bit result is either an int or a float; the callee decides.
+		define(instruction.Regs[0], moveResultCategory(method, file, index, intCategory))
+	case instruction.Opcode == 0x0b:
+		define(instruction.Regs[0], moveResultCategory(method, file, index, Category{Kind: Bits64}))
 	case instruction.Opcode == 0x0c:
-		define(instruction.Regs[0], refCategory)
+		define(instruction.Regs[0], moveResultCategory(method, file, index, refCategory))
 	case instruction.Opcode == 0x0d:
 		// The handler entry pushes the thrown exception; move-exception stores it.
 		define(instruction.Regs[0], Category{Kind: Reference, Descriptor: "Ljava/lang/Throwable;"})
 	case instruction.Opcode == 0x0f:
-		use(instruction.Regs[0], intCategory)
+		// A 32-bit return is either an int or a float; the prototype decides.
+		kind, err := DescriptorCategory(method.Proto.ReturnType)
+		if err != nil {
+			return nil, nil, err
+		}
+		use(instruction.Regs[0], Category{Kind: kind, Descriptor: method.Proto.ReturnType})
+	case instruction.Opcode == 0x10:
+		kind, err := DescriptorCategory(method.Proto.ReturnType)
+		if err != nil {
+			return nil, nil, err
+		}
+		use(instruction.Regs[0], Category{Kind: kind, Descriptor: method.Proto.ReturnType})
 	case instruction.Opcode == 0x11 || instruction.Opcode == 0x27:
 		use(instruction.Regs[0], refCategory)
 	case instruction.Opcode >= 0x12 && instruction.Opcode <= 0x15:
+		fallback := Category{Kind: Bits32}
 		if instruction.Literal == 0 {
-			define(instruction.Regs[0], Category{Kind: Null})
-		} else {
-			define(instruction.Regs[0], intCategory)
+			fallback = Category{Kind: Null}
 		}
+		define(instruction.Regs[0], method.constantCategory(index, fallback))
+	case instruction.Opcode >= 0x16 && instruction.Opcode <= 0x19:
+		define(instruction.Regs[0], method.constantCategory(index, Category{Kind: Bits64}))
 	case instruction.Opcode == 0x1a || instruction.Opcode == 0x1b:
 		define(instruction.Regs[0], Category{Kind: Reference, Descriptor: "Ljava/lang/String;"})
 	case instruction.Opcode == 0x1c:
@@ -66,13 +92,26 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 		define(instruction.Regs[0], Category{Kind: Reference, Descriptor: file.Types[instruction.Index].Descriptor})
 	case instruction.Opcode == 0x24 || instruction.Opcode == 0x25:
 		component := file.Types[instruction.Index].Descriptor[1:]
-		category := intCategory
-		if len(component) > 0 && (component[0] == 'L' || component[0] == '[') {
-			category = refCategory
+		category, err := DescriptorCategory(component)
+		if err != nil {
+			return nil, nil, err
 		}
 		for _, register := range instruction.Regs {
-			use(register, category)
+			use(register, Category{Kind: category, Descriptor: component})
 		}
+	case instruction.Opcode >= 0x2d && instruction.Opcode <= 0x31:
+		var kind CategoryKind
+		switch instruction.Opcode {
+		case 0x2d, 0x2e:
+			kind = Float
+		case 0x2f, 0x30:
+			kind = Double
+		default:
+			kind = Long
+		}
+		use(instruction.Regs[1], Category{Kind: kind})
+		use(instruction.Regs[2], Category{Kind: kind})
+		define(instruction.Regs[0], intCategory)
 	case instruction.Opcode >= 0x32 && instruction.Opcode <= 0x37:
 		left, right := current[instruction.Regs[0]], current[instruction.Regs[1]]
 		if instruction.Opcode >= 0x34 || left.Kind == IntLike || right.Kind == IntLike {
@@ -87,25 +126,35 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 		if instruction.Opcode >= 0x3a {
 			use(instruction.Regs[0], intCategory)
 		}
-	case instruction.Opcode >= 0x44 && instruction.Opcode <= 0x4a:
-		use(instruction.Regs[1], refCategory)
+	case instruction.Opcode >= 0x44 && instruction.Opcode <= 0x51:
+		// The element type is not encoded in the instruction: DEX tracks it in
+		// the array register's type, which the category analysis carries.
+		array := current[instruction.Regs[1]]
+		if len(array.Descriptor) < 2 || array.Descriptor[0] != '[' {
+			return nil, nil, fmt.Errorf("array register v%d has no array type", instruction.Regs[1])
+		}
+		component := array.Descriptor[1:]
+		if err := validateArrayElementKind(instruction.Opcode, component); err != nil {
+			return nil, nil, err
+		}
+		kind, err := DescriptorCategory(component)
+		if err != nil {
+			return nil, nil, err
+		}
+		value := Category{Kind: kind, Descriptor: component}
+		use(instruction.Regs[1], Category{Kind: Reference, Descriptor: array.Descriptor})
 		use(instruction.Regs[2], intCategory)
-		if instruction.Opcode == 0x46 {
-			define(instruction.Regs[0], refCategory)
+		if instruction.Opcode <= 0x4a {
+			define(instruction.Regs[0], value)
 		} else {
-			define(instruction.Regs[0], intCategory)
+			use(instruction.Regs[0], value)
 		}
-	case instruction.Opcode >= 0x4b && instruction.Opcode <= 0x51:
-		value := intCategory
-		if instruction.Opcode == 0x4d {
-			value = refCategory
-		}
-		use(instruction.Regs[0], value)
-		use(instruction.Regs[1], refCategory)
-		use(instruction.Regs[2], intCategory)
 	case instruction.Opcode >= 0x52 && instruction.Opcode <= 0x6d:
 		field := file.Fields[instruction.Index]
-		kind, _ := DescriptorCategory(field.Type)
+		kind, err := DescriptorCategory(field.Type)
+		if err != nil {
+			return nil, nil, err
+		}
 		category := Category{Kind: kind, Descriptor: field.Type}
 		switch {
 		case instruction.Opcode <= 0x58:
@@ -122,35 +171,151 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 	case isInvoke(instruction.Opcode):
 		callee := file.Methods[instruction.Index]
 		proto := file.Protos[callee.ProtoIndex]
-		register := 0
+		position := 0
 		if !isStaticInvoke(instruction.Opcode) {
 			use(instruction.Regs[0], Category{Kind: Reference, Descriptor: callee.Class})
-			register++
+			position++
 		}
 		for _, descriptor := range proto.Parameters {
-			if register >= len(instruction.Regs) {
+			if position >= len(instruction.Regs) {
 				break
 			}
-			kind, _ := DescriptorCategory(descriptor)
-			use(instruction.Regs[register], Category{Kind: kind, Descriptor: descriptor})
-			register++
+			kind, err := DescriptorCategory(descriptor)
+			if err != nil {
+				return nil, nil, err
+			}
+			use(instruction.Regs[position], Category{Kind: kind, Descriptor: descriptor})
+			position += kind.Words()
 		}
-	case instruction.Opcode == 0x7b || instruction.Opcode == 0x7c || instruction.Opcode >= 0x8d && instruction.Opcode <= 0x8f:
-		use(instruction.Regs[1], intCategory)
-		define(instruction.Regs[0], intCategory)
-	case instruction.Opcode >= 0x90 && instruction.Opcode <= 0x9a:
-		use(instruction.Regs[1], intCategory)
-		use(instruction.Regs[2], intCategory)
-		define(instruction.Regs[0], intCategory)
-	case instruction.Opcode >= 0xb0 && instruction.Opcode <= 0xba:
-		use(instruction.Regs[0], intCategory)
-		use(instruction.Regs[1], intCategory)
-		define(instruction.Regs[0], intCategory)
+	case instruction.Opcode >= 0x7b && instruction.Opcode <= 0x8f:
+		source, destination := unaryCategories(instruction.Opcode)
+		use(instruction.Regs[1], Category{Kind: source})
+		define(instruction.Regs[0], Category{Kind: destination})
+	case instruction.Opcode >= 0x90 && instruction.Opcode <= 0xaf:
+		kind, shift, ok := binaryCategories(instruction.Opcode)
+		if !ok {
+			return nil, nil, nil
+		}
+		use(instruction.Regs[1], Category{Kind: kind})
+		if shift {
+			use(instruction.Regs[2], intCategory)
+		} else {
+			use(instruction.Regs[2], Category{Kind: kind})
+		}
+		define(instruction.Regs[0], Category{Kind: kind})
+	case instruction.Opcode >= 0xb0 && instruction.Opcode <= 0xcf:
+		kind, shift, ok := binaryTwoAddressCategories(instruction.Opcode)
+		if !ok {
+			return nil, nil, nil
+		}
+		use(instruction.Regs[0], Category{Kind: kind})
+		if shift {
+			use(instruction.Regs[1], intCategory)
+		} else {
+			use(instruction.Regs[1], Category{Kind: kind})
+		}
+		define(instruction.Regs[0], Category{Kind: kind})
 	case instruction.Opcode >= 0xd0 && instruction.Opcode <= 0xe2:
 		use(instruction.Regs[1], intCategory)
 		define(instruction.Regs[0], intCategory)
 	}
 	return uses, defs, nil
+}
+
+// moveResultCategory takes the result category from the preceding invoke. The
+// move-result instruction itself carries no type, so the callee prototype is
+// the authority on whether the value is an int, a float, a reference, a long or
+// a double.
+func moveResultCategory(method *Method, file *model.File, index int, fallback Category) Category {
+	if index > 0 {
+		previous := method.Instructions[index-1]
+		if isInvoke(previous.Opcode) && int(previous.Index) < len(file.Methods) {
+			callee := file.Methods[previous.Index]
+			if int(callee.ProtoIndex) < len(file.Protos) {
+				proto := file.Protos[callee.ProtoIndex]
+				kind, err := DescriptorCategory(proto.ReturnType)
+				if err == nil {
+					return Category{Kind: kind, Descriptor: proto.ReturnType}
+				}
+			}
+		}
+	}
+	return fallback
+}
+
+// unaryCategories maps an arithmetic conversion to its source and destination
+// categories.
+func unaryCategories(opcode byte) (source, destination CategoryKind) {
+	switch opcode {
+	case 0x7b, 0x7c, 0x8d, 0x8e, 0x8f:
+		return IntLike, IntLike
+	case 0x7d, 0x7e:
+		return Long, Long
+	case 0x7f:
+		return Float, Float
+	case 0x80:
+		return Double, Double
+	case 0x81:
+		return IntLike, Long
+	case 0x82:
+		return IntLike, Float
+	case 0x83:
+		return IntLike, Double
+	case 0x84:
+		return Long, IntLike
+	case 0x85:
+		return Long, Float
+	case 0x86:
+		return Long, Double
+	case 0x87:
+		return Float, IntLike
+	case 0x88:
+		return Float, Long
+	case 0x89:
+		return Float, Double
+	case 0x8a:
+		return Double, IntLike
+	case 0x8b:
+		return Double, Long
+	default: // 0x8c
+		return Double, Float
+	}
+}
+
+// binaryCategories maps a three-register arithmetic opcode to the operand
+// category and whether the second source is a shift distance.
+func binaryCategories(opcode byte) (kind CategoryKind, shift, ok bool) {
+	switch {
+	case opcode <= 0x9a:
+		kind = IntLike
+	case opcode <= 0xa2:
+		kind = Long
+	case opcode <= 0xa5:
+		return Long, true, true
+	case opcode <= 0xaa:
+		kind = Float
+	default:
+		kind = Double
+	}
+	return kind, false, true
+}
+
+// binaryTwoAddressCategories maps a /2addr arithmetic opcode to the operand
+// category and whether the second source is a shift distance.
+func binaryTwoAddressCategories(opcode byte) (kind CategoryKind, shift, ok bool) {
+	switch {
+	case opcode <= 0xba:
+		kind = IntLike
+	case opcode <= 0xc2:
+		kind = Long
+	case opcode <= 0xc5:
+		return Long, true, true
+	case opcode <= 0xca:
+		kind = Float
+	default:
+		kind = Double
+	}
+	return kind, false, true
 }
 
 func allocationAt(allocations []Allocation, instruction int) Allocation {
@@ -165,6 +330,16 @@ func allocationAt(allocations []Allocation, instruction int) Allocation {
 // sortedRegisters returns the keys of a register set in ascending order so
 // analysis output is deterministic.
 func sortedRegisters(set map[uint16]bool) []uint16 {
+	registers := make([]uint16, 0, len(set))
+	for register := range set {
+		registers = append(registers, register)
+	}
+	sort.Slice(registers, func(i, j int) bool { return registers[i] < registers[j] })
+	return registers
+}
+
+// sortedCategoryRegisters returns the keys of a category map in ascending order.
+func sortedCategoryRegisters(set map[uint16]Category) []uint16 {
 	registers := make([]uint16, 0, len(set))
 	for register := range set {
 		registers = append(registers, register)

@@ -34,6 +34,21 @@ const (
 	Reference
 	Null
 	Uninitialized
+	// Long and Double are category-2 values: they occupy the register named by
+	// the instruction plus the following register.
+	Long
+	Double
+	Float
+	// Bits32 and Bits64 are constant definitions whose width is known but whose
+	// interpretation is not: DEX constants are raw bit patterns, so the same
+	// const-wide can feed a long or a double operation. The first typed use
+	// resolves the kind.
+	Bits32
+	Bits64
+	// WideUpper marks the second register of a category-2 value. Reading that
+	// register through a narrow instruction is invalid DEX, and the category
+	// join rejects it instead of silently reading the high half.
+	WideUpper
 	Conflict
 )
 
@@ -52,11 +67,37 @@ func (k CategoryKind) String() string {
 		return "null"
 	case Uninitialized:
 		return "uninitialized"
+	case Long:
+		return "long"
+	case Double:
+		return "double"
+	case Float:
+		return "float"
+	case Bits32:
+		return "32-bit constant"
+	case Bits64:
+		return "64-bit constant"
+	case WideUpper:
+		return "wide-high"
 	case Conflict:
 		return "conflict"
 	default:
 		return fmt.Sprintf("category(%d)", k)
 	}
+}
+
+// Words reports how many 32-bit registers the category occupies.
+func (k CategoryKind) Words() int {
+	if k == Long || k == Double || k == Bits64 {
+		return 2
+	}
+	return 1
+}
+
+// isUntyped reports whether the category is a constant whose interpretation is
+// still open.
+func (k CategoryKind) isUntyped() bool {
+	return k == Null || k == Bits32 || k == Bits64
 }
 
 // Category records a register category at a program point. Allocation is the
@@ -128,6 +169,11 @@ type Method struct {
 	Context     Context
 	Proto       model.Proto
 	AccessFlags uint32
+	// constantKinds records the interpretation the backward refinement derived
+	// for constant definitions whose literal is a raw bit pattern.
+	constantKinds map[int]Category
+	// demands records the categories each instruction requires of its operands.
+	demands [][]demand
 }
 
 func contextFor(in Input) Context {
@@ -155,22 +201,26 @@ func diagnostic(ctx Context, ins *Instruction, op string, err error) error {
 	return report.New(ctx.Entry, ctx.Class, ctx.Method, offset, op, err)
 }
 
-// DescriptorCategory returns the supported register category for a field or
-// method descriptor. Wide and floating point values are deliberately rejected.
+// DescriptorCategory returns the register category for a field or method
+// descriptor. Category-2 descriptors (long and double) report their own kind so
+// callers can reserve the second register slot.
 func DescriptorCategory(descriptor string) (CategoryKind, error) {
-	kind, err := parseDescriptor(descriptor, true)
-	if err != nil {
+	if _, err := parseDescriptor(descriptor, true); err != nil {
 		return Unknown, err
 	}
-	switch kind {
-	case descriptorVoid:
+	switch descriptor[0] {
+	case 'V':
 		return Unknown, nil
-	case descriptorInt:
+	case 'Z', 'B', 'C', 'S', 'I':
 		return IntLike, nil
-	case descriptorReference:
+	case 'J':
+		return Long, nil
+	case 'D':
+		return Double, nil
+	case 'F':
+		return Float, nil
+	case 'L', '[':
 		return Reference, nil
-	case descriptorWideOrFloat:
-		return Unknown, fmt.Errorf("wide/floating descriptor %q is unsupported", descriptor)
 	default:
 		return Unknown, fmt.Errorf("invalid descriptor %q", descriptor)
 	}

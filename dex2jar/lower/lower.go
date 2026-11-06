@@ -243,6 +243,23 @@ func applyStaticValue(file *model.File, class *model.Class, field *model.Encoded
 			return classDiagnostic(file, class, "static-value", fmt.Errorf("field %q has unsupported reference initializer", field.Field.Name))
 		}
 	}
+	switch kind {
+	case ir.Long:
+		if value.Type == model.ValueLong || value.Type == model.ValueInt {
+			builder.SetConstantLong(member, value.Signed)
+			return nil
+		}
+	case ir.Float:
+		if value.Type == model.ValueFloat {
+			builder.SetConstantFloat(member, uint32(value.Unsigned))
+			return nil
+		}
+	case ir.Double:
+		if value.Type == model.ValueDouble {
+			builder.SetConstantDouble(member, value.Unsigned)
+			return nil
+		}
+	}
 	switch value.Type {
 	case model.ValueBoolean:
 		if !value.Boolean {
@@ -409,11 +426,22 @@ func methodDescriptor(proto model.Proto) (string, error) {
 }
 
 func incomingWords(proto model.Proto, flags uint32) uint16 {
-	words := len(proto.Parameters)
+	words := 0
+	for _, parameter := range proto.Parameters {
+		words += descriptorWords(parameter)
+	}
 	if flags&dexStatic == 0 {
 		words++
 	}
 	return uint16(words)
+}
+
+// descriptorWords is the JVM local and DEX register width of a descriptor.
+func descriptorWords(descriptor string) int {
+	if len(descriptor) == 1 && (descriptor[0] == 'J' || descriptor[0] == 'D') {
+		return 2
+	}
+	return 1
 }
 
 func superclassName(class *model.Class) (string, error) {

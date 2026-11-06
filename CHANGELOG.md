@@ -2,6 +2,32 @@
 
 ## Unreleased — 2026-11-06
 
+Translate long, float and double register values.
+
+- Add `Long`, `Double` and `Float` register categories. A category-2 value
+  reserves two JVM local slots, so the register pair can never collide with an
+  unrelated value in the second half.
+- Model DEX constants as raw bit patterns of a known width: a 32-bit constant
+  can become an int or a float, and a 64-bit constant a long or a double. A
+  backward demand analysis over the CFG resolves each constant definition from
+  its use sites, so `const-wide` feeding a `double` operation materializes a
+  `CONSTANT_Double` even when definition and use sit in different blocks.
+- Support `move-wide`, `move-result-wide`, `return-wide`, all `const-wide`
+  forms, float/double/long comparisons, every long/float/double arithmetic and
+  conversion opcode, wide fields, and wide array elements. Array element
+  opcodes are selected from the array register's flow type, which also makes
+  `aget`/`aput` on `float[]` emit `FALOAD`/`FASTORE`.
+- Add `CONSTANT_Long`, `CONSTANT_Float` and `CONSTANT_Double` to the class
+  builder, including the unusable second constant-pool slot a long or double
+  occupies, plus `ldc2_w` and wide `ConstantValue` attributes.
+- Fix invoke result typing: `move-result*` stores the result with the category
+  from the callee prototype and the move-result definition instead of the
+  register's pre-invoke category. Previously a reference result stored into a
+  fresh register emitted `istore` and failed JVM verification.
+- On the Termux APK this raises strictly translatable classes to 1657 (61.5%).
+
+## Unreleased — 2026-11-06
+
 Add DEX try/catch exception-flow translation.
 
 - Validate the DEX try table: protected ranges must end on instruction

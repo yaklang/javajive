@@ -215,11 +215,11 @@ func TestUnsupportedFamiliesHavePreciseDiagnostics(t *testing.T) {
 		words []uint16
 		part  string
 	}{
-		{"wide", []uint16{0x0004, 0x000e}, "wide/float/double"},
+		{"method-handle", []uint16{0x00fe, 0}, "post-DEX-035"},
 		{"monitor", []uint16{0x001d, 0x000e}, "monitor"},
 		{"switch", []uint16{0x002b, 0, 0}, "switch"},
-		{"fill-array", []uint16{0x0026, 0, 0}, "filled/fill-array"},
-		{"wide-array", []uint16{0x0045, 0, 0x000e}, "wide/float/double"},
+		{"fill-array", []uint16{0x0026, 0, 0}, "fill-array-data"},
+		{"wide-array", []uint16{0x0045, 0, 0x000e}, "has no array type"},
 		{"polymorphic", []uint16{0x00fa, 0, 0, 0}, "polymorphic/custom"},
 	}
 	for _, test := range tests {

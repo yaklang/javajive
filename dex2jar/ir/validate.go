@@ -163,6 +163,43 @@ func validateProto(proto model.Proto) error {
 	return nil
 }
 
+// validateArrayElementKind checks that the DEX element opcode matches the array
+// component descriptor. DEX shares aget/aput between int and float values, so
+// the descriptor is what selects the JVM element access.
+func validateArrayElementKind(opcode byte, component string) error {
+	switch opcode {
+	case 0x44, 0x4b:
+		if component == "I" || component == "F" {
+			return nil
+		}
+	case 0x45, 0x4c:
+		if component == "J" || component == "D" {
+			return nil
+		}
+	case 0x46, 0x4d:
+		if component != "" && (component[0] == 'L' || component[0] == '[') {
+			return nil
+		}
+	case 0x47, 0x4e:
+		if component == "Z" {
+			return nil
+		}
+	case 0x48, 0x4f:
+		if component == "B" {
+			return nil
+		}
+	case 0x49, 0x50:
+		if component == "C" {
+			return nil
+		}
+	case 0x4a, 0x51:
+		if component == "S" {
+			return nil
+		}
+	}
+	return fmt.Errorf("array opcode does not match element type %q", component)
+}
+
 func shortyDescriptor(descriptor string) byte {
 	if descriptor == "" {
 		return 0

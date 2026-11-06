@@ -51,6 +51,7 @@ const (
 	SIPUSH          Opcode = 0x11
 	LDC             Opcode = 0x12
 	LDC_W           Opcode = 0x13
+	LDC2_W          Opcode = 0x14
 	ILOAD           Opcode = 0x15
 	LLOAD           Opcode = 0x16
 	FLOAD           Opcode = 0x17

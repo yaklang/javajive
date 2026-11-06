@@ -10,18 +10,25 @@ import (
 const (
 	cpUTF8               = 1
 	cpInteger            = 3
+	cpFloat              = 4
+	cpLong               = 5
+	cpDouble             = 6
 	cpClass              = 7
 	cpString             = 8
 	cpFieldref           = 9
 	cpMethodref          = 10
 	cpInterfaceMethodref = 11
 	cpNameAndType        = 12
+	// cpPadding marks the unusable second slot a long or double constant
+	// occupies. It is never written to the class file.
+	cpPadding = 0
 )
 
 type cpEntry struct {
 	tag   byte
 	a, b  uint16
 	i32   int32
+	i64   int64
 	bytes []byte
 	key   string
 	text  string
@@ -51,6 +58,22 @@ func (p *ConstantPool) add(e cpEntry) (uint16, error) {
 	}
 	p.entries = append(p.entries, e)
 	index := uint16(len(p.entries))
+	p.index[e.key] = index
+	return index, nil
+}
+
+// addWide adds a two-slot constant. A long or double occupies index n and the
+// unusable index n+1, so the pool keeps a padding entry for the second slot.
+func (p *ConstantPool) addWide(e cpEntry) (uint16, error) {
+	if index, ok := p.index[e.key]; ok {
+		return index, nil
+	}
+	if len(p.entries)+2 > math.MaxUint16-1 {
+		return 0, fmt.Errorf("constant pool limit exceeded: constant_pool_count would exceed 65535")
+	}
+	p.entries = append(p.entries, e)
+	index := uint16(len(p.entries))
+	p.entries = append(p.entries, cpEntry{tag: cpPadding})
 	p.index[e.key] = index
 	return index, nil
 }
@@ -96,6 +119,21 @@ func (p *ConstantPool) String(value string) (uint16, error) {
 // Integer adds a CONSTANT_Integer.
 func (p *ConstantPool) Integer(value int32) (uint16, error) {
 	return p.add(cpEntry{tag: cpInteger, i32: value, key: fmt.Sprintf("i:%d", value)})
+}
+
+// Long adds a CONSTANT_Long.
+func (p *ConstantPool) Long(value int64) (uint16, error) {
+	return p.addWide(cpEntry{tag: cpLong, i64: value, key: fmt.Sprintf("j:%d", value)})
+}
+
+// Float adds a CONSTANT_Float from its IEEE-754 bit pattern.
+func (p *ConstantPool) Float(bits uint32) (uint16, error) {
+	return p.add(cpEntry{tag: cpFloat, i32: int32(bits), key: fmt.Sprintf("f:%08x", bits)})
+}
+
+// Double adds a CONSTANT_Double from its IEEE-754 bit pattern.
+func (p *ConstantPool) Double(bits uint64) (uint16, error) {
+	return p.addWide(cpEntry{tag: cpDouble, i64: int64(bits), key: fmt.Sprintf("d:%016x", bits)})
 }
 
 // NameAndType adds a CONSTANT_NameAndType.
@@ -178,7 +216,11 @@ func (p *ConstantPool) entry(index uint16) (cpEntry, error) {
 	if index == 0 || int(index) > len(p.entries) {
 		return cpEntry{}, fmt.Errorf("constant pool index %d is out of range", index)
 	}
-	return p.entries[index-1], nil
+	entry := p.entries[index-1]
+	if entry.tag == cpPadding {
+		return cpEntry{}, fmt.Errorf("constant pool index %d is the unusable half of a long/double constant", index)
+	}
+	return entry, nil
 }
 
 func (p *ConstantPool) write(dst *byteWriter) error {
@@ -187,13 +229,19 @@ func (p *ConstantPool) write(dst *byteWriter) error {
 	}
 	dst.u2(uint16(p.Count()))
 	for _, e := range p.entries {
+		if e.tag == cpPadding {
+			continue
+		}
 		dst.u1(e.tag)
 		switch e.tag {
 		case cpUTF8:
 			dst.u2(uint16(len(e.bytes)))
 			dst.bytes(e.bytes)
-		case cpInteger:
+		case cpInteger, cpFloat:
 			dst.u4(uint32(e.i32))
+		case cpLong, cpDouble:
+			dst.u4(uint32(uint64(e.i64) >> 32))
+			dst.u4(uint32(e.i64))
 		case cpClass, cpString:
 			dst.u2(e.a)
 		case cpFieldref, cpMethodref, cpInterfaceMethodref, cpNameAndType:

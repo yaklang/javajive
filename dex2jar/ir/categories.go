@@ -33,54 +33,83 @@ func (m *Method) EffectsAt(index int) (uses, defs []uint16) {
 }
 
 // instructionEffects is the per-opcode use/define table shared by liveness,
-// definite-assignment and category analysis.
+// definite-assignment and category analysis. A category-2 definition also
+// defines the following register, which is how the pair stays assigned.
 func instructionEffects(instruction Instruction) (uses, defs []uint16) {
+	registers := instruction.Regs
 	switch {
 	case instruction.Opcode == 0x00 || instruction.Opcode == 0x0e || instruction.Opcode >= 0x28 && instruction.Opcode <= 0x2a:
 		return nil, nil
-	case instruction.Opcode >= 0x01 && instruction.Opcode <= 0x03 || instruction.Opcode >= 0x07 && instruction.Opcode <= 0x09:
-		return []uint16{instruction.Regs[1]}, []uint16{instruction.Regs[0]}
-	case instruction.Opcode == 0x0a || instruction.Opcode == 0x0c || instruction.Opcode == 0x0d:
+	case instruction.Opcode >= 0x01 && instruction.Opcode <= 0x09:
+		uses, defs = []uint16{registers[1]}, []uint16{registers[0]}
+	case instruction.Opcode >= 0x0a && instruction.Opcode <= 0x0d:
 		// move-result and move-exception store an already-produced value.
-		return nil, []uint16{instruction.Regs[0]}
-	case instruction.Opcode == 0x0f || instruction.Opcode == 0x11 || instruction.Opcode == 0x27:
-		return []uint16{instruction.Regs[0]}, nil
+		defs = []uint16{registers[0]}
+	case instruction.Opcode == 0x0f || instruction.Opcode == 0x10 || instruction.Opcode == 0x11:
+		uses = []uint16{registers[0]}
 	case instruction.Opcode >= 0x12 && instruction.Opcode <= 0x1c || instruction.Opcode == 0x22:
-		return nil, []uint16{instruction.Regs[0]}
+		defs = []uint16{registers[0]}
 	case instruction.Opcode == 0x1f:
-		return []uint16{instruction.Regs[0]}, []uint16{instruction.Regs[0]}
+		uses, defs = []uint16{registers[0]}, []uint16{registers[0]}
 	case instruction.Opcode == 0x20 || instruction.Opcode == 0x21 || instruction.Opcode == 0x23:
-		return []uint16{instruction.Regs[1]}, []uint16{instruction.Regs[0]}
+		uses, defs = []uint16{registers[1]}, []uint16{registers[0]}
 	case instruction.Opcode == 0x24 || instruction.Opcode == 0x25:
-		return append([]uint16(nil), instruction.Regs...), nil
+		uses = append([]uint16(nil), registers...)
+	case instruction.Opcode >= 0x2d && instruction.Opcode <= 0x31:
+		uses, defs = []uint16{registers[1], registers[2]}, []uint16{registers[0]}
 	case instruction.Opcode >= 0x32 && instruction.Opcode <= 0x37:
-		return append([]uint16(nil), instruction.Regs...), nil
+		uses = append([]uint16(nil), registers...)
 	case instruction.Opcode >= 0x38 && instruction.Opcode <= 0x3d:
-		return []uint16{instruction.Regs[0]}, nil
+		uses = []uint16{registers[0]}
 	case instruction.Opcode >= 0x44 && instruction.Opcode <= 0x4a:
-		return []uint16{instruction.Regs[1], instruction.Regs[2]}, []uint16{instruction.Regs[0]}
+		uses, defs = []uint16{registers[1], registers[2]}, []uint16{registers[0]}
 	case instruction.Opcode >= 0x4b && instruction.Opcode <= 0x51:
-		return []uint16{instruction.Regs[0], instruction.Regs[1], instruction.Regs[2]}, nil
+		uses = []uint16{registers[0], registers[1], registers[2]}
 	case instruction.Opcode >= 0x52 && instruction.Opcode <= 0x58:
-		return []uint16{instruction.Regs[1]}, []uint16{instruction.Regs[0]}
+		uses, defs = []uint16{registers[1]}, []uint16{registers[0]}
 	case instruction.Opcode >= 0x59 && instruction.Opcode <= 0x5f:
-		return []uint16{instruction.Regs[0], instruction.Regs[1]}, nil
+		uses = []uint16{registers[0], registers[1]}
 	case instruction.Opcode >= 0x60 && instruction.Opcode <= 0x66:
-		return nil, []uint16{instruction.Regs[0]}
+		defs = []uint16{registers[0]}
 	case instruction.Opcode >= 0x67 && instruction.Opcode <= 0x6d:
-		return []uint16{instruction.Regs[0]}, nil
+		uses = []uint16{registers[0]}
 	case isInvoke(instruction.Opcode):
-		return append([]uint16(nil), instruction.Regs...), nil
-	case instruction.Opcode == 0x7b || instruction.Opcode == 0x7c || instruction.Opcode >= 0x8d && instruction.Opcode <= 0x8f:
-		return []uint16{instruction.Regs[1]}, []uint16{instruction.Regs[0]}
-	case instruction.Opcode >= 0x90 && instruction.Opcode <= 0x9a:
-		return []uint16{instruction.Regs[1], instruction.Regs[2]}, []uint16{instruction.Regs[0]}
-	case instruction.Opcode >= 0xb0 && instruction.Opcode <= 0xba:
-		return []uint16{instruction.Regs[0], instruction.Regs[1]}, []uint16{instruction.Regs[0]}
+		uses = append([]uint16(nil), registers...)
+	case instruction.Opcode >= 0x7b && instruction.Opcode <= 0x8f:
+		uses, defs = []uint16{registers[1]}, []uint16{registers[0]}
+	case instruction.Opcode >= 0x90 && instruction.Opcode <= 0xaf:
+		uses, defs = []uint16{registers[1], registers[2]}, []uint16{registers[0]}
+	case instruction.Opcode >= 0xb0 && instruction.Opcode <= 0xcf:
+		uses, defs = []uint16{registers[0], registers[1]}, []uint16{registers[0]}
 	case instruction.Opcode >= 0xd0 && instruction.Opcode <= 0xe2:
-		return []uint16{instruction.Regs[1]}, []uint16{instruction.Regs[0]}
+		uses, defs = []uint16{registers[1]}, []uint16{registers[0]}
 	default:
-		return append([]uint16(nil), instruction.Regs...), nil
+		return append([]uint16(nil), registers...), nil
+	}
+	if wideDefinitionOpcode(instruction.Opcode) && len(defs) == 1 {
+		defs = append(defs, defs[0]+1)
+	}
+	return uses, defs
+}
+
+// wideDefinitionOpcode reports whether the destination of an opcode is a
+// category-2 value that occupies the following register too.
+func wideDefinitionOpcode(opcode byte) bool {
+	switch {
+	case opcode >= 0x04 && opcode <= 0x06, opcode == 0x0b, opcode >= 0x16 && opcode <= 0x19:
+		return true
+	case opcode == 0x45, opcode == 0x53, opcode == 0x61:
+		return true
+	case opcode == 0x7d || opcode == 0x7e || opcode == 0x80:
+		return true
+	case opcode == 0x81 || opcode == 0x83 || opcode == 0x86 || opcode == 0x88 || opcode == 0x89 || opcode == 0x8b:
+		return true
+	case opcode >= 0x9b && opcode <= 0xa5 || opcode >= 0xab && opcode <= 0xaf:
+		return true
+	case opcode >= 0xbb && opcode <= 0xc5 || opcode >= 0xcb && opcode <= 0xcf:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -112,10 +141,18 @@ func (m *Method) DefinitionAt(index int) (Definition, bool) {
 	return definition, true
 }
 
+// demand is one concrete category an instruction requires of an operand. It is
+// recorded while walking a block and consumed by the backward refinement pass.
+type demand struct {
+	register uint16
+	category Category
+}
+
 // blockRun is the local result of walking one basic block.
 type blockRun struct {
 	states      [][]Category
 	definitions []Definition
+	demands     [][]demand
 	exit        []Category
 }
 
@@ -127,53 +164,76 @@ func walkBlock(method *Method, file *model.File, allocations []Allocation, block
 	run := &blockRun{
 		states:      make([][]Category, 0, len(block.Instructions)),
 		definitions: make([]Definition, 0, len(block.Instructions)),
+		demands:     make([][]demand, 0, len(block.Instructions)),
 	}
 	state := append([]Category(nil), entryState...)
-	// A null constant has no intrinsic type; it adopts the type of its first
-	// use. Track where the current null lifetime started so the definition and
+	// A constant has no intrinsic type; it adopts the type of its first use.
+	// Track where the current untyped lifetime started so the definition and
 	// every intermediate state can be refined retroactively.
-	nullLifetime := make(map[uint16]int)
+	untypedLifetime := make(map[uint16]int)
+	wideHigh := func(register uint16, instruction *Instruction) error {
+		if int(register)+1 >= len(state) {
+			return diagnostic(method.Context, instruction, "", fmt.Errorf("wide value in v%d requires register v%d", register, register+1))
+		}
+		state[register+1] = Category{Kind: WideUpper}
+		delete(untypedLifetime, register+1)
+		return nil
+	}
 	for _, instructionIndex := range block.Instructions {
 		run.states = append(run.states, append([]Category(nil), state...))
 		position := len(run.states) - 1
+		instruction := &method.Instructions[instructionIndex]
 		uses, defs, err := instructionConstraints(method, file, instructionIndex, state, allocations)
 		if err != nil {
-			instruction := &method.Instructions[instructionIndex]
 			return nil, diagnostic(method.Context, instruction, "", err)
 		}
+		record := make([]demand, 0, len(uses))
 		// Operand requirements first: they constrain the values read at this
 		// point, including a destination register that is also an operand.
-		for register, category := range uses {
+		for _, register := range sortedCategoryRegisters(uses) {
+			category := uses[register]
 			if category.Kind == Unknown {
 				continue
 			}
+			record = append(record, demand{register: register, category: category})
 			merged, _, err := mergeCategory(state[register], category)
 			if err != nil {
-				instruction := &method.Instructions[instructionIndex]
 				return nil, diagnostic(method.Context, instruction, "", fmt.Errorf("v%d: %w", register, err))
 			}
-			if state[register].Kind == Null && merged.Kind != Null {
-				if start, ok := nullLifetime[register]; ok && start < position {
+			if state[register].Kind.isUntyped() && merged.Kind != state[register].Kind {
+				if start, ok := untypedLifetime[register]; ok && start < position {
 					for index := start + 1; index <= position; index++ {
 						run.states[index][register] = merged
 					}
 					run.definitions[start].Category = merged
-					delete(nullLifetime, register)
+					delete(untypedLifetime, register)
 				}
 			}
 			state[register] = merged
+			if merged.Kind.Words() == 2 {
+				if err := wideHigh(register, instruction); err != nil {
+					return nil, err
+				}
+			}
 		}
+		run.demands = append(run.demands, record)
 		definition := Definition{Register: -1}
-		for register, category := range defs {
+		for _, register := range sortedCategoryRegisters(defs) {
+			category := defs[register]
 			if category.Kind == Unknown {
 				continue
 			}
 			state[register] = category
 			definition = Definition{Register: int32(register), Category: category}
-			if category.Kind == Null {
-				nullLifetime[register] = position
+			if category.Kind.isUntyped() {
+				untypedLifetime[register] = position
 			} else {
-				delete(nullLifetime, register)
+				delete(untypedLifetime, register)
+			}
+			if category.Kind.Words() == 2 {
+				if err := wideHigh(register, instruction); err != nil {
+					return nil, err
+				}
 			}
 		}
 		run.definitions = append(run.definitions, definition)
@@ -202,7 +262,12 @@ func analyzeCategories(method *Method, file *model.File, allocations []Allocatio
 		}
 		kind, _ := DescriptorCategory(descriptor)
 		entry[parameter] = Category{Kind: kind, Descriptor: descriptor}
-		parameter++
+		words := kind.Words()
+		// A category-2 parameter occupies its register and the next one.
+		if words == 2 && parameter+1 < registerCount {
+			entry[parameter+1] = Category{Kind: WideUpper}
+		}
+		parameter += words
 	}
 
 	// usedBeforeDef drives use-site verification; the live sets decide which
@@ -246,6 +311,27 @@ func analyzeCategories(method *Method, file *model.File, allocations []Allocatio
 	}
 	_ = liveOut
 
+	// Constants are raw bit patterns, so a const instruction only knows its
+	// width; the backward refinement pass resolves its interpretation and the
+	// forward solution is recomputed until no constant changes kind.
+	for pass := 0; pass <= len(method.Instructions)+2; pass++ {
+		if _, err := solveCategories(method, file, allocations, entry, registerCount, propagate); err != nil {
+			return nil, err
+		}
+		changed, err := refineConstants(method, file)
+		if err != nil {
+			return nil, err
+		}
+		if !changed {
+			return entry, nil
+		}
+	}
+	return nil, diagnostic(method.Context, nil, "categories", fmt.Errorf("constant category inference did not converge"))
+}
+
+// solveCategories runs the forward category fixpoint and materializes the
+// per-instruction states, definitions and operand demands.
+func solveCategories(method *Method, file *model.File, allocations []Allocation, entry []Category, registerCount int, propagate []map[uint16]bool) ([][]Category, error) {
 	entries := make([][]Category, len(method.Blocks))
 	for index := range entries {
 		entries[index] = make([]Category, registerCount)
@@ -287,11 +373,12 @@ func analyzeCategories(method *Method, file *model.File, allocations []Allocatio
 		}
 	}
 
-	// Materialize per-instruction states and definitions.
+	// Materialize per-instruction states, definitions and demands.
 	stride := registerCount
 	method.CategoryStride = stride
 	method.Categories = make([]Category, len(method.Instructions)*stride)
 	method.Definitions = make([]Definition, len(method.Instructions))
+	method.demands = make([][]demand, len(method.Instructions))
 	for index := range method.Definitions {
 		method.Definitions[index].Register = -1
 	}
@@ -309,9 +396,10 @@ func analyzeCategories(method *Method, file *model.File, allocations []Allocatio
 		for offset, instructionIndex := range block.Instructions {
 			copy(method.Categories[instructionIndex*stride:], run.states[offset])
 			method.Definitions[instructionIndex] = run.definitions[offset]
+			method.demands[instructionIndex] = run.demands[offset]
 		}
 	}
-	return entry, nil
+	return entries, nil
 }
 
 // computeLiveness runs the standard backward live-variable analysis over the

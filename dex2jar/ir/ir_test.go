@@ -541,7 +541,7 @@ func TestBuildRejectsMalformedFilledNewArray(t *testing.T) {
 			name:  "wide element",
 			kind:  "[J",
 			words: []uint16{0x1024, 0x0000, 0x0000, 0x000c, 0x0011},
-			part:  "wide/float/double",
+			part:  "filled-new-array of a wide",
 		},
 		{
 			name:  "missing move-result-object",

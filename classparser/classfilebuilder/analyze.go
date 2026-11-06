@@ -198,6 +198,8 @@ func (c *Code) instructionEffect(i *instruction) (stackEffect, error) {
 			return stackEffect{pop: args, push: result}, nil
 		case NEW:
 			return stackEffect{push: 1}, nil
+		case LDC2_W:
+			return stackEffect{push: 2}, nil
 		case ANEWARRAY:
 			return stackEffect{pop: 1, push: 1}, nil
 		case CHECKCAST:
