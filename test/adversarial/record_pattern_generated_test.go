@@ -263,3 +263,72 @@ public class ArrayPattern {
 		t.Fatalf("array record behavior changed: got %q want %q", rebuiltRun, originalRun)
 	}
 }
+
+func TestAdversarialGuardedRecordPatternFailsClosedOrRoundTrips(t *testing.T) {
+	if !envEnabled() {
+		t.Skip("set JAVAJIVE_ADVERSARIAL_EVAL=1 to run the adversarial evaluation")
+	}
+	javac, err := exec.LookPath("javac")
+	if err != nil {
+		t.Skip("javac not found")
+	}
+	java, err := exec.LookPath("java")
+	if err != nil {
+		t.Skip("java not found")
+	}
+	if javacMajor(t, javac) < 21 {
+		t.Skip("record deconstruction requires javac 21")
+	}
+	const name = "GuardedPattern"
+	const source = `
+public class GuardedPattern {
+    record R(int x) {}
+    static String describe(R r) {
+        return switch (r) {
+            case R(int x) when x > 0 -> "pos";
+            case R(int x) -> "nonpos";
+        };
+    }
+    public static void main(String[] args) {
+        System.out.println(describe(new R(2)));
+        System.out.println(describe(new R(-1)));
+    }
+}
+`
+	dir := compileConstructorFixture(t, javac, name, source)
+	originalRun, err := exec.Command(java, "-Xverify:all", "-cp", dir, name).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run original: %v\n%s", err, originalRun)
+	}
+	files, err := modernDecompileTree(t, dir)
+	if err != nil {
+		// A guarded deconstruction may not be representable yet. It must fail
+		// closed (stub/diagnostic), never emit silently wrong source.
+		if strings.Contains(err.Error(), "stub") || strings.Contains(err.Error(), "incomplete") {
+			return
+		}
+		t.Fatalf("guarded record decompile: %v", err)
+	}
+	rebuilt := t.TempDir()
+	var paths []string
+	for fileName, decompiled := range files {
+		if strings.Contains(decompiled, "yak-decompiler: undecompilable") {
+			return // fail-closed is acceptable
+		}
+		path := filepath.Join(rebuilt, fileName)
+		if err := os.WriteFile(path, []byte(decompiled), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, path)
+	}
+	if err := compileTreeAt(t, javac, rebuilt, paths, 21); err != nil {
+		t.Fatalf("guarded record tree does not compile: %v", err)
+	}
+	rebuiltRun, err := exec.Command(java, "-Xverify:all", "-cp", rebuilt, name).CombinedOutput()
+	if err != nil {
+		t.Fatalf("guarded record run failed: %v\n%s", err, rebuiltRun)
+	}
+	if string(rebuiltRun) != string(originalRun) {
+		t.Fatalf("guarded record behavior changed: got %q want %q", rebuiltRun, originalRun)
+	}
+}
