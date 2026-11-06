@@ -59,6 +59,118 @@ func bindMethodTypeArguments(pattern, actual types.JavaType, variables map[strin
 	return reflect.DeepEqual(pattern.RawType(), actual.RawType())
 }
 
+// solveBareMethodTypeConstraints is the constraint-solving fallback for a
+// method type variable that appears only as a bare formal (`<T> T choose(T,T)`).
+// Repeated occurrences accumulate lower bounds and meet at their hierarchy LUB;
+// a nested invariant occurrence (`List<T>`) makes the problem non-bare and is
+// rejected so the strict structural binder remains authoritative there.
+func solveBareMethodTypeConstraints(params []types.JavaType, args []JavaValue, formals []string, ctx *class_context.ClassContext) (map[string]types.JavaType, bool) {
+	if len(params) != len(args) || len(formals) == 0 || ctx == nil {
+		return nil, false
+	}
+	variables := methodVariableSet(formals)
+	occurrences := map[string]int{}
+	for _, param := range params {
+		if name, bare := bareMethodVariable(param, variables); bare {
+			occurrences[name]++
+			continue
+		}
+		// A variable nested in any non-bare position cannot be solved by this
+		// fallback: List<String> is not assignable to List<Object>.
+		for name := range variables {
+			if javaTypeMentionsNames(param, []string{name}) {
+				return nil, false
+			}
+		}
+	}
+	for name := range variables {
+		if occurrences[name] == 0 {
+			return nil, false
+		}
+	}
+	bounds := map[string][]types.JavaType{}
+	for i, param := range params {
+		name, bare := bareMethodVariable(param, variables)
+		if !bare || args[i] == nil {
+			continue
+		}
+		if IsNullLiteral(valueUnwrapSlot(args[i])) {
+			continue
+		}
+		actual := args[i].Type()
+		if actual == nil || isPrimitiveJavaType(actual) || IsNullLiteral(valueUnwrapSlot(args[i])) {
+			return nil, false
+		}
+		bounds[name] = append(bounds[name], actual)
+	}
+	provider := types.SuperTypeProvider(nil)
+	if ctx.SiblingSuperTypes != nil {
+		provider = ctx.SiblingSuperTypes
+	}
+	bindings := map[string]types.JavaType{}
+	for _, name := range formals {
+		lower := bounds[name]
+		if len(lower) == 0 {
+			return nil, false
+		}
+		candidate := lower[0].Copy()
+		for _, actual := range lower[1:] {
+			if typeAcceptsForConstraint(actual, candidate, provider) {
+				continue
+			}
+			next := types.BridgedCommonSuperType(candidate, actual, provider)
+			if next == nil || isPrimitiveJavaType(next) || next.IsArray() {
+				return nil, false
+			}
+			candidate = next
+		}
+		if !isDenotableConstraintType(candidate) || !sourceDenotableJavaType(candidate, ctx) {
+			return nil, false
+		}
+		bindings[name] = candidate
+	}
+	return bindings, true
+}
+
+func valueUnwrapSlot(value JavaValue) JavaValue {
+	for i := 0; i < 32; i++ {
+		slot, ok := value.(*SlotValue)
+		if !ok || slot == nil {
+			return value
+		}
+		value = slot.GetValue()
+	}
+	return value
+}
+
+func isPrimitiveJavaType(t types.JavaType) bool {
+	if t == nil {
+		return true
+	}
+	_, primitive := t.RawType().(*types.JavaPrimer)
+	return primitive
+}
+
+func typeAcceptsForConstraint(actual, candidate types.JavaType, provider types.SuperTypeProvider) bool {
+	actualName, ok := types.ClassFQNOf(actual)
+	if !ok {
+		return false
+	}
+	candidateName, ok := types.ClassFQNOf(candidate)
+	if !ok {
+		return false
+	}
+	return actualName == candidateName || types.IsReferenceSubtypeBridged(actualName, candidateName, provider)
+}
+
+func isDenotableConstraintType(t types.JavaType) bool {
+	if t == nil || isPrimitiveJavaType(t) || t.IsArray() {
+		return false
+	}
+	_, ok := types.ClassFQNOf(t)
+	return ok
+}
+
 type receiverTypeQueryResult struct {
 	raw  string
 	args []types.JavaType
@@ -244,29 +356,36 @@ func (f *FunctionCallExpression) inferredGenericMethodReturnQuery(ctx *class_con
 	}
 	bindings := map[string]types.JavaType{}
 	variables := methodVariableSet(formals)
-	// Solve invariant container/array constraints before erased bare variables,
-	// independently of their order in the selected original descriptor.
-	for i, p := range params {
-		if !javaTypeMentionsNames(p, formals) {
-			continue
+	// A bare-variable method such as `<T> T choose(T,T)` admits multiple lower
+	// bounds and meets at their LUB. Try that constraint solve first; nested
+	// invariant occurrences fall back to the strict structural binder below.
+	if solved, ok := solveBareMethodTypeConstraints(params, f.Arguments, formals, ctx); ok {
+		bindings = solved
+	} else {
+		// Solve invariant container/array constraints before erased bare variables,
+		// independently of their order in the selected original descriptor.
+		for i, p := range params {
+			if !javaTypeMentionsNames(p, formals) {
+				continue
+			}
+			if _, bare := bareMethodVariable(p, variables); bare {
+				continue
+			}
+			if f.Arguments[i] == nil || !bindMethodTypeArguments(p, f.Arguments[i].Type(), variables, bindings) {
+				return nil
+			}
 		}
-		if _, bare := bareMethodVariable(p, variables); bare {
-			continue
-		}
-		if f.Arguments[i] == nil || !bindMethodTypeArguments(p, f.Arguments[i].Type(), variables, bindings) {
-			return nil
-		}
-	}
-	for i, p := range params {
-		name, bare := bareMethodVariable(p, variables)
-		if !bare {
-			continue
-		}
-		if f.Arguments[i] == nil {
-			return nil
-		}
-		if !bindMethodTypeArguments(p, f.Arguments[i].Type(), variables, bindings) && !f.erasedCallerArgumentAgrees(i, bindings[name], ctx) {
-			return nil
+		for i, p := range params {
+			name, bare := bareMethodVariable(p, variables)
+			if !bare {
+				continue
+			}
+			if f.Arguments[i] == nil {
+				return nil
+			}
+			if !bindMethodTypeArguments(p, f.Arguments[i].Type(), variables, bindings) && !f.erasedCallerArgumentAgrees(i, bindings[name], ctx) {
+				return nil
+			}
 		}
 	}
 

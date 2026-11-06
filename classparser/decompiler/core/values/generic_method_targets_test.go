@@ -221,3 +221,79 @@ func TestGenericMethodWitnessRequiresVariableRole(t *testing.T) {
 		})
 	}
 }
+
+func TestSolveBareMethodTypeConstraintsMeetsLUB(t *testing.T) {
+	tVar := types.NewJavaTypeVariable("T")
+	stringArg := NewJavaLiteral("x", types.NewJavaClass("java.lang.String"))
+	integerArg := NewJavaLiteral(1, types.NewJavaClass("java.lang.Integer"))
+	bindings, ok := solveBareMethodTypeConstraints(
+		[]types.JavaType{tVar, tVar},
+		[]JavaValue{stringArg, integerArg},
+		[]string{"T"}, &class_context.ClassContext{})
+	if !ok || bindings["T"] == nil {
+		t.Fatal("bare type variables did not meet at a common bound")
+	}
+	if name, _ := types.ClassFQNOf(bindings["T"]); name != "java.lang.Object" && name != "java.lang.Comparable" {
+		t.Fatalf("T bound = %v", bindings["T"])
+	}
+
+	nullArg := NewJavaLiteral("null", types.NewJavaClass("java.lang.Object"))
+	bindings, ok = solveBareMethodTypeConstraints(
+		[]types.JavaType{tVar, tVar},
+		[]JavaValue{nullArg, stringArg},
+		[]string{"T"}, &class_context.ClassContext{})
+	if !ok || !typeFQNEqualsForTest(bindings["T"], types.NewJavaClass("java.lang.String")) {
+		t.Fatalf("null arm did not contribute no bound: %v %v", bindings, ok)
+	}
+}
+
+func TestSolveBareMethodTypeConstraintsRejectsInvariantNesting(t *testing.T) {
+	tVar := types.NewJavaTypeVariable("T")
+	listParam := types.NewParameterizedType("java.util.List", []types.JavaType{tVar})
+	stringArg := NewJavaLiteral("x", types.NewJavaClass("java.lang.String"))
+	if _, ok := solveBareMethodTypeConstraints(
+		[]types.JavaType{listParam, tVar},
+		[]JavaValue{stringArg, stringArg},
+		[]string{"T"}, &class_context.ClassContext{}); ok {
+		t.Fatal("nested invariant type variable was treated as bare")
+	}
+}
+
+func typeFQNEqualsForTest(a, b types.JavaType) bool {
+	an, aok := types.ClassFQNOf(a)
+	bn, bok := types.ClassFQNOf(b)
+	return aok && bok && an == bn
+}
+
+func TestInferredGenericMethodReturnUsesConstraintSolver(t *testing.T) {
+	const desc = "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"
+	mt, err := types.ParseMethodDescriptor(desc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &class_context.ClassContext{
+		ClassName: "example.Owner",
+		MethodSignaturesByDesc: map[string]string{
+			class_context.MethodDescKey("choose", desc): "<T:Ljava/lang/Object;>(TT;TT;)TT;",
+		},
+	}
+	receiver := NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass(ctx.ClassName))
+	receiver.IsThis = true
+	member := &JavaClassMember{Name: ctx.ClassName, Member: "choose", Description: desc, JavaType: mt}
+	call := NewFunctionCallExpression(receiver, member, mt.FunctionType())
+	call.Descriptor = desc
+	call.FunctionName = "choose"
+	call.ClassName = ctx.ClassName
+	call.Arguments = []JavaValue{
+		NewJavaLiteral("x", types.NewJavaClass("java.lang.String")),
+		NewJavaLiteral(1, types.NewJavaClass("java.lang.Integer")),
+	}
+	got := call.inferredGenericMethodReturn(ctx)
+	if got == nil {
+		t.Fatal("bare-variable constraint solve did not produce a return type")
+	}
+	name, ok := types.ClassFQNOf(got)
+	if !ok || name != "java.lang.Object" && name != "java.lang.Comparable" {
+		t.Fatalf("constraint result = %v", got)
+	}
+}
