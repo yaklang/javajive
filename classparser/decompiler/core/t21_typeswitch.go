@@ -361,14 +361,14 @@ func inferMergePC(sw *OpCode, byOff map[int]*OpCode) int {
 	counts := map[int]int{}
 	sw.SwitchJmpCase.ForEach(func(k int, off int32) bool {
 		if op := byOff[int(off)]; op != nil {
-			if t, ok := trailingGoto(op, byOff, 24); ok {
+			if t, ok := trailingGoto(op, byOff, 512); ok {
 				counts[t]++
 			}
 		}
 		return true
 	})
 	if op := byOff[int(sw.SwitchDefaultOffset)]; op != nil {
-		if t, ok := trailingGoto(op, byOff, 24); ok {
+		if t, ok := trailingGoto(op, byOff, 512); ok {
 			counts[t]++
 		}
 	}
@@ -383,9 +383,21 @@ func inferMergePC(sw *OpCode, byOff map[int]*OpCode) int {
 
 func trailingGoto(start *OpCode, byOff map[int]*OpCode, maxHops int) (int, bool) {
 	op := start
+	seen := map[*OpCode]bool{}
 	for i := 0; i < maxHops && op != nil; i++ {
+		if seen[op] {
+			break
+		}
+		seen[op] = true
 		if op.Instr.OpCode == OP_GOTO || op.Instr.OpCode == OP_GOTO_W {
-			return ifBranchPC(op), true
+			target := byOff[ifBranchPC(op)]
+			// A switch-expression arm reaches its merge through forward gotos.
+			// A backward edge is a loop and cannot be the value merge.
+			if target == nil || target.CurrentOffset <= op.CurrentOffset {
+				break
+			}
+			op = target
+			continue
 		}
 		if isReturnOp(op.Instr.OpCode) {
 			return int(op.CurrentOffset), true
@@ -462,10 +474,14 @@ func recoverTypeCase(d *Decompiler, byOff map[int]*OpCode, start, mergePC, loopP
 		return "", "", "", false, false
 	}
 	op = nextOp(op, byOff)
-	if op == nil || op.Instr.OpCode != OP_CHECKCAST {
+	// javac may omit CHECKCAST when the matched type is final (for example a
+	// final record): the typeSwitch index already proves the operand type.
+	if op != nil && op.Instr.OpCode == OP_CHECKCAST {
+		op = nextOp(op, byOff)
+	}
+	if op == nil {
 		return "", "", "", false, false
 	}
-	op = nextOp(op, byOff)
 	bindSlot := GetStoreIdx(op)
 	if bindSlot < 0 {
 		return "", "", "", false, false
@@ -479,7 +495,9 @@ func recoverTypeCase(d *Decompiler, byOff map[int]*OpCode, start, mergePC, loopP
 	// A record deconstruction prefix is proven against the record's declared
 	// component list. Without that metadata, a multi-accessor prefix is still
 	// rejected rather than rendered as a simple type pattern.
-	if recordPattern, bodyStart, bodyEnv, recovered := d.recoverRecordPattern(cur, byOff, bindSlot, recordType, mergePC, env); recovered {
+	componentNames := map[string]int{}
+	seedPatternBindNames(env, componentNames)
+	if recordPattern, bodyStart, bodyEnv, recovered := d.recoverRecordPattern(cur, byOff, bindSlot, recordType, mergePC, loopPC, restartSlot, caseIndex, env, componentNames); recovered {
 		b, ok := evalExprToGoto(d, byOff, int(bodyStart.CurrentOffset), mergePC, selectorSlot, bodyEnv)
 		if !ok {
 			return "", "", "", true, false
