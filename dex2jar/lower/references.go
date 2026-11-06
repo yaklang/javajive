@@ -244,20 +244,42 @@ func (l *methodLowerer) checkArrayDescriptors(instruction *ir.Instruction, descr
 	return nil
 }
 
-// fileHierarchyCache indexes one DEX file's classes once; inspect lowers every
-// class of an application, so rebuilding the graph per method would be quadratic.
-var fileHierarchyCache sync.Map // *model.File -> map[string]*model.Class
+// maxHierarchyCacheEntries bounds the per-file class graphs kept alive while an
+// application is lowered; inspect walks one file at a time, so a small window is
+// enough and a long-lived process cannot grow this without limit.
+const maxHierarchyCacheEntries = 8
 
+var hierarchyCache = struct {
+	sync.Mutex
+	entries map[*model.File]map[string]*model.Class
+	order   []*model.File
+}{entries: make(map[*model.File]map[string]*model.Class)}
+
+// classHierarchy indexes one DEX file's classes once. Rebuilding the graph for
+// every method would be quadratic on large applications.
 func classHierarchy(file *model.File) map[string]*model.Class {
-	if cached, ok := fileHierarchyCache.Load(file); ok {
-		return cached.(map[string]*model.Class)
+	hierarchyCache.Lock()
+	if cached, ok := hierarchyCache.entries[file]; ok {
+		hierarchyCache.Unlock()
+		return cached
 	}
+	hierarchyCache.Unlock()
+
 	index := make(map[string]*model.Class, len(file.Classes))
 	for position := range file.Classes {
 		class := &file.Classes[position]
 		index[class.Descriptor] = class
 	}
-	fileHierarchyCache.Store(file, index)
+
+	hierarchyCache.Lock()
+	if len(hierarchyCache.order) >= maxHierarchyCacheEntries {
+		evicted := hierarchyCache.order[0]
+		hierarchyCache.order = hierarchyCache.order[1:]
+		delete(hierarchyCache.entries, evicted)
+	}
+	hierarchyCache.entries[file] = index
+	hierarchyCache.order = append(hierarchyCache.order, file)
+	hierarchyCache.Unlock()
 	return index
 }
 

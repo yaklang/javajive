@@ -356,10 +356,44 @@ func (p *parser) applyInnerClass(c *model.Class, annotation model.Annotation) er
 		}
 		flags = uint16(value.Signed)
 	}
+	// The InnerClass annotation carries only the simple name and flags. The
+	// declaring class comes from a MemberClasses row on the outer class or an
+	// EnclosingClass annotation; fillInnerClassOuters links it afterwards
+	// instead of parsing "$" out of the descriptor.
 	c.InnerClasses = append(c.InnerClasses, model.InnerClass{
-		Inner: c.Descriptor, Outer: outerOfDescriptor(c.Descriptor), Name: name, Flags: flags,
+		Inner: c.Descriptor, Name: name, Flags: flags,
 	})
 	return nil
+}
+
+// fillInnerClassOuters links nested classes to their declaring class using only
+// evidence present in the file: a MemberClasses row declared by the outer class,
+// or an EnclosingClass annotation on the nested class itself.
+func (p *parser) fillInnerClassOuters() {
+	memberOf := make(map[string]string)
+	for index := range p.file.Classes {
+		outer := &p.file.Classes[index]
+		for _, row := range outer.InnerClasses {
+			if row.Outer == outer.Descriptor && row.Inner != "" {
+				memberOf[row.Inner] = outer.Descriptor
+			}
+		}
+	}
+	for index := range p.file.Classes {
+		class := &p.file.Classes[index]
+		for row := range class.InnerClasses {
+			if class.InnerClasses[row].Outer != "" {
+				continue
+			}
+			if class.Enclosing != nil && class.Enclosing.Class != "" {
+				class.InnerClasses[row].Outer = class.Enclosing.Class
+				continue
+			}
+			if outer, ok := memberOf[class.Descriptor]; ok {
+				class.InnerClasses[row].Outer = outer
+			}
+		}
+	}
 }
 
 func protoDescriptor(proto model.Proto) (string, error) {
@@ -369,19 +403,6 @@ func protoDescriptor(proto model.Proto) (string, error) {
 	}
 	descriptor += ")" + proto.ReturnType
 	return descriptor, nil
-}
-
-func outerOfDescriptor(descriptor string) string {
-	if len(descriptor) < 3 || descriptor[0] != 'L' {
-		return ""
-	}
-	name := descriptor[1 : len(descriptor)-1]
-	for index := len(name) - 1; index >= 0; index-- {
-		if name[index] == '$' && index+1 < len(name) {
-			return "L" + name[:index] + ";"
-		}
-	}
-	return ""
 }
 
 func (p *parser) checkAnnotationMethodMembership() error {

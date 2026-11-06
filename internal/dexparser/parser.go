@@ -114,6 +114,7 @@ func (p *parser) parse() (*model.File, error) {
 	if err := p.parseClasses(); err != nil {
 		return nil, err
 	}
+	p.fillInnerClassOuters()
 	if err := p.checkAnnotationMethodMembership(); err != nil {
 		return nil, err
 	}

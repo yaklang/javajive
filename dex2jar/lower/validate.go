@@ -113,6 +113,14 @@ func (l *methodLowerer) validateDelegationShape(delegation int, thisRegister uin
 					// DEX permits field stores on uninitialized this before
 					// super(). The JVM does not, so these move after delegation;
 					// the super constructor cannot observe subclass fields.
+					// Moving a store is only value-preserving while the stored
+					// register is not redefined before the delegation point.
+					valueRegister := instruction.Regs[0]
+					for probe := index + 1; probe < delegation; probe++ {
+						if _, definitions := l.registerEffects(probe); containsRegister(definitions, valueRegister) {
+							return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("field store before delegation reads v%d, which is reassigned before super()", valueRegister))
+						}
+					}
 					l.deferredStores = append(l.deferredStores, index)
 				default:
 					return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("uninitialized this v%d is used before constructor delegation", thisRegister))
@@ -124,6 +132,15 @@ func (l *methodLowerer) validateDelegationShape(delegation int, thisRegister uin
 		}
 	}
 	return nil
+}
+
+func containsRegister(registers []uint16, want uint16) bool {
+	for _, register := range registers {
+		if register == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (l *methodLowerer) validateDefinedDirectTarget(instruction *ir.Instruction, callee model.MethodID) error {

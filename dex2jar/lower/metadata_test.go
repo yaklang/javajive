@@ -466,9 +466,14 @@ func constructorStoreFixture() (*model.File, *model.Class) {
 				AccessFlags: dexPublic | dexConstructor,
 				Method:      methods[1],
 				Code: &model.Code{RegistersSize: 2, InsSize: 2, OutsSize: 1, Instructions: []uint16{
+					0x0000,         // nop
 					0x0159, 0x0000, // iput v1, v0, value  (before delegation)
 					0x1070, 0x0000, 0x0000, // invoke-direct {v0}, Object.<init>()
 					0x000e, // return-void
+				}, Debug: &model.DebugInfo{
+					LineStart: 1,
+					// A position on the deferred store must still bind a label.
+					Positions: []model.DebugPosition{{Address: 0, Line: 1}, {Address: 1, Line: 2}, {Address: 3, Line: 3}},
 				}},
 			},
 			{
@@ -683,5 +688,20 @@ func TestLowerUsesApplicationHierarchyForAssignability(t *testing.T) {
 	}
 	if _, err := javaclassparser.Parse(raw); err != nil {
 		t.Fatalf("parse generated class: %v", err)
+	}
+}
+
+func TestLowerRejectsDeferredStoreWithReassignedValue(t *testing.T) {
+	file, class := constructorStoreFixture()
+	// iput v1, v0, value; const/4 v1, #9; invoke-direct {v0}, Object.<init>()
+	class.DirectMethods[0].Code.Instructions = []uint16{
+		0x0159, 0x0000,
+		0x9112, // const/4 v1, #9
+		0x1070, 0x0000, 0x0000,
+		0x000e,
+	}
+	_, err := Class(file, class)
+	if err == nil || !strings.Contains(err.Error(), "reassigned before super") {
+		t.Fatalf("error = %v", err)
 	}
 }

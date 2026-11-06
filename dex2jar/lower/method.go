@@ -86,11 +86,13 @@ func (l *methodLowerer) lower() error {
 		l.code.Mark(l.labels[block.Start])
 		for _, index := range block.Instructions {
 			instruction := &l.method.Instructions[index]
-			if deferred[index] {
-				continue
-			}
+			// A deferred store still owns its address: debug data may reference
+			// it, and an unmarked label would fail class assembly.
 			if label := l.addressLabels[instruction.Offset]; label != nil && label != l.labels[block.Start] {
 				l.code.Mark(label)
+			}
+			if deferred[index] {
+				continue
 			}
 			if err := l.emitInstruction(index); err != nil {
 				return err
@@ -171,9 +173,13 @@ func (l *methodLowerer) emitDebug() error {
 	}
 	codeUnits := uint32(len(l.method.Code.Instructions))
 	startLabel := l.addressLabels[0]
-	// The JVM rejects two LocalVariableTable entries for the same slot and
-	// range, so a register already described explicitly keeps only that entry.
-	described := make(map[uint16]bool)
+	// The JVM rejects duplicate LocalVariableTable entries for the same slot and
+	// range, so an explicitly described range keeps only that entry.
+	type localRange struct {
+		register   uint16
+		start, end *classfilebuilder.Label
+	}
+	described := make(map[localRange]bool)
 	for _, local := range debug.Locals {
 		if local.Name == "" || local.Type == "" || local.Start >= local.End || local.End > codeUnits {
 			continue
@@ -186,7 +192,7 @@ func (l *methodLowerer) emitDebug() error {
 			continue
 		}
 		l.code.Local(start, end, local.Name, local.Type, l.home(local.Register))
-		described[local.Register] = true
+		described[localRange{register: local.Register, start: start, end: end}] = true
 	}
 	parameterRegister := l.method.Code.RegistersSize - l.method.Code.InsSize
 	if l.encoded.AccessFlags&dexStatic == 0 {
@@ -203,13 +209,17 @@ func (l *methodLowerer) emitDebug() error {
 		if register >= int(l.method.Code.RegistersSize) {
 			return nil
 		}
-		if described[uint16(register)] {
-			continue
-		}
+		// Without a proven descriptor the parameter name is dropped rather than
+		// described as java.lang.Object, which would invent a type.
 		descriptor := l.registerDescriptor[register]
 		if descriptor == "" {
-			descriptor = "Ljava/lang/Object;"
+			continue
 		}
+		key := localRange{register: uint16(register), start: startLabel, end: l.endLabel}
+		if described[key] {
+			continue
+		}
+		described[key] = true
 		l.code.Local(startLabel, l.endLabel, name, descriptor, l.home(uint16(register)))
 	}
 	return nil
