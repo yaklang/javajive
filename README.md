@@ -184,13 +184,20 @@ hidden-API sections; annotations, debug metadata, and `SourceFile`; non-default
 integer/string static constants; ordinary integer/reference control flow; fields
 and invokes on object and array owners; safely paired `new-instance`/constructor
 initialization; int, reference, boolean, byte, char, and short arrays including
-`filled-new-array`; register lifetime reuse within one method; and try/catch with
-`move-exception`, typed handlers, and catch-all handlers. Generated class files
-are parser-tested and JVM-verified, including executable branch, field, invoke,
-constructor, array, and exception paths.
+`filled-new-array` and `fill-array-data` literals; `packed-switch` and
+`sparse-switch`; `monitor-enter`/`monitor-exit`; register lifetime reuse within
+one method; try/catch with `move-exception`, typed handlers, catch-all handlers,
+and handlers that discard the caught exception; unreachable dead code; and long,
+float, and double values, including category-2 register pairs, wide constants,
+conversions, comparisons, wide fields, and wide array elements. Generated class
+files are parser-tested and JVM-verified, including executable branch, switch,
+field, invoke, constructor, array, numeric, monitor, and exception paths.
+Assignability between reference types is proven through the application
+hierarchy declared in the same DEX; a relation whose expected type is outside
+the application is accepted, because the platform hierarchy the input was
+verified against is not part of the DEX.
 
-Still unsupported: monitor operations; float, long, and double values or
-opcodes; `packed-switch`/`sparse-switch` and `fill-array-data` payloads; DEX 038+
+Still unsupported: `filled-new-array` of wide or floating elements; DEX 038+
 dynamic invokes and method constants; CompactDex; and APK resources or native
 libraries. APK input
 means only canonically named `classes.dex`, `classes2.dex`, ... entries are

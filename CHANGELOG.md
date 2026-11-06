@@ -2,6 +2,84 @@
 
 ## Unreleased — 2026-11-06
 
+Translate switches, array literals, monitors, and discarding exception handlers.
+
+- Decode switch and fill-array-data payloads as data instead of rejecting the
+  code stream. `packed-switch` carries a `first_key` followed by its targets,
+  `sparse-switch` carries a key array followed by a target array (sorted on
+  output), and
+  `fill-array-data` carries its element width and raw bytes.
+- Lower packed switches to `tableswitch`, sparse switches to `lookupswitch`,
+  and array literals to element stores selected by the array register's flow
+  type, so `int[]`, `byte[]`, `float[]` and `double[]` literals keep their
+  values.
+- Lower `monitor-enter`/`monitor-exit` directly; synchronized bodies and the
+  handler that releases the monitor and rethrows are JVM-verified.
+- Accept exception handlers that never bind the caught exception. DEX only
+  makes the exception available through `move-exception`, so a handler without
+  one discards it; the JVM still pushes it, and a `pop`/`goto` trampoline
+  discards it before the shared handler block runs.
+- Allow unreachable trailing blocks: DEX emits dead code after a terminator,
+  and it is emitted without being verified or executed.
+- Replace the reference descriptor of allocation aliases at `new-instance` and
+  the constructor instead of merging it with an earlier register lifetime.
+  This fixed false "not provably assignable" rejections for reused registers.
+- Prove assignability for types declared in the application and accept
+  relations whose expected type is outside it: the platform hierarchy the
+  input was verified against is not in the DEX. Reference arrays are covariant
+  in their components; primitive arrays stay invariant.
+- Resolve `invoke-super` targets through the application superclass chain
+  instead of requiring the direct superclass, and accept any DEX access flags
+  on `<clinit>` (the JVM ignores them).
+- Leave an unresolved array register untouched during the category fixpoint
+  instead of merging an empty reference into it; the empty category used to
+  poison later passes and produce spurious join conflicts.
+- Walk invoke arguments by register words in the reference analysis, so the
+  second half of a long or double argument is not checked as a reference.
+- Model exception edges precisely: a handler entry merges the register state at
+  the start of every protected instruction, and the backward demand analysis
+  injects handler demands at those instructions instead of at the protected
+  block exit. Definitions that happen after the last throwing instruction no
+  longer leak into the handler.
+- Compute block reachability after exception edges are added, and ignore
+  unreachable predecessors when joining register categories.
+- Read sparse switch payloads as a key array followed by a target array, and
+  treat nested reference arrays as covariant in their components.
+- Validate each DEX file once per conversion instead of once per method. The
+  per-method whole-file check was quadratic: inspecting the F-Droid APK
+  (19,701 classes) went from over 40 minutes to 15 seconds, and the Termux APK
+  from 135 seconds to 4 seconds.
+- On the Termux APK this raises strictly translatable classes to 2628 (97.5%);
+  on the F-Droid APK (19,701 classes) to 17,431 (88.5%).
+
+## Unreleased — 2026-11-06
+
+Translate long, float and double register values.
+
+- Add `Long`, `Double` and `Float` register categories. A category-2 value
+  reserves two JVM local slots, so the register pair can never collide with an
+  unrelated value in the second half.
+- Model DEX constants as raw bit patterns of a known width: a 32-bit constant
+  can become an int or a float, and a 64-bit constant a long or a double. A
+  backward demand analysis over the CFG resolves each constant definition from
+  its use sites, so `const-wide` feeding a `double` operation materializes a
+  `CONSTANT_Double` even when definition and use sit in different blocks.
+- Support `move-wide`, `move-result-wide`, `return-wide`, all `const-wide`
+  forms, float/double/long comparisons, every long/float/double arithmetic and
+  conversion opcode, wide fields, and wide array elements. Array element
+  opcodes are selected from the array register's flow type, which also makes
+  `aget`/`aput` on `float[]` emit `FALOAD`/`FASTORE`.
+- Add `CONSTANT_Long`, `CONSTANT_Float` and `CONSTANT_Double` to the class
+  builder, including the unusable second constant-pool slot a long or double
+  occupies, plus `ldc2_w` and wide `ConstantValue` attributes.
+- Fix invoke result typing: `move-result*` stores the result with the category
+  from the callee prototype and the move-result definition instead of the
+  register's pre-invoke category. Previously a reference result stored into a
+  fresh register emitted `istore` and failed JVM verification.
+- On the Termux APK this raises strictly translatable classes to 1657 (61.5%).
+
+## Unreleased — 2026-11-06
+
 Add DEX try/catch exception-flow translation.
 
 - Validate the DEX try table: protected ranges must end on instruction

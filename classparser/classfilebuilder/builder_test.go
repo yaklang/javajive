@@ -159,6 +159,66 @@ func TestWideLocalsIIncAndLDCWide(t *testing.T) {
 	}
 }
 
+func TestLongDoubleAndFloatConstantsExecute(t *testing.T) {
+	class := NewClass("WideConstants", "java/lang/Object", ACC_PUBLIC|ACC_SUPER)
+	longIndex, err := class.Pool().Long(1<<40 + 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doubleIndex, err := class.Pool().Double(math.Float64bits(2.5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	floatIndex, err := class.Pool().Float(math.Float32bits(1.5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// double values() { return 2.5 + (double) 1.5f + (double) (1L << 40 + 7); }
+	values := class.AddMethod(ACC_PUBLIC|ACC_STATIC, "values", "()D").Code()
+	values.LDC2(doubleIndex).LDC(floatIndex).Emit(F2D).Emit(DADD).LDC2(longIndex).Emit(L2D).Emit(DADD).Emit(DRETURN)
+
+	expected, err := class.Pool().Double(math.Float64bits(float64(1<<40+7) + 4.0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	valuesRef, err := class.Pool().Methodref("WideConstants", "values", "()D")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertionClass, err := class.Pool().Class("java/lang/AssertionError")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertionCtor, err := class.Pool().Methodref("java/lang/AssertionError", "<init>", "()V")
+	if err != nil {
+		t.Fatal(err)
+	}
+	main := class.AddMethod(ACC_PUBLIC|ACC_STATIC, "main", "([Ljava/lang/String;)V").Code()
+	ok := main.NewLabel()
+	main.CP(INVOKESTATIC, valuesRef).LDC2(expected).Emit(DCMPG).Branch(IFEQ, ok)
+	main.CP(NEW, assertionClass).Emit(DUP).CP(INVOKESPECIAL, assertionCtor).Emit(ATHROW)
+	main.Mark(ok).Emit(RETURN)
+
+	raw, err := class.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := javaclassparser.Parse(raw); err != nil {
+		t.Fatalf("parse generated class: %v", err)
+	}
+	java, err := exec.LookPath("java")
+	if err != nil {
+		t.Skip("java is unavailable")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "WideConstants.class"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command(java, "-Xverify:all", "-cp", dir, "WideConstants").CombinedOutput(); err != nil {
+		t.Fatalf("java verification of WideConstants failed: %v\n%s", err, output)
+	}
+}
+
 func TestLongBranchesWidenAndExpand(t *testing.T) {
 	class := NewClass("LongBranches", "java/lang/Object", ACC_PUBLIC|ACC_SUPER)
 	code := class.AddMethod(ACC_PUBLIC|ACC_STATIC, "choose", "(I)I").Code()

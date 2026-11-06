@@ -33,8 +33,22 @@ const (
 	dexDeclaredSynchronized = uint32(0x20000)
 )
 
+// ClassOptions controls optional work around a class translation.
+type ClassOptions struct {
+	// FileValidated reports that the caller already validated File with
+	// ir.ValidateFile and will not mutate it. Method lowering then skips the
+	// per-method whole-file metadata validation, which is quadratic on large
+	// applications.
+	FileValidated bool
+}
+
 // Class lowers one parser-neutral DEX class. It never returns partial bytes.
 func Class(file *model.File, class *model.Class) ([]byte, error) {
+	return ClassWithOptions(file, class, ClassOptions{})
+}
+
+// ClassWithOptions is Class with explicit caller-provided guarantees.
+func ClassWithOptions(file *model.File, class *model.Class, options ClassOptions) ([]byte, error) {
 	if file == nil {
 		return nil, report.New("", "", "", -1, "class", fmt.Errorf("nil DEX file"))
 	}
@@ -116,7 +130,7 @@ func Class(file *model.File, class *model.Class) ([]byte, error) {
 			return nil, methodDiagnostic(methodContext(file, class, &method), nil, "method", fmt.Errorf("duplicate method %s%s", method.Method.Name, descriptor))
 		}
 		seenMethods[key] = true
-		if err := addMethod(file, class, &method, builder); err != nil {
+		if err := addMethod(file, class, &method, builder, options); err != nil {
 			return nil, err
 		}
 	}
@@ -243,6 +257,23 @@ func applyStaticValue(file *model.File, class *model.Class, field *model.Encoded
 			return classDiagnostic(file, class, "static-value", fmt.Errorf("field %q has unsupported reference initializer", field.Field.Name))
 		}
 	}
+	switch kind {
+	case ir.Long:
+		if value.Type == model.ValueLong || value.Type == model.ValueInt {
+			builder.SetConstantLong(member, value.Signed)
+			return nil
+		}
+	case ir.Float:
+		if value.Type == model.ValueFloat {
+			builder.SetConstantFloat(member, uint32(value.Unsigned))
+			return nil
+		}
+	case ir.Double:
+		if value.Type == model.ValueDouble {
+			builder.SetConstantDouble(member, value.Unsigned)
+			return nil
+		}
+	}
 	switch value.Type {
 	case model.ValueBoolean:
 		if !value.Boolean {
@@ -282,7 +313,7 @@ func shrinkSigned(descriptor string, value model.EncodedValue) int32 {
 	}
 }
 
-func addMethod(file *model.File, class *model.Class, method *model.EncodedMethod, builder *classfilebuilder.Class) error {
+func addMethod(file *model.File, class *model.Class, method *model.EncodedMethod, builder *classfilebuilder.Class, options ClassOptions) error {
 	ctx := methodContext(file, class, method)
 	if method.Method.Class != class.Descriptor {
 		return methodDiagnostic(ctx, nil, "method", fmt.Errorf("method owner %q does not match class", method.Method.Class))
@@ -366,7 +397,7 @@ func addMethod(file *model.File, class *model.Class, method *model.EncodedMethod
 	if declarationOnly {
 		return nil
 	}
-	built, err := ir.Build(ir.Input{File: file, Class: class, Method: method})
+	built, err := ir.Build(ir.Input{File: file, Class: class, Method: method, SkipFileValidation: options.FileValidated})
 	if err != nil {
 		return err
 	}
@@ -409,11 +440,22 @@ func methodDescriptor(proto model.Proto) (string, error) {
 }
 
 func incomingWords(proto model.Proto, flags uint32) uint16 {
-	words := len(proto.Parameters)
+	words := 0
+	for _, parameter := range proto.Parameters {
+		words += descriptorWords(parameter)
+	}
 	if flags&dexStatic == 0 {
 		words++
 	}
 	return uint16(words)
+}
+
+// descriptorWords is the JVM local and DEX register width of a descriptor.
+func descriptorWords(descriptor string) int {
+	if len(descriptor) == 1 && (descriptor[0] == 'J' || descriptor[0] == 'D') {
+		return 2
+	}
+	return 1
 }
 
 func superclassName(class *model.Class) (string, error) {
@@ -491,20 +533,23 @@ func methodAccess(flags uint32, name string) (uint16, error) {
 	if err := validateVisibility(flags); err != nil {
 		return 0, err
 	}
-	if flags&dexSynchronized != 0 && flags&dexNative == 0 {
-		return 0, fmt.Errorf("DEX synchronized flag requires native method")
-	}
 	if flags&dexAbstract != 0 && flags&(dexPrivate|dexStatic|dexFinal|dexSynchronized|dexNative|dexStrict|dexDeclaredSynchronized) != 0 {
 		return 0, fmt.Errorf("abstract method has incompatible access flags")
+	}
+	if name == "<clinit>" {
+		// The JVM ignores class-initializer access flags except ACC_STATIC, and
+		// DEX compilers routinely set public/private/synthetic/constructor bits
+		// that carry no JVM meaning.
+		return classfilebuilder.ACC_STATIC, nil
+	}
+	if flags&dexSynchronized != 0 && flags&dexNative == 0 {
+		return 0, fmt.Errorf("DEX synchronized flag requires native method")
 	}
 	if flags&dexConstructor != 0 && name != "<init>" && name != "<clinit>" {
 		return 0, fmt.Errorf("constructor access flag is set on %q", name)
 	}
 	if name == "<init>" && flags&(dexStatic|dexFinal|dexSynchronized|dexBridge|dexNative|dexAbstract|dexStrict|dexDeclaredSynchronized) != 0 {
 		return 0, fmt.Errorf("constructor has incompatible access flags")
-	}
-	if name == "<clinit>" && flags&(dexPublic|dexPrivate|dexProtected|dexFinal|dexSynchronized|dexBridge|dexVarargs|dexNative|dexAbstract|dexStrict|dexDeclaredSynchronized) != 0 {
-		return 0, fmt.Errorf("class initializer has incompatible access flags")
 	}
 	access := uint16(flags & 0xffff)
 	if flags&dexDeclaredSynchronized != 0 {

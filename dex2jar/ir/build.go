@@ -16,8 +16,10 @@ func Build(in Input) (*Method, error) {
 	if in.File == nil || in.Class == nil || in.Method == nil || in.Method.Code == nil {
 		return nil, diagnostic(ctx, nil, "method", fmt.Errorf("incomplete method input"))
 	}
-	if err := validateFileMetadata(in.File); err != nil {
-		return nil, diagnostic(ctx, nil, "metadata", err)
+	if !in.SkipFileValidation {
+		if err := validateFileMetadata(in.File); err != nil {
+			return nil, diagnostic(ctx, nil, "metadata", err)
+		}
 	}
 	if err := validateInputMetadata(in); err != nil {
 		return nil, diagnostic(ctx, nil, "metadata", err)
@@ -85,7 +87,7 @@ func validateInstructions(method *Method, file *model.File) error {
 				return diagnostic(method.Context, instruction, "", fmt.Errorf("filled-new-array type %q is not an array", descriptor))
 			}
 			if component := descriptor[1:]; component == "J" || component == "D" || component == "F" {
-				return diagnostic(method.Context, instruction, "", fmt.Errorf("unsupported opcode family: wide/float/double"))
+				return diagnostic(method.Context, instruction, "", fmt.Errorf("filled-new-array of a wide or floating element is unsupported"))
 			}
 		}
 		if instruction.Opcode == 0x1c || instruction.Opcode == 0x1f || instruction.Opcode == 0x20 || instruction.Opcode == 0x22 || instruction.Opcode == 0x23 {
@@ -96,9 +98,6 @@ func validateInstructions(method *Method, file *model.File) error {
 			kind, err := parseDescriptor(descriptor, instruction.Opcode == 0x1c)
 			if err != nil {
 				return diagnostic(method.Context, instruction, "", err)
-			}
-			if kind == descriptorWideOrFloat {
-				return diagnostic(method.Context, instruction, "", fmt.Errorf("wide/floating descriptor %q is unsupported", descriptor))
 			}
 			switch instruction.Opcode {
 			case 0x1f, 0x20:
@@ -151,6 +150,25 @@ func validateInstructions(method *Method, file *model.File) error {
 			if isRangeInvoke(instruction.Opcode) && !contiguous(instruction.Regs) {
 				return diagnostic(method.Context, instruction, "", fmt.Errorf("range registers are not contiguous"))
 			}
+			// A category-2 argument lists both of its registers; they must be
+			// the register and its successor.
+			position := 0
+			if !isStaticInvoke(instruction.Opcode) {
+				position++
+			}
+			for _, descriptor := range proto.Parameters {
+				kind, err := DescriptorCategory(descriptor)
+				if err != nil {
+					return diagnostic(method.Context, instruction, "", err)
+				}
+				if position+kind.Words() > len(instruction.Regs) {
+					break
+				}
+				if kind.Words() == 2 && instruction.Regs[position+1] != instruction.Regs[position]+1 {
+					return diagnostic(method.Context, instruction, "", fmt.Errorf("wide argument v%d must be followed by v%d", instruction.Regs[position], instruction.Regs[position]+1))
+				}
+				position += kind.Words()
+			}
 		}
 		if isMoveResult(instruction.Opcode) {
 			if index == 0 {
@@ -173,8 +191,20 @@ func validateInstructions(method *Method, file *model.File) error {
 			if kind == Unknown {
 				return diagnostic(method.Context, instruction, "", fmt.Errorf("move-result follows a void invoke"))
 			}
-			if instruction.Opcode == 0x0a && kind != IntLike || instruction.Opcode == 0x0c && kind != Reference {
-				return diagnostic(method.Context, instruction, "", fmt.Errorf("move-result category does not match invoke result %s", kind))
+			switch instruction.Opcode {
+			case 0x0a:
+				// A 32-bit result is either an int or a float.
+				if kind != IntLike && kind != Float {
+					return diagnostic(method.Context, instruction, "", fmt.Errorf("move-result category does not match invoke result %s", kind))
+				}
+			case 0x0b:
+				if kind != Long && kind != Double {
+					return diagnostic(method.Context, instruction, "", fmt.Errorf("move-result-wide category does not match invoke result %s", kind))
+				}
+			case 0x0c:
+				if kind != Reference {
+					return diagnostic(method.Context, instruction, "", fmt.Errorf("move-result-object category does not match invoke result %s", kind))
+				}
 			}
 		}
 		if instruction.Opcode >= 0x0e && instruction.Opcode <= 0x11 {
@@ -191,22 +221,14 @@ func validateInstructions(method *Method, file *model.File) error {
 
 func unsupportedFamily(opcode byte) string {
 	switch {
-	case opcode == 0x0d:
-		return "exception-handler entry"
-	case opcode >= 0x1d && opcode <= 0x1e:
-		return "monitor"
-	case opcode >= 0x24 && opcode <= 0x26:
-		return "filled/fill-array"
 	case opcode >= 0x2b && opcode <= 0x2c:
 		return "switch"
-	case opcode >= 0x47 && opcode <= 0x4a || opcode >= 0x4e && opcode <= 0x51:
-		return "non-int/non-reference array element"
 	case opcode >= 0xfa && opcode <= 0xfd:
 		return "polymorphic/custom invocation"
 	case opcode >= 0xfe:
 		return "post-DEX-035 method constant"
 	default:
-		return "wide/float/double"
+		return "unimplemented opcode"
 	}
 }
 
@@ -221,11 +243,14 @@ func validateReturnOpcode(descriptor string, opcode byte) error {
 			return fmt.Errorf("return-void does not match return descriptor %q", descriptor)
 		}
 	case 0x0f:
-		if kind != Int {
+		// A 32-bit return carries either an int or a float.
+		if kind != Int && kind != Float {
 			return fmt.Errorf("return does not match return descriptor %q", descriptor)
 		}
 	case 0x10:
-		return fmt.Errorf("unsupported opcode family: wide/float/double")
+		if kind != Long && kind != Double {
+			return fmt.Errorf("return-wide does not match return descriptor %q", descriptor)
+		}
 	case 0x11:
 		if kind != Reference {
 			return fmt.Errorf("return-object does not match return descriptor %q", descriptor)
@@ -255,12 +280,15 @@ func supportedParameterWords(proto model.Proto) (int, error) {
 	if err := validateProto(proto); err != nil {
 		return 0, err
 	}
+	words := 0
 	for _, descriptor := range proto.Parameters {
-		if _, err := DescriptorCategory(descriptor); err != nil {
+		kind, err := DescriptorCategory(descriptor)
+		if err != nil {
 			return 0, err
 		}
+		words += kind.Words()
 	}
-	return len(proto.Parameters), nil
+	return words, nil
 }
 
 func isInvoke(opcode byte) bool {
@@ -285,8 +313,10 @@ func invokeResultCategory(instruction Instruction, file *model.File) (CategoryKi
 	return DescriptorCategory(file.Protos[callee.ProtoIndex].ReturnType)
 }
 
-// validateExceptionEntries requires move-exception to open a handler block and
-// every handler block to start with one.
+// validateExceptionEntries requires move-exception to open a handler block. A
+// handler that never reads the caught exception does not begin with one: DEX
+// only binds the exception through move-exception, so such a handler simply
+// discards it.
 func validateExceptionEntries(method *Method) error {
 	handlerStarts := make(map[uint32]bool)
 	for index := range method.Blocks {
@@ -301,16 +331,6 @@ func validateExceptionEntries(method *Method) error {
 		}
 		if !handlerStarts[instruction.Offset] {
 			return diagnostic(method.Context, instruction, "", fmt.Errorf("move-exception is only valid as the first instruction of an exception handler"))
-		}
-	}
-	for blockIndex := range method.Blocks {
-		block := &method.Blocks[blockIndex]
-		if !block.Handler {
-			continue
-		}
-		first := method.Instructions[block.Instructions[0]]
-		if first.Opcode != 0x0d {
-			return diagnostic(method.Context, &first, "", fmt.Errorf("exception handler at offset %d does not start with move-exception", block.Start))
 		}
 	}
 	return nil
@@ -387,14 +407,17 @@ func mergeCategory(left, right Category) (Category, bool, error) {
 	if left.Kind == Conflict || right.Kind == Conflict {
 		return Category{Kind: Conflict}, left.Kind != Conflict, fmt.Errorf("conflicting register categories")
 	}
-	if left.Kind == Unknown || left.Kind == Null {
+	if left.Kind == Unknown {
 		return right, true, nil
 	}
-	if right.Kind == Null {
-		return left, false, nil
+	if left.Kind.isUntyped() || right.Kind.isUntyped() {
+		return mergeUntyped(left, right)
 	}
 	leftReference := left.Kind == Reference || left.Kind == Uninitialized
 	rightReference := right.Kind == Reference || right.Kind == Uninitialized
+	if !leftReference && !rightReference && left.Kind != right.Kind {
+		return Category{Kind: Conflict}, true, fmt.Errorf("incompatible stable local categories %s and %s", left.Kind, right.Kind)
+	}
 	if leftReference != rightReference {
 		return Category{Kind: Conflict}, true, fmt.Errorf("incompatible stable local categories %s and %s", left.Kind, right.Kind)
 	}
@@ -406,4 +429,51 @@ func mergeCategory(left, right Category) (Category, bool, error) {
 		return left, true, nil
 	}
 	return left, false, nil
+}
+
+// mergeUntyped joins a constant whose interpretation is still open with the
+// category demanded at a use or at a control-flow join.
+func mergeUntyped(left, right Category) (Category, bool, error) {
+	untyped, typed := left, right
+	if !left.Kind.isUntyped() {
+		untyped, typed = right, left
+	}
+	if typed.Kind.isUntyped() {
+		switch {
+		case untyped.Kind == typed.Kind:
+			return left, false, nil
+		case untyped.Kind == Null:
+			// A zero constant is a valid 32-bit constant but never supplies the
+			// two registers a category-2 value needs.
+			if typed.Kind == Bits32 {
+				return Category{Kind: Bits32}, true, nil
+			}
+		case typed.Kind == Null:
+			if untyped.Kind == Bits32 {
+				return Category{Kind: Bits32}, true, nil
+			}
+		}
+		return Category{Kind: Conflict}, true, fmt.Errorf("incompatible constant categories %s and %s", left.Kind, right.Kind)
+	}
+	// A null constant has no intrinsic type and adopts the type of its first
+	// use. The DEX "zero" value is assignable to int, float and reference, but
+	// never supplies the two registers a category-2 value needs.
+	switch untyped.Kind {
+	case Null:
+		if typed.Kind.Words() == 2 {
+			return Category{Kind: Conflict}, true, fmt.Errorf("null constant cannot become %s", typed.Kind)
+		}
+		if typed.Kind == Int || typed.Kind == Float || typed.Kind == Reference {
+			return typed, true, nil
+		}
+	case Bits32:
+		if typed.Kind == Int || typed.Kind == Float {
+			return typed, true, nil
+		}
+	case Bits64:
+		if typed.Kind == Long || typed.Kind == Double {
+			return typed, true, nil
+		}
+	}
+	return Category{Kind: Conflict}, true, fmt.Errorf("constant category %s cannot become %s", untyped.Kind, typed.Kind)
 }

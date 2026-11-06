@@ -55,8 +55,8 @@ func (l *methodLowerer) validateInvokes() error {
 		}
 		switch instruction.Opcode {
 		case 0x6f, 0x75:
-			if callee.Class != l.class.Superclass {
-				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("invoke-super must target a non-constructor method on the direct superclass"))
+			if !l.isSuperclass(callee.Class) {
+				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("invoke-super target %q is not a superclass of %q", callee.Class, l.class.Descriptor))
 			}
 		case 0x70, 0x76:
 			if callee.Class != l.class.Descriptor {
@@ -86,6 +86,36 @@ func (l *methodLowerer) validateFusedConstructor(instruction *ir.Instruction, al
 		}
 	}
 	return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("constructor receiver v%d is not an alias of its fused new-instance allocation", instruction.Regs[0]))
+}
+
+// isSuperclass reports whether target is an ancestor of the current class.
+// Invoke-super may name an inherited method declared further up the chain than
+// the direct superclass. A type declared outside the application counts as an
+// ancestor: its hierarchy is not in the DEX, and the input was verified against
+// the platform classpath. An application target must be reached through the
+// declared superclass chain, because a platform ancestor cannot extend an
+// application class.
+func (l *methodLowerer) isSuperclass(target string) bool {
+	if target == l.class.Superclass {
+		return true
+	}
+	index := classHierarchy(l.file)
+	if _, ok := index[target]; !ok {
+		return true
+	}
+	visited := map[string]bool{}
+	for current := l.class.Superclass; current != "" && !visited[current]; {
+		visited[current] = true
+		if current == target {
+			return true
+		}
+		class, ok := index[current]
+		if !ok {
+			return false
+		}
+		current = class.Superclass
+	}
+	return false
 }
 
 func (l *methodLowerer) validateDelegationShape(delegation int, thisRegister uint16) error {
@@ -192,12 +222,6 @@ func (l *methodLowerer) validateDefiniteAssignments() error {
 				reachable[successor] = true
 				queue = append(queue, successor)
 			}
-		}
-	}
-	for index, ok := range reachable {
-		if !ok {
-			instruction := &l.method.Instructions[l.method.Blocks[index].Instructions[0]]
-			return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("unreachable basic block is unsupported"))
 		}
 	}
 	in := make([][]bool, len(l.method.Blocks))

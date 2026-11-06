@@ -674,6 +674,14 @@ func hierarchyFixture() (*model.File, *model.Class) {
 				0x000e,
 			}},
 		},
+		{
+			AccessFlags: dexPublic,
+			Method:      model.MethodID{Class: child, Name: "callSuper", ProtoIndex: 0},
+			Code: &model.Code{RegistersSize: 1, InsSize: 1, OutsSize: 1, Instructions: []uint16{
+				0x106f, 0x0001, 0x0000, // invoke-super {v0}, Base.ping()
+				0x000e,
+			}},
+		},
 	}
 	// The child constructor must resolve through the same method table.
 	methods[0] = model.MethodID{Class: child, Name: "<init>", ProtoIndex: 0}
@@ -703,5 +711,93 @@ func TestLowerRejectsDeferredStoreWithReassignedValue(t *testing.T) {
 	_, err := Class(file, class)
 	if err == nil || !strings.Contains(err.Error(), "reassigned before super") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLowerAcceptsPlatformAssignability(t *testing.T) {
+	file, class := hierarchyFixture()
+	// The receiver is an application type, but the expected type is a platform
+	// interface: its hierarchy is not in the DEX, and the input was verified
+	// against the platform classpath.
+	file.Methods[1] = model.MethodID{Class: "Ljava/lang/Runnable;", Name: "run", ProtoIndex: 0}
+	if _, err := Class(file, class); err != nil {
+		t.Fatalf("platform assignability rejected: %v", err)
+	}
+}
+
+func TestLowerRejectsDisprovedApplicationAssignability(t *testing.T) {
+	file, class := hierarchyFixture()
+	file.Classes = append(file.Classes, model.Class{Descriptor: "Ldex/Other;", Superclass: "Ljava/lang/Object;", AccessFlags: dexPublic})
+	file.Methods[1] = model.MethodID{Class: "Ldex/Other;", Name: "ping", ProtoIndex: 0}
+	if _, err := Class(file, class); err == nil || !strings.Contains(err.Error(), "not provably assignable") {
+		t.Fatalf("disproved application assignment error = %v", err)
+	}
+}
+
+func TestLowerInvokeSuperTargetsInheritedMethod(t *testing.T) {
+	file, class := hierarchyFixture()
+	// callSuper invokes Base.ping through a chain Child -> Mid -> Base, so the
+	// target is an ancestor but not the direct superclass.
+	raw, err := Class(file, class)
+	if err != nil {
+		t.Fatalf("Class: %v (inherited super target not resolved)", err)
+	}
+	parsed, err := javaclassparser.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse generated class: %v", err)
+	}
+	for _, method := range parsed.Methods {
+		if parsed.ConstantPoolManager.GetUtf8(int(method.NameIndex)).Value != "callSuper" {
+			continue
+		}
+		code := method.Attributes[0].(*javaclassparser.CodeAttribute).Code
+		if !bytes.Contains(code, []byte{0xb7}) {
+			t.Fatalf("callSuper code = % x, want invokespecial", code)
+		}
+	}
+}
+
+func arrayCovarianceInput() (*model.File, *model.Class) {
+	const owner = "Ldex/Covariant;"
+	file := &model.File{
+		Entry: "classes.dex",
+		Types: []model.Type{{Descriptor: "[Ljava/lang/String;"}, {Descriptor: "[Ljava/lang/Object;"}},
+		Protos: []model.Proto{
+			{ReturnType: "V", Parameters: []string{"[Ljava/lang/String;"}, ParameterTypes: []uint32{0}},
+			{ReturnType: "V", Parameters: []string{"[Ljava/lang/Object;"}, ParameterTypes: []uint32{1}},
+		},
+		Methods: []model.MethodID{
+			{Class: owner, Name: "use", ProtoIndex: 0},
+			{Class: "Ldex/Target;", Name: "consume", ProtoIndex: 1},
+		},
+	}
+	class := &model.Class{
+		Descriptor:  owner,
+		Superclass:  "Ljava/lang/Object;",
+		AccessFlags: dexPublic,
+		DirectMethods: []model.EncodedMethod{{
+			AccessFlags: dexPublic | dexStatic,
+			Method:      file.Methods[0],
+			Code: &model.Code{RegistersSize: 1, InsSize: 1, OutsSize: 1, Instructions: []uint16{
+				0x1071, 0x0001, 0x0000, // invoke-static {v0}, Target.consume([Ljava/lang/Object;)V
+				0x000e,
+			}},
+		}},
+	}
+	return file, class
+}
+
+func TestLowerAcceptsReferenceArrayCovariance(t *testing.T) {
+	file, class := arrayCovarianceInput()
+	if _, err := Class(file, class); err != nil {
+		t.Fatalf("reference array covariance rejected: %v", err)
+	}
+	// Primitive arrays are invariant; widening int[] to long[] must fail.
+	file.Types[0] = model.Type{Descriptor: "[I"}
+	file.Types[1] = model.Type{Descriptor: "[J"}
+	file.Protos[0].Parameters = []string{"[I"}
+	file.Protos[1].Parameters = []string{"[J"}
+	if _, err := Class(file, class); err == nil || !strings.Contains(err.Error(), "not provably assignable") {
+		t.Fatalf("primitive array covariance error = %v", err)
 	}
 }

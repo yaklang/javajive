@@ -163,6 +163,43 @@ func validateProto(proto model.Proto) error {
 	return nil
 }
 
+// validateArrayElementKind checks that the DEX element opcode matches the array
+// component descriptor. DEX shares aget/aput between int and float values, so
+// the descriptor is what selects the JVM element access.
+func validateArrayElementKind(opcode byte, component string) error {
+	switch opcode {
+	case 0x44, 0x4b:
+		if component == "I" || component == "F" {
+			return nil
+		}
+	case 0x45, 0x4c:
+		if component == "J" || component == "D" {
+			return nil
+		}
+	case 0x46, 0x4d:
+		if component != "" && (component[0] == 'L' || component[0] == '[') {
+			return nil
+		}
+	case 0x47, 0x4e:
+		if component == "Z" {
+			return nil
+		}
+	case 0x48, 0x4f:
+		if component == "B" {
+			return nil
+		}
+	case 0x49, 0x50:
+		if component == "C" {
+			return nil
+		}
+	case 0x4a, 0x51:
+		if component == "S" {
+			return nil
+		}
+	}
+	return fmt.Errorf("array opcode does not match element type %q", component)
+}
+
 func shortyDescriptor(descriptor string) byte {
 	if descriptor == "" {
 		return 0
@@ -171,6 +208,13 @@ func shortyDescriptor(descriptor string) byte {
 		return 'L'
 	}
 	return descriptor[0]
+}
+
+// ValidateFile checks the whole DEX file's metadata once. Callers that lower
+// many methods from one file should validate it here and set
+// Input.SkipFileValidation instead of paying for it per method.
+func ValidateFile(file *model.File) error {
+	return validateFileMetadata(file)
 }
 
 func validateFileMetadata(file *model.File) error {

@@ -303,6 +303,65 @@ func (c *Class) SetConstantString(field *Field, value string) *Class {
 	return c
 }
 
+// SetConstantLong adds a ConstantValue attribute for a long field.
+func (c *Class) SetConstantLong(field *Field, value int64) *Class {
+	if field == nil {
+		c.fail("nil field for ConstantValue")
+		return c
+	}
+	if field.descriptorText != "J" {
+		c.fail("long ConstantValue is incompatible with field %q descriptor %q", field.name, field.descriptorText)
+		return c
+	}
+	index, err := c.pool.Long(value)
+	if err != nil {
+		c.fail("field %q ConstantValue: %v", field.name, err)
+		return c
+	}
+	c.setConstantValue(field, index)
+	return c
+}
+
+// SetConstantFloat adds a ConstantValue attribute for a float field from its
+// IEEE-754 bit pattern.
+func (c *Class) SetConstantFloat(field *Field, bits uint32) *Class {
+	if field == nil {
+		c.fail("nil field for ConstantValue")
+		return c
+	}
+	if field.descriptorText != "F" {
+		c.fail("float ConstantValue is incompatible with field %q descriptor %q", field.name, field.descriptorText)
+		return c
+	}
+	index, err := c.pool.Float(bits)
+	if err != nil {
+		c.fail("field %q ConstantValue: %v", field.name, err)
+		return c
+	}
+	c.setConstantValue(field, index)
+	return c
+}
+
+// SetConstantDouble adds a ConstantValue attribute for a double field from its
+// IEEE-754 bit pattern.
+func (c *Class) SetConstantDouble(field *Field, bits uint64) *Class {
+	if field == nil {
+		c.fail("nil field for ConstantValue")
+		return c
+	}
+	if field.descriptorText != "D" {
+		c.fail("double ConstantValue is incompatible with field %q descriptor %q", field.name, field.descriptorText)
+		return c
+	}
+	index, err := c.pool.Double(bits)
+	if err != nil {
+		c.fail("field %q ConstantValue: %v", field.name, err)
+		return c
+	}
+	c.setConstantValue(field, index)
+	return c
+}
+
 func (c *Class) setConstantValue(field *Field, index uint16) {
 	if field.constantValue != 0 {
 		c.fail("field %q already has a ConstantValue", field.name)

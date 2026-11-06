@@ -9,6 +9,9 @@ import (
 
 func isGoto(opcode byte) bool { return opcode >= 0x28 && opcode <= 0x2a }
 func isIf(opcode byte) bool   { return opcode >= 0x32 && opcode <= 0x3d }
+func isSwitch(opcode byte) bool {
+	return opcode == 0x2b || opcode == 0x2c
+}
 func isBranch(opcode byte) bool {
 	return isGoto(opcode) || isIf(opcode)
 }
@@ -113,6 +116,22 @@ func buildBlocks(instructions []Instruction, codeUnits uint32, ctx Context, site
 				leaders[instructions[index+1].Offset] = true
 			}
 		}
+		if isSwitch(instruction.Opcode) {
+			if index+1 >= len(instructions) {
+				return nil, diagnostic(ctx, &instruction, "", fmt.Errorf("switch has no fall-through instruction"))
+			}
+			for _, target := range instruction.Targets {
+				if target < 0 || target >= int64(codeUnits) {
+					return nil, diagnostic(ctx, &instruction, "", fmt.Errorf("switch target %d is outside code units [0,%d)", target, codeUnits))
+				}
+				if _, ok := byOffset[uint32(target)]; !ok {
+					return nil, diagnostic(ctx, &instruction, "", fmt.Errorf("switch target %d is not an instruction boundary", target))
+				}
+				leaders[uint32(target)] = true
+			}
+			// The instruction after the switch is the default case.
+			leaders[instructions[index+1].Offset] = true
+		}
 		if isTerminal(instruction.Opcode) && index+1 < len(instructions) {
 			leaders[instructions[index+1].Offset] = true
 		}
@@ -157,10 +176,14 @@ func buildBlocks(instructions []Instruction, codeUnits uint32, ctx Context, site
 			if isIf(last.Opcode) && index+1 < len(blocks) {
 				addSuccessor(block, index+1)
 			}
-		} else if !isTerminal(last.Opcode) {
-			if index+1 >= len(blocks) {
-				return nil, diagnostic(ctx, &last, "", fmt.Errorf("reachable execution may fall off end of code"))
+		} else if isSwitch(last.Opcode) {
+			for _, target := range last.Targets {
+				addSuccessor(block, blockAt[uint32(target)])
 			}
+			if index+1 < len(blocks) {
+				addSuccessor(block, index+1)
+			}
+		} else if !isTerminal(last.Opcode) && index+1 < len(blocks) {
 			addSuccessor(block, index+1)
 		}
 	}
@@ -175,14 +198,57 @@ func buildBlocks(instructions []Instruction, codeUnits uint32, ctx Context, site
 			blocks[blockIndex].Handler = true
 		}
 	}
+	recorded := make(map[int]map[int]bool, len(sites))
 	for _, site := range sites {
 		for index := range blocks {
 			if blocks[index].Start < site.start || blocks[index].Start >= site.end {
 				continue
 			}
 			for _, target := range site.targets {
-				addSuccessor(&blocks[index], handlerBlock[target.address])
+				handler := handlerBlock[target.address]
+				addSuccessor(&blocks[index], handler)
+				if recorded[handler] == nil {
+					recorded[handler] = make(map[int]bool)
+				}
+				for _, instructionIndex := range blocks[index].Instructions {
+					if instructions[instructionIndex].Offset >= site.start && instructions[instructionIndex].Offset < site.end {
+						recorded[handler][instructionIndex] = true
+					}
+				}
 			}
+		}
+	}
+	for handler, set := range recorded {
+		for instructionIndex := range set {
+			blocks[handler].Protected = append(blocks[handler].Protected, instructionIndex)
+		}
+		sort.Ints(blocks[handler].Protected)
+	}
+	// Reachability follows every edge, including exception dispatch, so handler
+	// blocks are live. Only reachable code must end in a terminator; a trailing
+	// dead block is emitted as unverifiable dead code rather than rejected.
+	reachable := make([]bool, len(blocks))
+	reachable[0] = true
+	queue := []int{0}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		for _, successor := range blocks[current].Successors {
+			if !reachable[successor] {
+				reachable[successor] = true
+				queue = append(queue, successor)
+			}
+		}
+	}
+	for index := range blocks {
+		blocks[index].Reachable = reachable[index]
+		if !reachable[index] {
+			continue
+		}
+		block := &blocks[index]
+		last := instructions[block.Instructions[len(block.Instructions)-1]]
+		if !isBranch(last.Opcode) && !isSwitch(last.Opcode) && !isTerminal(last.Opcode) && index+1 >= len(blocks) {
+			return nil, diagnostic(ctx, &last, "", fmt.Errorf("reachable execution may fall off end of code"))
 		}
 	}
 	for index := range blocks {

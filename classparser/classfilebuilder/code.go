@@ -250,11 +250,26 @@ func (c *Code) LDC(index uint16) *Code {
 		c.fail("ldc: %v", err)
 		return c
 	}
-	if entry.tag != cpInteger && entry.tag != cpString && entry.tag != cpClass {
+	if entry.tag != cpInteger && entry.tag != cpFloat && entry.tag != cpString && entry.tag != cpClass {
 		c.fail("ldc does not support constant pool tag %d at index %d", entry.tag, index)
 		return c
 	}
 	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindLDC, op: LDC, arg: int(index)}})
+	return c
+}
+
+// LDC2 appends ldc2_w, which pushes a long or double constant.
+func (c *Code) LDC2(index uint16) *Code {
+	entry, err := c.pool.entry(index)
+	if err != nil {
+		c.fail("ldc2_w: %v", err)
+		return c
+	}
+	if entry.tag != cpLong && entry.tag != cpDouble {
+		c.fail("ldc2_w does not support constant pool tag %d at index %d", entry.tag, index)
+		return c
+	}
+	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindCP, op: LDC2_W, arg: int(index)}})
 	return c
 }
 
