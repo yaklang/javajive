@@ -162,6 +162,22 @@ func finallyCleanupBindingsScoped(scope, owned []statements.Statement, bindings 
 				roots, blocks = []values.JavaValue{x.Condition}, [][]statements.Statement{x.IfBody, x.ElseBody}
 			case *statements.DoWhileStatement:
 				roots, blocks = []values.JavaValue{x.ConditionValue}, [][]statements.Statement{x.Body}
+			case *statements.WhileStatement:
+				// NormalizeLoopForms may rewrite a top-tested do-while into
+				// this form after the flag proof's first pass. The same loop
+				// ownership and capture checks must still apply.
+				roots, blocks = []values.JavaValue{x.ConditionValue}, [][]statements.Statement{x.Body}
+			case *statements.ForStatement:
+				if x.Condition != nil {
+					roots = append(roots, x.Condition.Condition)
+				}
+				if x.InitVar != nil {
+					blocks = append(blocks, []statements.Statement{x.InitVar})
+				}
+				if x.EndExp != nil {
+					blocks = append(blocks, []statements.Statement{x.EndExp})
+				}
+				blocks = append(blocks, x.SubStatements)
 			case *statements.SynchronizedStatement:
 				roots, blocks = []values.JavaValue{x.Argument}, [][]statements.Statement{x.Body}
 			case *statements.TryCatchStatement:

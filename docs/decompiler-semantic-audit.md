@@ -41,7 +41,10 @@ Requests own their mode, analysis budget, resolver, result and rewrite history. 
   gaps and terminal-handler proof.
 - **Loop forms.** `NormalizeLoopForms` converts the canonical do-while guard to
   while, removes a redundant trailing continue, and recovers a for loop only
-  when no unlabeled continue and no escaping declaration is involved.
+  when no unlabeled continue and no escaping declaration is involved. The
+  finally proof and cleanup-binding walker traverse `do-while`, `while` and
+  `for` forms alike, so finalization recovery cannot depend on whether the
+  normalized loop shape is present.
 - **Generic constraints.** `solveBareMethodTypeConstraints` accumulates lower
   bounds for bare method type variables and meets them at a hierarchy LUB.
   Nested invariant occurrences remain on the strict structural binder.

@@ -193,6 +193,12 @@ Add a native, pure-Go DEX/APK-to-JAR path as a strict first vertical slice.
 - Add a generic method type-variable constraint solver for bare formals:
   repeated occurrences meet at a hierarchy LUB, null contributes no bound, and
   nested invariant occurrences fall back to the strict structural binder.
+- Extend the finally proof and its cleanup-binding walker across normalized
+  `while` and `for` loops. Loop-form normalization previously changed a
+  protected `do-while` after the finally flag proof had been written for that
+  only loop form, so a safe finally could remain desugared and duplicate close
+  or cleanup effects. The proof now validates condition/init/update coverage
+  and loop ownership for all three statement forms.
 - Replace the blanket empty-stack gate for irreducible state dispatch with a
   per-word carrier certificate plus a target-merge certificate. Constants and
   materialized locals always cross; an effectful word may cross only when its
