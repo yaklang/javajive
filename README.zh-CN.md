@@ -117,6 +117,11 @@ javajive decompile app.apk -o ./app-src
 
 # 目录：递归反编译其中的 .class（必须用 -o 指定输出目录）
 javajive decompile ./classes -o ./src
+
+# 超大生成方法：显式提高单方法分析预算。
+# 大于 1,000,000 的取值同时按比例放大图/扫描上限。
+javajive decompile Big.class -analysis-budget 2000000
+javajive decompile app.jar -o ./app-src -analysis-budget 2000000
 ```
 
 ### dex2jar
@@ -221,9 +226,11 @@ out := javajive.MarshalSerialized(restored...)
 | `DecompileFile(path) (string, error)` | 从磁盘反编译单个 `.class` |
 | `DecompileWithResolver(classBytes, resolve)` | 带「类字节解析器」的反编译 |
 | `DecompileArchive(src, dst) error` | 将 `.jar`/`.war`/`.zip` 反编译到目录 |
+| `DecompileArchiveWithAnalysisBudget(src, dst, budget) error` | 带显式单方法分析预算的归档反编译 |
 | `DexToJar(input, options) ([]byte, DexReport, error)` | 将 DEX/APK 字节转为确定性 JAR |
 | `DexFileToJar(src, dst, options) (DexReport, error)` | 使用目标目录中的临时文件转换 DEX/APK |
 | `DecompileDEXFile(src, dst, options) error` | 经私有临时 JAR 转换并反编译 DEX/APK |
+| `DecompileDEXFileWithAnalysisBudget(src, dst, options, budget) error` | DEX/APK 转换并带预算反编译归档 |
 | `ParseClass(classBytes) (*ClassObject, error)` | 解析单个 `.class` 字节 |
 | `ParseClassFile(path) (*ClassObject, error)` | 从磁盘解析单个 `.class` |
 | `ParseSerialized(raw) ([]JavaSerializable, error)` | 解析序列化流 |

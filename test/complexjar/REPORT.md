@@ -19,7 +19,7 @@ complex corpus.
 | Checked-in small fixtures | 4 | — | used by archive/unit tests |
 | New complex corpus (this suite) | 7 | 151 decompiled units | all tree-compile, verify and (where a driver exists) behavior-match |
 | **Total JAR inputs** | **49 paths / 48 unique files** | | plexus-cipher is mirrored in two test roots |
-| External Kotlin stdlib 2.0.21 stress test (not gated) | +1 | 994 classes | 29 whole-class stubs, 104 method stubs, 77 files with stubs |
+| External Kotlin stdlib 2.0.21 stress test (not gated) | +1 | 994 classes | 8 whole-class stubs, 103 method stubs |
 
 The historical 38 are not vendored; CI downloads and SHA-256-pins them. The
 four checked-in fixtures are
@@ -77,45 +77,64 @@ being counted as success.
    a loop or assigned to a local, replacing the entire method body. It now
    requires the switch result to be the method return; other shapes keep their
    surrounding statements and use the core dispatcher.
-5. **A switch that is the whole infinite-loop body used unlabeled breaks.**
+6. **A switch that is the whole infinite-loop body used unlabeled breaks.**
    Each case break exited only the switch, so the loop spun forever and the
    post-loop return was unreachable. Direct case breaks are now labeled
    `break LOOP_n` when the switch is the sole loop body.
-6. **Record `implements` clauses were dropped.** Dropping `extends Record` for
+7. **Record `implements` clauses were dropped.** Dropping `extends Record` for
    a record declaration also cleared `implements Shape`. Only the extends part
    is removed now.
-7. **Record compact constructors could contain illegal `return`.** The
+8. **Record compact constructors could contain illegal `return`.** The
    decompiler falls back to an explicit canonical constructor, renames its
    parameters to the component names, and keeps the required field
    assignments.
-8. **Promoted nested records had package-private canonical constructors.**
+9. **Promoted nested records had package-private canonical constructors.**
    Flattening can promote a package-private nested record to public; its
    canonical constructor must then be public. The dumper now aligns the
    constructor access with the rendered record declaration.
-9. **Private interface methods rendered `private default`.** Java 9+ private
+10. **Private interface methods rendered `private default`.** Java 9+ private
    interface methods have bodies but are not default methods.
-10. **Modern enum constant bodies were rejected.** Java 9+ classfiles omit the
+11. **Modern enum constant bodies were rejected.** Java 9+ classfiles omit the
     legacy synthetic trailing constructor argument, use a private body
     constructor and carry `NestHost`; Kotlin also encodes array clone with
     `java/lang/Object`. The proof now accepts both forwarding shapes and the
     modern nest metadata.
-11. **Discarded static field reads produced invalid Java.** A `getstatic; pop`
+12. **Discarded static field reads produced invalid Java.** A `getstatic; pop`
     (Kotlin's `Result.Companion;` idiom) rendered a bare field expression, which
     is not a Java statement. It is now evaluated in a boolean sink
     (`(Owner.FIELD == null)` / `== 0`) so `<clinit>` and exceptional exits are
     preserved without inventing a field-statement.
-12. **Int-to-boolean coercion was rejected under an output budget.** The
+13. **Int-to-boolean coercion was rejected under an output budget.** The
     `(word) != (0)` sandbox renderer now streams through the request writer
     instead of being classified as an unbounded opaque value.
+
+14. **Kotlin enum `$ENTRIES` views were rejected.** Kotlin initializes
+    `$ENTRIES` from `EnumEntriesKt.enumEntries($VALUES)` after the backing-array
+    packet. The enum-regeneration proof treated that read as an escaping use of
+    the erased field and stubbed the whole class. The exact
+    `getstatic/checkcast/invokestatic/putstatic` shape is now certified, source
+    regenerates the argument as `values()`, and `getEntries()` keeps declaration
+    order and identity. The external Kotlin stdlib observation drops from 29 to
+    8 whole-class stubs (103 method stubs remain).
+15. **Very large methods had no explicit budget control.** A 55 KB generated
+    class (22,709 instructions) fails `DecompileWithOptions` at the default
+    1,000,000 `set_element_work` cap after ~17 s even though the solver used only
+    334,911 analysis updates; a 2,000,000 budget completes in ~28 s and emits
+    179,710 bytes. `MaxAnalysisUpdates` above 1,000,000 now scales the derived
+    graph/scan/set/node caps by 64x (64M ceiling), and the new CLI/API surfaces
+    route that policy through single classes, directories, archives and DEX
+    translation. The default remains the conservative 1M policy.
 
 ## Remaining boundaries
 
 - **Kotlin/JVM metadata is not a supported source target.** The external
-  `kotlin-stdlib-2.0.21.jar` test decompiles 994 classes but leaves 29
-  whole-class stub comments and 104 method stubs. Most whole-class stubs are
-  Kotlin enums carrying a synthetic `$ENTRIES` field initialized through
-  `EnumEntriesKt.enumEntries($VALUES)`, a shape the enum-regeneration proof
-  does not yet model. This JAR is an observation, not a CI gate.
+  `kotlin-stdlib-2.0.21.jar` observation decompiles 994 classes and now leaves
+  8 whole-class stub comments and 103 method stubs. Kotlin enums with a
+  synthetic `$ENTRIES` view reconstruct and preserve `getEntries()`; the
+  remaining whole-class stubs are inline `Sequence`/`Iterable` classes.
+  Remaining javac errors are dominated by methods overloaded only by return
+  type (`maxOf(Float)` vs `maxOf(Double)`), which Java source cannot declare
+  without renaming. This JAR is an observation, not a CI gate.
 - **Pattern switches without a source-level reconstruction.** When javac emits
   `MatchException`/complex deconstruction, the decompiler may emit an
   equivalent `instanceof`/state-dispatch form instead of a Java 21 pattern
@@ -130,11 +149,13 @@ being counted as success.
   and emits a method stub with an `exception-handler structuring failed`
   diagnostic. It does not emit silently wrong source. Simple type patterns,
   `case null`, guards, and equivalent-dispatcher forms are covered.
-- **Very large single methods.** A generated 250-class `main` with ~7,500
-  statements and 47 KB of bytecode exceeds the documented
-  `MaxAnalysisUpdates=1,000,000` reaching-definition budget and degrades that
-  method to a stub. Splitting the same work into ten methods passes. This is a
-  policy boundary, not a silent miscompile.
+- **Very large single methods use an opt-in budget.** The public default keeps
+  `MaxAnalysisUpdates=1,000,000` and its 1M graph/set caps. A generated 55 KB
+  class with 22,709 instructions hits `set_element_work` at the default after
+  ~17 s; `-analysis-budget 2000000` completes the same method in ~28 s and emits
+  179,710 bytes. The CLI flag and the budgeted archive/DEX/JarFS APIs select
+  this policy explicitly. Without it, the method degrades with a
+  `resource_limit` status rather than a silent miscompile.
 - **Constructor prefixes.** Java cannot declare a synthetic local before the
   `super()`/`this()` delegation, so acyclic stack phis and discarded-value
   sinks are disabled inside constructors; constructor switch-expression joins

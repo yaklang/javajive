@@ -80,6 +80,20 @@ Add a native, pure-Go DEX/APK-to-JAR path as a strict first vertical slice.
   legal Java without losing class initialization.
 - Accept modern enum constant-body classfiles (Java 9+ direct forwarding and
   `NestHost`; Kotlin's `java/lang/Object.clone` array encoding).
+- Reconstruct Kotlin enums that publish their backing array through
+  `EnumEntriesKt.enumEntries($VALUES)`: the `$ENTRIES` read is certified, the
+  erased backing field is regenerated as `values()`, and `getEntries()` keeps
+  declaration order and identity. Kotlin stdlib whole-class stubs drop from 29
+  to 8 in the external stress observation.
+- Resolve nested-type spelling from the archive's own emitted sibling units
+  before applying stdlib dotted shortcuts, so Kotlin's flat `Outer$Inner`
+  classes compile while external `java.util.Map$Entry` stays dotted.
+- Add an opt-in large-method analysis budget: `DecompileOptions` values above
+  1,000,000 scale the derived graph/scan/set/node caps up to 64× (64M ceiling),
+  and the new `DecompileArchiveWithAnalysisBudget`,
+  `DecompileDEXFileWithAnalysisBudget`, `NewJarFSFromLocalWithAnalysisBudget`
+  and CLI `-analysis-budget` route the same policy through archives, DEX
+  translation and single classes. The default policy is unchanged.
 - Add `test/complexjar` with seven round-trip JARs (Java 21 features,
   control-flow torture, Java 8 legacy, 100-class scale, multi-release, module,
   and packaged irreducible classes) covering decompile → tree recompile → JVM

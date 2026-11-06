@@ -12,8 +12,11 @@ completion of measurements alone never counts as a passing comparison.
 result, err := javajive.DecompileWithOptions(classBytes, javajive.DecompileOptions{
     Mode: javajive.Precision,
     MaxAnalysisUpdates: 1_000_000, // per method; zero selects this default
-    Resolve: resolveClassBytes,   // optional JVM internal-name resolver
+    Resolve: resolveClassBytes,    // optional JVM internal-name resolver
 })
+// Values above 1,000,000 opt into 64x-scaled graph/scan/set/node caps:
+// javajive decompile Big.class -analysis-budget 2000000
+// javajive.DecompileArchiveWithAnalysisBudget("app.jar", "src", 2_000_000)
 ```
 
 `Precision` is the default for this new API. It excludes the registered class/method source-recovery pipeline. `Compatibility` retains that pipeline, recording rule IDs, phases and before/after hashes for every applied rule. The original `Decompile` and archive APIs retain their compatibility behavior.
@@ -59,13 +62,19 @@ that T21 cannot rewrite to a source-level pattern switch.
 Reported but not claimed as clean:
 
 - **Kotlin/JVM bytecode.** `kotlin-stdlib-2.0.21.jar` decompiles 994 classes
-  with 29 whole-class stubs and 104 method stubs. Kotlin enums carrying a
-  synthetic `$ENTRIES` field initialized from `$VALUES` remain outside the
-  enum-regeneration proof. This is an external stress observation, not a corpus
-  acceptance target.
-- **Large single methods.** The documented `MaxAnalysisUpdates=1,000,000`
-  reaching-definition budget still degrades a 47 KB generated method to a
-  method stub; the same workload split into ten methods passes.
+  with 8 whole-class stubs and 103 method stubs. Enums that publish
+  `$ENTRIES = EnumEntriesKt.enumEntries($VALUES)` now reconstruct, and flat
+  `Outer$Inner` sibling names are resolved from the archive before stdlib
+  dotted shortcuts. Remaining whole-class stubs are inline `Sequence`/`Iterable`
+  classes; remaining javac errors are dominated by return-type-only overloads
+  that Java cannot declare without renaming. This is an external stress
+  observation, not a corpus acceptance target.
+- **Large single methods use an explicit budget.** The default
+  `MaxAnalysisUpdates=1,000,000` policy still stops a 55 KB generated method
+  (22,709 instructions) at the 1M `set_element_work` cap. Passing
+  `MaxAnalysisUpdates=2_000_000` (CLI `-analysis-budget 2000000`, or the
+  budgeted archive/DEX APIs) scales the derived caps to 64M and completes the
+  method. The default remains conservative for untrusted input.
 - **Constructor prefixes.** Acyclic stack phis and discarded-value sinks are
   disabled inside constructors because Java cannot declare a synthetic local
   before `super()`/`this()`; constructor prefix joins use the established

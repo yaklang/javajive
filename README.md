@@ -134,6 +134,11 @@ javajive decompile app.apk -o ./app-src
 
 # Directory: recursively decompile .class files (requires -o output dir).
 javajive decompile ./classes -o ./src
+
+# Very large generated methods: opt into a higher per-method analysis budget.
+# Values above 1,000,000 also scale graph/scan caps.
+javajive decompile Big.class -analysis-budget 2000000
+javajive decompile app.jar -o ./app-src -analysis-budget 2000000
 ```
 
 ### dex2jar
@@ -243,9 +248,11 @@ out := javajive.MarshalSerialized(restored...)
 | `DecompileFile(path) (string, error)` | Decompile one `.class` from disk |
 | `DecompileWithResolver(classBytes, resolve)` | Decompile with a class-bytes resolver |
 | `DecompileArchive(src, dst) error` | Decompile a `.jar`/`.war`/`.zip` into a directory |
+| `DecompileArchiveWithAnalysisBudget(src, dst, budget) error` | Archive decompilation with an explicit per-method analysis budget |
 | `DexToJar(input, options) ([]byte, DexReport, error)` | Convert DEX/APK bytes to a deterministic JAR |
 | `DexFileToJar(src, dst, options) (DexReport, error)` | Convert a DEX/APK file using a same-directory temporary JAR |
 | `DecompileDEXFile(src, dst, options) error` | Convert DEX/APK through a private temporary JAR and decompile it |
+| `DecompileDEXFileWithAnalysisBudget(src, dst, options, budget) error` | DEX/APK conversion plus budgeted archive decompilation |
 | `ParseClass(classBytes) (*ClassObject, error)` | Parse one `.class`'s bytes |
 | `ParseClassFile(path) (*ClassObject, error)` | Parse one `.class` from disk |
 | `ParseSerialized(raw) ([]JavaSerializable, error)` | Parse a serialization stream |
