@@ -80,19 +80,10 @@ func factorUnprotectedTryTail(region *core.Node, tr *statements.TryCatchStatemen
 		}
 	}
 	lt, rt := left.JavaValue.Type(), right.JavaValue.Type()
-	if lt == nil || rt == nil {
-		return nil, nil
-	}
-	typ := lt
-	lnull, rnull := values.IsNullLiteral(plainTryValue(left.JavaValue)), values.IsNullLiteral(plainTryValue(right.JavaValue))
-	if lnull {
-		typ = rt
-	}
-	if lnull || rnull {
-		if _, primitive := typ.RawType().(*types.JavaPrimer); primitive {
-			return nil, nil
-		}
-	} else if lt.String(&class_context.ClassContext{}) != rt.String(&class_context.ClassContext{}) {
+	lnull := values.IsNullLiteral(plainTryValue(left.JavaValue))
+	rnull := values.IsNullLiteral(plainTryValue(right.JavaValue))
+	typ, ok := tryTailCommonResultType(lt, rt, lnull, rnull)
+	if !ok {
 		return nil, nil
 	}
 	result := values.NewJavaRef(utils.NewRootVariableId(), nil, typ.Copy())
@@ -106,6 +97,59 @@ func factorUnprotectedTryTail(region *core.Node, tr *statements.TryCatchStatemen
 	// inside the try and is still evaluated exactly once, before either prefix.
 	branch.IfBody, branch.ElseBody = []statements.Statement{&lstore}, []statements.Statement{&rstore}
 	return declaration, tail
+}
+
+// tryTailCommonResultType derives the declared type shared by two branch
+// stores. Equal types stay exact; distinct reference types meet at their JDK
+// least upper bound so a shared handler can protect heterogeneous but
+// assignable branch results. Null contributes no type. Primitives, arrays and
+// unknown hierarchies fail closed.
+func tryTailCommonResultType(left, right types.JavaType, leftNull, rightNull bool) (types.JavaType, bool) {
+	if left == nil || right == nil {
+		return nil, false
+	}
+	leftNull = leftNull || isNullJavaType(left)
+	rightNull = rightNull || isNullJavaType(right)
+	if leftNull && rightNull {
+		return types.NewJavaClass("java.lang.Object"), true
+	}
+	if leftNull {
+		left = right
+	}
+	if rightNull {
+		right = left
+	}
+	if isPrimitiveType(left) || isPrimitiveType(right) || left.IsArray() || right.IsArray() {
+		return nil, false
+	}
+	if _, ok := types.ClassFQNOf(left); !ok {
+		return nil, false
+	}
+	if _, ok := types.ClassFQNOf(right); !ok {
+		return nil, false
+	}
+	if typeFQNEquals(left, right) {
+		return left, true
+	}
+	common := types.BridgedCommonSuperType(left, right, nil)
+	if common == nil || isPrimitiveType(common) || common.IsArray() {
+		return nil, false
+	}
+	if _, ok := types.ClassFQNOf(common); !ok {
+		return nil, false
+	}
+	return common, true
+}
+
+func isNullJavaType(typ types.JavaType) bool {
+	if typ == nil {
+		return false
+	}
+	if _, ok := typ.RawType().(*types.JavaPrimer); ok {
+		return false
+	}
+	name, _ := types.ClassFQNOf(typ)
+	return name == "null" || typ.String(&class_context.ClassContext{}) == "null"
 }
 
 func plainTryValue(v values.JavaValue) values.JavaValue {
