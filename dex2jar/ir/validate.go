@@ -210,6 +210,13 @@ func shortyDescriptor(descriptor string) byte {
 	return descriptor[0]
 }
 
+// ValidateFile checks the whole DEX file's metadata once. Callers that lower
+// many methods from one file should validate it here and set
+// Input.SkipFileValidation instead of paying for it per method.
+func ValidateFile(file *model.File) error {
+	return validateFileMetadata(file)
+}
+
 func validateFileMetadata(file *model.File) error {
 	metadata := file.Header.StringIDsSize != 0 || file.Header.TypeIDsSize != 0 || file.Header.ProtoIDsSize != 0 || file.Header.FieldIDsSize != 0 || file.Header.MethodIDsSize != 0
 	if metadata {

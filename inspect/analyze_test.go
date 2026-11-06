@@ -124,7 +124,9 @@ func TestAnalyzeExternalAPKKeepsInventoryAndProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AnalyzeFile: %v", err)
 	}
-	if report.Status != artifactinspect.StatusPartial || report.Artifact.Format != "apk" || report.Archive == nil {
+	// The fixture uses the full DEX subset, so every class now translates; the
+	// test cares about inventory and provenance, not a particular verdict.
+	if report.Status != artifactinspect.StatusComplete || report.Artifact.Format != "apk" || report.Archive == nil {
 		t.Fatalf("report = %#v", report)
 	}
 	if len(report.Archive.Entries) == 0 || len(report.DEXFiles) == 0 {
@@ -136,12 +138,15 @@ func TestAnalyzeExternalAPKKeepsInventoryAndProvenance(t *testing.T) {
 	if len(report.DEXFiles[0].Classes) == 0 {
 		t.Fatal("classes.dex inventory was lost")
 	}
-	if len(report.Diagnostics) == 0 {
-		t.Fatal("partial analysis reported no diagnostics")
-	}
-	for _, diagnostic := range report.Diagnostics {
-		if !strings.Contains(diagnostic.Message, "payload") && !strings.Contains(diagnostic.Message, "already defined") {
-			t.Fatalf("unexpected diagnostic = %#v", diagnostic)
+	// Whenever the analysis is partial it must say why.
+	if report.Status == artifactinspect.StatusPartial {
+		if len(report.Diagnostics) == 0 {
+			t.Fatal("partial analysis reported no diagnostics")
+		}
+		for _, diagnostic := range report.Diagnostics {
+			if !strings.Contains(diagnostic.Message, "payload") && !strings.Contains(diagnostic.Message, "already defined") {
+				t.Fatalf("unexpected diagnostic = %#v", diagnostic)
+			}
 		}
 	}
 }

@@ -426,12 +426,15 @@ func analyzeDEX(data []byte, provenance DEXProvenance, options Options) DEXFile 
 	}
 	classes := append([]model.Class(nil), parsed.Classes...)
 	sort.SliceStable(classes, func(i, j int) bool { return classes[i].Descriptor < classes[j].Descriptor })
+	// Validate the file once; the per-class verdicts below then skip the
+	// per-method whole-file validation.
+	fileErr := ir.ValidateFile(parsed)
 	for classIndex := range classes {
 		classModel := &classes[classIndex]
 		class := Class{
 			Descriptor: classModel.Descriptor, AccessFlags: classModel.AccessFlags, Superclass: classModel.Superclass,
 			SourceFile: classModel.SourceFile, Methods: []Method{},
-			Translation: analyzeTranslation(parsed, classModel),
+			Translation: analyzeTranslation(parsed, classModel, fileErr),
 		}
 		methods := append([]model.EncodedMethod(nil), classModel.DirectMethods...)
 		methods = append(methods, classModel.VirtualMethods...)
@@ -461,8 +464,12 @@ func analyzeDEX(data []byte, provenance DEXProvenance, options Options) DEXFile 
 // analyzeTranslation reports whether the strict translator can recover this
 // class on its own. It never emits a classfile: the verdict tells a reverse
 // engineer which classes are recoverable and why the others are not.
-func analyzeTranslation(file *model.File, class *model.Class) Translation {
-	if _, err := lower.Class(file, class); err != nil {
+func analyzeTranslation(file *model.File, class *model.Class, fileErr error) Translation {
+	err := fileErr
+	if err == nil {
+		_, err = lower.ClassWithOptions(file, class, lower.ClassOptions{FileValidated: true})
+	}
+	if err != nil {
 		message := err.Error()
 		var diagnostic *dexreport.Diagnostic
 		if errors.As(err, &diagnostic) && diagnostic.Err != nil {

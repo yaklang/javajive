@@ -33,8 +33,22 @@ const (
 	dexDeclaredSynchronized = uint32(0x20000)
 )
 
+// ClassOptions controls optional work around a class translation.
+type ClassOptions struct {
+	// FileValidated reports that the caller already validated File with
+	// ir.ValidateFile and will not mutate it. Method lowering then skips the
+	// per-method whole-file metadata validation, which is quadratic on large
+	// applications.
+	FileValidated bool
+}
+
 // Class lowers one parser-neutral DEX class. It never returns partial bytes.
 func Class(file *model.File, class *model.Class) ([]byte, error) {
+	return ClassWithOptions(file, class, ClassOptions{})
+}
+
+// ClassWithOptions is Class with explicit caller-provided guarantees.
+func ClassWithOptions(file *model.File, class *model.Class, options ClassOptions) ([]byte, error) {
 	if file == nil {
 		return nil, report.New("", "", "", -1, "class", fmt.Errorf("nil DEX file"))
 	}
@@ -116,7 +130,7 @@ func Class(file *model.File, class *model.Class) ([]byte, error) {
 			return nil, methodDiagnostic(methodContext(file, class, &method), nil, "method", fmt.Errorf("duplicate method %s%s", method.Method.Name, descriptor))
 		}
 		seenMethods[key] = true
-		if err := addMethod(file, class, &method, builder); err != nil {
+		if err := addMethod(file, class, &method, builder, options); err != nil {
 			return nil, err
 		}
 	}
@@ -299,7 +313,7 @@ func shrinkSigned(descriptor string, value model.EncodedValue) int32 {
 	}
 }
 
-func addMethod(file *model.File, class *model.Class, method *model.EncodedMethod, builder *classfilebuilder.Class) error {
+func addMethod(file *model.File, class *model.Class, method *model.EncodedMethod, builder *classfilebuilder.Class, options ClassOptions) error {
 	ctx := methodContext(file, class, method)
 	if method.Method.Class != class.Descriptor {
 		return methodDiagnostic(ctx, nil, "method", fmt.Errorf("method owner %q does not match class", method.Method.Class))
@@ -383,7 +397,7 @@ func addMethod(file *model.File, class *model.Class, method *model.EncodedMethod
 	if declarationOnly {
 		return nil
 	}
-	built, err := ir.Build(ir.Input{File: file, Class: class, Method: method})
+	built, err := ir.Build(ir.Input{File: file, Class: class, Method: method, SkipFileValidation: options.FileValidated})
 	if err != nil {
 		return err
 	}

@@ -23,6 +23,10 @@ type Input struct {
 	File   *model.File
 	Class  *model.Class
 	Method *model.EncodedMethod
+	// SkipFileValidation reports that the caller already validated File. Build
+	// otherwise validates the whole file per method, which is quadratic on
+	// large applications.
+	SkipFileValidation bool
 }
 
 // CategoryKind is the verifier-relevant category of a DEX register value.

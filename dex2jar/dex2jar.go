@@ -18,6 +18,7 @@ import (
 	"github.com/yaklang/javajive/dex2jar/ir"
 	"github.com/yaklang/javajive/dex2jar/lower"
 	"github.com/yaklang/javajive/dex2jar/model"
+	dexreport "github.com/yaklang/javajive/dex2jar/report"
 )
 
 const manifest = "Manifest-Version: 1.0\r\n\r\n"
@@ -178,6 +179,10 @@ func applicationToJar(app *model.Application) ([]byte, Report, error) {
 		if file == nil {
 			return nil, report, errors.New("dex2jar: application contains a nil DEX file")
 		}
+		// Validate the file once instead of once per method.
+		if err := ir.ValidateFile(file); err != nil {
+			return nil, report, dexreport.New(file.Entry, "", "", 0, "metadata", err)
+		}
 		for classIndex := range file.Classes {
 			class := &file.Classes[classIndex]
 			name, err := classEntryName(class.Descriptor)
@@ -189,7 +194,7 @@ func applicationToJar(app *model.Application) ([]byte, Report, error) {
 			}
 			seen[name] = file.Entry
 
-			classBytes, err := lower.Class(file, class)
+			classBytes, err := lower.ClassWithOptions(file, class, lower.ClassOptions{FileValidated: true})
 			if err != nil {
 				return nil, report, err
 			}

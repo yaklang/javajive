@@ -16,8 +16,10 @@ func Build(in Input) (*Method, error) {
 	if in.File == nil || in.Class == nil || in.Method == nil || in.Method.Code == nil {
 		return nil, diagnostic(ctx, nil, "method", fmt.Errorf("incomplete method input"))
 	}
-	if err := validateFileMetadata(in.File); err != nil {
-		return nil, diagnostic(ctx, nil, "metadata", err)
+	if !in.SkipFileValidation {
+		if err := validateFileMetadata(in.File); err != nil {
+			return nil, diagnostic(ctx, nil, "metadata", err)
+		}
 	}
 	if err := validateInputMetadata(in); err != nil {
 		return nil, diagnostic(ctx, nil, "metadata", err)

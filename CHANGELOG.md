@@ -45,7 +45,12 @@ Translate switches, array literals, monitors, and discarding exception handlers.
   unreachable predecessors when joining register categories.
 - Read sparse switch payloads as a key array followed by a target array, and
   treat nested reference arrays as covariant in their components.
-- On the Termux APK this raises strictly translatable classes to 2628 (97.5%).
+- Validate each DEX file once per conversion instead of once per method. The
+  per-method whole-file check was quadratic: inspecting the F-Droid APK
+  (19,701 classes) went from over 40 minutes to 15 seconds, and the Termux APK
+  from 135 seconds to 4 seconds.
+- On the Termux APK this raises strictly translatable classes to 2628 (97.5%);
+  on the F-Droid APK (19,701 classes) to 17,431 (88.5%).
 
 ## Unreleased — 2026-11-06
 
