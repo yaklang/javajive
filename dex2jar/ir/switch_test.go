@@ -33,13 +33,14 @@ func TestDecodePackedSwitchCarriesFirstKey(t *testing.T) {
 }
 
 func TestDecodeSparseSwitchSortsKeys(t *testing.T) {
-	// sparse-switch v0, payload@4; return-void; payload: keys 100 then 5.
+	// sparse-switch v0, payload@4; return-void; payload: keys 100, 5 followed
+	// by their targets 3 and 9.
 	words := []uint16{
 		0x002c, 0x0004, 0x0000,
 		0x000e,
 		0x0200, 0x0002,
-		0x0064, 0x0000, 0x0003, 0x0000,
-		0x0005, 0x0000, 0x0003, 0x0000,
+		0x0064, 0x0000, 0x0005, 0x0000,
+		0x0003, 0x0000, 0x0009, 0x0000,
 	}
 	instructions, err := Decode(&model.Code{Instructions: words}, Context{Entry: "classes.dex", Class: "LC;", Method: "m"})
 	if err != nil {
@@ -51,6 +52,10 @@ func TestDecodeSparseSwitchSortsKeys(t *testing.T) {
 	switchInstruction := instructions[0]
 	if len(switchInstruction.Keys) != 2 || switchInstruction.Keys[0] != 5 || switchInstruction.Keys[1] != 100 {
 		t.Fatalf("sparse keys = %v, want ascending", switchInstruction.Keys)
+	}
+	// Sorting must keep every key attached to its own target.
+	if switchInstruction.Targets[0] != 9 || switchInstruction.Targets[1] != 3 {
+		t.Fatalf("sparse targets = %v, want the pair for each key", switchInstruction.Targets)
 	}
 }
 

@@ -66,9 +66,9 @@ func switchFixture() (*model.File, *model.Class) {
 					0x000f,
 					0x0200, 0x0002, // sparse payload: 2 cases
 					0x0005, 0x0000, // key 5
-					0x0005, 0x0000, // target offset 5
 					0x0064, 0x0000, // key 100
-					0x0007, 0x0000, // target offset 7
+					0x0005, 0x0000, // target for key 5 -> offset 5
+					0x0007, 0x0000, // target for key 100 -> offset 7
 				}},
 			},
 		},

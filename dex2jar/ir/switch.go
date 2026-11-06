@@ -126,17 +126,19 @@ func decodeSwitchPayload(words []uint16, base, switchOffset uint32, sparse bool)
 		}
 		return targets, nil, first, nil
 	}
-	// The class format requires lookupswitch pairs sorted by key; DEX does not
-	// require order, so sort the pairs here instead of rejecting the input.
+	// A sparse payload stores all keys first and then all targets. The class
+	// format requires sorted lookup pairs, so sort them here instead of
+	// rejecting an input whose keys are not ordered.
 	type casePair struct {
 		key    int32
 		target int64
 	}
 	pairs := make([]casePair, size)
+	targetsBase := base + 2 + 2*size
 	for index := uint32(0); index < size; index++ {
 		pairs[index] = casePair{
-			key:    read32(base + 2 + 4*index),
-			target: int64(switchOffset) + int64(read32(base+4+4*index)),
+			key:    read32(base + 2 + 2*index),
+			target: int64(switchOffset) + int64(read32(targetsBase+2*index)),
 		}
 	}
 	sort.Slice(pairs, func(i, j int) bool { return pairs[i].key < pairs[j].key })

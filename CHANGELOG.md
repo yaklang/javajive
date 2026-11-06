@@ -6,7 +6,8 @@ Translate switches, array literals, monitors, and discarding exception handlers.
 
 - Decode switch and fill-array-data payloads as data instead of rejecting the
   code stream. `packed-switch` carries a `first_key` followed by its targets,
-  `sparse-switch` carries key/target pairs (sorted on output), and
+  `sparse-switch` carries a key array followed by a target array (sorted on
+  output), and
   `fill-array-data` carries its element width and raw bytes.
 - Lower packed switches to `tableswitch`, sparse switches to `lookupswitch`,
   and array literals to element stores selected by the array register's flow
@@ -35,7 +36,7 @@ Translate switches, array literals, monitors, and discarding exception handlers.
   poison later passes and produce spurious join conflicts.
 - Walk invoke arguments by register words in the reference analysis, so the
   second half of a long or double argument is not checked as a reference.
-- On the Termux APK this raises strictly translatable classes to 2607 (96.7%).
+- On the Termux APK this raises strictly translatable classes to 2620 (97.2%).
 
 ## Unreleased — 2026-11-06
 
