@@ -46,10 +46,11 @@ def required_coverage_snapshot(repo_root: Path) -> dict[str, Any]:
     }
 
 
-# Four source shards feed one required algorithm-regression summary. Full task
-# contracts, platform builds, and historical-JAR audits remain available through
-# the explicit task-gates / extended / untrusted-oracle workflows.
-BASELINE_CI_JOBS = ("source", "regression")
+# Eight source shards feed one required algorithm-regression summary that also
+# requires the concurrently running regression suite. Full task contracts,
+# platform builds, and historical-JAR audits remain available through the
+# explicit task-gates / extended / untrusted-oracle workflows.
+BASELINE_CI_JOBS = ("source", "regression", "gate")
 
 # These are reviewed authored-fixture suites, not a promotion of the external
 # historical corpus. Keep every selector explicit: a prefix could accidentally
