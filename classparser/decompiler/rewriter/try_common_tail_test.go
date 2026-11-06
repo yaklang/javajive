@@ -144,3 +144,26 @@ func TestTryTailDependencyProofRejectsCyclesAndOversizedTrees(t *testing.T) {
 		}
 	}
 }
+
+func TestTryTailCommonResultType(t *testing.T) {
+	stringType := types.NewJavaClass("java.lang.String")
+	integerType := types.NewJavaClass("java.lang.Integer")
+	objectType := types.NewJavaClass("java.lang.Object")
+	common, ok := tryTailCommonResultType(stringType, integerType, false, false)
+	if !ok || common == nil || common.IsArray() {
+		t.Fatalf("compatible reference results rejected: %v %v", common, ok)
+	}
+	if name, _ := types.ClassFQNOf(common); name == "java.lang.String" || name == "java.lang.Integer" {
+		t.Fatalf("expected a common supertype, got %v", common)
+	}
+	if _, ok := tryTailCommonResultType(types.NewJavaPrimer(types.JavaInteger), objectType, false, false); ok {
+		t.Fatal("primitive/reference results accepted")
+	}
+	nullString, ok := tryTailCommonResultType(objectType, stringType, true, false)
+	if !ok || !typeFQNEquals(nullString, stringType) {
+		t.Fatalf("null arm did not retain concrete type: %v %v", nullString, ok)
+	}
+	if _, ok := tryTailCommonResultType(types.NewJavaArrayType(stringType), types.NewJavaArrayType(stringType), false, false); ok {
+		t.Fatal("array results accepted")
+	}
+}
