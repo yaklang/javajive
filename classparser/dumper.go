@@ -12480,6 +12480,45 @@ func (c *ClassObjectDumper) aggressiveRedumpMethod(name, descriptor string) *dum
 	return res
 }
 
+// reconstructedPatternMethod builds a declaration shell for a method whose body
+// is supplied by T21. It reuses the stub signature builder, but removes the stub
+// ledger/diagnostic entries because the emitted body is complete source.
+func (c *ClassObjectDumper) reconstructedPatternMethod(method *MemberInfo, name, descriptor, body string) *dumpedMethods {
+	stub := c.dumpStubMethod(method, name, descriptor, "pattern switch reconstructed")
+	if stub == nil {
+		return nil
+	}
+	methodKey := name + descriptor
+	if c.report != nil {
+		keptStubs := c.report.StubMethods[:0]
+		for _, entry := range c.report.StubMethods {
+			if entry != methodKey {
+				keptStubs = append(keptStubs, entry)
+			}
+		}
+		c.report.StubMethods = keptStubs
+		keptDiagnostics := c.report.Diagnostics[:0]
+		for _, diagnostic := range c.report.Diagnostics {
+			if diagnostic.Code == "method_stub" && diagnostic.Method == methodKey {
+				continue
+			}
+			keptDiagnostics = append(keptDiagnostics, diagnostic)
+		}
+		c.report.Diagnostics = keptDiagnostics
+		if len(c.report.StubMethods) == 0 {
+			c.sourceDegraded = false
+		}
+	}
+	stub.code = replaceMethodBody(stub.code, body)
+	stub.bodyCode = body
+	stub.isStub = false
+	stub.incompleteValue = false
+	stub.malformedTry = false
+	stub.member = method
+	stub.descriptor = descriptor
+	return stub
+}
+
 // dumpStubMethod builds a syntactically-valid placeholder for a method whose body could
 // not be decompiled. It reconstructs the signature purely from the access flags and the
 // method descriptor (independent of the bytecode), so a single un-decompilable method
@@ -12924,7 +12963,19 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		// if name != "isSymlink" {
 		// 	continue
 		// }
-		res, err := c.safeDumpMethod(name, descriptor)
+		var res *dumpedMethods
+		// Reconstruct a javac pattern-switch body before the legacy method
+		// structurer runs. The deconstruction handler otherwise trips the
+		// caught-exception sentinel and may exhaust the request output budget
+		// before T21 gets a chance to replace the whole body.
+		if methodHasTypeSwitch(c.obj, method) {
+			if body, ok, _ := reconstructPatternMethod(c, method, name, descriptor); ok {
+				res = c.reconstructedPatternMethod(method, name, descriptor, body)
+			}
+		}
+		if res == nil {
+			res, err = c.safeDumpMethod(name, descriptor)
+		}
 		applyLeakedExceptionSentinel(res)
 		if err == nil && res != nil && name == "<clinit>" && c.isInterfaceLike() && isIgnorableAssertionOnlyClinit(res.code) {
 			continue

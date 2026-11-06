@@ -148,6 +148,13 @@ Add a native, pure-Go DEX/APK-to-JAR path as a strict first vertical slice.
   `DecompileDEXFileWithAnalysisBudget`, `NewJarFSFromLocalWithAnalysisBudget`
   and CLI `-analysis-budget` route the same policy through archives, DEX
   translation and single classes. The default policy is unchanged.
+- Reconstruct Java 21 record deconstruction pattern switches instead of
+  failing closed. T21 certifies javac's shared `Throwable`/`MatchException`
+  handler, reads the target record's declared component list, emits
+  `case Record(component...)` patterns, and reproduces the compiler default
+  throw. The adversarial shape now compiles, verifies and matches runtime
+  behavior, and a generated 3-round corpus exercises 1-3 records with 1-3
+  primitive components per case.
 - Recover switch-expression joins in constructor bodies by placing the
   synthetic join local immediately after the `this()`/`super()` delegation.
   Joins in the constructor prefix (for example a switch expression passed to

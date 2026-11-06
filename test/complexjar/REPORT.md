@@ -140,6 +140,17 @@ being counted as success.
     they now fail the method closed with
     `constructor prefix stack join cannot be expressed before super()/this()`
     instead of returning uncompilable source.
+18. **Record deconstruction patterns were rejected as one MatchException
+    blob.** The old pre-check refused any `MatchException`, and T21 could not
+    distinguish a record accessor prefix from an ordinary case-body call. T21
+    now certifies the javac shared `Throwable` handler, resolves the target
+    record's `Record` attribute through the archive resolver, reconstructs each
+    declared component in order, and emits `case Circle(double r)` patterns.
+    The compiler's default `MatchException(null, null)` throw is rendered
+    explicitly, so the flat source remains exhaustive without sealed/permits
+    metadata. The adversarial shape compiles, verifies and matches runtime
+    output; a generated 3-round record corpus varies 1-3 records with 1-3
+    primitive components per case and verifies the same round trip.
 
 ## Remaining boundaries
 
@@ -157,14 +168,13 @@ being counted as success.
   switch. The complex JAR and adversarial suites compile, verify and compare
   behavior for these outputs; they are not pretty-printed back to the exact
   source form.
-- **Java 21 record-deconstruction patterns are partially supported.** The
-  checked-in T21-C06 fixture reconstructs its shape. A separate adversarial
-  shape (`case Circle(double r)` over a nested sealed hierarchy) compiles its
-  accessor calls under shared `Throwable` handlers that wrap failures in
-  `MatchException`; the current shared-handler structurer rejects that shape
-  and emits a method stub with an `exception-handler structuring failed`
-  diagnostic. It does not emit silently wrong source. Simple type patterns,
-  `case null`, guards, and equivalent-dispatcher forms are covered.
+- **Record deconstruction covers simple component patterns.** A record whose
+  component accessors match its declared `Record` attribute (including a single
+  component) reconstructs to `case Record(component...)`. Nested patterns,
+  array components, guards combined with deconstruction, and records whose
+  metadata is unavailable still fail closed with a diagnostic. Simple type
+  patterns, `case null`, guards, and equivalent-dispatcher forms remain
+  covered.
 - **Very large single methods use an opt-in budget.** The public default keeps
   `MaxAnalysisUpdates=1,000,000` and its 1M graph/set caps. A generated 55 KB
   class with 22,709 instructions hits `set_element_work` at the default after

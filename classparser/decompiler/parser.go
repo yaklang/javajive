@@ -169,12 +169,12 @@ func ParseBytesCode(decompiler *core.Decompiler) (res []statements.Statement, er
 	decompiler.InlineGuardedCallTemps(&sts)
 	// Post-RewriteVar per-VarUid instanceof-widen with Object-safe gate. Kill-switch:
 	// JDEC_POST_RW_INSTANCEOF_WIDEN_OFF=1.
-	rewriter.WidenInstanceofReadRefs(&sts)
+	rewriter.WidenInstanceofReadRefs(&sts, decompiler.FunctionContext)
 	// Widen a concrete numeric-typed declaration to java.lang.Number when its slot is reused for an
 	// incompatible numeric sub-type and every read is Number-safe (fastjson2
 	// ObjectWriterCreatorASM.gwFieldName: Integer slot reused for Long stores, read via
 	// .intValue()/.longValue()). Kill-switch: JDEC_WIDEN_NUMERIC_MIXED_OFF=1.
-	rewriter.WidenNumericMixedSlotDecl(&sts)
+	rewriter.WidenNumericMixedSlotDecl(&sts, decompiler.FunctionContext)
 	// Retype a split-slot foreach/copy temp that lost its ARRAY type to java.lang.Object because the
 	// copy source's concrete type was adopted only AFTER this copy in DFS order (frozen-Object stale
 	// snapshot). Runs after RewriteVar unifies ids and all adoptions commit, so the source reports its

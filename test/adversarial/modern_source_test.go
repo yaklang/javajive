@@ -392,10 +392,12 @@ public class RecDeconstruction {
 `
 
 // Java 21 record deconstruction puts record accessor calls under shared
-// Throwable handlers that wrap failures in MatchException. Until that shared
-// handler shape is structured, the method must degrade to an explicit stub
-// with a diagnostic; a compiled source that silently drops an arm is worse.
-func TestAdversarialRecordDeconstructionFailsClosed(t *testing.T) {
+// Throwable handlers that wrap failures in MatchException. T21 reconstructs the
+// pattern switch from the record's declared components and lets javac regenerate
+// that handler. If the proof cannot close (unknown record metadata, nested
+// patterns, or an unrecognized handler), the method must still fail closed with
+// an explicit stub instead of dropping an arm.
+func TestAdversarialRecordDeconstructionRoundTrip(t *testing.T) {
 	if !envEnabled() {
 		t.Skip("set JAVAJIVE_ADVERSARIAL_EVAL=1 to run the adversarial evaluation")
 	}
@@ -413,6 +415,14 @@ func TestAdversarialRecordDeconstructionFailsClosed(t *testing.T) {
 	}
 	if err := compileTreeAt(t, javac, dir, []string{path}, 21); err != nil {
 		t.Fatalf("compile original: %v", err)
+	}
+	java, err := exec.LookPath("java")
+	if err != nil {
+		t.Skip("java not found")
+	}
+	originalRun, err := exec.Command(java, "-Xverify:all", "-cp", dir, "RecDeconstruction").CombinedOutput()
+	if err != nil {
+		t.Fatalf("run original: %v\n%s", err, originalRun)
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, "RecDeconstruction.class"))
 	if err != nil {
@@ -453,6 +463,29 @@ func TestAdversarialRecordDeconstructionFailsClosed(t *testing.T) {
 		}
 		if !strings.Contains(result.Source, "switch") {
 			t.Fatalf("record-deconstruction shape lost its switch:\n%s", result.Source)
+		}
+		files, err := modernDecompileTree(t, dir)
+		if err != nil {
+			t.Fatalf("record tree decompile: %v", err)
+		}
+		rebuilt := t.TempDir()
+		var rebuiltPaths []string
+		for name, source := range files {
+			path := filepath.Join(rebuilt, name)
+			if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			rebuiltPaths = append(rebuiltPaths, path)
+		}
+		if err := compileTreeAt(t, javac, rebuilt, rebuiltPaths, 21); err != nil {
+			t.Fatalf("reconstructed pattern switch does not compile: %v", err)
+		}
+		rebuiltRun, err := exec.Command(java, "-Xverify:all", "-cp", rebuilt, "RecDeconstruction").CombinedOutput()
+		if err != nil {
+			t.Fatalf("reconstructed pattern switch failed: %v\n%s", err, rebuiltRun)
+		}
+		if string(rebuiltRun) != string(originalRun) {
+			t.Fatalf("record-deconstruction behavior changed: got %q want %q", rebuiltRun, originalRun)
 		}
 		return
 	}
