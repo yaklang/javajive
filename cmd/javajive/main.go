@@ -74,13 +74,17 @@ Run "javajive <command> -h" for command-specific options.
 func cmdDecompile(args []string) error {
 	fs := newFlagSet("decompile")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "usage: javajive decompile [-o out] <file|dir>")
+		fmt.Fprintln(fs.Output(), "usage: javajive decompile [-o out] [-analysis-budget N] <file|dir>")
 		fmt.Fprintln(fs.Output(), "Decompile .class, archive, DEX, APK, or directory input; DEX/APK defaults to <input>.src.")
 		fs.PrintDefaults()
 	}
 	out := fs.String("o", "", "output file (for a .class) or directory (for archives/DEX/APK/dirs); default: stdout / <input>.src")
+	budget := fs.Int("analysis-budget", 0, "per-method analysis updates for very large generated methods (0 = default; >1000000 scales graph caps)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *budget < 0 {
+		return fmt.Errorf("-analysis-budget must be non-negative")
 	}
 	if fs.NArg() != 1 {
 		return fmt.Errorf("decompile requires exactly one input path\nusage: javajive decompile [-o out] <file|dir>")
@@ -93,7 +97,7 @@ func cmdDecompile(args []string) error {
 	}
 
 	if info.IsDir() {
-		return decompileDir(input, *out)
+		return decompileDir(input, *out, *budget)
 	}
 
 	switch strings.ToLower(filepath.Ext(input)) {
@@ -102,7 +106,7 @@ func cmdDecompile(args []string) error {
 		if dst == "" {
 			dst = input + ".src"
 		}
-		if err := jj.DecompileArchive(input, dst); err != nil {
+		if err := jj.DecompileArchiveWithAnalysisBudget(input, dst, *budget); err != nil {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "decompiled archive %q -> %q\n", input, dst)
@@ -112,7 +116,7 @@ func cmdDecompile(args []string) error {
 		if dst == "" {
 			dst = input + ".src"
 		}
-		if err := jj.DecompileDEXFile(input, dst, jj.DexOptions{}); err != nil {
+		if err := jj.DecompileDEXFileWithAnalysisBudget(input, dst, jj.DexOptions{}, *budget); err != nil {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "decompiled DEX input %q -> %q\n", input, dst)
@@ -122,7 +126,7 @@ func cmdDecompile(args []string) error {
 		if err != nil {
 			return err
 		}
-		src, err := jj.Decompile(data)
+		src, err := decompileClassBytes(data, *budget)
 		if err != nil {
 			return err
 		}
@@ -137,7 +141,26 @@ func cmdDecompile(args []string) error {
 	}
 }
 
-func decompileDir(dir, out string) error {
+// decompileClassBytes uses the explicit-budget path only when the caller asked
+// for one, preserving the default single-class behavior otherwise.
+func decompileClassBytes(data []byte, budget int) (string, error) {
+	if budget <= 0 {
+		return jj.Decompile(data)
+	}
+	result, err := jj.DecompileWithOptions(data, jj.DecompileOptions{
+		Mode:               jj.Compatibility,
+		MaxAnalysisUpdates: budget,
+	})
+	if err != nil {
+		return "", err
+	}
+	if result.Source == "" {
+		return "", fmt.Errorf("decompile produced no source (status=%s)", result.Status)
+	}
+	return result.Source, nil
+}
+
+func decompileDir(dir, out string, budget int) error {
 	if out == "" {
 		return fmt.Errorf("decompiling a directory requires -o <output directory>")
 	}
@@ -152,7 +175,7 @@ func decompileDir(dir, out string) error {
 		if err != nil {
 			return err
 		}
-		src, decErr := jj.Decompile(data)
+		src, decErr := decompileClassBytes(data, budget)
 		if decErr != nil {
 			fmt.Fprintf(os.Stderr, "skip %q: %v\n", path, decErr)
 			return nil

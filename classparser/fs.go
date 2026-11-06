@@ -27,6 +27,7 @@ type JarFS struct {
 
 	// Immutable compilation profile, distinct from Multi-Release lookup.
 	targetSourceVersion       int
+	maxAnalysisUpdates        int
 	sourceCompiler            SourceCompilerProfile
 	sourceFieldMetadata       *sourceFieldMetadataAuthority
 	sourceConstructorLowering *sourceConstructorLoweringAuthority
@@ -86,6 +87,18 @@ func NewJarFSFromLocalWithResolver(path string, resolve func(string) ([]byte, bo
 // This is independent of which Multi-Release archive entries are selected.
 func NewJarFSFromLocalWithSourceVersion(path string, target int, resolve func(string) ([]byte, bool)) (*JarFS, error) {
 	return NewJarFSFromLocalWithCompilerProfile(path, target, "", resolve)
+}
+
+// NewJarFSFromLocalWithAnalysisBudget is NewJarFSFromLocalWithSourceVersion
+// with an explicit per-method reaching-definition budget. A positive value
+// above the public 1M default also scales the derived graph caps.
+func NewJarFSFromLocalWithAnalysisBudget(path string, target int, maxAnalysisUpdates int, resolve func(string) ([]byte, bool)) (*JarFS, error) {
+	z, err := NewJarFSFromLocalWithCompilerProfile(path, target, "", resolve)
+	if err != nil {
+		return nil, err
+	}
+	z.maxAnalysisUpdates = maxAnalysisUpdates
+	return z, nil
 }
 
 // NewJarFSFromLocalWithCompilerProfile fixes the source language and compiler
@@ -192,6 +205,7 @@ func (z *JarFS) decompileClassBytes(name string, data []byte) []byte {
 	// typed protocol; a mapping-looking source fragment grants no permission.
 	d := NewClassObjectDumper(cf)
 	d.options.TargetSourceVersion = z.targetSourceVersion
+	d.options.MaxAnalysisUpdates = z.maxAnalysisUpdates
 	d.options.SourceCompiler = z.sourceCompiler
 	d.options.sourceFieldMetadata = z.sourceFieldMetadata
 	d.options.sourceConstructorLowering = z.sourceConstructorLowering
@@ -206,6 +220,9 @@ func (z *JarFS) decompileClassBytes(name string, data []byte) []byte {
 		d.Work = z.archive.budget.Work()
 		d.options.Context = z.archive.ctx
 		d.options.TargetRelease = z.archive.targetRelease
+	}
+	if d.Work == nil {
+		d.Work = largeMethodWorkBudget(z.maxAnalysisUpdates)
 	}
 	source, err := d.DumpClass()
 	if err != nil {
@@ -399,6 +416,7 @@ func (z *JarFS) getNestedJarFS(jarPath string) (*filesys.UnifiedFS, error) {
 	// 嵌套的jar也继承递归解析设置与共享预算
 	nestedJarFS := NewJarFSWithOptions(nestedZipFS, z.recursiveParse)
 	nestedJarFS.targetSourceVersion = z.targetSourceVersion
+	nestedJarFS.maxAnalysisUpdates = z.maxAnalysisUpdates
 	nestedJarFS.sourceCompiler = z.sourceCompiler
 	nestedJarFS.retainUnprovedSource = z.retainUnprovedSource
 	nestedJarFS.declarationResolver = z.declarationResolver
@@ -501,6 +519,7 @@ type ExpandedZipFS struct {
 	zipFS                *filesys.ZipFS // optional container (zip root); nil for local directories
 	recursiveParse       bool
 	retainUnprovedSource bool
+	maxAnalysisUpdates   int
 	jarCache             *utils.SafeMapWithKey[string, *filesys.UnifiedFS]
 	zipCache             *utils.SafeMapWithKey[string, *filesys.ZipFS]
 	archive              *archiveFSState
@@ -520,6 +539,15 @@ func NewExpandedZipFSWithOptions(underlying fi.FileSystem, zipFS *filesys.ZipFS,
 		jarCache:       utils.NewSafeMapWithKey[string, *filesys.UnifiedFS](),
 		zipCache:       utils.NewSafeMapWithKey[string, *filesys.ZipFS](),
 		archive:        archiveStateFromZipFS(zipFS),
+	}
+}
+
+// SetAnalysisBudget applies a per-method reaching-definition budget to classes
+// decompiled directly from this filesystem and to nested archives created
+// afterwards. A positive value above 1,000,000 also scales graph caps.
+func (e *ExpandedZipFS) SetAnalysisBudget(maxAnalysisUpdates int) {
+	if e != nil {
+		e.maxAnalysisUpdates = maxAnalysisUpdates
 	}
 }
 
@@ -560,6 +588,7 @@ func (e *ExpandedZipFS) GetJarFS(jarPath string) (*filesys.UnifiedFS, error) {
 
 	jarFS := NewJarFSWithOptions(zipFS, e.recursiveParse)
 	jarFS.retainUnprovedSource = e.retainUnprovedSource
+	jarFS.maxAnalysisUpdates = e.maxAnalysisUpdates
 	jarFS.declarationResolver = e.archiveDeclarationResolver(jarPath)
 	if e.archive != nil && e.archive.active {
 		jarFS.archive = e.archive.nestedState()
@@ -732,6 +761,8 @@ func (e *ExpandedZipFS) ReadFile(name string) ([]byte, error) {
 	}
 	d := NewClassObjectDumper(cf)
 	d.options.RetainUnprovedSource = e.retainUnprovedSource
+	d.options.MaxAnalysisUpdates = e.maxAnalysisUpdates
+	d.Work = largeMethodWorkBudget(e.maxAnalysisUpdates)
 	logical := cf.GetClassName() + ".class"
 	if normalized := normalizeArchivePath(name); strings.HasSuffix(normalized, logical) {
 		root := strings.TrimSuffix(normalized, logical)

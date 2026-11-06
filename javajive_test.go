@@ -1,6 +1,8 @@
 package javajive_test
 
 import (
+	"archive/zip"
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,5 +78,41 @@ func TestDecompileFileExport(t *testing.T) {
 	}
 	if !strings.Contains(src, "InvisibleAnnoSeed") {
 		t.Fatalf("unexpected source:\n%s", src)
+	}
+}
+
+func TestDecompileArchiveWithAnalysisBudgetExport(t *testing.T) {
+	dir := t.TempDir()
+	jarPath := filepath.Join(dir, "seed.jar")
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	entry, err := zw.Create("InvisibleAnnoSeed.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.Write(testdataClass(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(jarPath, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "src")
+	if err := jj.DecompileArchiveWithAnalysisBudget(jarPath, outDir, 2_000_000); err != nil {
+		t.Fatalf("DecompileArchiveWithAnalysisBudget: %v", err)
+	}
+	src, err := os.ReadFile(filepath.Join(outDir, "InvisibleAnnoSeed.java"))
+	if err != nil {
+		t.Fatalf("read decompiled source: %v", err)
+	}
+	if !strings.Contains(string(src), "class InvisibleAnnoSeed") {
+		t.Fatalf("unexpected source:\n%s", src)
+	}
+
+	if err := jj.DecompileArchiveWithAnalysisBudget(jarPath, outDir, -1); err == nil {
+		t.Fatal("negative analysis budget accepted")
 	}
 }

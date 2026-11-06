@@ -55,10 +55,17 @@ func NewFromJarFS(fs *javaclassparser.JarFS) (*JarWar, error) {
 }
 
 func New(compressedFile string) (*JarWar, error) {
+	return NewWithAnalysisBudget(compressedFile, 0)
+}
+
+// NewWithAnalysisBudget opens an archive with an explicit per-method
+// reaching-definition budget. Positive budgets above 1,000,000 opt into the
+// large-method graph scaling.
+func NewWithAnalysisBudget(compressedFile string, maxAnalysisUpdates int) (*JarWar, error) {
 	if utils.GetFirstExistedFile(compressedFile) == "" {
 		return nil, fmt.Errorf("file not existed: %s", compressedFile)
 	}
-	fs, err := javaclassparser.NewJarFSFromLocal(compressedFile)
+	fs, err := javaclassparser.NewJarFSFromLocalWithAnalysisBudget(compressedFile, 0, maxAnalysisUpdates, nil)
 	if err != nil {
 		return nil, utils.Wrap(err, "failed to create jar fs")
 	}

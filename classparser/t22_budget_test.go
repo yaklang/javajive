@@ -72,6 +72,46 @@ func parseStoreMerge(t *testing.T, n int) *core.Decompiler {
 	return d
 }
 
+func TestT22PublicLargeBudgetScalesGraphBounds(t *testing.T) {
+	cases := []struct {
+		budget int
+		want   int64
+	}{
+		{0, defaultGraphBound},
+		{1, analysisGraphFactor},
+		{15_625, defaultGraphBound},
+		{20_000, defaultGraphBound},
+		{1_000_000, defaultGraphBound},
+		{1_000_001, defaultGraphBound * analysisGraphFactor},
+		{2_000_000, defaultGraphBound * analysisGraphFactor},
+		{100_000_000, defaultGraphBound * analysisGraphFactor},
+	}
+	for _, tc := range cases {
+		opts := DecompileOptions{MaxAnalysisUpdates: tc.budget}
+		applySecureGraphBounds(&opts)
+		got := []int64{opts.Limits.MaxGraphEdges, opts.Limits.MaxGraphScans, opts.Limits.MaxSetElementWork, opts.Limits.MaxNodeCopies}
+		for i, value := range got {
+			if value != tc.want {
+				t.Fatalf("budget=%d limit #%d=%d want %d", tc.budget, i, value, tc.want)
+			}
+		}
+	}
+
+	// An explicitly supplied limit is a caller decision, not a derived default.
+	opts := DecompileOptions{
+		MaxAnalysisUpdates: 2_000_000,
+		Limits:             Limits{MaxGraphEdges: 7, MaxGraphScans: 9},
+	}
+	applySecureGraphBounds(&opts)
+	if opts.Limits.MaxGraphEdges != 7 || opts.Limits.MaxGraphScans != 9 {
+		t.Fatalf("explicit graph limits overwritten: %+v", opts.Limits)
+	}
+	if opts.Limits.MaxSetElementWork != defaultGraphBound*analysisGraphFactor ||
+		opts.Limits.MaxNodeCopies != defaultGraphBound*analysisGraphFactor {
+		t.Fatalf("unset graph limits not scaled: %+v", opts.Limits)
+	}
+}
+
 func TestT22_C01_graphBeforeSolve(t *testing.T) {
 	const throws, handlers = 40, 40
 	d := parseThrowFanout(t, throws, handlers)
