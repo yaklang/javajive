@@ -332,3 +332,67 @@ public class GuardedPattern {
 		t.Fatalf("guarded record behavior changed: got %q want %q", rebuiltRun, originalRun)
 	}
 }
+
+func TestAdversarialDeepRecordPatternRoundTrip(t *testing.T) {
+	if !envEnabled() {
+		t.Skip("set JAVAJIVE_ADVERSARIAL_EVAL=1 to run the adversarial evaluation")
+	}
+	javac, err := exec.LookPath("javac")
+	if err != nil {
+		t.Skip("javac not found")
+	}
+	java, err := exec.LookPath("java")
+	if err != nil {
+		t.Skip("java not found")
+	}
+	if javacMajor(t, javac) < 21 {
+		t.Skip("record deconstruction requires javac 21")
+	}
+	const name = "DeepPattern"
+	const source = `
+public class DeepPattern {
+    record Leaf(int v) {}
+    record Mid(Leaf l) {}
+    record Top(Mid m1, Mid m2) {}
+    static int sum(Top top) {
+        return switch (top) {
+            case Top(Mid(Leaf(int v1)), Mid(Leaf(int v2))) -> v1 + v2;
+        };
+    }
+    public static void main(String[] args) {
+        System.out.println(sum(new Top(new Mid(new Leaf(1)), new Mid(new Leaf(2)))));
+    }
+}
+`
+	dir := compileConstructorFixture(t, javac, name, source)
+	originalRun, err := exec.Command(java, "-Xverify:all", "-cp", dir, name).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run original: %v\n%s", err, originalRun)
+	}
+	files, err := modernDecompileTree(t, dir)
+	if err != nil {
+		t.Fatalf("deep record decompile: %v", err)
+	}
+	rebuilt := t.TempDir()
+	var paths []string
+	for fileName, decompiled := range files {
+		if strings.Contains(decompiled, "yak-decompiler: undecompilable") {
+			t.Fatalf("%s was stubbed:\n%s", fileName, decompiled)
+		}
+		path := filepath.Join(rebuilt, fileName)
+		if err := os.WriteFile(path, []byte(decompiled), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, path)
+	}
+	if err := compileTreeAt(t, javac, rebuilt, paths, 21); err != nil {
+		t.Fatalf("deep record tree does not compile: %v", err)
+	}
+	rebuiltRun, err := exec.Command(java, "-Xverify:all", "-cp", rebuilt, name).CombinedOutput()
+	if err != nil {
+		t.Fatalf("deep record run failed: %v\n%s", err, rebuiltRun)
+	}
+	if string(rebuiltRun) != string(originalRun) {
+		t.Fatalf("deep record behavior changed: got %q want %q", rebuiltRun, originalRun)
+	}
+}
