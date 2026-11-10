@@ -5,6 +5,20 @@
 Universal input containers across the Java archive and Android pipelines, plus
 bounded failure recovery for malformed and partially unsupported inputs.
 
+- Harden adversarial Java ecosystem boundaries: reject JImage count and
+  decompression amplification before allocation, bound compact-cp reconstruction,
+  reject truncated AES ZIP metadata, verify zero-valued CRC fields, and cover the
+  cases with deterministic tests and fuzz seeds.
+- Make flat and structured archive exports honor the same request context, work
+  budget, byte/entry limits, and multi-release target. Flat export now propagates
+  per-entry path/read/write failures instead of reporting success after partial
+  output.
+- Validate classfile minor/preview policy, JVM Code length, and all constant-pool
+  links including unused version-gated constants before source recovery.
+- Keep recovered DEX interface/annotation shells JVM-valid, preserve parameter
+  annotations where representable, restore annotation-interface defaults, and
+  bound JAR diagnostics with an explicit truncation record.
+
 - Harden DEX IR decoding: validate switch and fill-array payload targets with
   signed/`uint64` arithmetic before indexing, reject negative, wrapped, and
   final-word payloads, and cap instruction×register analysis state before

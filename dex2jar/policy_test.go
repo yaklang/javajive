@@ -3,6 +3,7 @@ package dex2jar
 import (
 	"archive/zip"
 	"bytes"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -289,6 +290,53 @@ func TestApplicationRecoverPropagatesMinimalDependency(t *testing.T) {
 	}
 	if !parentMinimal || !childDependency {
 		t.Fatalf("diagnostics = %#v", detailed.Diagnostics)
+	}
+}
+
+func TestApplicationRecoverDoesNotCountMinimalShellMethodsAsTranslated(t *testing.T) {
+	app := policyFixture()
+	class := &app.Files[0].Classes[0]
+	class.DirectMethods[1].Method.Name = "bad/name"
+	jar, detailed, err := applicationToJarWithPolicy(app, FailureRecover)
+	if err != nil {
+		t.Fatalf("recover conversion: %v", err)
+	}
+	if len(jar) == 0 || detailed.StubbedClasses != 1 || detailed.Summary.Methods != 2 || detailed.Summary.TranslatedMethods != 0 {
+		t.Fatalf("jar=%d detailed=%#v", len(jar), detailed)
+	}
+	for _, diagnostic := range detailed.Diagnostics {
+		if diagnostic.Code == "class.minimal_recovery" {
+			return
+		}
+	}
+	t.Fatalf("minimal recovery diagnostic missing: %#v", detailed.Diagnostics)
+}
+
+func TestConversionDiagnosticsAreBoundedAndExplicitlyTruncated(t *testing.T) {
+	input := make([]ConversionDiagnostic, maxConversionDiagnostics+100)
+	for index := range input {
+		input[index] = ConversionDiagnostic{
+			Entry: strings.Repeat("entry\n", 100), Class: "Lexample/Many;", Method: fmt.Sprintf("m%d", index),
+			Category: "recovery", Action: "stubbed", Message: strings.Repeat("message", 100),
+		}
+	}
+	payload, diagnostics, err := encodeConversionDiagnostics(Report{Warnings: len(input)}, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload) > maxDiagnosticsPayload || len(diagnostics) > maxConversionDiagnostics {
+		t.Fatalf("payload=%d diagnostics=%d", len(payload), len(diagnostics))
+	}
+	last := diagnostics[len(diagnostics)-1]
+	if last.Code != "diagnostics.truncated" || !bytes.Contains(payload, []byte("diagnostics.truncated")) {
+		t.Fatalf("last=%#v payload=%s", last, payload)
+	}
+	if strings.Contains(diagnostics[0].Entry, "\n") || len([]rune(diagnostics[0].Message)) > maxDiagnosticFieldRunes {
+		t.Fatalf("diagnostic was not sanitized: %#v", diagnostics[0])
+	}
+	second, secondDiagnostics, err := encodeConversionDiagnostics(Report{Warnings: len(input)}, input)
+	if err != nil || !bytes.Equal(payload, second) || !reflect.DeepEqual(diagnostics, secondDiagnostics) {
+		t.Fatalf("bounded diagnostics are nondeterministic: %v", err)
 	}
 }
 

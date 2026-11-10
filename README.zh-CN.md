@@ -119,6 +119,9 @@ Commands:
 | `.aab` | Android App Bundle；翻译每个 `<module>/dex/classes*.dex` |
 
 `--structured` 会把 Java 归档拆成 `sources/`、`resources/` 与逐字节保留的 `archives/`。
+flat 与 structured 导出共享同一套请求级取消、字节/条目、parser work、输出和
+multi-release target 策略；单个条目的读取、路径或写入失败会返回错误，不会留下部分
+产物却报告成功。
 Android 容器始终输出翻译后的源码树。
 
 JImage 会先转换为 package-layout 的 JAR 视图：class 资源按 package 路径导出，
@@ -209,7 +212,8 @@ javajive jimage2jar -o jdk.jar /path/to/jdk/lib/modules
 部分成功返回 nil error、CLI 退出码为 0，状态为 `partial`；`complete` 表示没有降级。
 部分 JAR 包含确定性的 `META-INF/javajive/diagnostics.json`；class 恢复还会写入受限、
 版本化的 `JavaJiveRecovery` 属性，反编译后显示为开头的
-`// javajive recovery: ...` 注释。部分产物不代表语义等价。容器损坏、whole-file
+`// javajive recovery: ...` 注释。诊断字段、记录数与总 payload 均有上限；若明细被
+截断会保留显式 `diagnostics.truncated` 记录，而 summary 仍保留真实降级总数。部分产物不代表语义等价。容器损坏、whole-file
 校验失败、未知格式、资源超限和内部错误仍然终止。所有模式都先写同目录临时文件，
 再原子替换目标文件。
 

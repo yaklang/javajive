@@ -28,5 +28,17 @@ func FuzzDexToJarNeverPanics(f *testing.F) {
 			Input:  options,
 			Policy: dex2jar.FailureStubUnsupportedMethods,
 		})
+		jar, report, err := dex2jar.DexToJarWithOptions(data, dex2jar.ConvertOptions{
+			Input:  options,
+			Policy: dex2jar.FailureRecover,
+		})
+		if err == nil && len(jar) == 0 {
+			t.Fatalf("recover succeeded without JAR: %#v", report)
+		}
+		for _, diagnostic := range report.Diagnostics {
+			if diagnostic.Category == "internal" && diagnostic.Action == "failed" {
+				t.Fatalf("recover converted an internal panic into a diagnostic: %#v", diagnostic)
+			}
+		}
 	})
 }

@@ -26,6 +26,12 @@ import (
 
 const manifest = "Manifest-Version: 1.0\r\n\r\n"
 
+const (
+	maxConversionDiagnostics = 512
+	maxDiagnosticsPayload    = 1 << 20
+	maxDiagnosticFieldRunes  = 240
+)
+
 var archiveTimestamp = time.Date(1980, time.January, 1, 0, 0, 0, 0, time.UTC)
 
 // Options controls DEX and Android container input bounds. Non-positive values
@@ -453,7 +459,7 @@ func applicationToJarWithPolicy(app *model.Application, policy FailurePolicy) ([
 		}
 		for _, method := range append(class.DirectMethods, class.VirtualMethods...) {
 			detailed.Summary.Methods++
-			if method.Code == nil {
+			if method.Code == nil || result.ClassMinimal {
 				continue
 			}
 			descriptor, descriptorErr := methodDescriptorForReport(file, &method)
@@ -464,16 +470,11 @@ func applicationToJarWithPolicy(app *model.Application, policy FailurePolicy) ([
 	}
 
 	if len(detailed.Diagnostics) > 0 {
-		payload, marshalErr := json.MarshalIndent(struct {
-			Version     int                    `json:"version"`
-			Status      string                 `json:"status"`
-			Summary     Report                 `json:"summary"`
-			Diagnostics []ConversionDiagnostic `json:"diagnostics"`
-		}{Version: 1, Status: "partial", Summary: detailed.Summary, Diagnostics: detailed.Diagnostics}, "", "  ")
+		payload, diagnostics, marshalErr := encodeConversionDiagnostics(detailed.Summary, detailed.Diagnostics)
 		if marshalErr != nil {
 			return nil, detailed, fmt.Errorf("dex2jar: encode diagnostics: %w", marshalErr)
 		}
-		payload = append(payload, '\n')
+		detailed.Diagnostics = diagnostics
 		entries = append(entries, jarEntry{name: "META-INF/javajive/diagnostics.json", data: payload})
 	}
 	jar, err := writeJar(entries)
@@ -486,6 +487,87 @@ func applicationToJarWithPolicy(app *model.Application, policy FailurePolicy) ([
 		detailed.Status = "partial"
 	}
 	return jar, detailed, nil
+}
+
+func encodeConversionDiagnostics(summary Report, input []ConversionDiagnostic) ([]byte, []ConversionDiagnostic, error) {
+	diagnostics := make([]ConversionDiagnostic, 0, min(len(input), maxConversionDiagnostics))
+	for _, diagnostic := range input {
+		diagnostic.Entry = sanitizeDiagnosticField(diagnostic.Entry)
+		diagnostic.Class = sanitizeDiagnosticField(diagnostic.Class)
+		diagnostic.Method = sanitizeDiagnosticField(diagnostic.Method)
+		diagnostic.Descriptor = sanitizeDiagnosticField(diagnostic.Descriptor)
+		diagnostic.Category = sanitizeDiagnosticField(diagnostic.Category)
+		diagnostic.Action = sanitizeDiagnosticField(diagnostic.Action)
+		diagnostic.Feature = sanitizeDiagnosticField(diagnostic.Feature)
+		diagnostic.Code = sanitizeDiagnosticField(diagnostic.Code)
+		diagnostic.Kind = sanitizeDiagnosticField(diagnostic.Kind)
+		diagnostic.Scope = sanitizeDiagnosticField(diagnostic.Scope)
+		diagnostic.Stage = sanitizeDiagnosticField(diagnostic.Stage)
+		diagnostic.Severity = sanitizeDiagnosticField(diagnostic.Severity)
+		diagnostic.Op = sanitizeDiagnosticField(diagnostic.Op)
+		diagnostic.Artifact = sanitizeDiagnosticField(diagnostic.Artifact)
+		diagnostic.Message = sanitizeDiagnosticField(diagnostic.Message)
+		diagnostics = append(diagnostics, diagnostic)
+		if len(diagnostics) == maxConversionDiagnostics-1 {
+			break
+		}
+	}
+	truncated := len(diagnostics) < len(input)
+	appendTruncation := func(omitted int) {
+		diagnostics = append(diagnostics, ConversionDiagnostic{
+			Category: "recovery", Action: "drop_attribute", Code: "diagnostics.truncated",
+			Kind: "resource_limit", Scope: "container", Stage: "write", Severity: "warning",
+			Message: fmt.Sprintf("%d diagnostics were omitted to keep META-INF/javajive/diagnostics.json bounded", omitted),
+		})
+	}
+	if truncated {
+		appendTruncation(len(input) - len(diagnostics))
+	}
+	marshal := func() ([]byte, error) {
+		payload, err := json.MarshalIndent(struct {
+			Version     int                    `json:"version"`
+			Status      string                 `json:"status"`
+			Summary     Report                 `json:"summary"`
+			Diagnostics []ConversionDiagnostic `json:"diagnostics"`
+		}{Version: 1, Status: "partial", Summary: summary, Diagnostics: diagnostics}, "", "  ")
+		return append(payload, '\n'), err
+	}
+	for {
+		payload, err := marshal()
+		if err != nil || len(payload) <= maxDiagnosticsPayload {
+			return payload, diagnostics, err
+		}
+		if len(diagnostics) <= 1 {
+			return nil, nil, fmt.Errorf("minimum diagnostics payload exceeds %d bytes", maxDiagnosticsPayload)
+		}
+		remove := len(diagnostics) / 4
+		if remove < 1 {
+			remove = 1
+		}
+		kept := len(diagnostics) - remove
+		if diagnostics[len(diagnostics)-1].Code == "diagnostics.truncated" {
+			kept--
+		}
+		if kept < 0 {
+			kept = 0
+		}
+		diagnostics = diagnostics[:kept]
+		appendTruncation(len(input) - kept)
+	}
+}
+
+func sanitizeDiagnosticField(value string) string {
+	value = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, strings.ToValidUTF8(value, "\uFFFD"))
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) > maxDiagnosticFieldRunes {
+		runes = runes[:maxDiagnosticFieldRunes]
+	}
+	return string(runes)
 }
 
 func methodDescriptorForReport(file *model.File, method *model.EncodedMethod) (string, error) {

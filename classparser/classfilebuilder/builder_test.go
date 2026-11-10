@@ -742,6 +742,7 @@ func TestPreflightValidationAPIs(t *testing.T) {
 		{"object descriptor", func() error { return ValidateObjectDescriptor("Ljava/lang/String;") }, func() error { return ValidateObjectDescriptor("[Ljava/lang/String;") }},
 		{"field symbol", func() error { return ValidateFieldSymbol("value", "[[I") }, func() error { return ValidateFieldSymbol("bad/name", "I") }},
 		{"method symbol", func() error { return ValidateMethodSymbol("<init>", "(I)V") }, func() error { return ValidateMethodSymbol("<init>", "()I") }},
+		{"method symbol UTF limit", func() error { return ValidateMethodSymbol(strings.Repeat("m", math.MaxUint16), "()V") }, func() error { return ValidateMethodSymbol(strings.Repeat("m", math.MaxUint16+1), "()V") }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

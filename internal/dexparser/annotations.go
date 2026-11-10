@@ -309,6 +309,10 @@ func (p *parser) translateSystemAnnotations(c *model.Class) error {
 			for _, descriptor := range descriptors {
 				c.InnerClasses = append(c.InnerClasses, model.InnerClass{Inner: descriptor, Outer: c.Descriptor})
 			}
+		case "Ldalvik/annotation/AnnotationDefault;":
+			if err := p.applyAnnotationDefaults(c, annotation); err != nil {
+				return err
+			}
 		default:
 			// MethodParameters, Record, PermittedSubclasses, NestHost and other
 			// post-Java-5 system annotations have no representation in a
@@ -316,6 +320,38 @@ func (p *parser) translateSystemAnnotations(c *model.Class) error {
 		}
 	}
 	c.Annotations = kept
+	return nil
+}
+
+func (p *parser) applyAnnotationDefaults(c *model.Class, annotation model.Annotation) error {
+	value, ok := annotationElement(annotation, "value")
+	if !ok {
+		return p.fail(0, "system annotation", "AnnotationDefault is missing element %q", "value")
+	}
+	if value.Type != model.ValueAnnotation || value.Annotation == nil {
+		return p.fail(0, "system annotation", "AnnotationDefault element %q is not an annotation", "value")
+	}
+	methods := make(map[string]uint32)
+	for _, method := range append(append([]model.EncodedMethod(nil), c.DirectMethods...), c.VirtualMethods...) {
+		if previous, exists := methods[method.Method.Name]; exists && previous != method.MethodIndex {
+			return p.fail(0, "system annotation", "AnnotationDefault method name %q is ambiguous", method.Method.Name)
+		}
+		methods[method.Method.Name] = method.MethodIndex
+	}
+	for _, element := range value.Annotation.Elements {
+		methodIndex, exists := methods[element.Name]
+		if !exists {
+			return p.fail(0, "system annotation", "AnnotationDefault element %q has no annotation method", element.Name)
+		}
+		c.MethodAnnotations = append(c.MethodAnnotations, model.MethodAnnotation{
+			MethodIndex: methodIndex,
+			Annotations: []model.Annotation{{
+				Visibility: model.AnnotationSystem,
+				Type:       "Ldalvik/annotation/AnnotationDefault;",
+				Elements:   []model.AnnotationElement{{Name: "value", Value: element.Value}},
+			}},
+		})
+	}
 	return nil
 }
 

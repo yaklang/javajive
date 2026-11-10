@@ -386,6 +386,65 @@ func classMetadataFixture() (*model.File, *model.Class) {
 	return file, class
 }
 
+func TestLowerEmitsAnnotationDefaultForReflection(t *testing.T) {
+	const owner = "Ldex/Defaults;"
+	file := &model.File{Entry: "classes.dex", Protos: []model.Proto{{ReturnType: "I"}}}
+	class := &model.Class{
+		Descriptor:  owner,
+		Superclass:  "Ljava/lang/Object;",
+		AccessFlags: dexPublic | dexInterface | dexAbstract | dexAnnotation,
+		VirtualMethods: []model.EncodedMethod{{
+			MethodIndex: 0,
+			AccessFlags: dexPublic | dexAbstract,
+			Method:      model.MethodID{Class: owner, Name: "value", ProtoIndex: 0},
+		}},
+		MethodAnnotations: []model.MethodAnnotation{{
+			MethodIndex: 0,
+			Annotations: []model.Annotation{{
+				Visibility: model.AnnotationSystem,
+				Type:       "Ldalvik/annotation/AnnotationDefault;",
+				Elements:   []model.AnnotationElement{{Name: "value", Value: model.EncodedValue{Type: model.ValueInt, Signed: 7}}},
+			}},
+		}},
+	}
+	raw, err := Class(file, class)
+	if err != nil {
+		t.Fatalf("Class: %v", err)
+	}
+	if _, err := javaclassparser.Parse(raw); err != nil {
+		t.Fatalf("parse generated annotation: %v", err)
+	}
+	javac, javacErr := exec.LookPath("javac")
+	java, javaErr := exec.LookPath("java")
+	if javacErr != nil || javaErr != nil {
+		t.Skip("javac/java unavailable")
+	}
+	dir := t.TempDir()
+	classPath := filepath.Join(dir, "dex", "Defaults.class")
+	if err := os.MkdirAll(filepath.Dir(classPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(classPath, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	driver := filepath.Join(dir, "Driver.java")
+	source := `public class Driver {
+    public static void main(String[] args) throws Exception {
+        Object value = dex.Defaults.class.getMethod("value").getDefaultValue();
+        if (!Integer.valueOf(7).equals(value)) throw new AssertionError(String.valueOf(value));
+    }
+}`
+	if err := os.WriteFile(driver, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command(javac, "-cp", dir, "-d", dir, driver).CombinedOutput(); err != nil {
+		t.Fatalf("javac driver: %v\n%s", err, output)
+	}
+	if output, err := exec.Command(java, "-Xverify:all", "-cp", dir, "Driver").CombinedOutput(); err != nil {
+		t.Fatalf("java reflection: %v\n%s", err, output)
+	}
+}
+
 func TestLowerRejectsInvalidMetadataShapes(t *testing.T) {
 	t.Run("throws array descriptor", func(t *testing.T) {
 		file, class := metadataFixture()

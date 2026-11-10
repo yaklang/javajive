@@ -310,6 +310,9 @@ func addFields(file *model.File, class *model.Class, builder *classfilebuilder.C
 		if _, err := fieldKind(field.Field.Type); err != nil {
 			return classDiagnostic(file, class, "field", fmt.Errorf("field %q: %w", field.Field.Name, err))
 		}
+		if err := classfilebuilder.ValidateFieldSymbol(field.Field.Name, field.Field.Type); err != nil {
+			return classDiagnostic(file, class, "field", fmt.Errorf("field %q: %w", field.Field.Name, err))
+		}
 		key := field.Field.Name + "\x00" + field.Field.Type
 		if seen[key] {
 			return classDiagnostic(file, class, "field", fmt.Errorf("duplicate field %s %s", field.Field.Name, field.Field.Type))
@@ -323,8 +326,8 @@ func addFields(file *model.File, class *model.Class, builder *classfilebuilder.C
 		if isStatic != (field.AccessFlags&dexStatic != 0) {
 			return classDiagnostic(file, class, "field", fmt.Errorf("field %q static membership and access flag disagree", field.Field.Name))
 		}
-		if class.AccessFlags&dexInterface != 0 && field.AccessFlags&(dexPublic|dexStatic|dexFinal) != dexPublic|dexStatic|dexFinal {
-			return classDiagnostic(file, class, "field", fmt.Errorf("Java 5 interface field must be public static final"))
+		if err := validateInterfaceFieldShape(class, field.AccessFlags); err != nil {
+			return classDiagnostic(file, class, "field", fmt.Errorf("field %q: %w", field.Field.Name, err))
 		}
 		member := builder.AddField(access, field.Field.Name, field.Field.Type)
 		if isStatic && index < len(class.StaticValues) {
@@ -476,6 +479,12 @@ func addMethod(file *model.File, class *model.Class, method *model.EncodedMethod
 	if err != nil {
 		return nil, methodDiagnostic(ctx, nil, "method", err)
 	}
+	if err := classfilebuilder.ValidateMethodSymbol(method.Method.Name, descriptor); err != nil {
+		return nil, methodDiagnostic(ctx, nil, "method", err)
+	}
+	if incomingWords(proto, method.AccessFlags) > 255 {
+		return nil, methodDiagnostic(ctx, nil, "method", fmt.Errorf("parameter word count plus receiver exceeds 255"))
+	}
 	access, err := methodAccess(method.AccessFlags, method.Method.Name)
 	if err != nil {
 		return nil, methodDiagnostic(ctx, nil, "method", err)
@@ -499,17 +508,8 @@ func addMethod(file *model.File, class *model.Class, method *model.EncodedMethod
 			return nil, methodDiagnostic(ctx, nil, "method", fmt.Errorf("class initializer must be static with descriptor ()V"))
 		}
 	}
-	if class.AccessFlags&dexInterface != 0 && method.Method.Name != "<clinit>" {
-		if builder.Version() >= classfilebuilder.VersionJava8 {
-			if method.AccessFlags&dexPublic == 0 {
-				return nil, methodDiagnostic(ctx, nil, "method", fmt.Errorf("Java 8 interface method must be public"))
-			}
-			if method.AccessFlags&dexAbstract == 0 && method.Code == nil {
-				return nil, methodDiagnostic(ctx, nil, "method", fmt.Errorf("interface method has neither code nor the abstract flag"))
-			}
-		} else if method.AccessFlags&(dexPublic|dexAbstract) != dexPublic|dexAbstract {
-			return nil, methodDiagnostic(ctx, nil, "method", fmt.Errorf("Java 5 interface method must be public abstract"))
-		}
+	if err := validateInterfaceMethodShape(class, method, builder.Version()); err != nil {
+		return nil, methodDiagnostic(ctx, nil, "method", err)
 	}
 
 	var built *ir.Method
@@ -566,25 +566,9 @@ func addMethod(file *model.File, class *model.Class, method *model.EncodedMethod
 		}
 	}
 	if parameters := parameterAnnotationsOf(class, method.MethodIndex); len(parameters) > 0 {
-		if len(parameters) != len(proto.Parameters) {
-			return nil, methodDiagnostic(ctx, nil, "parameter annotation", fmt.Errorf("parameter annotation count %d does not match descriptor parameter count %d", len(parameters), len(proto.Parameters)))
-		}
-		converted := make([][]classfilebuilder.Annotation, len(parameters))
-		visible := make([][]bool, len(parameters))
-		for index, set := range parameters {
-			converted[index] = make([]classfilebuilder.Annotation, 0, len(set))
-			visible[index] = make([]bool, 0, len(set))
-			for _, annotation := range set {
-				if isSystemAnnotation(annotation) {
-					continue
-				}
-				value, err := builderAnnotation(file, annotation)
-				if err != nil {
-					return nil, methodDiagnostic(ctx, nil, "parameter annotation", err)
-				}
-				converted[index] = append(converted[index], value)
-				visible[index] = append(visible[index], annotation.Visibility == model.AnnotationRuntime)
-			}
+		converted, visible, err := translateParameterAnnotations(file, parameters, len(proto.Parameters))
+		if err != nil {
+			return nil, methodDiagnostic(ctx, nil, "parameter annotation", err)
 		}
 		builder.SetMethodParameterAnnotations(member, converted, visible)
 	}
@@ -613,6 +597,30 @@ func addMethod(file *model.File, class *model.Class, method *model.EncodedMethod
 		return nil, err
 	}
 	return nil, nil
+}
+
+func translateParameterAnnotations(file *model.File, parameters [][]model.Annotation, parameterCount int) ([][]classfilebuilder.Annotation, [][]bool, error) {
+	if len(parameters) != parameterCount {
+		return nil, nil, fmt.Errorf("parameter annotation count %d does not match descriptor parameter count %d", len(parameters), parameterCount)
+	}
+	converted := make([][]classfilebuilder.Annotation, len(parameters))
+	visible := make([][]bool, len(parameters))
+	for index, set := range parameters {
+		converted[index] = make([]classfilebuilder.Annotation, 0, len(set))
+		visible[index] = make([]bool, 0, len(set))
+		for _, annotation := range set {
+			if isSystemAnnotation(annotation) {
+				continue
+			}
+			value, err := builderAnnotation(file, annotation)
+			if err != nil {
+				return nil, nil, err
+			}
+			converted[index] = append(converted[index], value)
+			visible[index] = append(visible[index], annotation.Visibility == model.AnnotationRuntime)
+		}
+	}
+	return converted, visible, nil
 }
 
 func hasControlFlow(instructions []ir.Instruction) bool {
@@ -769,6 +777,46 @@ func fieldAccess(flags uint32) (uint16, error) {
 		return 0, fmt.Errorf("field is both final and volatile")
 	}
 	return uint16(flags), nil
+}
+
+func validateInterfaceFieldShape(class *model.Class, flags uint32) error {
+	if class.AccessFlags&dexInterface == 0 {
+		return nil
+	}
+	const required = dexPublic | dexStatic | dexFinal
+	const allowed = required | dexSynthetic
+	if flags&required != required || flags&^allowed != 0 {
+		return fmt.Errorf("interface field must be public static final with only synthetic as an optional flag")
+	}
+	return nil
+}
+
+func validateInterfaceMethodShape(class *model.Class, method *model.EncodedMethod, version uint16) error {
+	if class.AccessFlags&dexInterface == 0 {
+		return nil
+	}
+	if method.Method.Name == "<clinit>" {
+		return nil
+	}
+	if method.Method.Name == "<init>" {
+		return fmt.Errorf("interface must not declare an instance constructor")
+	}
+	if version < classfilebuilder.VersionJava8 {
+		const required = dexPublic | dexAbstract
+		const allowed = required | dexBridge | dexVarargs | dexSynthetic
+		if method.AccessFlags&required != required || method.AccessFlags&^allowed != 0 {
+			return fmt.Errorf("Java 5 interface method must be public abstract with only bridge, varargs, and synthetic as optional flags")
+		}
+		return nil
+	}
+	const allowed = dexPublic | dexStatic | dexAbstract | dexStrict | dexBridge | dexVarargs | dexSynthetic
+	if method.AccessFlags&dexPublic == 0 || method.AccessFlags&^allowed != 0 {
+		return fmt.Errorf("Java 8 interface method has illegal access flags")
+	}
+	if method.AccessFlags&dexAbstract == 0 && method.Code == nil {
+		return fmt.Errorf("interface method has neither code nor the abstract flag")
+	}
+	return nil
 }
 
 func methodAccess(flags uint32, name string) (uint16, error) {

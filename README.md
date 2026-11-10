@@ -139,7 +139,10 @@ filename extension last, so renamed artifacts keep working.
 | `.aab` | Android App Bundle; every `<module>/dex/classes*.dex` is translated |
 
 `--structured` separates `sources/`, `resources/`, and byte-exact `archives/`
-for Java archives. Android containers always produce a translated source tree.
+for Java archives. Flat and structured exports apply the same request-scoped
+cancellation, byte/entry, parser-work, output, and multi-release target policy;
+an entry read/path/write failure is returned instead of silently leaving a
+partial destination. Android containers always produce a translated source tree.
 
 JImage inputs are converted to a package-layout JAR view: class resources are
 exported at their package paths, while `module-info.class` and non-class
@@ -262,7 +265,9 @@ is reported as `partial`; `complete` means no recorded degradation. Every
 partial JAR contains deterministic `META-INF/javajive/diagnostics.json`.
 Class-shell recovery also embeds a bounded, versioned `JavaJiveRecovery` class
 attribute. Decompiling that class renders valid records as leading
-`// javajive recovery: ...` comments. Partial output is not a claim of semantic
+`// javajive recovery: ...` comments. Diagnostics are field-, record-, and
+payload-bounded; an explicit `diagnostics.truncated` record reports omitted
+detail while summary counters retain the degradation total. Partial output is not a claim of semantic
 equivalence. Malformed containers, whole-file validation failures, unknown
 formats, resource limits, and internal failures still abort. All modes write a
 same-directory temporary file before replacing the destination.

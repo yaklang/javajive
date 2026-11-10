@@ -53,9 +53,6 @@ func (p *parser) parseClasses() error {
 			if err := p.parseAnnotationDirectory(annotationsOff, &c); err != nil {
 				return err
 			}
-			if err := p.translateSystemAnnotations(&c); err != nil {
-				return err
-			}
 		}
 		indices, names, err := p.typeList(interfacesOff)
 		if err != nil {
@@ -64,6 +61,11 @@ func (p *parser) parseClasses() error {
 		c.InterfaceIndices, c.Interfaces = indices, names
 		if err := p.classData(classDataOff, &c); err != nil {
 			return err
+		}
+		if annotationsOff != 0 {
+			if err := p.translateSystemAnnotations(&c); err != nil {
+				return err
+			}
 		}
 		if staticValuesOff != 0 {
 			cur := int(staticValuesOff)

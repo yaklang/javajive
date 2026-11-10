@@ -2,7 +2,9 @@ package classfilebuilder
 
 import (
 	"fmt"
+	"math"
 	"strings"
+	"unicode/utf16"
 )
 
 const maxArrayDimensions = 255
@@ -193,8 +195,21 @@ func parseFieldType(descriptor string, at int, array bool) (end, words int, err 
 	}
 }
 
+func validateUTF8Constant(value, kind string) error {
+	if len(modifiedUTF8(utf16.Encode([]rune(value)))) > math.MaxUint16 {
+		return fmt.Errorf("%s modified UTF-8 payload exceeds 65535 bytes", kind)
+	}
+	return nil
+}
+
 func validateFieldSymbol(name, descriptor string) error {
 	if err := validateFieldName(name); err != nil {
+		return err
+	}
+	if err := validateUTF8Constant(name, "field name"); err != nil {
+		return err
+	}
+	if err := validateUTF8Constant(descriptor, "field descriptor"); err != nil {
 		return err
 	}
 	_, err := fieldDescriptorWords(descriptor)
@@ -203,6 +218,12 @@ func validateFieldSymbol(name, descriptor string) error {
 
 func validateMethodSymbol(name, descriptor string) error {
 	if err := validateMethodName(name); err != nil {
+		return err
+	}
+	if err := validateUTF8Constant(name, "method name"); err != nil {
+		return err
+	}
+	if err := validateUTF8Constant(descriptor, "method descriptor"); err != nil {
 		return err
 	}
 	_, result, err := methodDescriptorWords(descriptor)
