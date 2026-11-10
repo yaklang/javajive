@@ -6,6 +6,7 @@ package dex2jar
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -52,13 +53,14 @@ type Report struct {
 	Warnings          int
 }
 
-// FailurePolicy controls whether recognized method-local capability gaps abort
-// conversion or become explicit throwing stubs. The zero value is strict.
+// FailurePolicy selects strict conversion, recognized method-local stubbing,
+// or full class-level recovery. The zero value is strict.
 type FailurePolicy string
 
 const (
 	FailureStrict                 FailurePolicy = "strict"
 	FailureStubUnsupportedMethods FailurePolicy = "stub_unsupported_methods"
+	FailureRecover                FailurePolicy = "recover"
 )
 
 // ConvertOptions combines existing input bounds with an explicit conversion
@@ -71,26 +73,47 @@ type ConvertOptions struct {
 // ConversionDiagnostic is stable, JSON-friendly evidence of one degradation or
 // terminal conversion failure.
 type ConversionDiagnostic struct {
-	Entry    string `json:"entry,omitempty"`
-	Class    string `json:"class,omitempty"`
-	Method   string `json:"method,omitempty"`
-	Category string `json:"category"`
-	Action   string `json:"action"`
-	Feature  string `json:"feature,omitempty"`
-	Message  string `json:"message"`
+	Entry      string `json:"entry,omitempty"`
+	Class      string `json:"class,omitempty"`
+	Method     string `json:"method,omitempty"`
+	Descriptor string `json:"descriptor,omitempty"`
+	Category   string `json:"category"`
+	Action     string `json:"action"`
+	Feature    string `json:"feature,omitempty"`
+	Code       string `json:"code,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	Scope      string `json:"scope,omitempty"`
+	Stage      string `json:"stage,omitempty"`
+	Severity   string `json:"severity,omitempty"`
+	Offset     int64  `json:"offset,omitempty"`
+	Op         string `json:"op,omitempty"`
+	Artifact   string `json:"artifact,omitempty"`
+	Message    string `json:"message"`
 }
 
 // DetailedReport describes complete, partial, or failed conversion without
 // weakening the existing scalar Report contract.
 type DetailedReport struct {
-	Status      string                 `json:"status"`
-	Summary     Report                 `json:"summary"`
-	Diagnostics []ConversionDiagnostic `json:"diagnostics,omitempty"`
+	Status            string                 `json:"status"`
+	Summary           Report                 `json:"summary"`
+	AttemptedClasses  int                    `json:"attempted_classes"`
+	StubbedClasses    int                    `json:"stubbed_classes"`
+	OmittedClasses    int                    `json:"omitted_classes"`
+	StubbedMethods    int                    `json:"stubbed_methods"`
+	DroppedAttributes int                    `json:"dropped_attributes"`
+	Diagnostics       []ConversionDiagnostic `json:"diagnostics,omitempty"`
 }
 
 type jarEntry struct {
 	name string
 	data []byte
+}
+
+type convertedClass struct {
+	file   *model.File
+	class  *model.Class
+	name   string
+	result lower.ClassResult
 }
 
 // InputKind identifies reverse-toolchain input by content magic.
@@ -179,9 +202,9 @@ func DexToJar(data []byte, options Options) ([]byte, Report, error) {
 	return jar, detailed.Summary, err
 }
 
-// DexToJarWithOptions translates an input with explicit strict or best-effort
-// policy. An error always means no JAR bytes; partial success has a nil error and
-// Status "partial" with diagnostics for every stubbed method.
+// DexToJarWithOptions translates an input with an explicit failure policy. An
+// error always means no JAR bytes; partial success has a nil error and Status
+// "partial" with method, class, initializer, and metadata recovery diagnostics.
 func DexToJarWithOptions(data []byte, options ConvertOptions) (jar []byte, detailed DetailedReport, err error) {
 	detailed.Status = "failed"
 	defer func() {
@@ -200,7 +223,7 @@ func DexToJarWithOptions(data []byte, options ConvertOptions) (jar []byte, detai
 	if policy == "" {
 		policy = FailureStrict
 	}
-	if policy != FailureStrict && policy != FailureStubUnsupportedMethods {
+	if policy != FailureStrict && policy != FailureStubUnsupportedMethods && policy != FailureRecover {
 		return nil, detailed, fmt.Errorf("dex2jar: unknown failure policy %q", policy)
 	}
 	app, _, err := parseApplication(data, options.Input)
@@ -333,9 +356,13 @@ func applicationToJarWithPolicy(app *model.Application, policy FailurePolicy) ([
 	entries := make([]jarEntry, 0)
 	seen := make(map[string]string)
 	hierarchy := applicationHierarchy(app)
+	converted := make([]convertedClass, 0, len(hierarchy))
 	lowerPolicy := lower.Strict
-	if policy == FailureStubUnsupportedMethods {
+	switch policy {
+	case FailureStubUnsupportedMethods:
 		lowerPolicy = lower.StubUnsupportedMethods
+	case FailureRecover:
+		lowerPolicy = lower.Recover
 	}
 	for _, file := range app.Files {
 		if file == nil {
@@ -348,6 +375,7 @@ func applicationToJarWithPolicy(app *model.Application, policy FailurePolicy) ([
 		}
 		for classIndex := range file.Classes {
 			class := &file.Classes[classIndex]
+			detailed.AttemptedClasses++
 			name, err := classEntryName(class.Descriptor)
 			if err != nil {
 				err = fmt.Errorf("dex2jar: class %q: %w", class.Descriptor, err)
@@ -363,33 +391,91 @@ func applicationToJarWithPolicy(app *model.Application, policy FailurePolicy) ([
 
 			result, err := lower.ClassWithPolicy(file, class, lower.ClassOptions{FileValidated: true, Hierarchy: hierarchy}, lowerPolicy)
 			if err != nil {
+				detailed.Summary.Classes = len(converted)
 				detailed.Diagnostics = append(detailed.Diagnostics, diagnosticFromError(err, "failed", ""))
 				return nil, detailed, err
 			}
-			entries = append(entries, jarEntry{name: name, data: result.Bytes})
-			detailed.Summary.Classes++
-			stubs := make(map[string]bool, len(result.StubbedMethods))
-			for _, stub := range result.StubbedMethods {
-				stubs[stub.Method+"\x00"+stub.Descriptor] = true
+			converted = append(converted, convertedClass{file: file, class: class, name: name, result: result})
+		}
+	}
+	if policy == FailureRecover {
+		if err := recoverMinimalDependencies(converted, hierarchy); err != nil {
+			detailed.Diagnostics = append(detailed.Diagnostics, diagnosticFromError(err, "failed", "dependency-closure"))
+			return nil, detailed, err
+		}
+	}
+	for _, item := range converted {
+		file, class, name, result := item.file, item.class, item.name, item.result
+		entries = append(entries, jarEntry{name: name, data: result.Bytes})
+		detailed.Summary.Classes++
+		if result.ClassStubbed {
+			detailed.StubbedClasses++
+		}
+		for _, recovery := range result.Recoveries {
+
+			detailed.Summary.Warnings++
+			if recovery.Action == "drop_attribute" {
+				detailed.DroppedAttributes++
+			}
+			scope := recovery.Scope
+			if scope == "" {
+				scope = "class"
+			}
+			detailed.Diagnostics = append(detailed.Diagnostics, ConversionDiagnostic{
+				Entry: file.Entry, Class: class.Descriptor, Method: recovery.Member,
+				Descriptor: recovery.Descriptor, Category: "recovery", Action: recovery.Action,
+				Feature: recovery.Feature, Code: recovery.Code, Kind: "structural",
+				Scope: scope, Stage: "class_assemble", Severity: "warning", Message: recovery.Message,
+			})
+		}
+		recoveredMethods := make(map[string]bool, len(result.Recoveries))
+		for _, recovery := range result.Recoveries {
+			if recovery.Action == "stub_method" || recovery.Action == "stub_initializer" && recovery.Scope == "method" {
+				recoveredMethods[recovery.Member+"\x00"+recovery.Descriptor] = true
+			}
+		}
+
+		stubs := make(map[string]bool, len(result.StubbedMethods))
+		for _, stub := range result.StubbedMethods {
+			stubs[stub.Method+"\x00"+stub.Descriptor] = true
+			detailed.StubbedMethods++
+			if !result.ClassStubbed {
 				detailed.Summary.Warnings++
+			}
+			if !recoveredMethods[stub.Method+"\x00"+stub.Descriptor] {
 				detailed.Diagnostics = append(detailed.Diagnostics, ConversionDiagnostic{
 					Entry: file.Entry, Class: class.Descriptor, Method: stub.Method + stub.Descriptor,
-					Category: "unsupported", Action: "stubbed", Feature: stub.Feature, Message: stub.Message,
+					Descriptor: stub.Descriptor, Category: "unsupported", Action: "stubbed",
+					Feature: stub.Feature, Code: "method.unsupported_stub", Kind: "capability",
+					Scope: "method", Stage: "lower_method", Severity: "warning", Message: stub.Message,
 				})
 			}
-			for _, method := range append(class.DirectMethods, class.VirtualMethods...) {
-				detailed.Summary.Methods++
-				if method.Code == nil {
-					continue
-				}
-				descriptor, descriptorErr := methodDescriptorForReport(file, &method)
-				if descriptorErr == nil && !stubs[method.Method.Name+"\x00"+descriptor] {
-					detailed.Summary.TranslatedMethods++
-				}
+		}
+		for _, method := range append(class.DirectMethods, class.VirtualMethods...) {
+			detailed.Summary.Methods++
+			if method.Code == nil {
+				continue
+			}
+			descriptor, descriptorErr := methodDescriptorForReport(file, &method)
+			if descriptorErr == nil && !stubs[method.Method.Name+"\x00"+descriptor] {
+				detailed.Summary.TranslatedMethods++
 			}
 		}
 	}
 
+	if len(detailed.Diagnostics) > 0 {
+		payload, marshalErr := json.MarshalIndent(struct {
+			Version     int                    `json:"version"`
+			Status      string                 `json:"status"`
+			Summary     Report                 `json:"summary"`
+			Diagnostics []ConversionDiagnostic `json:"diagnostics"`
+		}{Version: 1, Status: "partial", Summary: detailed.Summary, Diagnostics: detailed.Diagnostics}, "", "  ")
+		if marshalErr != nil {
+			return nil, detailed, fmt.Errorf("dex2jar: encode diagnostics: %w", marshalErr)
+		}
+		payload = append(payload, '\n')
+		entries = append(entries, jarEntry{name: "META-INF/javajive/diagnostics.json", data: payload})
+	}
 	jar, err := writeJar(entries)
 	if err != nil {
 		detailed.Diagnostics = append(detailed.Diagnostics, diagnosticFromError(err, "failed", ""))
@@ -418,7 +504,29 @@ func methodDescriptorForReport(file *model.File, method *model.EncodedMethod) (s
 }
 
 func diagnosticFromError(err error, action, feature string) ConversionDiagnostic {
-	out := ConversionDiagnostic{Category: "invalid", Action: action, Feature: feature, Message: err.Error()}
+	out := ConversionDiagnostic{Category: "invalid", Action: action, Feature: feature, Severity: "error", Offset: -1, Message: err.Error()}
+	if failure, ok := dexreport.AsFailure(err); ok {
+		out.Code = failure.Code
+		out.Kind = string(failure.Kind)
+		out.Scope = string(failure.Scope)
+		out.Stage = string(failure.Stage)
+		out.Severity = string(failure.Severity)
+		out.Entry = failure.Entry
+		out.Class = failure.Class
+		out.Method = failure.Member
+		out.Descriptor = failure.Descriptor
+		out.Offset = failure.Offset
+		out.Op = failure.Op
+		if failure.Feature != "" {
+			out.Feature = failure.Feature
+		}
+		if action == "" || action == "failed" && failure.Action != "" {
+			out.Action = string(failure.Action)
+		}
+		if failure.Kind == dexreport.KindUnsupported {
+			out.Category = "unsupported"
+		}
+	}
 	if dexreport.IsUnsupported(err) {
 		out.Category = "unsupported"
 		var capability *dexreport.CapabilityError
@@ -427,9 +535,21 @@ func diagnosticFromError(err error, action, feature string) ConversionDiagnostic
 		}
 	}
 	if diagnostic, ok := dexreport.AsDiagnostic(err); ok {
-		out.Entry = diagnostic.Entry
-		out.Class = diagnostic.Class
-		out.Method = diagnostic.Method
+		if out.Entry == "" {
+			out.Entry = diagnostic.Entry
+		}
+		if out.Class == "" {
+			out.Class = diagnostic.Class
+		}
+		if out.Method == "" {
+			out.Method = diagnostic.Method
+		}
+		if out.Offset < 0 {
+			out.Offset = diagnostic.Offset
+		}
+		if out.Op == "" {
+			out.Op = diagnostic.Op
+		}
 	}
 	return out
 }
@@ -520,6 +640,51 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) (err error) {
 // applicationHierarchy indexes every class of the application so assignability
 // resolves across multidex files, where a superclass often lives in a
 // different DEX than its subclass.
+func recoverMinimalDependencies(classes []convertedClass, hierarchy map[string]*model.Class) error {
+	unsafeDependency := make(map[string]bool)
+	for index := range classes {
+		if classes[index].result.ClassMinimal {
+			unsafeDependency[classes[index].class.Descriptor] = true
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for index := range classes {
+			item := &classes[index]
+			if unsafeDependency[item.class.Descriptor] {
+				continue
+			}
+			dependency := ""
+			if unsafeDependency[item.class.Superclass] {
+				dependency = item.class.Superclass
+			} else {
+				for _, descriptor := range item.class.Interfaces {
+					if unsafeDependency[descriptor] {
+						dependency = descriptor
+						break
+					}
+				}
+			}
+			if dependency == "" {
+				continue
+			}
+			if !item.result.ClassStubbed {
+				result, err := lower.ClassWithPolicy(item.file, item.class, lower.ClassOptions{
+					FileValidated: true, Hierarchy: hierarchy, ForceClassShell: true,
+					RecoveryReason: fmt.Sprintf("dependency %s was reduced to a minimal class shell", dependency),
+				}, lower.Recover)
+				if err != nil {
+					return err
+				}
+				item.result = result
+			}
+			unsafeDependency[item.class.Descriptor] = true
+			changed = true
+		}
+	}
+	return nil
+}
+
 func applicationHierarchy(app *model.Application) map[string]*model.Class {
 	index := make(map[string]*model.Class)
 	for _, file := range app.Files {

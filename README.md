@@ -207,9 +207,12 @@ javajive decompile -o ./app-src app.apks
 javajive decompile -o ./app-src app.xapk
 javajive decompile -o ./app-src app.aab
 
-# Opt-in partial Android output: recognized unsupported methods become
-# explicit throwing stubs. Malformed input and resource failures still abort.
+# Full recovery: stub unsupported methods first, then emit traceable class
+# shells for otherwise valid classes that still cannot be lowered.
 javajive decompile --best-effort -o ./app-src app.apk
+
+# Narrow recovery: only recognized method-local capability gaps become stubs.
+javajive decompile --stub-methods-only -o ./app-src app.apk
 
 # Directory: recursively decompile .class files (requires -o output dir).
 javajive decompile -o ./src ./classes
@@ -228,8 +231,11 @@ javajive dex2jar -o app.jar app.apk
 javajive dex2jar -o app.jar app.apks
 javajive dex2jar -o app.jar app.aab
 
-# Explicit best-effort: recognized unsupported methods throw from a stub.
+# Full class-level recovery.
 javajive dex2jar --best-effort -o app.jar app.apk
+
+# Only recognized unsupported methods throw from a stub.
+javajive dex2jar --stub-methods-only -o app.jar app.apk
 ```
 
 ### jimage2jar
@@ -243,12 +249,23 @@ javajive jimage2jar -o jdk.jar /path/to/jdk/lib/modules
 Input is detected by magic rather than the filename extension. Output is a
 reproducible JAR. The default conversion is strict and transactional: it fails
 on any unsupported or malformed class or method, and never emits a JAR for that
-input. `--best-effort` additionally replaces a recognized method-local
-capability gap with a verifier-safe stub that throws
-`UnsupportedOperationException`; malformed input, unknown formats, integrity
-errors, resource limits, and internal failures still abort. Best-effort output
-is reported as `partial` with one diagnostic per stubbed method. Both modes
-write a same-directory temporary file before replacing the destination.
+input. `--stub-methods-only` replaces only recognized method-local capability
+gaps with verifier-safe `UnsupportedOperationException` stubs. `--best-effort`
+includes those stubs and, when an otherwise valid class still cannot be lowered,
+emits a fresh declaration-preserving class shell; reduced-metadata and minimal
+shells are later fallback tiers. A minimal superclass/interface also causes its
+dependents to become shells. Unsupported static initializers are replaced by a
+throwing `<clinit>` rather than silently exposing null/zero values.
+
+A degraded conversion succeeds with a nil API error and CLI exit code zero, and
+is reported as `partial`; `complete` means no recorded degradation. Every
+partial JAR contains deterministic `META-INF/javajive/diagnostics.json`.
+Class-shell recovery also embeds a bounded, versioned `JavaJiveRecovery` class
+attribute. Decompiling that class renders valid records as leading
+`// javajive recovery: ...` comments. Partial output is not a claim of semantic
+equivalence. Malformed containers, whole-file validation failures, unknown
+formats, resource limits, and internal failures still abort. All modes write a
+same-directory temporary file before replacing the destination.
 
 ### Native DEX/APK support boundary
 
@@ -276,11 +293,12 @@ verified against is not part of the DEX.
 
 Still unsupported as translated bodies: `filled-new-array` of wide or floating
 elements; DEX 038+ dynamic invokes and method constants; CompactDex; and APK
-resources or native libraries. With `--best-effort`, methods whose only blocker
-is one of the recognized opcode/representation gaps become explicit throwing
-stubs. Container corruption, DEX header/table/verifier errors, unsupported DEX
-versions or unparsed sections, resource limits, and internal errors are never
-stubbed.
+resources or native libraries. With `--stub-methods-only`, methods whose only
+blocker is a recognized opcode/representation gap become explicit throwing
+stubs. `--best-effort` additionally recovers class-local lowering and emission
+failures through documented class shells. Container corruption, DEX
+header/table/verifier errors, unsupported DEX versions or unparsed sections,
+resource limits, and internal errors are never hidden by a shell.
 
 Android container handling is structural:
 
@@ -293,8 +311,10 @@ Android container handling is structural:
 - `.aab` input translates every `<module>/dex/classes*.dex` entry across
   `base` and feature modules.
 
-All selected DEX files must succeed transactionally or no JAR is produced; use
-`inspect` to analyze inputs that cross the strict boundary.
+In strict mode all selected DEX files must succeed transactionally or no JAR is
+produced. Recovery modes may emit a traceable partial JAR after container parsing
+and whole-file validation succeed; use `inspect` for inputs that fail those
+boundaries.
 
 Container bounds default to 256 MB per DEX, 512 MB per archive/APK, 512 MB of
 total DEX data, 128 DEX files, 512 nested APKs, and 2 GB of total nested APK

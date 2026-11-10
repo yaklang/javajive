@@ -46,6 +46,12 @@ type ClassOptions struct {
 	// so assignability must be provable across files. When nil, only the file
 	// being lowered is consulted.
 	Hierarchy map[string]*model.Class
+	// ForceClassShell skips normal lowering and emits a declaration-preserving
+	// shell. Application recovery uses this when a superclass or interface was
+	// reduced to a minimal shell.
+	ForceClassShell bool
+	// RecoveryReason is embedded in diagnostics when ForceClassShell is set.
+	RecoveryReason string
 }
 
 // FailurePolicy controls whether a method-local unsupported capability aborts
@@ -56,6 +62,7 @@ type FailurePolicy uint8
 const (
 	Strict FailurePolicy = iota
 	StubUnsupportedMethods
+	Recover
 )
 
 // StubbedMethod records one concrete method whose body was replaced because
@@ -71,6 +78,9 @@ type StubbedMethod struct {
 type ClassResult struct {
 	Bytes          []byte
 	StubbedMethods []StubbedMethod
+	Recoveries     []Recovery
+	ClassStubbed   bool
+	ClassMinimal   bool
 }
 
 // Class lowers one parser-neutral DEX class. It never returns partial bytes.
@@ -93,9 +103,35 @@ func ClassWithPolicy(file *model.File, class *model.Class, options ClassOptions,
 	if class == nil {
 		return ClassResult{}, report.New(file.Entry, "", "", -1, "class", fmt.Errorf("nil class"))
 	}
-	if policy != Strict && policy != StubUnsupportedMethods {
+	if policy != Strict && policy != StubUnsupportedMethods && policy != Recover {
 		return ClassResult{}, classDiagnostic(file, class, "class", fmt.Errorf("unknown failure policy %d", policy))
 	}
+	if policy == Recover {
+		if options.ForceClassShell {
+			reason := options.RecoveryReason
+			if reason == "" {
+				reason = "application dependency requires a class shell"
+			}
+			return emitClassShell(file, class, options, errors.New(reason), false)
+		}
+		result, err := classWithPolicyOnce(file, class, options, StubUnsupportedMethods)
+		if err == nil {
+			return result, nil
+		}
+		shell, shellErr := emitClassShell(file, class, options, err, false)
+		if shellErr == nil {
+			return shell, nil
+		}
+		shell, reducedErr := emitClassShell(file, class, options, err, true)
+		if reducedErr == nil {
+			return shell, nil
+		}
+		return emitMinimalClassShell(file, class, fmt.Errorf("normal=%v; declaration shell=%v; reduced shell=%v", err, shellErr, reducedErr))
+	}
+	return classWithPolicyOnce(file, class, options, policy)
+}
+
+func classWithPolicyOnce(file *model.File, class *model.Class, options ClassOptions, policy FailurePolicy) (ClassResult, error) {
 	className, err := objectInternalName(class.Descriptor)
 	if err != nil {
 		return ClassResult{}, classDiagnostic(file, class, "class", err)
@@ -339,9 +375,9 @@ func parameterAnnotationsOf(class *model.Class, index uint32) [][]model.Annotati
 	return nil
 }
 
-// applyStaticValue turns a non-default encoded static initializer into a
-// ConstantValue attribute. Wide and non-scalar constants stay rejected: the
-// classfile builder has no Long/Float/Double constant pool entries yet.
+// applyStaticValue turns a representable encoded static initializer into a
+// ConstantValue attribute. Values that have no compatible classfile encoding
+// are rejected before mutating the builder.
 func applyStaticValue(file *model.File, class *model.Class, field *model.EncodedField, member *classfilebuilder.Field, builder *classfilebuilder.Class, value model.EncodedValue) error {
 	kind, err := fieldKind(field.Field.Type)
 	if err != nil {
@@ -352,6 +388,9 @@ func applyStaticValue(file *model.File, class *model.Class, field *model.Encoded
 		case model.ValueNull:
 			return nil
 		case model.ValueString:
+			if field.Field.Type != "Ljava/lang/String;" {
+				return classDiagnostic(file, class, "static-value", fmt.Errorf("field %q descriptor %q cannot use a String ConstantValue", field.Field.Name, field.Field.Type))
+			}
 			index := value.Unsigned
 			if index >= uint64(len(file.Strings)) {
 				return classDiagnostic(file, class, "static-value", fmt.Errorf("field %q string index %d is out of range", field.Field.Name, index))
@@ -524,6 +563,9 @@ func addMethod(file *model.File, class *model.Class, method *model.EncodedMethod
 		}
 	}
 	if parameters := parameterAnnotationsOf(class, method.MethodIndex); len(parameters) > 0 {
+		if len(parameters) != len(proto.Parameters) {
+			return nil, methodDiagnostic(ctx, nil, "parameter annotation", fmt.Errorf("parameter annotation count %d does not match descriptor parameter count %d", len(parameters), len(proto.Parameters)))
+		}
 		converted := make([][]classfilebuilder.Annotation, len(parameters))
 		visible := make([][]bool, len(parameters))
 		for index, set := range parameters {

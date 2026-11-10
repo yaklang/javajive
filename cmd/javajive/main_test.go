@@ -137,6 +137,10 @@ func TestCmdDecompileAnalysisBudget(t *testing.T) {
 		!strings.Contains(err.Error(), "non-negative") {
 		t.Fatalf("negative budget error = %v", err)
 	}
+	if err := cmdDecompile([]string{"--best-effort", classPath}); err == nil ||
+		!strings.Contains(err.Error(), "apply only to DEX/Android") {
+		t.Fatalf("non-Android recovery policy error = %v", err)
+	}
 
 	// Directory inputs route every class through the same budgeted path.
 	inDir := t.TempDir()

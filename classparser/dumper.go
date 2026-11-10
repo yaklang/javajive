@@ -649,6 +649,23 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 			return rendered, dumpError
 		}
 	}
+	recoveryComments := javaJiveRecoveryComments(c.obj)
+	if recoveryComments != "" {
+		defer func() {
+			if dumpError != nil || rendered == "" {
+				return
+			}
+			if strings.HasPrefix(rendered, recoveryComments) {
+				return
+			}
+			if err := c.ensureOutput(int64(len(recoveryComments) + len(rendered))); err != nil {
+				rendered = ""
+				dumpError = err
+				return
+			}
+			rendered = recoveryComments + rendered
+		}()
+	}
 	if projected := c.descriptorProjectionWithoutEnclosingMethod(); projected != nil {
 		original := c.obj
 		originalProjection := c.descriptorSourceProjection

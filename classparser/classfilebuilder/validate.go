@@ -7,6 +7,32 @@ import (
 
 const maxArrayDimensions = 255
 
+// ValidateClassInternalName reports whether name is a JVM class or interface
+// name in internal form, such as java/lang/String. Array descriptors are not
+// class internal names.
+func ValidateClassInternalName(name string) error {
+	return validateInternalName(name)
+}
+
+// ValidateObjectDescriptor reports whether descriptor is exactly one JVM
+// object type descriptor, such as Ljava/lang/String;.
+func ValidateObjectDescriptor(descriptor string) error {
+	_, err := internalNameFromDescriptor(descriptor)
+	return err
+}
+
+// ValidateFieldSymbol reports whether name and descriptor form a valid JVM
+// field symbol.
+func ValidateFieldSymbol(name, descriptor string) error {
+	return validateFieldSymbol(name, descriptor)
+}
+
+// ValidateMethodSymbol reports whether name and descriptor form a valid JVM
+// method symbol, including the special constraints for <init> and <clinit>.
+func ValidateMethodSymbol(name, descriptor string) error {
+	return validateMethodSymbol(name, descriptor)
+}
+
 func validateInternalName(name string) error {
 	if name == "" {
 		return fmt.Errorf("internal name is empty")

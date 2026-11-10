@@ -161,9 +161,11 @@ javajive decompile -o ./app-src app.apks
 javajive decompile -o ./app-src app.xapk
 javajive decompile -o ./app-src app.aab
 
-# 可选的 Android 部分产物：已知但不支持的方法变成显式抛异常 stub。
-# 畸形输入、未知格式和资源超限仍然失败，不会伪装成成功。
+# 完整恢复：先 stub 不支持的方法，再为仍无法 lower 的有效 class 输出可追踪 shell。
 javajive decompile --best-effort -o ./app-src app.apk
+
+# 窄恢复：仅将已识别的方法级能力缺口替换为抛异常 stub。
+javajive decompile --stub-methods-only -o ./app-src app.apk
 
 # 目录：递归反编译其中的 .class（必须用 -o 指定输出目录）
 javajive decompile -o ./src ./classes
@@ -182,8 +184,11 @@ javajive dex2jar -o app.jar app.apk
 javajive dex2jar -o app.jar app.apks
 javajive dex2jar -o app.jar app.aab
 
-# 显式 best-effort：已知不支持的方法使用抛异常 stub 代替
+# 完整 class 级恢复
 javajive dex2jar --best-effort -o app.jar app.apk
+
+# 仅 stub 已识别的不支持方法
+javajive dex2jar --stub-methods-only -o app.jar app.apk
 ```
 
 ### jimage2jar
@@ -195,10 +200,18 @@ javajive jimage2jar -o jdk.jar /path/to/jdk/lib/modules
 
 输入类型按文件魔数而非扩展名识别，输出为可复现的 JAR。默认转换严格且事务性：
 任一 class 或方法不受支持、或输入损坏时，整次转换失败且不产出 JAR。
-`--best-effort` 只把“已识别的方法级能力缺口”替换为 verifier-safe 的
-`UnsupportedOperationException` 抛异常 stub；畸形输入、未知格式、完整性错误、
-资源超限和内部错误仍然失败。best-effort 产物状态为 `partial`，每个 stub 方法都有
-对应诊断。两种模式都会先写同目录临时文件，再原子替换目标文件。
+`--stub-methods-only` 仅将已识别的方法级能力缺口替换为 verifier-safe 的
+`UnsupportedOperationException` stub。`--best-effort` 在此基础上，对仍无法 lower
+的有效 class 使用全新 builder 输出保留声明的 shell；必要时继续退化为精简元数据或
+最小 shell。若 superclass/interface 只能生成最小 shell，其依赖 class 也会递归降级。
+无法可信表示的静态初始化值会替换或合成抛异常 `<clinit>`，不会静默暴露 null/0。
+
+部分成功返回 nil error、CLI 退出码为 0，状态为 `partial`；`complete` 表示没有降级。
+部分 JAR 包含确定性的 `META-INF/javajive/diagnostics.json`；class 恢复还会写入受限、
+版本化的 `JavaJiveRecovery` 属性，反编译后显示为开头的
+`// javajive recovery: ...` 注释。部分产物不代表语义等价。容器损坏、whole-file
+校验失败、未知格式、资源超限和内部错误仍然终止。所有模式都先写同目录临时文件，
+再原子替换目标文件。
 
 ### 原生 DEX/APK 支持边界
 
@@ -210,10 +223,11 @@ int/引用控制流、字段与 invoke、`new-instance`/构造器配对、数组
 以及带 static/default 方法的接口。生成 class 会经过解析测试与 JVM 校验。
 
 暂不支持作为方法体翻译：wide/float 元素的 `filled-new-array`；DEX 038+ 动态调用与
-方法常量；CompactDex；APK 资源或原生库。使用 `--best-effort` 时，仅因上述已识别
-opcode/表示能力缺口而无法翻译的方法会变成显式抛异常 stub；容器损坏、DEX
+方法常量；CompactDex；APK 资源或原生库。使用 `--stub-methods-only` 时，仅因已识别
+opcode/表示能力缺口而无法翻译的方法会变成显式抛异常 stub；`--best-effort` 还会用
+带诊断的 class shell 恢复 class-local lowering/发射失败。容器损坏、DEX
 header/table/verifier 错误、未支持版本或未解析 section、资源超限与内部错误永远
-不会用 stub 掩盖。
+不会被 shell 掩盖。
 
 Android 容器的处理规则：
 
@@ -223,7 +237,8 @@ Android 容器的处理规则：
   定义冲突则整个转换失败。
 - `.aab` 会翻译 `base` 与各 feature 模块中的每个 `<module>/dex/classes*.dex`。
 
-所有选中的 DEX 必须事务性地全部成功，否则不生成 JAR；跨越严格边界的输入可先用
+严格模式下，所有选中的 DEX 必须事务性地全部成功，否则不生成 JAR。恢复模式可在
+容器解析与 whole-file 校验成功后生成可追踪的 partial JAR；跨越这些边界的输入可先用
 `inspect` 分析。
 
 容器默认上限：单个 DEX 256 MB、单个归档/APK 512 MB、DEX 总量 512 MB、128 个 DEX、

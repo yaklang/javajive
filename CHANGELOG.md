@@ -11,13 +11,19 @@ bounded failure recovery for malformed and partially unsupported inputs.
   allocation instead of amplifying memory from an admitted DEX.
 - Add explicit DEX failure policy APIs: `DexToJarWithOptions`,
   `DexFileToJarWithOptions`, and `DecompileDEXFileWithPolicy`. The existing
-  strict APIs remain transactional and unchanged. Best-effort stubs only
-  recognized method-local capability gaps with a verifier-safe
-  `UnsupportedOperationException` body, preserve method metadata, and report
-  `complete`/`partial` plus per-method diagnostics. Malformed input, unknown
-  formats, integrity errors, resource limits, and internal failures still abort.
-- Add `--best-effort` to `dex2jar` and Android `decompile`; the default remains
-  strict.
+  strict APIs remain transactional and unchanged. `--stub-methods-only` permits
+  verifier-safe stubs for recognized method-local capability gaps;
+  `--best-effort` additionally recovers class failures through fresh
+  declaration-preserving, reduced-metadata, and minimal shells. Dependency
+  recovery propagates from minimal superclasses/interfaces, and unsupported
+  static initializers fail closed through a throwing `<clinit>`.
+- Successful degradation reports `partial` with a nil error. Partial JARs carry
+  deterministic `META-INF/javajive/diagnostics.json`; recovered classes carry a
+  bounded `JavaJiveRecovery` attribute that the decompiler renders as leading
+  source comments. Malformed containers, whole-file validation failures,
+  resource limits, and internal failures still abort.
+- Add `--best-effort` and `--stub-methods-only` to `dex2jar` and Android
+  `decompile`; the default remains strict.
 - Isolate Java archive class failures: malformed and future-version class
   entries become diagnostic fallback `.java` files while other classes continue.
   Structured `ArchiveEntryReport` now carries `status`, `stub_methods`, and

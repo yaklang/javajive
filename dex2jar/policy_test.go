@@ -4,9 +4,11 @@ import (
 	"archive/zip"
 	"bytes"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	javaclassparser "github.com/yaklang/javajive/classparser"
 	"github.com/yaklang/javajive/dex2jar/model"
 )
 
@@ -125,6 +127,171 @@ func TestApplicationBestEffortDoesNotStubMalformedMethod(t *testing.T) {
 	}
 }
 
+func TestApplicationRecoverEmitsClassShellAndDiagnostics(t *testing.T) {
+	app := policyFixture()
+	app.Files[0].Classes[0].DirectMethods[1].Code.Instructions = []uint16{0x00ff}
+	jar, detailed, err := applicationToJarWithPolicy(app, FailureRecover)
+	if err != nil {
+		t.Fatalf("recover conversion: %v", err)
+	}
+	if detailed.Status != "partial" || detailed.StubbedClasses != 1 || detailed.StubbedMethods != 2 || detailed.Summary.Warnings == 0 {
+		t.Fatalf("detailed = %#v", detailed)
+	}
+	reader, err := zip.NewReader(bytes.NewReader(jar), int64(len(jar)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := make(map[string][]byte)
+	for _, file := range reader.File {
+		stream, openErr := file.Open()
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		var body bytes.Buffer
+		_, copyErr := body.ReadFrom(stream)
+		stream.Close()
+		if copyErr != nil {
+			t.Fatal(copyErr)
+		}
+		entries[file.Name] = body.Bytes()
+	}
+	if len(entries["example/Policy.class"]) == 0 || len(entries["META-INF/javajive/diagnostics.json"]) == 0 {
+		t.Fatalf("entries = %#v", entries)
+	}
+	if !bytes.Contains(entries["example/Policy.class"], []byte("JavaJiveRecovery")) || !bytes.Contains(entries["META-INF/javajive/diagnostics.json"], []byte("class.body_recovery")) {
+		t.Fatal("recovery evidence is missing from class or JAR diagnostics")
+	}
+	second, secondReport, err := applicationToJarWithPolicy(app, FailureRecover)
+	if err != nil || !bytes.Equal(second, jar) || !reflect.DeepEqual(secondReport, detailed) {
+		t.Fatalf("recover output is nondeterministic: err=%v reports=%#v/%#v", err, detailed, secondReport)
+	}
+}
+
+func TestApplicationRecoverKeepsGoodClassesAroundBadClass(t *testing.T) {
+	app := policyFixture()
+	bad := app.Files[0].Classes[0]
+	bad.Descriptor = "Lexample/Bad;"
+	for index := range bad.DirectMethods {
+		bad.DirectMethods[index].Method.Class = bad.Descriptor
+	}
+	bad.DirectMethods[1].Code.Instructions = []uint16{0x00ff}
+	goodClass := func(descriptor string) model.Class {
+		return model.Class{
+			Descriptor: descriptor, Superclass: "Ljava/lang/Object;", AccessFlags: 0x0001,
+			DirectMethods: []model.EncodedMethod{{
+				AccessFlags: 0x0009,
+				Method:      model.MethodID{Class: descriptor, Name: "ok", ProtoIndex: 0},
+				Code:        &model.Code{Instructions: []uint16{0x000e}},
+			}},
+		}
+	}
+	app.Files[0].Classes = []model.Class{goodClass("Lexample/Before;"), bad, goodClass("Lexample/After;")}
+
+	if jar, _, err := applicationToJarWithPolicy(app, FailureStrict); err == nil || jar != nil {
+		t.Fatalf("strict conversion: jar=%d err=%v", len(jar), err)
+	}
+	if jar, _, err := applicationToJarWithPolicy(app, FailureStubUnsupportedMethods); err == nil || jar != nil {
+		t.Fatalf("method-only conversion: jar=%d err=%v", len(jar), err)
+	}
+
+	jar, detailed, err := applicationToJarWithPolicy(app, FailureRecover)
+	if err != nil {
+		t.Fatalf("recover conversion: %v", err)
+	}
+	if detailed.Status != "partial" || detailed.AttemptedClasses != 3 || detailed.StubbedClasses != 1 {
+		t.Fatalf("detailed = %#v", detailed)
+	}
+	reader, err := zip.NewReader(bytes.NewReader(jar), int64(len(jar)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := make(map[string][]byte)
+	for _, entry := range reader.File {
+		stream, openErr := entry.Open()
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		var body bytes.Buffer
+		_, copyErr := body.ReadFrom(stream)
+		closeErr := stream.Close()
+		if copyErr != nil {
+			t.Fatal(copyErr)
+		}
+		if closeErr != nil {
+			t.Fatal(closeErr)
+		}
+		entries[entry.Name] = body.Bytes()
+	}
+	for _, name := range []string{"example/Before.class", "example/Bad.class", "example/After.class"} {
+		body := entries[name]
+		if len(body) == 0 {
+			t.Fatalf("missing %s; entries=%v", name, entries)
+		}
+		parsed, parseErr := javaclassparser.Parse(body)
+		if parseErr != nil {
+			t.Fatalf("parse %s: %v", name, parseErr)
+		}
+		if name == "example/Bad.class" {
+			source, dumpErr := parsed.Dump()
+			if dumpErr != nil {
+				t.Fatalf("dump %s: %v", name, dumpErr)
+			}
+			if !strings.HasPrefix(source, "// javajive recovery:") {
+				t.Fatalf("bad class recovery comments are missing:\n%s", source)
+			}
+		}
+	}
+	if !bytes.Contains(entries["META-INF/javajive/diagnostics.json"], []byte("Lexample/Bad;")) {
+		t.Fatal("diagnostics do not identify the recovered class")
+	}
+}
+
+func TestApplicationRecoverPropagatesMinimalDependency(t *testing.T) {
+	const parentDescriptor = "Lexample/MinimalParent;"
+	const childDescriptor = "Lexample/DependentChild;"
+	duplicate := model.EncodedField{
+		AccessFlags: 0x0001,
+		Field:       model.FieldID{Class: parentDescriptor, Name: "value", Type: "I"},
+	}
+	file := &model.File{
+		Entry:  "classes.dex",
+		Protos: []model.Proto{{ReturnType: "V"}},
+		Classes: []model.Class{
+			{
+				Descriptor: childDescriptor, Superclass: parentDescriptor, AccessFlags: 0x0001,
+				DirectMethods: []model.EncodedMethod{{
+					AccessFlags: 0x0009,
+					Method:      model.MethodID{Class: childDescriptor, Name: "ok", ProtoIndex: 0},
+					Code:        &model.Code{Instructions: []uint16{0x000e}},
+				}},
+			},
+			{
+				Descriptor: parentDescriptor, Superclass: "Ljava/lang/Object;", AccessFlags: 0x0001,
+				InstanceFields: []model.EncodedField{duplicate, duplicate},
+			},
+		},
+	}
+	jar, detailed, err := applicationToJarWithPolicy(&model.Application{Files: []*model.File{file}}, FailureRecover)
+	if err != nil {
+		t.Fatalf("recover conversion: %v", err)
+	}
+	if len(jar) == 0 || detailed.StubbedClasses != 2 {
+		t.Fatalf("jar=%d detailed=%#v", len(jar), detailed)
+	}
+	var parentMinimal, childDependency bool
+	for _, diagnostic := range detailed.Diagnostics {
+		if diagnostic.Class == parentDescriptor && diagnostic.Code == "class.minimal_recovery" {
+			parentMinimal = true
+		}
+		if diagnostic.Class == childDescriptor && diagnostic.Code == "class.body_recovery" && strings.Contains(diagnostic.Message, parentDescriptor) {
+			childDependency = true
+		}
+	}
+	if !parentMinimal || !childDependency {
+		t.Fatalf("diagnostics = %#v", detailed.Diagnostics)
+	}
+}
+
 func TestApplicationBestEffortStubsAndReports(t *testing.T) {
 	jar, detailed, err := applicationToJarWithPolicy(policyFixture(), FailureStubUnsupportedMethods)
 	if err != nil {
@@ -149,10 +316,20 @@ func TestApplicationBestEffortStubsAndReports(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open JAR: %v", err)
 	}
-	if len(reader.File) != 2 || reader.File[1].Name != "example/Policy.class" {
+	var classEntry *zip.File
+	var diagnostics bool
+	for _, entry := range reader.File {
+		switch entry.Name {
+		case "example/Policy.class":
+			classEntry = entry
+		case "META-INF/javajive/diagnostics.json":
+			diagnostics = true
+		}
+	}
+	if len(reader.File) != 3 || classEntry == nil || !diagnostics {
 		t.Fatalf("JAR entries = %#v", reader.File)
 	}
-	stream, err := reader.File[1].Open()
+	stream, err := classEntry.Open()
 	if err != nil {
 		t.Fatal(err)
 	}

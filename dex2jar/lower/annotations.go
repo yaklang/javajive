@@ -96,6 +96,12 @@ func builderValue(file *model.File, value model.EncodedValue) (classfilebuilder.
 		return classfilebuilder.AnnotationValue{Kind: classfilebuilder.AnnotationChar, Int: int64(uint16(value.Unsigned))}, nil
 	case model.ValueInt:
 		return classfilebuilder.AnnotationValue{Kind: classfilebuilder.AnnotationInt, Int: int64(int32(value.Signed))}, nil
+	case model.ValueLong:
+		return classfilebuilder.AnnotationValue{Kind: classfilebuilder.AnnotationLong, Int: value.Signed}, nil
+	case model.ValueFloat:
+		return classfilebuilder.AnnotationValue{Kind: classfilebuilder.AnnotationFloat, Bits: value.Unsigned}, nil
+	case model.ValueDouble:
+		return classfilebuilder.AnnotationValue{Kind: classfilebuilder.AnnotationDouble, Bits: value.Unsigned}, nil
 	case model.ValueString:
 		if value.Unsigned >= uint64(len(file.Strings)) {
 			return classfilebuilder.AnnotationValue{}, fmt.Errorf("string index %d is out of range", value.Unsigned)
@@ -187,7 +193,11 @@ func typeArrayElement(file *model.File, annotation model.Annotation, name string
 		if item.Unsigned >= uint64(len(file.Types)) {
 			return nil, fmt.Errorf("type index %d is out of range", item.Unsigned)
 		}
-		descriptors = append(descriptors, file.Types[item.Unsigned].Descriptor)
+		descriptor := file.Types[item.Unsigned].Descriptor
+		if err := classfilebuilder.ValidateObjectDescriptor(descriptor); err != nil {
+			return nil, fmt.Errorf("Throws type %q: %w", descriptor, err)
+		}
+		descriptors = append(descriptors, descriptor)
 	}
 	return descriptors, nil
 }

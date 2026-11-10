@@ -50,6 +50,7 @@ type Class struct {
 	fieldAttrs            [][]pendingAttribute
 	methodAttrs           [][]pendingAttribute
 	classAttrs            []pendingAttribute
+	rawClassAttrs         []pendingAttribute
 	err                   error
 }
 
@@ -190,6 +191,12 @@ func (c *Class) SetMethodParameterAnnotations(method *Method, annotations [][]An
 		c.fail("parameter annotation count %d exceeds 255", len(annotations))
 		return c
 	}
+	for index := range annotations {
+		if len(annotations[index]) != len(visible[index]) {
+			c.fail("parameter %d annotations and visibility differ in length", index)
+			return c
+		}
+	}
 	method.meta.parameterAnnot = annotations
 	method.meta.parameterVis = visible
 	return c
@@ -221,6 +228,25 @@ func (c *Class) SetEnclosingMethod(spec EnclosingMethodSpec) *Class {
 // SetSourceDebugExtension records a SourceDebugExtension attribute.
 func (c *Class) SetSourceDebugExtension(value string) *Class {
 	c.sourceDebug = value
+	return c
+}
+
+// AddClassAttribute appends an opaque class attribute in call order. Duplicate
+// names and payloads are preserved, and the payload is copied before returning.
+func (c *Class) AddClassAttribute(name string, payload []byte) *Class {
+	if name == "" {
+		c.fail("class attribute name is empty")
+		return c
+	}
+	if err := validateAttributePayloadLength(uint64(len(payload))); err != nil {
+		c.fail("class attribute %q: %v", name, err)
+		return c
+	}
+	if _, err := c.pool.UTF8(name); err != nil {
+		c.fail("class attribute name %q: %v", name, err)
+		return c
+	}
+	c.rawClassAttrs = append(c.rawClassAttrs, pendingAttribute{name: name, payload: append([]byte(nil), payload...)})
 	return c
 }
 
@@ -517,6 +543,18 @@ func (c *Class) Bytes() ([]byte, error) {
 	if err := c.resolvePending(c.classAttrs); err != nil {
 		return nil, err
 	}
+	if len(c.interfaces) > math.MaxUint16 {
+		return nil, fmt.Errorf("interfaces_count %d exceeds 65535", len(c.interfaces))
+	}
+	if len(c.fields) > math.MaxUint16 {
+		return nil, fmt.Errorf("fields_count %d exceeds 65535", len(c.fields))
+	}
+	if len(c.methods) > math.MaxUint16 {
+		return nil, fmt.Errorf("methods_count %d exceeds 65535", len(c.methods))
+	}
+	if _, err := checkedU2Count("class attributes_count", len(c.classAttrs)); err != nil {
+		return nil, err
+	}
 
 	out := &byteWriter{}
 	out.u4(classMagic)
@@ -534,9 +572,13 @@ func (c *Class) Bytes() ([]byte, error) {
 	}
 	out.u2(uint16(len(c.fields)))
 	for index, field := range c.fields {
-		attributes := uint16(len(c.fieldAttrs[index]))
+		attributeCount := len(c.fieldAttrs[index])
 		if field.constantValue != 0 {
-			attributes++
+			attributeCount++
+		}
+		attributes, err := checkedU2Count(fmt.Sprintf("field %q attributes_count", field.name), attributeCount)
+		if err != nil {
+			return nil, err
 		}
 		writeMemberHeader(out, &field.member, attributes)
 		if field.constantValue != 0 {
@@ -552,13 +594,19 @@ func (c *Class) Bytes() ([]byte, error) {
 	}
 	out.u2(uint16(len(c.methods)))
 	for i, method := range c.methods {
-		attributes := uint16(len(c.methodAttrs[i]))
+		attributeCount := len(c.methodAttrs[i])
 		if assembled[i] != nil {
-			attributes++
+			attributeCount++
+		}
+		attributes, err := checkedU2Count(fmt.Sprintf("method %s%s attributes_count", method.name, method.descriptorText), attributeCount)
+		if err != nil {
+			return nil, err
 		}
 		writeMemberHeader(out, &method.member, attributes)
 		if assembled[i] != nil {
-			writeCodeAttribute(out, c.codeName, assembled[i])
+			if err := writeCodeAttribute(out, c.codeName, assembled[i]); err != nil {
+				return nil, fmt.Errorf("method %s%s: %w", method.name, method.descriptorText, err)
+			}
 		}
 		for _, attribute := range c.methodAttrs[i] {
 			if err := writeAttribute(out, attribute); err != nil {
@@ -616,9 +664,15 @@ func (c *Class) encodeMemberAttributes(meta *annotationTarget, out *[]pendingAtt
 }
 
 func parameterAnnotationsPresent(annotations [][]Annotation, visible [][]bool, wantVisible bool) bool {
+	if len(visible) != len(annotations) {
+		return false
+	}
 	for index, set := range annotations {
+		if len(visible[index]) != len(set) {
+			return false
+		}
 		for i := range set {
-			if index < len(visible) && i < len(visible[index]) && visible[index][i] == wantVisible {
+			if visible[index][i] == wantVisible {
 				return true
 			}
 		}
@@ -690,6 +744,9 @@ func (c *Class) encodeClassAttributes() error {
 	}
 	if c.sourceDebug != "" {
 		value := c.sourceDebug
+		if err := validateAttributePayloadLength(uint64(len(value))); err != nil {
+			return fmt.Errorf("SourceDebugExtension %w", err)
+		}
 		c.classAttrs = append(c.classAttrs, pendingAttribute{name: "SourceDebugExtension", payload: []byte(value)})
 	}
 	if c.meta.signature != "" {
@@ -710,7 +767,18 @@ func (c *Class) encodeClassAttributes() error {
 			return encodeEnclosingMethod(pool, spec)
 		}})
 	}
-	return c.encodeAnnotationAttributes(&c.meta, &c.classAttrs)
+	if err := c.encodeAnnotationAttributes(&c.meta, &c.classAttrs); err != nil {
+		return err
+	}
+	c.classAttrs = append(c.classAttrs, c.rawClassAttrs...)
+	return nil
+}
+
+func checkedU2Count(kind string, count int) (uint16, error) {
+	if count > math.MaxUint16 {
+		return 0, fmt.Errorf("%s %d exceeds 65535", kind, count)
+	}
+	return uint16(count), nil
 }
 
 func writeMemberHeader(out *byteWriter, member *member, attributes uint16) {
@@ -720,17 +788,29 @@ func writeMemberHeader(out *byteWriter, member *member, attributes uint16) {
 	out.u2(attributes)
 }
 
-func writeCodeAttribute(out *byteWriter, nameIndex uint16, code *assembledCode) {
-	nestedLength := 0
+func writeCodeAttribute(out *byteWriter, nameIndex uint16, code *assembledCode) error {
+	if len(code.handlers) > math.MaxUint16 {
+		return fmt.Errorf("exception_table_length %d exceeds 65535", len(code.handlers))
+	}
+	if len(code.lines) > math.MaxUint16 {
+		return fmt.Errorf("line_number_table_length %d exceeds 65535", len(code.lines))
+	}
+	if len(code.locals) > math.MaxUint16 {
+		return fmt.Errorf("local_variable_table_length %d exceeds 65535", len(code.locals))
+	}
+	nestedLength := uint64(0)
 	if len(code.lines) > 0 {
-		nestedLength += 8 + 4*len(code.lines)
+		nestedLength += 8 + 4*uint64(len(code.lines))
 	}
 	if len(code.locals) > 0 {
-		nestedLength += 8 + 10*len(code.locals)
+		nestedLength += 8 + 10*uint64(len(code.locals))
 	}
-	attributeLength := uint32(12 + len(code.bytes) + 8*len(code.handlers) + nestedLength)
+	attributeLength := uint64(12) + uint64(len(code.bytes)) + 8*uint64(len(code.handlers)) + nestedLength
+	if err := validateAttributePayloadLength(attributeLength); err != nil {
+		return fmt.Errorf("Code %w", err)
+	}
 	out.u2(nameIndex)
-	out.u4(attributeLength)
+	out.u4(uint32(attributeLength))
 	out.u2(code.maxStack)
 	out.u2(code.maxLocals)
 	out.u4(uint32(len(code.bytes)))
@@ -771,4 +851,5 @@ func writeCodeAttribute(out *byteWriter, nameIndex uint16, code *assembledCode) 
 			out.u2(local.index)
 		}
 	}
+	return nil
 }

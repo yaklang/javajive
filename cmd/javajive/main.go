@@ -82,16 +82,17 @@ Run "javajive <command> -h" for command-specific options.
 func cmdDecompile(args []string) error {
 	fs := newFlagSet("decompile")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "usage: javajive decompile [-o out] [-analysis-budget N] [--structured] [--best-effort] <file|dir>")
+		fmt.Fprintln(fs.Output(), "usage: javajive decompile [-o out] [-analysis-budget N] [--structured] [--best-effort | --stub-methods-only] <file|dir>")
 		fmt.Fprintln(fs.Output(), "Decompile .class, Java archives (.jar/.war/.ear/.aar/.par/.jmod/.zip), JDK runtime images (.jimage / lib/modules), DEX/APK/APKS/XAPK/APKM/AAB, or a directory of .class files.")
 		fmt.Fprintln(fs.Output(), "Android containers and DEX default to <input>.src; --structured applies to Java archives and JImage.")
-		fmt.Fprintln(fs.Output(), "--best-effort applies to DEX/Android: recognized unsupported methods become explicit stubs.")
+		fmt.Fprintln(fs.Output(), "--best-effort applies full DEX/Android recovery; --stub-methods-only keeps the narrower recognized-method policy.")
 		fs.PrintDefaults()
 	}
 	out := fs.String("o", "", "output file (for a .class) or directory (for archives/DEX/APK/dirs); default: stdout / <input>.src")
 	budget := fs.Int("analysis-budget", 0, "per-method analysis updates for very large generated methods (0 = default; >1000000 scales graph caps)")
 	structured := fs.Bool("structured", false, "for archives: emit sources/, resources/, and preserved nested archives/ views")
-	bestEffort := fs.Bool("best-effort", false, "for DEX/Android: stub recognized unsupported methods and emit a partial result")
+	bestEffort := fs.Bool("best-effort", false, "for DEX/Android: recover method/class failures and emit a traceable partial result")
+	stubMethodsOnly := fs.Bool("stub-methods-only", false, "for DEX/Android: only stub recognized unsupported methods")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -99,7 +100,7 @@ func cmdDecompile(args []string) error {
 		return fmt.Errorf("-analysis-budget must be non-negative")
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("decompile requires exactly one input path\nusage: javajive decompile [-o out] <file|dir>")
+		return fmt.Errorf("decompile requires exactly one input path\nusage: javajive decompile [-o out] [--best-effort | --stub-methods-only] <file|dir>")
 	}
 	input := fs.Arg(0)
 
@@ -125,8 +126,13 @@ func cmdDecompile(args []string) error {
 		if dst == "" {
 			dst = input + ".src"
 		}
+		if *bestEffort && *stubMethodsOnly {
+			return fmt.Errorf("--best-effort and --stub-methods-only are mutually exclusive")
+		}
 		policy := jj.DexFailureStrict
 		if *bestEffort {
+			policy = jj.DexFailureRecover
+		} else if *stubMethodsOnly {
 			policy = jj.DexFailureStubUnsupportedMethods
 		}
 		detailed, err := jj.DecompileDEXFileWithPolicy(input, dst, jj.DexConvertOptions{Policy: policy}, *budget)
@@ -136,6 +142,10 @@ func cmdDecompile(args []string) error {
 		fmt.Fprintf(os.Stderr, "decompiled %s input %q -> %q (status=%s, %d warnings)\n",
 			kind, input, dst, detailed.Status, detailed.Summary.Warnings)
 		return nil
+	}
+
+	if *bestEffort || *stubMethodsOnly {
+		return fmt.Errorf("--best-effort and --stub-methods-only apply only to DEX/Android input, got %s", kind)
 	}
 
 	if jj.IsJavaArchiveContainer(kind) {
@@ -235,25 +245,31 @@ func decompileDir(dir, out string, budget int) error {
 func cmdDexToJar(args []string) error {
 	fs := newFlagSet("dex2jar")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "usage: javajive dex2jar -o output.jar [--best-effort] input.dex|input.apk|input.apks|input.xapk|input.apkm|input.aab")
+		fmt.Fprintln(fs.Output(), "usage: javajive dex2jar -o output.jar [--best-effort | --stub-methods-only] input.dex|input.apk|input.apks|input.xapk|input.apkm|input.aab")
 		fmt.Fprintln(fs.Output(), "Convert the supported DEX subset in a DEX/APK/APKS/XAPK/APKM/AAB input to a deterministic JAR.")
-		fmt.Fprintln(fs.Output(), "--best-effort stubs recognized unsupported methods; malformed input and resource failures still abort.")
+		fmt.Fprintln(fs.Output(), "--best-effort adds class-shell recovery; --stub-methods-only only stubs recognized unsupported methods. Input and resource failures still abort.")
 		fs.PrintDefaults()
 	}
 	out := fs.String("o", "", "output JAR path (required)")
-	bestEffort := fs.Bool("best-effort", false, "stub recognized unsupported methods and emit a partial JAR")
+	bestEffort := fs.Bool("best-effort", false, "recover method/class failures and emit a traceable partial JAR")
+	stubMethodsOnly := fs.Bool("stub-methods-only", false, "only stub recognized unsupported methods")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 || *out == "" {
-		return fmt.Errorf("dex2jar requires -o <output.jar> and one input path\nusage: javajive dex2jar -o output.jar input.dex|input.apk|input.apks|input.xapk|input.apkm|input.aab")
+		return fmt.Errorf("dex2jar requires -o <output.jar> and one input path\nusage: javajive dex2jar -o output.jar [--best-effort | --stub-methods-only] input.dex|input.apk|input.apks|input.xapk|input.apkm|input.aab")
 	}
 	kind, _ := jj.ClassifyInputFile(fs.Arg(0))
 	if kind == "" {
 		kind = jj.ContainerUnknown
 	}
+	if *bestEffort && *stubMethodsOnly {
+		return fmt.Errorf("--best-effort and --stub-methods-only are mutually exclusive")
+	}
 	policy := jj.DexFailureStrict
 	if *bestEffort {
+		policy = jj.DexFailureRecover
+	} else if *stubMethodsOnly {
 		policy = jj.DexFailureStubUnsupportedMethods
 	}
 	detailed, err := jj.DexFileToJarWithOptions(fs.Arg(0), *out, jj.DexConvertOptions{Policy: policy})

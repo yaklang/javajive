@@ -56,10 +56,10 @@ type DexOptions = nativedex.Options
 // DexReport summarizes a successful native DEX translation.
 type DexReport = nativedex.Report
 
-// DexConvertOptions selects strict or explicit best-effort translation.
+// DexConvertOptions selects strict, recognized-method stubbing, or full class recovery.
 type DexConvertOptions = nativedex.ConvertOptions
 
-// DexDetailedReport includes complete/partial status and stub diagnostics.
+// DexDetailedReport includes complete/partial status, recovery counters, and diagnostics.
 type DexDetailedReport = nativedex.DetailedReport
 
 type DexConversionDiagnostic = nativedex.ConversionDiagnostic
@@ -68,6 +68,7 @@ type DexFailurePolicy = nativedex.FailurePolicy
 const (
 	DexFailureStrict                 = nativedex.FailureStrict
 	DexFailureStubUnsupportedMethods = nativedex.FailureStubUnsupportedMethods
+	DexFailureRecover                = nativedex.FailureRecover
 )
 
 // InputKind identifies reverse-toolchain input by content magic.

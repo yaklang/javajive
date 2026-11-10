@@ -386,6 +386,23 @@ func classMetadataFixture() (*model.File, *model.Class) {
 	return file, class
 }
 
+func TestLowerRejectsInvalidMetadataShapes(t *testing.T) {
+	t.Run("throws array descriptor", func(t *testing.T) {
+		file, class := metadataFixture()
+		file.Types = append(file.Types, model.Type{Descriptor: "[Ljava/lang/Exception;"})
+		if _, err := Class(file, class); err == nil || !strings.Contains(err.Error(), "Throws type") {
+			t.Fatalf("Class error = %v", err)
+		}
+	})
+	t.Run("parameter annotation arity", func(t *testing.T) {
+		file, class := classMetadataFixture()
+		class.ParameterAnnotations[0].Parameters = append(class.ParameterAnnotations[0].Parameters, nil)
+		if _, err := Class(file, class); err == nil || !strings.Contains(err.Error(), "parameter annotation count") {
+			t.Fatalf("Class error = %v", err)
+		}
+	})
+}
+
 func TestLowerEmitsClassMetadataAndArrayOwnerInvoke(t *testing.T) {
 	file, class := classMetadataFixture()
 	raw, err := Class(file, class)
