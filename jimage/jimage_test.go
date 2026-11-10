@@ -3,6 +3,7 @@ package jimage_test
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"os"
@@ -114,6 +115,35 @@ func TestReadCompressedResource(t *testing.T) {
 	}
 	if !bytes.Equal(got, data) {
 		t.Fatalf("decompressed bytes differ")
+	}
+}
+
+func TestOpenRejectsResourceCountOverTableLength(t *testing.T) {
+	image := buildImage(t, []jimagefixture.Entry{
+		{Path: "/test/Foo.class", Data: []byte("class")},
+	})
+	binary.LittleEndian.PutUint32(image[12:16], ^uint32(0))
+	if _, err := jimage.OpenBytes(image); err == nil || !strings.Contains(err.Error(), "resource count") {
+		t.Fatalf("OpenBytes error = %v, want resource count rejection", err)
+	}
+}
+
+func TestReadRejectsOversizedDecompressorLayer(t *testing.T) {
+	image := buildImage(t, []jimagefixture.Entry{
+		{Path: "/test/Foo.class", Data: []byte("class"), Compressed: true},
+	})
+	reader, err := jimage.Open(bytes.NewReader(image), int64(len(image)), jimage.Options{MaxResourceSize: 64})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	entry, ok := reader.Entry("/test/Foo.class")
+	if !ok {
+		t.Fatal("entry not found")
+	}
+	resourceStart := len(image) - int(entry.CompressedSize)
+	binary.LittleEndian.PutUint64(image[resourceStart+12:resourceStart+20], 65)
+	if _, err := reader.Read("/test/Foo.class"); err == nil || !strings.Contains(err.Error(), "uncompressed layer size") {
+		t.Fatalf("Read error = %v, want decompressor layer limit", err)
 	}
 }
 

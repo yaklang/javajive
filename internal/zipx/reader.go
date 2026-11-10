@@ -213,10 +213,10 @@ func (r *checksumReader) Read(b []byte) (n int, err error) {
 				err = ErrChecksum
 			}
 		} else {
-			// If there's not a data descriptor, we still compare
-			// the CRC32 of what we've read against the file header
-			// or TOC's CRC32, if it seems like it was set.
-			if r.f.CRC32 != 0 && r.hash.Sum32() != r.f.CRC32 {
+			// If there's not a data descriptor, compare the CRC32 of
+			// what we've read against the central directory value.
+			if r.hash.Sum32() != r.f.CRC32 {
+
 				err = ErrChecksum
 			}
 		}
@@ -303,8 +303,12 @@ func readDirectoryHeader(f *File, r io.Reader) error {
 					f.headerOffset = int64(eb.uint64())
 				}
 			case winzipAesExtraId:
+				if len(eb) < 7 {
+					return ErrFormat
+				}
 				// grab the AE version
 				f.ae = eb.uint16()
+
 				// skip vendor ID
 				_ = eb.uint16()
 				// AES strength

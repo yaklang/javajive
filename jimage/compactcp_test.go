@@ -86,6 +86,18 @@ func TestDecompressCompactCP(t *testing.T) {
 	}
 }
 
+func TestDecompressCompactCPOutputLimit(t *testing.T) {
+	data := append(compactCPHeader()[:8], 0, 2)
+	data = append(data, compactCPExternalizedString, 0xA1)
+	reader := &Reader{
+		strings:         append([]byte{0}, append([]byte("oversized"), 0)...),
+		maxResourceSize: 16,
+	}
+	if _, err := reader.decompressCompactCP(data, 16, "test/Oversized.class"); err == nil || !bytes.Contains([]byte(err.Error()), []byte("output exceeds declared size")) {
+		t.Fatalf("decompressCompactCP error = %v, want running output bound", err)
+	}
+}
+
 func TestDecompressCompactCPMalformed(t *testing.T) {
 	compressed, expected, reader := compactCPFixture()
 	cases := []struct {

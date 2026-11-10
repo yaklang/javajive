@@ -16,6 +16,12 @@ func FuzzOpenBytes(f *testing.F) {
 		f.Fatal(err)
 	}
 	f.Add(fixture)
+	resourceCountOverTable := append([]byte(nil), fixture...)
+	resourceCountOverTable[12] = 0xff
+	resourceCountOverTable[13] = 0xff
+	resourceCountOverTable[14] = 0xff
+	resourceCountOverTable[15] = 0xff
+	f.Add(resourceCountOverTable)
 	f.Add([]byte{0xda, 0xda, 0xfe, 0xca})
 	f.Add([]byte{})
 	f.Fuzz(func(t *testing.T, data []byte) {

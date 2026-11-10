@@ -182,11 +182,14 @@ func TestT23_C02_PathsAndDuplicates(t *testing.T) {
 		} else {
 			t23MustPathRejected(t, err)
 		}
-		if _, err := NormalizeArchiveEntryName("C:/windows/x"); err == nil {
-			t.Fatal("expected reject drive path")
-		} else {
-			t23MustPathRejected(t, err)
+		for _, drivePath := range []string{"C:/windows/x", "c:/windows/x", "z:/windows/x"} {
+			if _, err := NormalizeArchiveEntryName(drivePath); err == nil {
+				t.Fatalf("expected reject drive path %q", drivePath)
+			} else {
+				t23MustPathRejected(t, err)
+			}
 		}
+
 		if _, err := NormalizeArchiveEntryName("foo\x00bar"); err == nil {
 			t.Fatal("expected reject NUL")
 		} else {
