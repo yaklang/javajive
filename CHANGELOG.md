@@ -2,8 +2,31 @@
 
 ## Unreleased — 2026-11-10
 
-Universal input containers across the Java archive and Android pipelines.
+Universal input containers across the Java archive and Android pipelines, plus
+bounded failure recovery for malformed and partially unsupported inputs.
 
+- Harden DEX IR decoding: validate switch and fill-array payload targets with
+  signed/`uint64` arithmetic before indexing, reject negative, wrapped, and
+  final-word payloads, and cap instruction×register analysis state before
+  allocation instead of amplifying memory from an admitted DEX.
+- Add explicit DEX failure policy APIs: `DexToJarWithOptions`,
+  `DexFileToJarWithOptions`, and `DecompileDEXFileWithPolicy`. The existing
+  strict APIs remain transactional and unchanged. Best-effort stubs only
+  recognized method-local capability gaps with a verifier-safe
+  `UnsupportedOperationException` body, preserve method metadata, and report
+  `complete`/`partial` plus per-method diagnostics. Malformed input, unknown
+  formats, integrity errors, resource limits, and internal failures still abort.
+- Add `--best-effort` to `dex2jar` and Android `decompile`; the default remains
+  strict.
+- Isolate Java archive class failures: malformed and future-version class
+  entries become diagnostic fallback `.java` files while other classes continue.
+  Structured `ArchiveEntryReport` now carries `status`, `stub_methods`, and
+  `diagnostics`, distinguishing complete, partial, and fallback sources.
+  Resource/cancellation failures still terminate the request.
+- Make real external-corpus and JDK/JLink integration tests explicit local
+  evaluations (`JAVAJIVE_EXTERNAL_EVAL=1`,
+  `JAVAJIVE_JIMAGE_INTEGRATION=1`). Required PR CI keeps small synthetic
+  container, archive-containment, DEX-policy, and no-panic regressions.
 - Add `internal/inputkind`: classify inputs by content magic, then archive
   structure, and only then the filename extension. Renamed APK/APKS/JMOD/AAR
   files now reach the correct pipeline.
@@ -42,8 +65,8 @@ Universal input containers across the Java archive and Android pipelines.
   uncompressed image. Big-endian JImages (`jlink --endian big`) are supported
   too.
 - Add pure-Go unit tests for compressed-index decoding and compact-cp constant
-  pool reconstruction, plus `jlink --compress=1` and `--endian big` integration
-  tests.
+  pool reconstruction, plus opt-in `jlink --compress=1` and `--endian big`
+  integration tests.
 - Add `testdata/external` with real Tomcat WARs, bundletool APK/AAB/APKS
   (universal and a 181-APK split bundle), an AndroidX AAR, Androguard/Apktool/
   dex2jar fixtures, and synthetic XAPK/APKM/EAR containers. Tests classify,
@@ -51,7 +74,9 @@ Universal input containers across the Java archive and Android pipelines.
   no panics.
 - Add fuzz seed corpora for the input classifier, JImage and compact-cp readers,
   `inspect`, and Android container parsing.
-- CI runs the container/JImage/external tests in the native regression job.
+- Required CI runs small synthetic container/JImage tests and focused archive
+  class-containment regressions; real external samples and JLink generation are
+  opt-in local evaluations.
 - `inspect` reports `jmod` / `jimage` / `aar` / `ear` / `par` / `apks` /
   `xapk` / `apkm` / `aab`, and records nested APK or AAB module DEX provenance.
 - CLI `decompile` and `dex2jar` route by detected container instead of file

@@ -67,3 +67,47 @@ func AsDiagnostic(err error) (*Diagnostic, bool) {
 	ok := errors.As(err, &diagnostic)
 	return diagnostic, ok
 }
+
+// CapabilityError identifies a recognized DEX construct whose structure is
+// valid but whose semantics are not implemented by the translator. Only errors
+// of this type are eligible for explicit best-effort method stubbing.
+type CapabilityError struct {
+	Feature string
+	Err     error
+}
+
+func (e *CapabilityError) Error() string {
+	if e == nil {
+		return "unsupported DEX capability"
+	}
+	if e.Err == nil {
+		return fmt.Sprintf("unsupported DEX capability: %s", e.Feature)
+	}
+	return e.Err.Error()
+}
+
+func (e *CapabilityError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// Unsupported marks a validated, method-local capability boundary.
+func Unsupported(feature string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var existing *CapabilityError
+	if errors.As(err, &existing) {
+		return err
+	}
+	return &CapabilityError{Feature: feature, Err: err}
+}
+
+// IsUnsupported reports whether err is an explicit capability boundary rather
+// than malformed input, a resource failure, or an internal error.
+func IsUnsupported(err error) bool {
+	var unsupported *CapabilityError
+	return errors.As(err, &unsupported)
+}

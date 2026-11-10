@@ -32,11 +32,14 @@ type DecompileArchiveOptions = ArchiveOptions
 // ArchiveEntryReport records one deterministic structured-export output.
 // Paths are slash-separated and relative to the destination directory.
 type ArchiveEntryReport struct {
-	Kind       string `json:"kind"`
-	SourcePath string `json:"source_path"`
-	OutputPath string `json:"output_path"`
-	Archive    string `json:"archive,omitempty"`
-	Size       int64  `json:"size"`
+	Kind        string                                `json:"kind"`
+	SourcePath  string                                `json:"source_path"`
+	OutputPath  string                                `json:"output_path"`
+	Archive     string                                `json:"archive,omitempty"`
+	Size        int64                                 `json:"size"`
+	Status      javaclassparser.ClassDecompileStatus  `json:"status,omitempty"`
+	StubMethods []string                              `json:"stub_methods,omitempty"`
+	Diagnostics []javaclassparser.DecompileDiagnostic `json:"diagnostics,omitempty"`
 }
 
 // NestedArchiveReport records the provenance and preserved bytes of a nested

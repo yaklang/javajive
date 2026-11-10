@@ -261,7 +261,13 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p artifacts
-          go test -json -count=1 -timeout=10m ./jimage ./inspect ./internal/inputkind ./internal/jimagefixture ./classparser/jarwar ./test/external | tee artifacts/container-jimage-tests.jsonl
+          go test -json -count=1 -timeout=10m ./jimage ./inspect ./internal/inputkind ./internal/jimagefixture ./classparser/jarwar | tee artifacts/container-jimage-tests.jsonl
+      - name: Archive class containment regression tests
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          go test -json -count=1 -timeout=5m ./classparser -run '^(TestArchiveClass|TestClassFallbackText)' | tee artifacts/archive-class-containment-tests.jsonl
       - name: Native DEX coverage contract
         working-directory: ${{ github.workspace }}
         run: |

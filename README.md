@@ -186,6 +186,11 @@ javajive decompile -o ./app-src app.war
 # are decompiled in place).
 javajive decompile --structured -o ./app-src app.war
 
+# Archive classes are isolated: a malformed or future-version class becomes a
+# diagnostic fallback .java entry while the remaining classes continue. The
+# structured report marks each class complete, partial, or fallback and carries
+# stub-method and diagnostic details.
+
 # AAR and JMOD are ordinary archives once the container is identified.
 javajive decompile -o ./aar-src library.aar
 javajive decompile -o ./jmod-src java.base.jmod
@@ -201,6 +206,10 @@ javajive decompile -o ./app-src app.apk
 javajive decompile -o ./app-src app.apks
 javajive decompile -o ./app-src app.xapk
 javajive decompile -o ./app-src app.aab
+
+# Opt-in partial Android output: recognized unsupported methods become
+# explicit throwing stubs. Malformed input and resource failures still abort.
+javajive decompile --best-effort -o ./app-src app.apk
 
 # Directory: recursively decompile .class files (requires -o output dir).
 javajive decompile -o ./src ./classes
@@ -218,6 +227,9 @@ javajive dex2jar -o classes.jar classes.dex
 javajive dex2jar -o app.jar app.apk
 javajive dex2jar -o app.jar app.apks
 javajive dex2jar -o app.jar app.aab
+
+# Explicit best-effort: recognized unsupported methods throw from a stub.
+javajive dex2jar --best-effort -o app.jar app.apk
 ```
 
 ### jimage2jar
@@ -229,9 +241,14 @@ javajive jimage2jar -o jdk.jar /path/to/jdk/lib/modules
 ```
 
 Input is detected by magic rather than the filename extension. Output is a
-reproducible JAR. `dex2jar` fails the complete conversion on any unsupported or
-malformed class or method; it writes a same-directory temporary file before
-replacing the destination and never substitutes method stubs.
+reproducible JAR. The default conversion is strict and transactional: it fails
+on any unsupported or malformed class or method, and never emits a JAR for that
+input. `--best-effort` additionally replaces a recognized method-local
+capability gap with a verifier-safe stub that throws
+`UnsupportedOperationException`; malformed input, unknown formats, integrity
+errors, resource limits, and internal failures still abort. Best-effort output
+is reported as `partial` with one diagnostic per stubbed method. Both modes
+write a same-directory temporary file before replacing the destination.
 
 ### Native DEX/APK support boundary
 
@@ -257,9 +274,13 @@ hierarchy declared in the same DEX; a relation whose expected type is outside
 the application is accepted, because the platform hierarchy the input was
 verified against is not part of the DEX.
 
-Still unsupported: `filled-new-array` of wide or floating elements; DEX 038+
-dynamic invokes and method constants; CompactDex; and APK resources or native
-libraries.
+Still unsupported as translated bodies: `filled-new-array` of wide or floating
+elements; DEX 038+ dynamic invokes and method constants; CompactDex; and APK
+resources or native libraries. With `--best-effort`, methods whose only blocker
+is one of the recognized opcode/representation gaps become explicit throwing
+stubs. Container corruption, DEX header/table/verifier errors, unsupported DEX
+versions or unparsed sections, resource limits, and internal errors are never
+stubbed.
 
 Android container handling is structural:
 
@@ -279,12 +300,14 @@ Container bounds default to 256 MB per DEX, 512 MB per archive/APK, 512 MB of
 total DEX data, 128 DEX files, 512 nested APKs, and 2 GB of total nested APK
 data. `DexOptions` fields raise these limits for larger bundles.
 
-The container test suite is backed by real samples under
-[`testdata/external`](testdata/external/README.md): Tomcat WARs, bundletool
-APK/AAB/APKS bundles (including a 181-APK split bundle), an AndroidX AAR,
-Androguard/Apktool/dex2jar fixtures, and synthetic XAPK/APKM/EAR containers.
-Fuzz seed corpora cover the classifier, JImage and compact-cp readers,
-`inspect`, and Android container parsing.
+The container corpus under [`testdata/external`](testdata/external/README.md)
+contains Tomcat WARs, bundletool APK/AAB/APKS bundles (including a 181-APK split
+bundle), an AndroidX AAR, Androguard/Apktool/dex2jar fixtures, and synthetic
+XAPK/APKM/EAR containers. These large real-world runs are explicit local
+evaluations (`JAVAJIVE_EXTERNAL_EVAL=1`), not part of the default PR CI.
+Ordinary CI keeps small synthetic container and no-panic regressions. Fuzz seed
+corpora cover the classifier, JImage and compact-cp readers, `inspect`, and
+Android container parsing.
 
 ### classinfo
 
@@ -381,10 +404,13 @@ out := javajive.MarshalSerialized(restored...)
 | `OpenJImageFile(path) (*JImageReader, error)` | Open a JDK runtime image for direct resource access |
 | `ClassifyInput(data, name) ContainerKind` | Classify bytes by magic, archive structure, then extension |
 | `ClassifyInputFile(path) (ContainerKind, error)` | Classify a file without loading the whole archive |
-| `DexToJar(input, options) ([]byte, DexReport, error)` | Convert DEX/APK/APKS/XAPK/APKM/AAB bytes to a deterministic JAR |
-| `DexFileToJar(src, dst, options) (DexReport, error)` | Convert a DEX/Android container file using a temporary JAR |
+| `DexToJar(input, options) ([]byte, DexReport, error)` | Strict DEX/APK/APKS/XAPK/APKM/AAB conversion to a deterministic JAR |
+| `DexToJarWithOptions(input, convertOptions) ([]byte, DexDetailedReport, error)` | Explicit strict or best-effort conversion with stub diagnostics |
+| `DexFileToJar(src, dst, options) (DexReport, error)` | Strict file conversion using an atomic temporary JAR |
+| `DexFileToJarWithOptions(src, dst, convertOptions) (DexDetailedReport, error)` | Policy-aware file conversion with atomic replacement |
 | `DecompileDEXFile(src, dst, options) error` | Convert DEX/Android container through a private temporary JAR and decompile it |
 | `DecompileDEXFileWithAnalysisBudget(src, dst, options, budget) error` | DEX/Android container conversion plus budgeted archive decompilation |
+| `DecompileDEXFileWithPolicy(src, dst, convertOptions, budget) (DexDetailedReport, error)` | Policy-aware DEX/Android conversion and decompilation |
 | `ParseClass(classBytes) (*ClassObject, error)` | Parse one `.class`'s bytes |
 | `ParseClassFile(path) (*ClassObject, error)` | Parse one `.class` from disk |
 | `ParseSerialized(raw) ([]JavaSerializable, error)` | Parse a serialization stream |
@@ -419,6 +445,10 @@ Third-party dependencies are confined to a small set of pure-Go libraries
 go test ./...                 # unit tests + JDK cross-tests (skipped if no JDK)
 go test ./... -race           # data-race free (linux)
 go test ./test/cross/ -v      # Java cross-tests only (needs javac/java on PATH)
+
+# Explicit large/real-world evaluations (not part of default PR CI):
+JAVAJIVE_EXTERNAL_EVAL=1 go test ./test/external
+JAVAJIVE_JIMAGE_INTEGRATION=1 go test ./jimage ./test/external
 ```
 
 The JDK cross-tests compile real Java artifacts at test time and verify them

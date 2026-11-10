@@ -4,6 +4,24 @@ Real-world Java and Android container files used by `test/external` and the
 package-level format tests. The files are treated as **data only**; tests parse
 them and never execute their contents.
 
+## Running the opt-in tests
+
+The real external corpus is excluded from default test runs. Run it explicitly
+with:
+
+```bash
+JAVAJIVE_EXTERNAL_EVAL=1 go test ./test/external
+```
+
+Tests that read a locally installed JDK runtime image or generate images with
+`jlink` are independently opt-in:
+
+```bash
+JAVAJIVE_JIMAGE_INTEGRATION=1 go test ./jimage ./test/external
+```
+
+Synthetic JImage unit tests remain part of ordinary `go test ./jimage` runs.
+
 ## Sources and licenses
 
 All samples come from Apache-2.0 projects. Keep the source URL in this file when

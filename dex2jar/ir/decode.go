@@ -14,6 +14,9 @@ func Decode(code *model.Code, ctx Context) ([]Instruction, error) {
 		return nil, diagnostic(ctx, nil, "code", fmt.Errorf("nil code item"))
 	}
 	words := code.Instructions
+	if uint64(len(words)) > math.MaxUint32 {
+		return nil, diagnostic(ctx, nil, "code", fmt.Errorf("instruction stream has %d code units; maximum addressable size is %d", len(words), uint64(math.MaxUint32)))
+	}
 	instructions := make([]Instruction, 0, len(words))
 	for offset := uint32(0); offset < uint32(len(words)); {
 		word := words[offset]
@@ -32,7 +35,7 @@ func Decode(code *model.Code, ctx Context) ([]Instruction, error) {
 		if !known {
 			return nil, diagnostic(ctx, &Instruction{Offset: offset, Opcode: opcode, Name: "unknown"}, "", fmt.Errorf("unknown DEX 035 opcode"))
 		}
-		if offset+uint32(info.width) > uint32(len(words)) {
+		if uint64(offset)+uint64(info.width) > uint64(len(words)) {
 			return nil, diagnostic(ctx, &Instruction{Offset: offset, Opcode: opcode, Name: info.name}, "", fmt.Errorf("truncated %s instruction: need %d code units, have %d", info.format, info.width, uint32(len(words))-offset))
 		}
 		instruction := Instruction{Offset: offset, Opcode: opcode, Name: info.name, Format: info.format, Width: info.width, Target: -1}
@@ -132,14 +135,14 @@ func Decode(code *model.Code, ctx Context) ([]Instruction, error) {
 			instruction.Regs = []uint16{word >> 8}
 			instruction.Target = int64(offset) + int64(int32(uint32(word1())|uint32(word2())<<16))
 			if opcode == 0x2b || opcode == 0x2c {
-				targets, keys, firstKey, err := decodeSwitchPayload(words, uint32(instruction.Target), offset, opcode == 0x2c)
+				targets, keys, firstKey, err := decodeSwitchPayload(words, instruction.Target, offset, opcode == 0x2c)
 				if err != nil {
 					return nil, diagnostic(ctx, &instruction, "", err)
 				}
 				instruction.Targets, instruction.Keys, instruction.FirstKey = targets, keys, firstKey
 			}
 			if opcode == 0x26 {
-				data, width, err := decodeFillArrayPayload(words, uint32(instruction.Target))
+				data, width, err := decodeFillArrayPayload(words, instruction.Target)
 				if err != nil {
 					return nil, diagnostic(ctx, &instruction, "", err)
 				}

@@ -24,6 +24,13 @@ func buildImage(t *testing.T, entries []jimagefixture.Entry) []byte {
 	return data
 }
 
+func requireJImageIntegration(t *testing.T) {
+	t.Helper()
+	if os.Getenv("JAVAJIVE_JIMAGE_INTEGRATION") != "1" {
+		t.Skip("JDK/JImage integration disabled; set JAVAJIVE_JIMAGE_INTEGRATION=1 to run")
+	}
+}
+
 func TestReadEntriesAndResources(t *testing.T) {
 	classBytes := []byte{0xca, 0xfe, 0xba, 0xbe, 1, 2, 3, 4}
 	resource := []byte("security.provider.1=SunSecurityProvider\n")
@@ -195,6 +202,8 @@ func TestWriteZIPRejectsClassCollision(t *testing.T) {
 }
 
 func TestOpenJDKImage(t *testing.T) {
+	requireJImageIntegration(t)
+
 	_, home := findJDK(t)
 	path := filepath.Join(home, "lib", "modules")
 	if _, err := os.Stat(path); err != nil {
@@ -255,6 +264,8 @@ func runJLink(t *testing.T, jlink string, args ...string) {
 }
 
 func TestJLinkCompactCPImage(t *testing.T) {
+	requireJImageIntegration(t)
+
 	jlink, home := findJDK(t)
 	plainPath := filepath.Join(home, "lib", "modules")
 	if _, err := os.Stat(plainPath); err != nil {
@@ -289,6 +300,8 @@ func TestJLinkCompactCPImage(t *testing.T) {
 }
 
 func TestJLinkBigEndianImage(t *testing.T) {
+	requireJImageIntegration(t)
+
 	jlink, home := findJDK(t)
 	plainPath := filepath.Join(home, "lib", "modules")
 	if _, err := os.Stat(plainPath); err != nil {

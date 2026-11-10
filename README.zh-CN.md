@@ -141,6 +141,10 @@ javajive decompile -o ./app-src app.war
 # （WEB-INF/lib、EAR/lib、AAR classes.jar 与 fat-JAR 依赖都会就地反编译）
 javajive decompile --structured -o ./app-src app.war
 
+# 归档内 class 相互隔离：畸形 class 或未来版本 class 会生成带诊断的 fallback
+# .java 条目，其余 class 继续导出。structured 报告会标记每个 class 为
+# complete / partial / fallback，并携带 stub 方法与诊断信息。
+
 # AAR 与 JMOD 识别后按普通归档处理
 javajive decompile -o ./aar-src library.aar
 javajive decompile -o ./jmod-src java.base.jmod
@@ -156,6 +160,10 @@ javajive decompile -o ./app-src app.apk
 javajive decompile -o ./app-src app.apks
 javajive decompile -o ./app-src app.xapk
 javajive decompile -o ./app-src app.aab
+
+# 可选的 Android 部分产物：已知但不支持的方法变成显式抛异常 stub。
+# 畸形输入、未知格式和资源超限仍然失败，不会伪装成成功。
+javajive decompile --best-effort -o ./app-src app.apk
 
 # 目录：递归反编译其中的 .class（必须用 -o 指定输出目录）
 javajive decompile -o ./src ./classes
@@ -173,6 +181,9 @@ javajive dex2jar -o classes.jar classes.dex
 javajive dex2jar -o app.jar app.apk
 javajive dex2jar -o app.jar app.apks
 javajive dex2jar -o app.jar app.aab
+
+# 显式 best-effort：已知不支持的方法使用抛异常 stub 代替
+javajive dex2jar --best-effort -o app.jar app.apk
 ```
 
 ### jimage2jar
@@ -182,9 +193,12 @@ javajive dex2jar -o app.jar app.aab
 javajive jimage2jar -o jdk.jar /path/to/jdk/lib/modules
 ```
 
-输入类型按文件魔数而非扩展名识别，输出为可复现的 JAR。任一 class 或方法不受支持、
-或输入损坏时，`dex2jar` 会让整个转换失败；它会先写入目标目录中的临时文件，再替换
-目标文件，并且不会用方法 stub 代替失败内容。
+输入类型按文件魔数而非扩展名识别，输出为可复现的 JAR。默认转换严格且事务性：
+任一 class 或方法不受支持、或输入损坏时，整次转换失败且不产出 JAR。
+`--best-effort` 只把“已识别的方法级能力缺口”替换为 verifier-safe 的
+`UnsupportedOperationException` 抛异常 stub；畸形输入、未知格式、完整性错误、
+资源超限和内部错误仍然失败。best-effort 产物状态为 `partial`，每个 stub 方法都有
+对应诊断。两种模式都会先写同目录临时文件，再原子替换目标文件。
 
 ### 原生 DEX/APK 支持边界
 
@@ -195,8 +209,11 @@ int/引用控制流、字段与 invoke、`new-instance`/构造器配对、数组
 字面量、`packed-switch`/`sparse-switch`、monitor、try/catch、long/float/double
 以及带 static/default 方法的接口。生成 class 会经过解析测试与 JVM 校验。
 
-暂不支持：wide/float 元素的 `filled-new-array`；DEX 038+ 动态调用与方法常量；
-CompactDex；APK 资源或原生库。
+暂不支持作为方法体翻译：wide/float 元素的 `filled-new-array`；DEX 038+ 动态调用与
+方法常量；CompactDex；APK 资源或原生库。使用 `--best-effort` 时，仅因上述已识别
+opcode/表示能力缺口而无法翻译的方法会变成显式抛异常 stub；容器损坏、DEX
+header/table/verifier 错误、未支持版本或未解析 section、资源超限与内部错误永远
+不会用 stub 掩盖。
 
 Android 容器的处理规则：
 
@@ -212,9 +229,11 @@ Android 容器的处理规则：
 容器默认上限：单个 DEX 256 MB、单个归档/APK 512 MB、DEX 总量 512 MB、128 个 DEX、
 512 个嵌套 APK、嵌套 APK 总量 2 GB。更大的包可通过 `DexOptions` 字段提高上限。
 
-容器测试使用 [`testdata/external`](testdata/external/README.md) 下的真实样本：
-Tomcat WAR、bundletool APK/AAB/APKS（含 181 个嵌套 APK 的 split 包）、AndroidX AAR、
-Androguard/Apktool/dex2jar 样本，以及合成的 XAPK/APKM/EAR。Fuzz 种子覆盖分类器、
+[`testdata/external`](testdata/external/README.md) 下的真实样本包括 Tomcat WAR、
+bundletool APK/AAB/APKS（含 181 个嵌套 APK 的 split 包）、AndroidX AAR、
+Androguard/Apktool/dex2jar 样本，以及合成的 XAPK/APKM/EAR。这些真实世界大样本
+测试属于显式本地评测（`JAVAJIVE_EXTERNAL_EVAL=1`），不进入默认 PR CI；普通 CI
+只保留小型合成容器回归与 no-panic 检查。Fuzz 种子覆盖分类器、
 JImage/compact-cp 读取、`inspect` 与 Android 容器解析。
 
 ### classinfo
@@ -312,10 +331,13 @@ out := javajive.MarshalSerialized(restored...)
 | `OpenJImageFile(path) (*JImageReader, error)` | 打开 JDK 运行时镜像并直接读取资源 |
 | `ClassifyInput(data, name) ContainerKind` | 按 magic、归档结构、扩展名分类输入 |
 | `ClassifyInputFile(path) (ContainerKind, error)` | 不加载整个归档即可分类文件 |
-| `DexToJar(input, options) ([]byte, DexReport, error)` | 将 DEX/APK/APKS/XAPK/APKM/AAB 字节转为确定性 JAR |
-| `DexFileToJar(src, dst, options) (DexReport, error)` | 使用临时文件转换 DEX/Android 容器 |
+| `DexToJar(input, options) ([]byte, DexReport, error)` | 严格转换 DEX/APK/APKS/XAPK/APKM/AAB 为确定性 JAR |
+| `DexToJarWithOptions(input, convertOptions) ([]byte, DexDetailedReport, error)` | 显式 strict/best-effort 转换并返回 stub 诊断 |
+| `DexFileToJar(src, dst, options) (DexReport, error)` | 严格转换文件并使用原子临时 JAR |
+| `DexFileToJarWithOptions(src, dst, convertOptions) (DexDetailedReport, error)` | 带策略的文件转换与原子替换 |
 | `DecompileDEXFile(src, dst, options) error` | 经私有临时 JAR 转换并反编译 DEX/Android 容器 |
 | `DecompileDEXFileWithAnalysisBudget(src, dst, options, budget) error` | DEX/Android 容器转换并带预算反编译归档 |
+| `DecompileDEXFileWithPolicy(src, dst, convertOptions, budget) (DexDetailedReport, error)` | 带策略的 DEX/Android 转换与反编译 |
 | `ParseClass(classBytes) (*ClassObject, error)` | 解析单个 `.class` 字节 |
 | `ParseClassFile(path) (*ClassObject, error)` | 从磁盘解析单个 `.class` |
 | `ParseSerialized(raw) ([]JavaSerializable, error)` | 解析序列化流 |
@@ -348,6 +370,10 @@ out := javajive.MarshalSerialized(restored...)
 go test ./...                 # 单元测试 + JDK 交叉测试（无 JDK 时自动跳过）
 go test ./... -race           # 无数据竞争（linux）
 go test ./test/cross/ -v      # 仅 Java 交叉测试（需 PATH 上有 javac/java）
+
+# 显式真实大语料/JImage 集成评测（默认 PR CI 不跑）
+JAVAJIVE_EXTERNAL_EVAL=1 go test ./test/external
+JAVAJIVE_JIMAGE_INTEGRATION=1 go test ./jimage ./test/external
 ```
 
 JDK 交叉测试会在测试时编译真实 Java 产物并用 JavaJive 验证；无 JDK 时自动 `t.Skip`。

@@ -3,7 +3,6 @@ package jarwar
 import (
 	"bytes"
 	"fmt"
-	"io/fs"
 	"os"
 	"path"
 	"sort"
@@ -164,18 +163,25 @@ func exportNestedArchive(root string, parentZip *filesys.ZipFS, entryPath, paren
 	return nil
 }
 
-func exportStructuredFile(root string, decompiler fs.ReadFileFS, entryPath, archivePath string, report *ArchiveReport) error {
-	data, err := decompiler.ReadFile(entryPath)
+func exportStructuredFile(root string, decompiler *javaclassparser.JarFS, entryPath, archivePath string, report *ArchiveReport) error {
+	outcome, err := decompiler.ReadClassOutcome(entryPath)
 	if err != nil {
 		return fmt.Errorf("read archive entry %q: %w", provenancePath(archivePath, entryPath), err)
 	}
+	data := outcome.Source
 	kind := "resource"
 	outputEntry := entryPath
 	outputRoot := structuredResourcesRoot
+	status := javaclassparser.ClassDecompileStatus("")
+	var stubMethods []string
+	var diagnostics []javaclassparser.DecompileDiagnostic
 	if strings.EqualFold(path.Ext(entryPath), ".class") {
 		kind = "source"
 		outputEntry = strings.TrimSuffix(entryPath, path.Ext(entryPath)) + ".java"
 		outputRoot = structuredSourcesRoot
+		status = outcome.Status
+		stubMethods = outcome.StubMethods
+		diagnostics = outcome.Diagnostics
 	}
 	if archivePath != "" {
 		outputEntry = provenancePath(archivePath, outputEntry)
@@ -188,11 +194,14 @@ func exportStructuredFile(root string, decompiler fs.ReadFileFS, entryPath, arch
 		return fmt.Errorf("write archive entry %q: %w", provenancePath(archivePath, entryPath), err)
 	}
 	report.Entries = append(report.Entries, ArchiveEntryReport{
-		Kind:       kind,
-		SourcePath: provenancePath(archivePath, entryPath),
-		OutputPath: outputPath,
-		Archive:    archivePath,
-		Size:       int64(len(data)),
+		Kind:        kind,
+		SourcePath:  provenancePath(archivePath, entryPath),
+		OutputPath:  outputPath,
+		Archive:     archivePath,
+		Size:        int64(len(data)),
+		Status:      status,
+		StubMethods: stubMethods,
+		Diagnostics: diagnostics,
 	})
 	return nil
 }

@@ -45,6 +45,20 @@ var externalSamples = []sampleCase{
 	{"sample.ear", inputkind.EAR, inspect.StatusComplete},
 }
 
+func requireExternalEval(t *testing.T) {
+	t.Helper()
+	if os.Getenv("JAVAJIVE_EXTERNAL_EVAL") != "1" {
+		t.Skip("external corpus evaluation disabled; set JAVAJIVE_EXTERNAL_EVAL=1 to run")
+	}
+}
+
+func requireJImageIntegration(t *testing.T) {
+	t.Helper()
+	if os.Getenv("JAVAJIVE_JIMAGE_INTEGRATION") != "1" {
+		t.Skip("JDK/JImage integration disabled; set JAVAJIVE_JIMAGE_INTEGRATION=1 to run")
+	}
+}
+
 func readSample(t *testing.T, name string) []byte {
 	t.Helper()
 	data, err := os.ReadFile(testfixtures.Path(name))
@@ -55,6 +69,8 @@ func readSample(t *testing.T, name string) []byte {
 }
 
 func TestExternalSamplesClassifyAndInspect(t *testing.T) {
+	requireExternalEval(t)
+
 	for _, sample := range externalSamples {
 		t.Run(sample.name, func(t *testing.T) {
 			data := readSample(t, sample.name)
@@ -76,6 +92,8 @@ func TestExternalSamplesClassifyAndInspect(t *testing.T) {
 }
 
 func TestExternalDecompileJavaArchives(t *testing.T) {
+	requireExternalEval(t)
+
 	t.Run("war", func(t *testing.T) {
 		dst := t.TempDir()
 		if err := jarwar.AutoDecompile(testfixtures.Path("tomcat-sample.war"), dst); err != nil {
@@ -138,6 +156,8 @@ func TestExternalDecompileJavaArchives(t *testing.T) {
 }
 
 func TestExternalAndroidTranslation(t *testing.T) {
+	requireExternalEval(t)
+
 	cases := []struct {
 		name     string
 		dexFiles int
@@ -172,6 +192,8 @@ func TestExternalAndroidTranslation(t *testing.T) {
 }
 
 func TestExternalAndroidRejections(t *testing.T) {
+	requireExternalEval(t)
+
 	cases := []struct {
 		name     string
 		contains string
@@ -195,6 +217,8 @@ func TestExternalAndroidRejections(t *testing.T) {
 }
 
 func TestExternalRenamedSamples(t *testing.T) {
+	requireExternalEval(t)
+
 	cases := []struct {
 		name string
 		file string
@@ -244,6 +268,8 @@ func jdkHome(t *testing.T) string {
 }
 
 func TestExternalJModAndJImage(t *testing.T) {
+	requireJImageIntegration(t)
+
 	home := jdkHome(t)
 
 	t.Run("jmod", func(t *testing.T) {
@@ -283,6 +309,8 @@ func TestExternalJModAndJImage(t *testing.T) {
 }
 
 func TestExternalUnsupportedDEXVersion040(t *testing.T) {
+	requireExternalEval(t)
+
 	data := readSample(t, "apktool-issue2543.dex")
 	if len(data) < 8 {
 		t.Fatal("DEX fixture is too short")
@@ -308,6 +336,8 @@ func mustNotPanic(t *testing.T, label string, action func()) {
 }
 
 func TestExternalMalformedTruncations(t *testing.T) {
+	requireExternalEval(t)
+
 	samples := []string{
 		"tomcat-sample.war",
 		"tomcat-broken.war",

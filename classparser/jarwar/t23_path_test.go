@@ -156,6 +156,52 @@ func t23Files(t *testing.T, root string) []string {
 	return files
 }
 
+func TestStructuredArchiveReportsClassOutcomes(t *testing.T) {
+	valid := t23ClassFixture(t)
+	future := bytes.Clone(valid)
+	future[6], future[7] = 0, byte(javaclassparser.MaxSupportedClassMajor+1)
+	archive := t23Zip(t, map[string][]byte{
+		"classes/Valid.class":     valid,
+		"classes/Malformed.class": {0xca, 0xfe, 0xba, 0xbe},
+		"classes/Future.class":    future,
+		"resource.txt":            []byte("exact"),
+	})
+	src := t23WriteArchive(t, archive, ".jar")
+	dst := t.TempDir()
+	report, err := AutoDecompileWithOptions(src, dst, ArchiveOptions{Structured: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entries := make(map[string]ArchiveEntryReport, len(report.Entries))
+	for _, entry := range report.Entries {
+		entries[entry.SourcePath] = entry
+	}
+	if got := entries["classes/Valid.class"]; got.Status != javaclassparser.ClassDecompileComplete || len(got.Diagnostics) != 0 {
+		t.Fatalf("valid report = %+v", got)
+	}
+	for _, test := range []struct {
+		name   string
+		code   string
+		marker string
+	}{
+		{"classes/Malformed.class", "class_parse_failed", "decompile parse failed"},
+		{"classes/Future.class", "unsupported_classfile_version", "decompile fallback"},
+	} {
+		got := entries[test.name]
+		if got.Status != javaclassparser.ClassDecompileFallback || len(got.Diagnostics) != 1 || got.Diagnostics[0].Code != test.code {
+			t.Fatalf("%s report = %+v", test.name, got)
+		}
+		raw, err := os.ReadFile(filepath.Join(dst, filepath.FromSlash(got.OutputPath)))
+		if err != nil || !bytes.Contains(raw, []byte(test.marker)) {
+			t.Fatalf("%s fallback = %q err %v", test.name, raw, err)
+		}
+	}
+	if got := entries["resource.txt"]; got.Kind != "resource" || got.Status != "" || len(got.Diagnostics) != 0 {
+		t.Fatalf("resource report = %+v", got)
+	}
+}
+
 func TestStructuredWARExport(t *testing.T) {
 	classBytes := t23ClassFixture(t)
 	innerResource := []byte{0, 1, 2, 3, 0xff}

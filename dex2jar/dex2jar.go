@@ -52,6 +52,42 @@ type Report struct {
 	Warnings          int
 }
 
+// FailurePolicy controls whether recognized method-local capability gaps abort
+// conversion or become explicit throwing stubs. The zero value is strict.
+type FailurePolicy string
+
+const (
+	FailureStrict                 FailurePolicy = "strict"
+	FailureStubUnsupportedMethods FailurePolicy = "stub_unsupported_methods"
+)
+
+// ConvertOptions combines existing input bounds with an explicit conversion
+// policy without changing the source-compatible Options type.
+type ConvertOptions struct {
+	Input  Options
+	Policy FailurePolicy
+}
+
+// ConversionDiagnostic is stable, JSON-friendly evidence of one degradation or
+// terminal conversion failure.
+type ConversionDiagnostic struct {
+	Entry    string `json:"entry,omitempty"`
+	Class    string `json:"class,omitempty"`
+	Method   string `json:"method,omitempty"`
+	Category string `json:"category"`
+	Action   string `json:"action"`
+	Feature  string `json:"feature,omitempty"`
+	Message  string `json:"message"`
+}
+
+// DetailedReport describes complete, partial, or failed conversion without
+// weakening the existing scalar Report contract.
+type DetailedReport struct {
+	Status      string                 `json:"status"`
+	Summary     Report                 `json:"summary"`
+	Diagnostics []ConversionDiagnostic `json:"diagnostics,omitempty"`
+}
+
 type jarEntry struct {
 	name string
 	data []byte
@@ -139,15 +175,51 @@ func IsJavaArchiveContainer(kind ContainerKind) bool {
 // by content magic and archive structure. On any parse or translation failure
 // it returns no JAR bytes.
 func DexToJar(data []byte, options Options) ([]byte, Report, error) {
-	app, _, err := parseApplication(data, options)
-	if err != nil {
-		return nil, Report{}, err
+	jar, detailed, err := DexToJarWithOptions(data, ConvertOptions{Input: options, Policy: FailureStrict})
+	return jar, detailed.Summary, err
+}
+
+// DexToJarWithOptions translates an input with explicit strict or best-effort
+// policy. An error always means no JAR bytes; partial success has a nil error and
+// Status "partial" with diagnostics for every stubbed method.
+func DexToJarWithOptions(data []byte, options ConvertOptions) (jar []byte, detailed DetailedReport, err error) {
+	detailed.Status = "failed"
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			jar = nil
+			detailed.Status = "failed"
+			detailed.Diagnostics = append(detailed.Diagnostics, ConversionDiagnostic{
+				Category: "internal",
+				Action:   "failed",
+				Message:  fmt.Sprintf("dex2jar internal panic: %v", recovered),
+			})
+			err = fmt.Errorf("dex2jar: internal panic: %v", recovered)
+		}
+	}()
+	policy := options.Policy
+	if policy == "" {
+		policy = FailureStrict
 	}
-	return applicationToJar(app)
+	if policy != FailureStrict && policy != FailureStubUnsupportedMethods {
+		return nil, detailed, fmt.Errorf("dex2jar: unknown failure policy %q", policy)
+	}
+	app, _, err := parseApplication(data, options.Input)
+	if err != nil {
+		detailed.Diagnostics = append(detailed.Diagnostics, diagnosticFromError(err, "failed", ""))
+		return nil, detailed, err
+	}
+	return applicationToJarWithPolicy(app, policy)
 }
 
 // APKToJar translates an APK containing classes*.dex entries.
-func APKToJar(data []byte, options Options) ([]byte, Report, error) {
+func APKToJar(data []byte, options Options) (jar []byte, report Report, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			jar = nil
+			report = Report{}
+			err = fmt.Errorf("dex2jar: internal panic: %v", recovered)
+		}
+	}()
 	if !hasZIPMagic(data) {
 		return nil, Report{}, errors.New("dex2jar: input is not an APK/ZIP archive")
 	}
@@ -155,32 +227,56 @@ func APKToJar(data []byte, options Options) ([]byte, Report, error) {
 	if err != nil {
 		return nil, Report{}, err
 	}
-	return applicationToJar(app)
+	jar, report, err = applicationToJar(app)
+	return
+}
+
+// DexFileToJarWithOptions converts a file with explicit policy and atomically
+// replaces dst only after a complete or explicitly partial JAR is available.
+func DexFileToJarWithOptions(src, dst string, options ConvertOptions) (DetailedReport, error) {
+	data, err := readInputFile(src, options.Input)
+	if err != nil {
+		return DetailedReport{Status: "failed"}, err
+	}
+	jar, detailed, err := DexToJarWithOptions(data, options)
+	if err != nil {
+		return detailed, err
+	}
+	if err := atomicWriteFile(dst, jar, 0o644); err != nil {
+		detailed.Status = "failed"
+		return detailed, fmt.Errorf("dex2jar: write %q: %w", dst, err)
+	}
+	return detailed, nil
 }
 
 // DexFileToJar reads a raw DEX or APK and writes the complete JAR to a
 // same-directory temporary file before replacing dst. An existing destination
 // is left untouched when conversion or temporary-file writing fails.
 func DexFileToJar(src, dst string, options Options) (Report, error) {
+	detailed, err := DexFileToJarWithOptions(src, dst, ConvertOptions{Input: options, Policy: FailureStrict})
+	return detailed.Summary, err
+}
+
+func readInputFile(src string, options Options) ([]byte, error) {
 	info, err := os.Stat(src)
 	if err != nil {
-		return Report{}, fmt.Errorf("dex2jar: stat %q: %w", src, err)
+		return nil, fmt.Errorf("dex2jar: stat %q: %w", src, err)
 	}
 	if !info.Mode().IsRegular() {
-		return Report{}, fmt.Errorf("dex2jar: input %q is not a regular file", src)
+		return nil, fmt.Errorf("dex2jar: input %q is not a regular file", src)
 	}
 	file, err := os.Open(src)
 	if err != nil {
-		return Report{}, fmt.Errorf("dex2jar: open %q: %w", src, err)
+		return nil, fmt.Errorf("dex2jar: open %q: %w", src, err)
 	}
 	var magic [8]byte
 	read, readErr := io.ReadFull(file, magic[:])
 	_ = file.Close()
 	if readErr != nil && readErr != io.ErrUnexpectedEOF {
-		return Report{}, fmt.Errorf("dex2jar: read magic from %q: %w", src, readErr)
+		return nil, fmt.Errorf("dex2jar: read magic from %q: %w", src, readErr)
 	}
 	if inputkind.IsJImageHeader(magic[:read]) {
-		return Report{}, fmt.Errorf("dex2jar: unsupported DEX input: detected jimage")
+		return nil, fmt.Errorf("dex2jar: unsupported DEX input: detected jimage")
 	}
 	archiveInput := hasZIPMagic(magic[:read]) || inputkind.IsJMODHeader(magic[:read])
 	maxSize := options.MaxDEXSize
@@ -195,20 +291,13 @@ func DexFileToJar(src, dst string, options Options) (Report, error) {
 		}
 	}
 	if info.Size() > maxSize {
-		return Report{}, fmt.Errorf("dex2jar: input size %d exceeds limit %d", info.Size(), maxSize)
+		return nil, fmt.Errorf("dex2jar: input size %d exceeds limit %d", info.Size(), maxSize)
 	}
 	data, err := os.ReadFile(src)
 	if err != nil {
-		return Report{}, fmt.Errorf("dex2jar: read %q: %w", src, err)
+		return nil, fmt.Errorf("dex2jar: read %q: %w", src, err)
 	}
-	jar, conversionReport, err := DexToJar(data, options)
-	if err != nil {
-		return conversionReport, err
-	}
-	if err := atomicWriteFile(dst, jar, 0o644); err != nil {
-		return conversionReport, fmt.Errorf("dex2jar: write %q: %w", dst, err)
-	}
-	return conversionReport, nil
+	return data, nil
 }
 
 func inputOptions(options Options) input.Options {
@@ -231,48 +320,71 @@ func parseApplication(data []byte, options Options) (*model.Application, Contain
 }
 
 func applicationToJar(app *model.Application) ([]byte, Report, error) {
+	jar, detailed, err := applicationToJarWithPolicy(app, FailureStrict)
+	return jar, detailed.Summary, err
+}
+
+func applicationToJarWithPolicy(app *model.Application, policy FailurePolicy) ([]byte, DetailedReport, error) {
+	detailed := DetailedReport{Status: "failed"}
 	if app == nil {
-		return nil, Report{}, errors.New("dex2jar: nil application")
+		return nil, detailed, errors.New("dex2jar: nil application")
 	}
-	report := Report{DEXFiles: len(app.Files)}
+	detailed.Summary.DEXFiles = len(app.Files)
 	entries := make([]jarEntry, 0)
 	seen := make(map[string]string)
 	hierarchy := applicationHierarchy(app)
+	lowerPolicy := lower.Strict
+	if policy == FailureStubUnsupportedMethods {
+		lowerPolicy = lower.StubUnsupportedMethods
+	}
 	for _, file := range app.Files {
 		if file == nil {
-			return nil, report, errors.New("dex2jar: application contains a nil DEX file")
+			return nil, detailed, errors.New("dex2jar: application contains a nil DEX file")
 		}
-		// Validate the file once instead of once per method.
 		if err := ir.ValidateFile(file); err != nil {
-			return nil, report, dexreport.New(file.Entry, "", "", 0, "metadata", err)
+			err = dexreport.New(file.Entry, "", "", 0, "metadata", err)
+			detailed.Diagnostics = append(detailed.Diagnostics, diagnosticFromError(err, "failed", ""))
+			return nil, detailed, err
 		}
 		for classIndex := range file.Classes {
 			class := &file.Classes[classIndex]
 			name, err := classEntryName(class.Descriptor)
 			if err != nil {
-				return nil, report, fmt.Errorf("dex2jar: class %q: %w", class.Descriptor, err)
+				err = fmt.Errorf("dex2jar: class %q: %w", class.Descriptor, err)
+				detailed.Diagnostics = append(detailed.Diagnostics, diagnosticFromError(err, "failed", ""))
+				return nil, detailed, err
 			}
 			if previous, exists := seen[name]; exists {
-				return nil, report, fmt.Errorf("dex2jar: duplicate output entry %q from %q and %q", name, previous, file.Entry)
+				err = fmt.Errorf("dex2jar: duplicate output entry %q from %q and %q", name, previous, file.Entry)
+				detailed.Diagnostics = append(detailed.Diagnostics, diagnosticFromError(err, "failed", ""))
+				return nil, detailed, err
 			}
 			seen[name] = file.Entry
 
-			classBytes, err := lower.ClassWithOptions(file, class, lower.ClassOptions{FileValidated: true, Hierarchy: hierarchy})
+			result, err := lower.ClassWithPolicy(file, class, lower.ClassOptions{FileValidated: true, Hierarchy: hierarchy}, lowerPolicy)
 			if err != nil {
-				return nil, report, err
+				detailed.Diagnostics = append(detailed.Diagnostics, diagnosticFromError(err, "failed", ""))
+				return nil, detailed, err
 			}
-			entries = append(entries, jarEntry{name: name, data: classBytes})
-			report.Classes++
-			for _, method := range class.DirectMethods {
-				report.Methods++
-				if method.Code != nil {
-					report.TranslatedMethods++
+			entries = append(entries, jarEntry{name: name, data: result.Bytes})
+			detailed.Summary.Classes++
+			stubs := make(map[string]bool, len(result.StubbedMethods))
+			for _, stub := range result.StubbedMethods {
+				stubs[stub.Method+"\x00"+stub.Descriptor] = true
+				detailed.Summary.Warnings++
+				detailed.Diagnostics = append(detailed.Diagnostics, ConversionDiagnostic{
+					Entry: file.Entry, Class: class.Descriptor, Method: stub.Method + stub.Descriptor,
+					Category: "unsupported", Action: "stubbed", Feature: stub.Feature, Message: stub.Message,
+				})
+			}
+			for _, method := range append(class.DirectMethods, class.VirtualMethods...) {
+				detailed.Summary.Methods++
+				if method.Code == nil {
+					continue
 				}
-			}
-			for _, method := range class.VirtualMethods {
-				report.Methods++
-				if method.Code != nil {
-					report.TranslatedMethods++
+				descriptor, descriptorErr := methodDescriptorForReport(file, &method)
+				if descriptorErr == nil && !stubs[method.Method.Name+"\x00"+descriptor] {
+					detailed.Summary.TranslatedMethods++
 				}
 			}
 		}
@@ -280,9 +392,46 @@ func applicationToJar(app *model.Application) ([]byte, Report, error) {
 
 	jar, err := writeJar(entries)
 	if err != nil {
-		return nil, report, err
+		detailed.Diagnostics = append(detailed.Diagnostics, diagnosticFromError(err, "failed", ""))
+		return nil, detailed, err
 	}
-	return jar, report, nil
+	detailed.Status = "complete"
+	if detailed.Summary.Warnings > 0 {
+		detailed.Status = "partial"
+	}
+	return jar, detailed, nil
+}
+
+func methodDescriptorForReport(file *model.File, method *model.EncodedMethod) (string, error) {
+	if int(method.Method.ProtoIndex) >= len(file.Protos) {
+		return "", fmt.Errorf("proto index out of range")
+	}
+	proto := file.Protos[method.Method.ProtoIndex]
+	var descriptor strings.Builder
+	descriptor.WriteByte('(')
+	for _, parameter := range proto.Parameters {
+		descriptor.WriteString(parameter)
+	}
+	descriptor.WriteByte(')')
+	descriptor.WriteString(proto.ReturnType)
+	return descriptor.String(), nil
+}
+
+func diagnosticFromError(err error, action, feature string) ConversionDiagnostic {
+	out := ConversionDiagnostic{Category: "invalid", Action: action, Feature: feature, Message: err.Error()}
+	if dexreport.IsUnsupported(err) {
+		out.Category = "unsupported"
+		var capability *dexreport.CapabilityError
+		if errors.As(err, &capability) {
+			out.Feature = capability.Feature
+		}
+	}
+	if diagnostic, ok := dexreport.AsDiagnostic(err); ok {
+		out.Entry = diagnostic.Entry
+		out.Class = diagnostic.Class
+		out.Method = diagnostic.Method
+	}
+	return out
 }
 
 func classEntryName(descriptor string) (string, error) {

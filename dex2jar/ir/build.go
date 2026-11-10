@@ -5,9 +5,16 @@ import (
 	"strings"
 
 	"github.com/yaklang/javajive/dex2jar/model"
+	"github.com/yaklang/javajive/dex2jar/report"
 )
 
 const dexAccessStatic = 0x0008
+
+// maxRegisterStateCells bounds the dense per-instruction register category
+// table and the temporary states used to derive it. Four million cells leave
+// ample room for ordinary methods while preventing hostile code/register
+// dimensions from amplifying a small code item into an unbounded allocation.
+const maxRegisterStateCells = 4 << 20
 
 // Build decodes, validates, builds the CFG, and derives stable register homes.
 func Build(in Input) (*Method, error) {
@@ -31,6 +38,10 @@ func Build(in Input) (*Method, error) {
 	instructions, err := Decode(method.Code, ctx)
 	if err != nil {
 		return nil, err
+	}
+	stateCells := uint64(len(instructions)) * uint64(method.Code.RegistersSize)
+	if stateCells > maxRegisterStateCells {
+		return nil, diagnostic(ctx, nil, "resources", fmt.Errorf("instruction/register state space of %d instructions x %d registers (%d cells) exceeds limit %d", len(instructions), method.Code.RegistersSize, stateCells, maxRegisterStateCells))
 	}
 	result := &Method{Code: method.Code, Instructions: instructions, Context: ctx, Proto: proto, AccessFlags: method.AccessFlags}
 	if err := validateInstructions(result, in.File); err != nil {
@@ -78,7 +89,8 @@ func validateInstructions(method *Method, file *model.File) error {
 		instruction := &method.Instructions[index]
 		info := opcodeTable[instruction.Opcode]
 		if !info.supported {
-			return diagnostic(method.Context, instruction, "", fmt.Errorf("construct is outside the supported DEX 035 subset; unsupported opcode family: %s", unsupportedFamily(instruction.Opcode)))
+			family := unsupportedFamily(instruction.Opcode)
+			return diagnostic(method.Context, instruction, "", report.Unsupported(family, fmt.Errorf("construct is outside the supported DEX 035 subset; unsupported opcode family: %s", family)))
 		}
 		for _, register := range instruction.Regs {
 			if uint32(register) >= registerCount {
@@ -99,7 +111,7 @@ func validateInstructions(method *Method, file *model.File) error {
 				return diagnostic(method.Context, instruction, "", fmt.Errorf("filled-new-array type %q is not an array", descriptor))
 			}
 			if component := descriptor[1:]; component == "J" || component == "D" || component == "F" {
-				return diagnostic(method.Context, instruction, "", fmt.Errorf("filled-new-array of a wide or floating element is unsupported"))
+				return diagnostic(method.Context, instruction, "", report.Unsupported("filled-new-array wide or floating element", fmt.Errorf("filled-new-array of a wide or floating element is unsupported")))
 			}
 		}
 		if instruction.Opcode == 0x1c || instruction.Opcode == 0x1f || instruction.Opcode == 0x20 || instruction.Opcode == 0x22 || instruction.Opcode == 0x23 {

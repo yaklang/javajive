@@ -56,6 +56,20 @@ type DexOptions = nativedex.Options
 // DexReport summarizes a successful native DEX translation.
 type DexReport = nativedex.Report
 
+// DexConvertOptions selects strict or explicit best-effort translation.
+type DexConvertOptions = nativedex.ConvertOptions
+
+// DexDetailedReport includes complete/partial status and stub diagnostics.
+type DexDetailedReport = nativedex.DetailedReport
+
+type DexConversionDiagnostic = nativedex.ConversionDiagnostic
+type DexFailurePolicy = nativedex.FailurePolicy
+
+const (
+	DexFailureStrict                 = nativedex.FailureStrict
+	DexFailureStubUnsupportedMethods = nativedex.FailureStubUnsupportedMethods
+)
+
 // InputKind identifies reverse-toolchain input by content magic.
 type InputKind = nativedex.InputKind
 
@@ -262,11 +276,23 @@ func DexToJar(input []byte, options DexOptions) ([]byte, DexReport, error) {
 	return nativedex.DexToJar(input, options)
 }
 
+// DexToJarWithOptions converts input with an explicit failure policy. Partial
+// success has a nil error and a detailed report identifying every stub.
+func DexToJarWithOptions(input []byte, options DexConvertOptions) ([]byte, DexDetailedReport, error) {
+	return nativedex.DexToJarWithOptions(input, options)
+}
+
 // DexFileToJar converts a raw DEX, APK, APKS/XAPK/APKM, or AAB file and replaces
 // dst only after the complete JAR has been written to a temporary file in the
 // same directory.
 func DexFileToJar(src, dst string, options DexOptions) (DexReport, error) {
 	return nativedex.DexFileToJar(src, dst, options)
+}
+
+// DexFileToJarWithOptions converts a file with explicit failure policy and
+// atomically replaces dst on complete or explicitly partial success.
+func DexFileToJarWithOptions(src, dst string, options DexConvertOptions) (DexDetailedReport, error) {
+	return nativedex.DexFileToJarWithOptions(src, dst, options)
 }
 
 // DecompileDEXFile converts a raw DEX, APK, APKS/XAPK/APKM, or AAB through a
@@ -280,17 +306,32 @@ func DecompileDEXFile(src, dst string, options DexOptions) error {
 // DecompileDEXFileWithAnalysisBudget is DecompileDEXFile with an explicit
 // per-method analysis budget for the translated JAR's decompilation.
 func DecompileDEXFileWithAnalysisBudget(src, dst string, options DexOptions, maxAnalysisUpdates int) error {
+	_, err := DecompileDEXFileWithPolicy(src, dst, DexConvertOptions{
+		Input:  options,
+		Policy: DexFailureStrict,
+	}, maxAnalysisUpdates)
+	return err
+}
+
+// DecompileDEXFileWithPolicy translates DEX/Android input with an explicit
+// failure policy, decompiles the resulting private JAR, and returns the
+// detailed translation report. The temporary JAR is always removed.
+func DecompileDEXFileWithPolicy(src, dst string, options DexConvertOptions, maxAnalysisUpdates int) (DexDetailedReport, error) {
 	tempDir, err := os.MkdirTemp("", "javajive-dex-decompile-*")
 	if err != nil {
-		return err
+		return DexDetailedReport{Status: "failed"}, err
 	}
 	defer os.RemoveAll(tempDir)
 
 	jarPath := filepath.Join(tempDir, "classes.jar")
-	if _, err := DexFileToJar(src, jarPath, options); err != nil {
-		return err
+	detailed, err := DexFileToJarWithOptions(src, jarPath, options)
+	if err != nil {
+		return detailed, err
 	}
-	return DecompileArchiveWithAnalysisBudget(jarPath, dst, maxAnalysisUpdates)
+	if err := DecompileArchiveWithAnalysisBudget(jarPath, dst, maxAnalysisUpdates); err != nil {
+		return detailed, err
+	}
+	return detailed, nil
 }
 
 // ---------------------------------------------------------------------------
