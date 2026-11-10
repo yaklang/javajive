@@ -477,11 +477,6 @@ func writeJar(classes []jarEntry) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-func hasDEXMagic(data []byte) bool {
-	return len(data) >= 8 && string(data[:4]) == "dex\n" && data[7] == 0 &&
-		data[4] >= '0' && data[4] <= '9' && data[5] >= '0' && data[5] <= '9' && data[6] >= '0' && data[6] <= '9'
-}
-
 func hasZIPMagic(data []byte) bool {
 	return len(data) >= 4 && data[0] == 'P' && data[1] == 'K' &&
 		((data[2] == 3 && data[3] == 4) || (data[2] == 5 && data[3] == 6) || (data[2] == 7 && data[3] == 8))

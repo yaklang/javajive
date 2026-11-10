@@ -29,6 +29,41 @@ func TestDiagnosticStableCategoriesAndRendering(t *testing.T) {
 	}
 }
 
+func TestCapabilityErrorContract(t *testing.T) {
+	var nilCapability *CapabilityError
+	if nilCapability.Error() != "unsupported DEX capability" || nilCapability.Unwrap() != nil {
+		t.Fatalf("nil CapabilityError = %q / %v", nilCapability.Error(), nilCapability.Unwrap())
+	}
+	if Unsupported("feature", nil) != nil {
+		t.Fatal("Unsupported(feature, nil) did not return nil")
+	}
+
+	cause := errors.New("root cause")
+	err := Unsupported("feature", cause)
+	if !IsUnsupported(err) || err.Error() != "root cause" {
+		t.Fatalf("Unsupported error = %v", err)
+	}
+	var capability *CapabilityError
+	if !errors.As(err, &capability) || capability.Feature != "feature" || capability.Unwrap() != cause {
+		t.Fatalf("capability = %#v", capability)
+	}
+	if again := Unsupported("other", err); again != err {
+		t.Fatalf("Unsupported rewrapped an existing capability: %v", again)
+	}
+	if !IsUnsupported(fmt.Errorf("outer: %w", err)) {
+		t.Fatal("IsUnsupported lost a wrapped capability")
+	}
+	if IsUnsupported(cause) {
+		t.Fatal("plain error was classified as unsupported")
+	}
+	if got := (&CapabilityError{Feature: "feature"}).Error(); got != "unsupported DEX capability: feature" {
+		t.Fatalf("feature-only error = %q", got)
+	}
+	if got := (&CapabilityError{}).Error(); got != "unsupported DEX capability: " {
+		t.Fatalf("empty capability error = %q", got)
+	}
+}
+
 func TestDiagnosticWrappingContract(t *testing.T) {
 	cause := errors.New("root cause")
 	if got := New("entry", "class", "method", 1, "opcode", nil); got != nil {

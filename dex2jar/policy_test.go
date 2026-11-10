@@ -3,6 +3,7 @@ package dex2jar
 import (
 	"archive/zip"
 	"bytes"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -44,6 +45,56 @@ func TestApplicationStrictRejectsUnsupportedMethod(t *testing.T) {
 	}
 	if detailed.Status != "failed" {
 		t.Fatalf("status = %q, want failed", detailed.Status)
+	}
+}
+
+func TestContainerPredicatesAndMagicBranches(t *testing.T) {
+	for _, kind := range []ContainerKind{ContainerAPK, ContainerAPKS, ContainerXAPK, ContainerAPKM, ContainerAAB} {
+		if !IsAndroidContainer(kind) {
+			t.Fatalf("%s is not classified as Android", kind)
+		}
+	}
+	if IsAndroidContainer(ContainerJAR) {
+		t.Fatal("JAR was classified as Android")
+	}
+	for _, kind := range []ContainerKind{ContainerJMOD, ContainerJImage, ContainerJAR, ContainerWAR, ContainerEAR, ContainerAAR, ContainerPAR, ContainerZIP} {
+		if !IsJavaArchiveContainer(kind) {
+			t.Fatalf("%s is not classified as a Java archive", kind)
+		}
+	}
+	if IsJavaArchiveContainer(ContainerAPK) {
+		t.Fatal("APK was classified as a Java archive")
+	}
+
+	tests := []struct {
+		name string
+		data []byte
+		want InputKind
+	}{
+		{"dex", []byte("dex\n035\x00"), InputDEX},
+		{"class", []byte{0xca, 0xfe, 0xba, 0xbe}, InputClass},
+		{"zip", []byte("PK\x03\x04"), InputZIP},
+		{"jmod", []byte{'J', 'M', 1, 0}, InputJMOD},
+		{"jimage", []byte{0xda, 0xda, 0xfe, 0xca}, InputJIMAGE},
+		{"unknown", []byte("not an artifact"), InputUnknown},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := DetectInputKind(test.data); got != test.want {
+				t.Fatalf("DetectInputKind = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestConversionPolicyRejectsUnknownPolicyAndMissingFile(t *testing.T) {
+	jar, detailed, err := DexToJarWithOptions([]byte("not an artifact"), ConvertOptions{Policy: FailurePolicy("unknown")})
+	if err == nil || !strings.Contains(err.Error(), "unknown failure policy") || jar != nil || detailed.Status != "failed" {
+		t.Fatalf("unknown policy: jar=%d report=%#v err=%v", len(jar), detailed, err)
+	}
+	report, err := DexFileToJarWithOptions(filepath.Join(t.TempDir(), "missing.dex"), filepath.Join(t.TempDir(), "out.jar"), ConvertOptions{})
+	if err == nil || report.Status != "failed" {
+		t.Fatalf("missing file: report=%#v err=%v", report, err)
 	}
 }
 
