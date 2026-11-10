@@ -174,6 +174,14 @@ func validateCodeLength(codeLength int) error {
 			Msg:   "code_length must be greater than 0",
 		}
 	}
+	if codeLength > 65535 {
+		return &ClassParseError{
+			Code:  ParseCodeCodeLength,
+			Stage: "code",
+			Field: "code_length",
+			Msg:   fmt.Sprintf("code_length %d exceeds JVM limit 65535", codeLength),
+		}
+	}
 	return nil
 }
 

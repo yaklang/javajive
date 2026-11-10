@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/yaklang/javajive/classparser"
+	"github.com/yaklang/javajive/internal/filesys"
 	"github.com/yaklang/javajive/internal/inputkind"
 	"github.com/yaklang/javajive/internal/utils"
 	"github.com/yaklang/javajive/jimage"
@@ -93,19 +94,35 @@ func AutoDecompileWithAnalysisBudget(from, to string, maxAnalysisUpdates int) er
 		_, err := decompileJImageWithOptions(from, to, ArchiveOptions{MaxAnalysisUpdates: maxAnalysisUpdates})
 		return err
 	}
-	return autoDecompileFlat(from, to, maxAnalysisUpdates)
+	return autoDecompileFlat(from, to, ArchiveOptions{MaxAnalysisUpdates: maxAnalysisUpdates})
 }
 
 // autoDecompileFlat writes the historical flat directory layout.
-func autoDecompileFlat(from, to string, maxAnalysisUpdates int) error {
+func autoDecompileFlat(from, to string, options ArchiveOptions) error {
 	fromLower := strings.ToLower(from)
 	switch {
 	case strings.HasSuffix(fromLower, ".jar"), strings.HasSuffix(fromLower, ".war"),
 		strings.HasSuffix(fromLower, ".ear"), strings.HasSuffix(fromLower, ".aar"),
 		strings.HasSuffix(fromLower, ".par"), strings.HasSuffix(fromLower, ".jmod"),
 		strings.HasSuffix(fromLower, ".zip"):
-		jar, err := NewWithAnalysisBudget(from, maxAnalysisUpdates)
+		archiveOptions := javaclassparser.ArchiveOptionsFrom(javaclassparser.DecompileOptions{
+			Context:       options.Context,
+			Limits:        options.Limits,
+			Work:          options.Work,
+			TargetRelease: options.TargetRelease,
+		})
+		if err := archiveOptions.Work.CheckContext(options.Context); err != nil {
+			return err
+		}
+		zipFS, err := filesys.NewZipFSFromLocalWithOptions(from, filesys.WithArchiveOptions(archiveOptions))
 		if err != nil {
+			return utils.Errorf("create archive failed: %v", err)
+		}
+		decompiler := javaclassparser.NewJarFS(zipFS)
+		decompiler.SetAnalysisBudget(options.MaxAnalysisUpdates)
+		jar, err := NewFromJarFS(decompiler)
+		if err != nil {
+			_ = zipFS.Close()
 			return utils.Errorf("create archive failed: %v", err)
 		}
 		defer jar.Close()
@@ -116,10 +133,14 @@ func autoDecompileFlat(from, to string, maxAnalysisUpdates int) error {
 			return utils.Errorf("read class file failed: %v", err)
 		}
 		var decompiled string
-		if maxAnalysisUpdates > 0 {
+		if options.Context != nil || options.Work != nil || options.Limits != (javaclassparser.Limits{}) || options.TargetRelease != 0 || options.MaxAnalysisUpdates > 0 {
 			result, derr := javaclassparser.DecompileWithOptions(raw, javaclassparser.DecompileOptions{
 				Mode:               javaclassparser.Compatibility,
-				MaxAnalysisUpdates: maxAnalysisUpdates,
+				Context:            options.Context,
+				Limits:             options.Limits,
+				Work:               options.Work,
+				TargetRelease:      options.TargetRelease,
+				MaxAnalysisUpdates: options.MaxAnalysisUpdates,
 			})
 			if derr != nil {
 				return utils.Errorf("decompile class failed: %v", derr)
@@ -163,7 +184,7 @@ func AutoDecompileWithOptions(from, to string, options ArchiveOptions) (ArchiveR
 		return decompileJImageWithOptions(from, to, options)
 	}
 	if !options.Structured {
-		return ArchiveReport{}, autoDecompileFlat(from, to, options.MaxAnalysisUpdates)
+		return ArchiveReport{}, autoDecompileFlat(from, to, options)
 	}
 	return decompileArchiveStructured(from, to, options)
 }

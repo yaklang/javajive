@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"strings"
+
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 
 	"github.com/yaklang/javajive/internal/jdecenv"
@@ -233,6 +235,14 @@ func decompileWithBudget(data []byte, options DecompileOptions) (result Decompil
 	// Java-21 source semantics to a classfile outside the supported range.
 	if err := ValidateSupportedClassMajor(obj.MajorVersion); err != nil {
 		result.Status = "unsupported"
+		return result, budget, err
+	}
+	if err := ValidateClassMinor(obj.MajorVersion, obj.MinorVersion); err != nil {
+		if strings.Contains(err.Error(), "unsupported_classfile_preview") {
+			result.Status = "unsupported"
+		} else {
+			result.Status = "invalid_input"
+		}
 		return result, budget, err
 	}
 	result.Members = newMemberLedger(obj)

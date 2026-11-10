@@ -218,8 +218,14 @@ func (z *JarFS) decompileClassOutcomeBound(name string, data []byte, work **work
 	if strings.HasSuffix(lower, ".raw") && (len(data) < 4 || data[0] != 0xca || data[1] != 0xfe || data[2] != 0xba || data[3] != 0xbe) {
 		return ClassDecompileOutcome{Source: data, Status: ClassDecompileComplete}, nil
 	}
-	cf, err := Parse(data)
+	if z.archive != nil && z.archive.budget != nil {
+		*work = z.archive.budget.Work()
+	}
+	cf, err := ParseWithBudget(data, *work)
 	if err != nil {
+		if isClassResourceError(err) {
+			return ClassDecompileOutcome{}, err
+		}
 		message := sanitizeClassText(err.Error())
 		return ClassDecompileOutcome{
 			Source: []byte(fmt.Sprintf("// decompile parse failed for %s: %s\n", sanitizeClassText(name), message)),

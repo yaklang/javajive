@@ -3,6 +3,7 @@ package jarwar
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
 	"io/fs"
 	"os"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/yaklang/javajive/classparser"
 	"github.com/yaklang/javajive/internal/filesys"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 func t23Zip(t *testing.T, files map[string][]byte) []byte {
@@ -380,6 +382,97 @@ func TestArchiveOptionsFlatCompatibilityAndSharedBudget(t *testing.T) {
 		})
 		if err == nil || !filesys.IsResourceLimit(err) {
 			t.Fatalf("expected shared aggregate limit, got %v", err)
+		}
+	})
+}
+
+func TestFlatArchiveOptionsPreserveRequestPolicy(t *testing.T) {
+	classBytes := t23ClassFixture(t)
+
+	t.Run("canceled context", func(t *testing.T) {
+		src := t23WriteArchive(t, t23Zip(t, map[string][]byte{"plain.txt": []byte("flat")}), ".jar")
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := AutoDecompileWithOptions(src, t.TempDir(), ArchiveOptions{Context: ctx})
+		if err == nil || !filesys.IsCanceled(err) {
+			t.Fatalf("expected canceled request, got %v", err)
+		}
+	})
+
+	t.Run("archive limit", func(t *testing.T) {
+		src := t23WriteArchive(t, t23Zip(t, map[string][]byte{
+			"one.txt": []byte("one"),
+			"two.txt": []byte("two"),
+		}), ".jar")
+		_, err := AutoDecompileWithOptions(src, t.TempDir(), ArchiveOptions{
+			Limits: javaclassparser.Limits{MaxArchiveEntries: 1},
+		})
+		if err == nil || !filesys.IsResourceLimit(err) {
+			t.Fatalf("expected archive entry limit, got %v", err)
+		}
+	})
+
+	t.Run("shared parse budget", func(t *testing.T) {
+		src := t23WriteArchive(t, t23Zip(t, map[string][]byte{"Fixture.class": classBytes}), ".jar")
+		work := workbudget.New(context.Background(), workbudget.Limits{MaxParseItems: 1})
+		_, err := AutoDecompileWithOptions(src, t.TempDir(), ArchiveOptions{Work: work})
+		if err == nil || !workbudget.Is(err) || work.Err() == nil || !strings.Contains(err.Error(), "counter=parse_items") {
+			t.Fatalf("expected shared parse limit, got %v snapshot=%v", err, work.Snapshot())
+		}
+	})
+
+	t.Run("target release", func(t *testing.T) {
+		manifest := []byte("Manifest-Version: 1.0\r\nMulti-Release: true\r\n\r\n")
+		src := t23WriteArchive(t, t23Zip(t, map[string][]byte{
+			"META-INF/MANIFEST.MF":            manifest,
+			"release.txt":                     []byte("base"),
+			"META-INF/versions/9/release.txt": []byte("mr9"),
+		}), ".jar")
+		for _, test := range []struct {
+			target int
+			want   string
+		}{
+			{target: 8, want: "base"},
+			{target: 9, want: "mr9"},
+		} {
+			dst := t.TempDir()
+			if _, err := AutoDecompileWithOptions(src, dst, ArchiveOptions{TargetRelease: test.target}); err != nil {
+				t.Fatalf("target %d: %v", test.target, err)
+			}
+			out, err := os.ReadFile(filepath.Join(dst, "release.txt"))
+			if err != nil || string(out) != test.want {
+				t.Fatalf("target %d release = %q, want %q: %v", test.target, out, test.want, err)
+			}
+		}
+	})
+}
+
+func TestFlatArchiveFailFastPathAndWriteErrors(t *testing.T) {
+	t.Run("unsafe archive entry", func(t *testing.T) {
+		src := t23WriteArchive(t, t23Zip(t, map[string][]byte{"../escape.txt": []byte("no")}), ".jar")
+		parent := t.TempDir()
+		dst := filepath.Join(parent, "out")
+		_, err := AutoDecompileWithOptions(src, dst, ArchiveOptions{})
+		if err == nil || !filesys.IsPathRejected(err) {
+			t.Fatalf("expected path rejection, got %v", err)
+		}
+		if _, statErr := os.Stat(filepath.Join(parent, "escape.txt")); !os.IsNotExist(statErr) {
+			t.Fatalf("escape file exists: %v", statErr)
+		}
+	})
+
+	t.Run("destination collision", func(t *testing.T) {
+		src := t23WriteArchive(t, t23Zip(t, map[string][]byte{"blocked/file.txt": []byte("no")}), ".jar")
+		dst := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dst, "blocked"), []byte("already a file"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := AutoDecompileWithOptions(src, dst, ArchiveOptions{})
+		if err == nil || !strings.Contains(err.Error(), "create archive directory") {
+			t.Fatalf("expected destination write error, got %v", err)
+		}
+		if _, statErr := os.Stat(filepath.Join(dst, "blocked", "file.txt")); statErr == nil {
+			t.Fatal("flat export continued after destination error")
 		}
 	})
 }

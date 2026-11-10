@@ -19,6 +19,42 @@ func readValidationSeed(t *testing.T) []byte {
 	return raw
 }
 
+func TestDecompileClassfileMinorPolicy(t *testing.T) {
+	seed := readValidationSeed(t)
+	tests := []struct {
+		name   string
+		major  uint16
+		minor  uint16
+		status string
+		code   string
+	}{
+		{name: "java8 illegal minor", major: 52, minor: 1, status: "invalid_input", code: "invalid_classfile_version"},
+		{name: "java12 preview", major: 56, minor: 0xffff, status: "unsupported", code: "unsupported_classfile_preview"},
+		{name: "legacy valid", major: 45, minor: 3},
+		{name: "legacy illegal", major: 45, minor: 4, status: "invalid_input", code: "invalid_classfile_version"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			raw := append([]byte(nil), seed...)
+			binary.BigEndian.PutUint16(raw[4:6], test.minor)
+			binary.BigEndian.PutUint16(raw[6:8], test.major)
+			if _, err := Parse(raw); err != nil {
+				t.Fatalf("Parse rejected inspectable version: %v", err)
+			}
+			result, err := DecompileWithOptions(raw, DecompileOptions{Mode: Precision, EnvSnapshot: map[string]string{}})
+			if test.code == "" {
+				if err != nil {
+					t.Fatalf("valid version rejected: %v", err)
+				}
+				return
+			}
+			if err == nil || result.Status != test.status || !strings.Contains(err.Error(), test.code) {
+				t.Fatalf("status=%s err=%v, want %s/%s", result.Status, err, test.status, test.code)
+			}
+		})
+	}
+}
+
 func TestDecompileRejectsUnsupportedClassfileMajor(t *testing.T) {
 	seed := readValidationSeed(t)
 	for _, major := range []uint16{0, 1, 44, 45, 49, 52, 65, 66, 99, 255} {
