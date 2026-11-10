@@ -90,6 +90,34 @@ func TestRecoverEmitsFreshDeclarationShell(t *testing.T) {
 	}
 }
 
+func TestRecoverFailsClosedForIncompatibleWideInitializer(t *testing.T) {
+	const owner = "Ldex/RecoveredWideStatic;"
+	file := &model.File{Entry: "classes.dex"}
+	class := &model.Class{
+		Descriptor: owner, Superclass: "Ljava/lang/Object;", AccessFlags: dexPublic,
+		StaticFields: []model.EncodedField{{
+			AccessFlags: dexPublic | dexStatic,
+			Field:       model.FieldID{Class: owner, Name: "VALUE", Type: "J"},
+		}},
+		StaticValues: []model.EncodedValue{{Type: model.ValueFloat, Unsigned: 0x3f800000}},
+	}
+	result, err := ClassWithPolicy(file, class, ClassOptions{}, Recover)
+	if err != nil {
+		t.Fatalf("ClassWithPolicy Recover: %v", err)
+	}
+	if !result.ClassStubbed || !bytes.Contains(result.Bytes, []byte("<clinit>")) {
+		t.Fatalf("result = %#v", result)
+	}
+	var field, initializer bool
+	for _, recovery := range result.Recoveries {
+		field = field || recovery.Action == "stub_initializer" && recovery.Scope == "field"
+		initializer = initializer || recovery.Action == "stub_initializer" && recovery.Member == "<clinit>"
+	}
+	if !field || !initializer {
+		t.Fatalf("recoveries = %#v", result.Recoveries)
+	}
+}
+
 func TestRecoverFailsClosedForUnsupportedStaticInitializer(t *testing.T) {
 	java, err := exec.LookPath("java")
 	if err != nil {

@@ -403,20 +403,23 @@ func applyStaticValue(file *model.File, class *model.Class, field *model.Encoded
 	}
 	switch kind {
 	case ir.Long:
-		if value.Type == model.ValueLong || value.Type == model.ValueInt {
-			builder.SetConstantLong(member, value.Signed)
-			return nil
+		if value.Type != model.ValueLong && value.Type != model.ValueInt {
+			return classDiagnostic(file, class, "static-value", fmt.Errorf("field %q has incompatible long initializer kind %#x", field.Field.Name, value.Type))
 		}
+		builder.SetConstantLong(member, value.Signed)
+		return nil
 	case ir.Float:
-		if value.Type == model.ValueFloat {
-			builder.SetConstantFloat(member, uint32(value.Unsigned))
-			return nil
+		if value.Type != model.ValueFloat {
+			return classDiagnostic(file, class, "static-value", fmt.Errorf("field %q has incompatible float initializer kind %#x", field.Field.Name, value.Type))
 		}
+		builder.SetConstantFloat(member, uint32(value.Unsigned))
+		return nil
 	case ir.Double:
-		if value.Type == model.ValueDouble {
-			builder.SetConstantDouble(member, value.Unsigned)
-			return nil
+		if value.Type != model.ValueDouble {
+			return classDiagnostic(file, class, "static-value", fmt.Errorf("field %q has incompatible double initializer kind %#x", field.Field.Name, value.Type))
 		}
+		builder.SetConstantDouble(member, value.Unsigned)
+		return nil
 	}
 	switch value.Type {
 	case model.ValueBoolean:
