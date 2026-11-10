@@ -132,7 +132,7 @@ filename extension last, so renamed artifacts keep working.
 | `.aar` | Android library archive; `classes.jar` and `libs/*.jar` are decompiled |
 | `.par` | Java archive (extension fallback when the ZIP has no stronger marker) |
 | `.jmod` | JDK module image; the four-byte `JM\x01\x00` prefix is stripped automatically |
-| `.jimage` / `$JAVA_HOME/lib/modules` | JDK 9+ runtime image; converted to a package-layout JAR view. Uncompressed and zlib `zip` resources are supported; `compact-cp` resources are diagnosed as unsupported |
+| `.jimage` / `$JAVA_HOME/lib/modules` | JDK 9+ runtime image; converted to a package-layout JAR view. Uncompressed, zlib `zip`, and `compact-cp` resources are supported |
 | `.dex` | raw DEX |
 | `.apk` | root `classes.dex`, `classes2.dex`, ... multidex entries |
 | `.apks` / `.xapk` / `.apkm` / `.apkx` | nested split APKs; `universal.apk` is preferred when present |
@@ -143,9 +143,9 @@ for Java archives. Android containers always produce a translated source tree.
 
 JImage inputs are converted to a package-layout JAR view: class resources are
 exported at their package paths, while `module-info.class` and non-class
-resources keep their module prefix. Uncompressed and zlib-compressed (`zip`)
-resources are supported; `compact-cp`-compressed class files are reported as
-unsupported. A full JDK image contains tens of thousands of classes, so
+resources keep their module prefix. Uncompressed, zlib-compressed (`zip`), and
+`compact-cp` (constant-pool string sharing) resources are supported, including
+big-endian images. A full JDK image contains tens of thousands of classes, so
 `inspect` or `JImageToJar` is a good first step.
 
 ### inspect
@@ -276,8 +276,15 @@ All selected DEX files must succeed transactionally or no JAR is produced; use
 `inspect` to analyze inputs that cross the strict boundary.
 
 Container bounds default to 256 MB per DEX, 512 MB per archive/APK, 512 MB of
-total DEX data, 128 DEX files, 64 nested APKs, and 2 GB of total nested APK
+total DEX data, 128 DEX files, 512 nested APKs, and 2 GB of total nested APK
 data. `DexOptions` fields raise these limits for larger bundles.
+
+The container test suite is backed by real samples under
+[`testdata/external`](testdata/external/README.md): Tomcat WARs, bundletool
+APK/AAB/APKS bundles (including a 181-APK split bundle), an AndroidX AAR,
+Androguard/Apktool/dex2jar fixtures, and synthetic XAPK/APKM/EAR containers.
+Fuzz seed corpora cover the classifier, JImage and compact-cp readers,
+`inspect`, and Android container parsing.
 
 ### classinfo
 

@@ -112,7 +112,7 @@ func TestReadCompressedResource(t *testing.T) {
 
 func TestUnsupportedCompressor(t *testing.T) {
 	image := buildImage(t, []jimagefixture.Entry{
-		{Path: "/test/Compact.class", Data: []byte{0xca, 0xfe, 0xba, 0xbe}, Compressed: true, Compressor: "compact-cp"},
+		{Path: "/test/Compact.class", Data: []byte{0xca, 0xfe, 0xba, 0xbe}, Compressed: true, Compressor: "lzma"},
 	})
 	reader, err := jimage.OpenBytes(image)
 	if err != nil {
@@ -124,7 +124,7 @@ func TestUnsupportedCompressor(t *testing.T) {
 		t.Fatalf("error = %v, want ErrUnsupportedCompressor", err)
 	}
 	var unsupported *jimage.UnsupportedCompressorError
-	if !errors.As(err, &unsupported) || unsupported.Compressor != "compact-cp" {
+	if !errors.As(err, &unsupported) || unsupported.Compressor != "lzma" {
 		t.Fatalf("error details = %#v", err)
 	}
 }
@@ -195,14 +195,7 @@ func TestWriteZIPRejectsClassCollision(t *testing.T) {
 }
 
 func TestOpenJDKImage(t *testing.T) {
-	home := os.Getenv("JAVA_HOME")
-	if home == "" {
-		javac, err := exec.LookPath("javac")
-		if err != nil {
-			t.Skip("no JDK available")
-		}
-		home = filepath.Dir(filepath.Dir(javac))
-	}
+	_, home := findJDK(t)
 	path := filepath.Join(home, "lib", "modules")
 	if _, err := os.Stat(path); err != nil {
 		t.Skipf("JDK image not found at %s", path)
@@ -221,5 +214,110 @@ func TestOpenJDKImage(t *testing.T) {
 	}
 	if !bytes.HasPrefix(object, []byte{0xca, 0xfe, 0xba, 0xbe}) {
 		t.Fatalf("Object.class magic = %x", object[:4])
+	}
+}
+
+func findJDK(t *testing.T) (jlink, home string) {
+	t.Helper()
+	if home := os.Getenv("JAVA_HOME"); home != "" {
+		candidate := filepath.Join(home, "bin", "jlink")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, home
+		}
+	}
+	if output, err := exec.Command("/usr/libexec/java_home").Output(); err == nil {
+		home := strings.TrimSpace(string(output))
+		candidate := filepath.Join(home, "bin", "jlink")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, home
+		}
+	}
+	path, err := exec.LookPath("jlink")
+	if err != nil {
+		t.Skip("jlink not available")
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	home = filepath.Dir(filepath.Dir(path))
+	if _, err := os.Stat(filepath.Join(home, "lib", "modules")); err != nil {
+		t.Skipf("JDK runtime image not found next to %s", path)
+	}
+	return path, home
+}
+
+func runJLink(t *testing.T, jlink string, args ...string) {
+	t.Helper()
+	output, err := exec.Command(jlink, args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("jlink %s failed: %v\n%s", strings.Join(args, " "), err, output)
+	}
+}
+
+func TestJLinkCompactCPImage(t *testing.T) {
+	jlink, home := findJDK(t)
+	plainPath := filepath.Join(home, "lib", "modules")
+	if _, err := os.Stat(plainPath); err != nil {
+		t.Skipf("JDK runtime image not found at %s", plainPath)
+	}
+	output := filepath.Join(t.TempDir(), "image")
+	runJLink(t, jlink, "--compress=1", "--add-modules", "java.base", "--output", output, "--no-header-files", "--no-man-pages")
+
+	compact, err := jimage.OpenFile(filepath.Join(output, "lib", "modules"))
+	if err != nil {
+		t.Fatalf("open compact-cp image: %v", err)
+	}
+	defer compact.Close()
+	plain, err := jimage.OpenFile(plainPath)
+	if err != nil {
+		t.Fatalf("open plain image: %v", err)
+	}
+	defer plain.Close()
+
+	name := "java.base/java/lang/Object.class"
+	got, err := compact.Read(name)
+	if err != nil {
+		t.Fatalf("read compact-cp Object.class: %v", err)
+	}
+	want, err := plain.Read(name)
+	if err != nil {
+		t.Fatalf("read plain Object.class: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("compact-cp %s differs from the plain image", name)
+	}
+}
+
+func TestJLinkBigEndianImage(t *testing.T) {
+	jlink, home := findJDK(t)
+	plainPath := filepath.Join(home, "lib", "modules")
+	if _, err := os.Stat(plainPath); err != nil {
+		t.Skipf("JDK runtime image not found at %s", plainPath)
+	}
+	output := filepath.Join(t.TempDir(), "image")
+	runJLink(t, jlink, "--compress=0", "--endian", "big", "--add-modules", "java.base", "--output", output, "--no-header-files", "--no-man-pages")
+
+	bigEndian, err := jimage.OpenFile(filepath.Join(output, "lib", "modules"))
+	if err != nil {
+		t.Fatalf("open big-endian image: %v", err)
+	}
+	defer bigEndian.Close()
+	plain, err := jimage.OpenFile(plainPath)
+	if err != nil {
+		t.Fatalf("open plain image: %v", err)
+	}
+	defer plain.Close()
+
+	name := "java.base/java/lang/Object.class"
+	got, err := bigEndian.Read(name)
+	if err != nil {
+		t.Fatalf("read big-endian Object.class: %v", err)
+	}
+	want, err := plain.Read(name)
+	if err != nil {
+		t.Fatalf("read plain Object.class: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("big-endian %s differs from the plain image", name)
 	}
 }

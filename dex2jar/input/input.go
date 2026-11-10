@@ -19,7 +19,7 @@ const (
 	DefaultMaxTotalDEXSize int64 = 512 << 20
 	DefaultMaxTotalAPKSize int64 = 2 << 30
 	DefaultMaxDEXFiles           = 128
-	DefaultMaxNestedAPKs         = 64
+	DefaultMaxNestedAPKs         = 512
 )
 
 var dexEntryPattern = regexp.MustCompile(`^classes([0-9]*)\.dex$`)

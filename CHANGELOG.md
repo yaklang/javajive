@@ -23,7 +23,9 @@ Universal input containers across the Java archive and Android pipelines.
 - Android App Bundles: `.aab` translates every `<module>/dex/classes*.dex`
   entry across base and feature modules.
 - Add bounded nested-container limits (`MaxTotalAPKSize`, `MaxNestedAPKs`) and
-  global DEX count/size checks across all collected sources.
+  global DEX count/size checks across all collected sources. The default
+  nested-APK bound is 512, enough for bundletool split bundles with hundreds of
+  resource/config APKs.
 - Add a native `jimage` package for JDK 9+ runtime images (`lib/modules`,
   `.jimage`): parse the header, redirect/offset tables, attribute streams,
   string table, and resources on demand; inflate `zip`-compressed resources with
@@ -34,8 +36,22 @@ Universal input containers across the Java archive and Android pipelines.
   at package paths; `module-info.class` and non-class resources keep their
   module prefix. `inspect` reports `jimage` with per-resource hashes and
   compression state.
-- `compact-cp`-compressed class files are diagnosed as unsupported instead of
-  being misread. Uncompressed and zlib-compressed JDK images are supported.
+- Support `compact-cp` (constant-pool string sharing): reconstruct externalized
+  UTF8 and descriptor entries, including `L;` type tokens, long/double slots,
+  and the trailing class body. Reconstructed classes are byte-identical to the
+  uncompressed image. Big-endian JImages (`jlink --endian big`) are supported
+  too.
+- Add pure-Go unit tests for compressed-index decoding and compact-cp constant
+  pool reconstruction, plus `jlink --compress=1` and `--endian big` integration
+  tests.
+- Add `testdata/external` with real Tomcat WARs, bundletool APK/AAB/APKS
+  (universal and a 181-APK split bundle), an AndroidX AAR, Androguard/Apktool/
+  dex2jar fixtures, and synthetic XAPK/APKM/EAR containers. Tests classify,
+  inspect, decompile, and translate every sample; malformed truncations assert
+  no panics.
+- Add fuzz seed corpora for the input classifier, JImage and compact-cp readers,
+  `inspect`, and Android container parsing.
+- CI runs the container/JImage/external tests in the native regression job.
 - `inspect` reports `jmod` / `jimage` / `aar` / `ear` / `par` / `apks` /
   `xapk` / `apkm` / `aab`, and records nested APK or AAB module DEX provenance.
 - CLI `decompile` and `dex2jar` route by detected container instead of file

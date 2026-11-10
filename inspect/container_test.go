@@ -211,7 +211,7 @@ func TestAnalyzeJImage(t *testing.T) {
 func TestAnalyzeJImageUnsupportedCompressor(t *testing.T) {
 	classBytes := containerClassFixture(t)
 	image, err := jimagefixture.Build([]jimagefixture.Entry{
-		{Path: "/test/demo/Hello.class", Data: classBytes, Compressed: true, Compressor: "compact-cp"},
+		{Path: "/test/demo/Hello.class", Data: classBytes, Compressed: true, Compressor: "lzma"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -222,7 +222,7 @@ func TestAnalyzeJImageUnsupportedCompressor(t *testing.T) {
 	}
 	found := false
 	for _, diagnostic := range report.Diagnostics {
-		if strings.Contains(diagnostic.Message, "compact-cp") {
+		if strings.Contains(diagnostic.Message, "lzma") {
 			found = true
 			break
 		}

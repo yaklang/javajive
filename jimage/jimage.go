@@ -43,6 +43,12 @@ const (
 	modulesModuleName     = "modules"
 	packagesModuleName    = "packages"
 	maxDecompressorLayers = 16
+
+	compactCPExternalizedString     = 23
+	compactCPExternalizedDescriptor = 25
+	constantUTF8                    = 1
+	constantLong                    = 5
+	constantDouble                  = 6
 )
 
 var archiveTimestamp = time.Date(1980, time.January, 1, 0, 0, 0, 0, time.UTC)
@@ -566,9 +572,9 @@ func (r *Reader) decompress(entry Entry, payload []byte) ([]byte, error) {
 		case "zip":
 			next, err = decompressZIP(current[payloadStart:payloadEnd], uncompressedSize)
 		case "compact-cp":
-			return nil, &UnsupportedCompressorError{Entry: entry.Name(), Compressor: compressor}
+			next, err = r.decompressCompactCP(current[payloadStart:payloadEnd], uncompressedSize, entry.Name())
 		default:
-			return nil, fmt.Errorf("jimage: resource %q uses unknown compressor %q", entry.Name(), compressor)
+			return nil, &UnsupportedCompressorError{Entry: entry.Name(), Compressor: compressor}
 		}
 		if err != nil {
 			return nil, fmt.Errorf("jimage: decompress %q with %s: %w", entry.Name(), compressor, err)
@@ -603,6 +609,193 @@ func decompressZIP(payload []byte, expected uint64) ([]byte, error) {
 		return nil, fmt.Errorf("inflated to %d bytes, want %d", len(output), expected)
 	}
 	return output, nil
+}
+
+// decompressCompactCP reconstructs a class file whose constant-pool UTF8
+// entries were externalized into the image string table by jlink's
+// StringSharingPlugin ("compact-cp").
+func (r *Reader) decompressCompactCP(data []byte, uncompressedSize uint64, entryName string) ([]byte, error) {
+	if uncompressedSize > r.maxResourceSize {
+		return nil, fmt.Errorf("jimage: compact-cp resource %q size %d exceeds limit %d", entryName, uncompressedSize, r.maxResourceSize)
+	}
+	if len(data) < 10 {
+		return nil, fmt.Errorf("jimage: compact-cp resource %q is shorter than the 10-byte class header", entryName)
+	}
+	output := make([]byte, 0, int(uncompressedSize))
+	output = append(output, data[:10]...)
+	constantPoolCount := int(binary.BigEndian.Uint16(data[8:10]))
+	position := 10
+	for index := 1; index < constantPoolCount; index++ {
+		if position >= len(data) {
+			return nil, fmt.Errorf("jimage: compact-cp resource %q: constant pool truncated at entry %d", entryName, index)
+		}
+		tag := data[position]
+		position++
+		switch tag {
+		case compactCPExternalizedString:
+			stringIndex, next, err := decompressInt(data, position)
+			if err != nil {
+				return nil, fmt.Errorf("jimage: compact-cp resource %q entry %d: %w", entryName, index, err)
+			}
+			position = next
+			value, err := r.stringAt(uint32(stringIndex))
+			if err != nil {
+				return nil, fmt.Errorf("jimage: compact-cp resource %q entry %d: %w", entryName, index, err)
+			}
+			if len(value) > 0xffff {
+				return nil, fmt.Errorf("jimage: compact-cp resource %q entry %d string is %d bytes", entryName, index, len(value))
+			}
+			output = append(output, constantUTF8, byte(len(value)>>8), byte(len(value)))
+			output = append(output, value...)
+		case compactCPExternalizedDescriptor:
+			descriptorIndex, next, err := decompressInt(data, position)
+			if err != nil {
+				return nil, fmt.Errorf("jimage: compact-cp resource %q entry %d: %w", entryName, index, err)
+			}
+			position = next
+			indexesLength, next, err := decompressInt(data, position)
+			if err != nil {
+				return nil, fmt.Errorf("jimage: compact-cp resource %q entry %d: %w", entryName, index, err)
+			}
+			position = next
+			descriptor, err := r.stringAt(uint32(descriptorIndex))
+			if err != nil {
+				return nil, fmt.Errorf("jimage: compact-cp resource %q entry %d: %w", entryName, index, err)
+			}
+			if indexesLength > len(data)-position {
+				return nil, fmt.Errorf("jimage: compact-cp resource %q entry %d: descriptor index stream is truncated", entryName, index)
+			}
+			indexes := data[position : position+indexesLength]
+			position += indexesLength
+
+			output = append(output, constantUTF8)
+			lengthPosition := len(output)
+			output = append(output, 0, 0)
+			descriptorLength := 0
+			if indexesLength > 0 {
+				indexPosition := 0
+				for offset := 0; offset < len(descriptor); offset++ {
+					c := descriptor[offset]
+					output = append(output, c)
+					descriptorLength++
+					if c != 'L' {
+						continue
+					}
+					packageIndex, next, err := decompressInt(indexes, indexPosition)
+					if err != nil {
+						return nil, fmt.Errorf("jimage: compact-cp resource %q entry %d descriptor: %w", entryName, index, err)
+					}
+					indexPosition = next
+					packageName, err := r.stringAt(uint32(packageIndex))
+					if err != nil {
+						return nil, fmt.Errorf("jimage: compact-cp resource %q entry %d descriptor: %w", entryName, index, err)
+					}
+					if len(packageName) > 0 {
+						output = append(output, packageName...)
+						output = append(output, '/')
+						descriptorLength += len(packageName) + 1
+					}
+					classIndex, next, err := decompressInt(indexes, indexPosition)
+					if err != nil {
+						return nil, fmt.Errorf("jimage: compact-cp resource %q entry %d descriptor: %w", entryName, index, err)
+					}
+					indexPosition = next
+					className, err := r.stringAt(uint32(classIndex))
+					if err != nil {
+						return nil, fmt.Errorf("jimage: compact-cp resource %q entry %d descriptor: %w", entryName, index, err)
+					}
+					output = append(output, className...)
+					descriptorLength += len(className)
+				}
+			} else {
+				output = append(output, descriptor...)
+				descriptorLength = len(descriptor)
+			}
+			if descriptorLength > 0xffff {
+				return nil, fmt.Errorf("jimage: compact-cp resource %q entry %d descriptor is %d bytes", entryName, index, descriptorLength)
+			}
+			binary.BigEndian.PutUint16(output[lengthPosition:lengthPosition+2], uint16(descriptorLength))
+		case constantUTF8:
+			if position+2 > len(data) {
+				return nil, fmt.Errorf("jimage: compact-cp resource %q entry %d: UTF8 length is truncated", entryName, index)
+			}
+			length := int(binary.BigEndian.Uint16(data[position : position+2]))
+			if length > len(data)-position-2 {
+				return nil, fmt.Errorf("jimage: compact-cp resource %q entry %d: UTF8 value is truncated", entryName, index)
+			}
+			output = append(output, constantUTF8)
+			output = append(output, data[position:position+2+length]...)
+			position += 2 + length
+		case constantLong, constantDouble:
+			if position+8 > len(data) {
+				return nil, fmt.Errorf("jimage: compact-cp resource %q entry %d: wide constant is truncated", entryName, index)
+			}
+			index++ // long and double occupy two constant-pool slots
+			output = append(output, tag)
+			output = append(output, data[position:position+8]...)
+			position += 8
+		default:
+			size, ok := compactCPConstantSize(tag)
+			if !ok {
+				return nil, fmt.Errorf("jimage: compact-cp resource %q entry %d has unsupported constant-pool tag %d", entryName, index, tag)
+			}
+			if size > len(data)-position {
+				return nil, fmt.Errorf("jimage: compact-cp resource %q entry %d value is truncated", entryName, index)
+			}
+			output = append(output, tag)
+			output = append(output, data[position:position+size]...)
+			position += size
+		}
+	}
+	remain := len(data) - position
+	computed := len(output) + remain
+	if uint64(computed) != uncompressedSize {
+		return nil, fmt.Errorf("jimage: compact-cp resource %q reconstructed %d bytes, want %d", entryName, computed, uncompressedSize)
+	}
+	output = append(output, data[position:]...)
+	return output, nil
+}
+
+func compactCPConstantSize(tag byte) (int, bool) {
+	switch tag {
+	case 3, 4, 9, 10, 11, 12, 17, 18:
+		return 4, true
+	case 7, 8, 16, 19, 20:
+		return 2, true
+	case 15:
+		return 3, true
+	default:
+		return 0, false
+	}
+}
+
+func decompressInt(data []byte, position int) (int, int, error) {
+	if position < 0 || position >= len(data) {
+		return 0, position, errors.New("truncated compressed integer")
+	}
+	first := data[position]
+	if first < 0x80 {
+		if position+4 > len(data) {
+			return 0, position, errors.New("truncated constant-pool index")
+		}
+		value := uint32(first)<<24 | uint32(data[position+1])<<16 | uint32(data[position+2])<<8 | uint32(data[position+3])
+		return int(value), position + 4, nil
+	}
+	length := int((first & 0x60) >> 5)
+	if length < 1 || length > 3 {
+		return 0, position, fmt.Errorf("invalid compressed integer length %d", length)
+	}
+	if position+length > len(data) {
+		return 0, position, errors.New("truncated compressed integer")
+	}
+	value := int(first & 0x1f)
+	if length > 1 {
+		value <<= 8 * (length - 1)
+		for offset := 1; offset < length; offset++ {
+			value |= int(data[position+offset]) << (8 * (length - offset - 1))
+		}
+	}
+	return value, position + length, nil
 }
 
 func archiveName(entry Entry) (string, error) {

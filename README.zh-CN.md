@@ -112,7 +112,7 @@ Commands:
 | `.aar` | Android 库归档；`classes.jar` 与 `libs/*.jar` 会反编译 |
 | `.par` | Java 归档（ZIP 无更强标记时按扩展名回退） |
 | `.jmod` | JDK 模块镜像；自动剥离 4 字节 `JM\x01\x00` 头 |
-| `.jimage` / `$JAVA_HOME/lib/modules` | JDK 9+ 运行时镜像；转换为 package-layout 的 JAR 视图。支持未压缩与 zlib `zip` 资源；`compact-cp` 资源会明确报不支持 |
+| `.jimage` / `$JAVA_HOME/lib/modules` | JDK 9+ 运行时镜像；转换为 package-layout 的 JAR 视图。支持未压缩、zlib `zip` 与 `compact-cp` 资源 |
 | `.dex` | 裸 DEX |
 | `.apk` | 根目录的 `classes.dex`、`classes2.dex`…… multidex 条目 |
 | `.apks` / `.xapk` / `.apkm` / `.apkx` | 嵌套 split APK；存在 `universal.apk` 时优先使用 |
@@ -122,9 +122,9 @@ Commands:
 Android 容器始终输出翻译后的源码树。
 
 JImage 会先转换为 package-layout 的 JAR 视图：class 资源按 package 路径导出，
-`module-info.class` 与非 class 资源保留模块前缀。支持未压缩与 zlib（`zip`）资源；
-`compact-cp` 压缩的 class 会明确报不支持。完整 JDK 镜像包含数万个 class，建议先用
-`inspect` 或 `JImageToJar`。
+`module-info.class` 与非 class 资源保留模块前缀。支持未压缩、zlib（`zip`）与
+`compact-cp`（常量池字符串共享）资源，也支持 big-endian 镜像。完整 JDK 镜像包含
+数万个 class，建议先用 `inspect` 或 `JImageToJar`。
 
 ### decompile
 
@@ -210,7 +210,12 @@ Android 容器的处理规则：
 `inspect` 分析。
 
 容器默认上限：单个 DEX 256 MB、单个归档/APK 512 MB、DEX 总量 512 MB、128 个 DEX、
-64 个嵌套 APK、嵌套 APK 总量 2 GB。更大的包可通过 `DexOptions` 字段提高上限。
+512 个嵌套 APK、嵌套 APK 总量 2 GB。更大的包可通过 `DexOptions` 字段提高上限。
+
+容器测试使用 [`testdata/external`](testdata/external/README.md) 下的真实样本：
+Tomcat WAR、bundletool APK/AAB/APKS（含 181 个嵌套 APK 的 split 包）、AndroidX AAR、
+Androguard/Apktool/dex2jar 样本，以及合成的 XAPK/APKM/EAR。Fuzz 种子覆盖分类器、
+JImage/compact-cp 读取、`inspect` 与 Android 容器解析。
 
 ### classinfo
 

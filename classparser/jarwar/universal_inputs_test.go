@@ -226,7 +226,7 @@ func TestJImageUnsupportedCompressor(t *testing.T) {
 			Path:       "/test/org/sonatype/plexus/components/cipher/PlexusCipherException.class",
 			Data:       classBytes,
 			Compressed: true,
-			Compressor: "compact-cp",
+			Compressor: "lzma",
 		},
 	})
 	if err != nil {
@@ -234,8 +234,8 @@ func TestJImageUnsupportedCompressor(t *testing.T) {
 	}
 	src := t23WriteArchive(t, image, ".jimage")
 	err = AutoDecompile(src, t.TempDir())
-	if err == nil || !strings.Contains(err.Error(), "compact-cp") {
-		t.Fatalf("error = %v, want compact-cp diagnostic", err)
+	if err == nil || !strings.Contains(err.Error(), "lzma") {
+		t.Fatalf("error = %v, want lzma diagnostic", err)
 	}
 }
 
