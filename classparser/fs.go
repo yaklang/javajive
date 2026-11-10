@@ -14,6 +14,7 @@ import (
 
 	"github.com/yaklang/javajive/internal/filesys"
 	fi "github.com/yaklang/javajive/internal/filesys/filesys_interface"
+	"github.com/yaklang/javajive/internal/inputkind"
 	"github.com/yaklang/javajive/internal/memfile"
 	"github.com/yaklang/javajive/internal/utils"
 )
@@ -262,6 +263,28 @@ func (z *JarFS) ReadFile(name string) ([]byte, error) {
 	return z.decompileClassBytes(name, data), nil
 }
 
+// ReadRawFile returns the original bytes for name without decompiling class
+// entries. Nested archive paths such as "WEB-INF/lib/dep.jar/Foo.class" are
+// resolved through every archive layer.
+func (z *JarFS) ReadRawFile(name string) ([]byte, error) {
+	if isArchivePath(name) {
+		jarPath, internalPath, ok := parseArchivePath(name)
+		if !ok {
+			return nil, os.ErrNotExist
+		}
+		unifiedFS, err := z.getNestedJarFS(jarPath)
+		if err != nil {
+			return nil, err
+		}
+		nested, ok := unifiedFS.GetFileSystem().(*JarFS)
+		if !ok {
+			return nil, fmt.Errorf("nested archive %q is not a JarFS", jarPath)
+		}
+		return nested.ReadRawFile(internalPath)
+	}
+	return z.readJarEntry(name)
+}
+
 func (f *JarFS) OpenFile(name string, flag int, perm os.FileMode) (fs.File, error) {
 	return f.Open(name)
 }
@@ -301,8 +324,8 @@ func (z *JarFS) Stat(name string) (fs.FileInfo, error) {
 }
 
 var (
-	archiveFileSuffixes    = []string{".jar", ".war", ".ear", ".par", ".zip"}
-	jarLikeArchiveSuffixes = []string{".jar", ".war", ".ear", ".par"}
+	archiveFileSuffixes    = []string{".jar", ".war", ".ear", ".aar", ".par", ".jmod", ".zip"}
+	jarLikeArchiveSuffixes = []string{".jar", ".war", ".ear", ".aar", ".par", ".jmod"}
 )
 
 func isArchiveFile(path string) bool {
@@ -415,6 +438,7 @@ func (z *JarFS) getNestedJarFS(jarPath string) (*filesys.UnifiedFS, error) {
 	if err != nil {
 		return nil, utils.Wrapf(err, "failed to read jar file: %s", jarPath)
 	}
+	jarContent = inputkind.StripJMODHeader(jarContent)
 
 	nestedZipFS, err := filesys.NewZipFSRawWithOptions(bytes.NewReader(jarContent), int64(len(jarContent)), z.nestedZipFSOptions()...)
 	if err != nil {
@@ -588,6 +612,7 @@ func (e *ExpandedZipFS) GetJarFS(jarPath string) (*filesys.UnifiedFS, error) {
 	if err != nil {
 		return nil, utils.Wrapf(err, "failed to read jar file: %s", jarPath)
 	}
+	jarContent = inputkind.StripJMODHeader(jarContent)
 
 	zipFS, err := filesys.NewZipFSRawWithOptions(bytes.NewReader(jarContent), int64(len(jarContent)), e.nestedZipFSOptions()...)
 	if err != nil {
@@ -630,6 +655,7 @@ func (e *ExpandedZipFS) getZipFS(zipPath string) (*filesys.ZipFS, error) {
 	if err != nil {
 		return nil, utils.Wrapf(err, "failed to read zip file: %s", zipPath)
 	}
+	zipContent = inputkind.StripJMODHeader(zipContent)
 
 	nestedZipFS, err := filesys.NewZipFSRawWithOptions(bytes.NewReader(zipContent), int64(len(zipContent)), e.nestedZipFSOptions()...)
 	if err != nil {

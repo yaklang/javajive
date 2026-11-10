@@ -1,5 +1,49 @@
 # Changelog
 
+## Unreleased — 2026-11-10
+
+Universal input containers across the Java archive and Android pipelines.
+
+- Add `internal/inputkind`: classify inputs by content magic, then archive
+  structure, and only then the filename extension. Renamed APK/APKS/JMOD/AAR
+  files now reach the correct pipeline.
+- JMOD: strip the four-byte `JM\x01\x00` prefix when opening a local archive and
+  when recursing into nested JMOD entries, so JDK module images decompile as
+  ordinary archives.
+- AAR and PAR: accept both as Java archives. `classes.jar` and `libs/*.jar` in
+  AAR inputs are decompiled through the existing nested-archive path.
+- Fix flat archive export for nested JARs. `DumpToLocalFileSystem` now resolves
+  raw bytes through `JarFS.ReadRawFile` and recovers the physical `.class` name
+  behind UnifiedFS's virtual `.java` entries. WAR `WEB-INF/lib`, EAR `EAR/lib`,
+  AAR `classes.jar`, fat-JAR `BOOT-INF/lib`, and arbitrary JAR-in-JAR layers
+  export sources instead of logging `create child node failed`.
+- Android split bundles: `.apks` / `.xapk` / `.apkm` / `.apkx` walk nested
+  `.apk` entries, prefer `universal.apk`, skip resource-only splits, and merge
+  identical classes across splits. Conflicting definitions fail the conversion.
+- Android App Bundles: `.aab` translates every `<module>/dex/classes*.dex`
+  entry across base and feature modules.
+- Add bounded nested-container limits (`MaxTotalAPKSize`, `MaxNestedAPKs`) and
+  global DEX count/size checks across all collected sources.
+- Add a native `jimage` package for JDK 9+ runtime images (`lib/modules`,
+  `.jimage`): parse the header, redirect/offset tables, attribute streams,
+  string table, and resources on demand; inflate `zip`-compressed resources with
+  zlib. `JImageToJar` and `OpenJImageFile` expose the format.
+- `decompile` / `DecompileArchive` convert a JImage into a package-layout JAR
+  view and reuse the flat or structured exporter. The new `jimage2jar` CLI
+  subcommand exposes the conversion directly. Class resources are exported
+  at package paths; `module-info.class` and non-class resources keep their
+  module prefix. `inspect` reports `jimage` with per-resource hashes and
+  compression state.
+- `compact-cp`-compressed class files are diagnosed as unsupported instead of
+  being misread. Uncompressed and zlib-compressed JDK images are supported.
+- `inspect` reports `jmod` / `jimage` / `aar` / `ear` / `par` / `apks` /
+  `xapk` / `apkm` / `aab`, and records nested APK or AAB module DEX provenance.
+- CLI `decompile` and `dex2jar` route by detected container instead of file
+  extension; `--structured` now rejects Android containers with a clear error.
+- Add classifier, container-parser, flat-export, JMOD/AAR/PAR, JImage, inspect,
+  and end-to-end JAR tests for the new inputs, including real JDK
+  `lib/modules` and `jlink --compress=2` images.
+
 ## Unreleased — 2026-11-06
 
 Complete real-application DEX translation.

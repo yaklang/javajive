@@ -65,6 +65,9 @@ func NewWithAnalysisBudget(compressedFile string, maxAnalysisUpdates int) (*JarW
 	if utils.GetFirstExistedFile(compressedFile) == "" {
 		return nil, fmt.Errorf("file not existed: %s", compressedFile)
 	}
+	if isJImage(compressedFile) {
+		return nil, fmt.Errorf("JImage input is supported by AutoDecompile/DecompileArchive, not New: %s", compressedFile)
+	}
 	fs, err := javaclassparser.NewJarFSFromLocalWithAnalysisBudget(compressedFile, 0, maxAnalysisUpdates, nil)
 	if err != nil {
 		return nil, utils.Wrap(err, "failed to create jar fs")
@@ -112,16 +115,26 @@ func (j *JarWar) DumpToLocalFileSystem(dir string) error {
 			return nil
 		}
 
-		if filepath.Ext(s) == ".class" {
+		// Nested archive entries are exposed through UnifiedFS with the virtual
+		// ".java" extension. Fall back to the physical ".class" name when the
+		// virtual name is not itself an archive resource.
+		entryPath := s
+		if filepath.Ext(entryPath) == ".java" {
+			if _, err := j.fs.ReadRawFile(entryPath); err != nil {
+				entryPath = strings.TrimSuffix(entryPath, ".java") + ".class"
+			}
+		}
+
+		if filepath.Ext(entryPath) == ".class" {
 			// 尝试反编译.class文件
-			originalRaw, err := j.fs.ZipFS.ReadFile(s)
+			originalRaw, err := j.fs.ReadRawFile(entryPath)
 			if err != nil {
 				log.Warnf("ReadFile failed: %v", err)
 				return utils.Wrap(err, "ReadFile failed during decompilation")
 			}
 			originalSize := len(originalRaw)
 
-			decompiled, err := j.fs.ReadFile(s)
+			decompiled, err := j.fs.ReadFile(entryPath)
 			if err != nil {
 				log.Warnf("Decompile failed, keep original(%v): %v", s, err)
 				// 保存反编译失败的文件(带锁去重)
@@ -135,7 +148,7 @@ func (j *JarWar) DumpToLocalFileSystem(dir string) error {
 			log.Infof("Decompiled [%v] - Original size: %d bytes, Decompiled size: %d bytes, Lines of code: %d",
 				s, originalSize, len(decompiled), lines)
 
-			javaName := strings.TrimSuffix(s, ".class") + ".java"
+			javaName := strings.TrimSuffix(entryPath, ".class") + ".java"
 			javaTarget, joinErr := SafeJoin(dir, javaName)
 			if joinErr != nil {
 				return joinErr
@@ -143,7 +156,7 @@ func (j *JarWar) DumpToLocalFileSystem(dir string) error {
 			return os.WriteFile(javaTarget, decompiled, 0755)
 		} else {
 			// 非.class文件，保持原样
-			raw, err := j.fs.ZipFS.ReadFile(s)
+			raw, err := j.fs.ReadRawFile(entryPath)
 			if err != nil {
 				log.Warnf("ReadFile failed: %v", err)
 				return err

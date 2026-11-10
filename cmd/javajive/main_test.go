@@ -1,11 +1,16 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
 	"flag"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/yaklang/javajive/internal/jimagefixture"
 )
 
 func TestCmdDexToJarHelp(t *testing.T) {
@@ -30,11 +35,84 @@ func TestCmdDexToJarRejectsMagicWithoutOutput(t *testing.T) {
 	if err := os.WriteFile(input, []byte("not dex"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmdDexToJar([]string{"-o", output, input}); err == nil || !strings.Contains(err.Error(), "unsupported input magic") {
+	if err := cmdDexToJar([]string{"-o", output, input}); err == nil || !strings.Contains(err.Error(), "unsupported DEX input") {
 		t.Fatalf("cmdDexToJar error = %v", err)
 	}
 	if _, err := os.Stat(output); !os.IsNotExist(err) {
 		t.Fatalf("output exists after failure: %v", err)
+	}
+}
+
+func TestCmdDecompileJImage(t *testing.T) {
+	classBytes, err := os.ReadFile(filepath.Join("..", "..", "classparser", "testdata", "invisible_anno.class"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := jimagefixture.Build([]jimagefixture.Entry{
+		{Path: "/test/InvisibleAnnoSeed.class", Data: classBytes},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(t.TempDir(), "modules")
+	if err := os.WriteFile(src, image, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outDir := t.TempDir()
+	if err := cmdDecompile([]string{"-o", outDir, src}); err != nil {
+		t.Fatalf("cmdDecompile JImage: %v", err)
+	}
+	source, err := os.ReadFile(filepath.Join(outDir, "InvisibleAnnoSeed.java"))
+	if err != nil {
+		t.Fatalf("read decompiled source: %v", err)
+	}
+	if !strings.Contains(string(source), "class InvisibleAnnoSeed") {
+		t.Fatalf("unexpected source:\n%s", source)
+	}
+}
+
+func TestCmdJImageToJar(t *testing.T) {
+	classBytes, err := os.ReadFile(filepath.Join("..", "..", "classparser", "testdata", "invisible_anno.class"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := jimagefixture.Build([]jimagefixture.Entry{
+		{Path: "/test/InvisibleAnnoSeed.class", Data: classBytes},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	src := filepath.Join(dir, "modules")
+	if err := os.WriteFile(src, image, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "jdk.jar")
+	if err := cmdJImageToJar([]string{"-o", dst, src}); err != nil {
+		t.Fatalf("cmdJImageToJar: %v", err)
+	}
+	raw, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reader.File) != 1 || reader.File[0].Name != "InvisibleAnnoSeed.class" {
+		t.Fatalf("JAR entries = %#v", reader.File)
+	}
+	stream, err := reader.File[0].Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(stream)
+	stream.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(body, classBytes) {
+		t.Fatal("converted class bytes differ")
 	}
 }
 

@@ -20,7 +20,7 @@ func cmdInspectTo(args []string, stdout io.Writer) error {
 	fs.SetOutput(io.Discard)
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: javajive inspect INPUT --format json [--disassembly=false]")
-		fmt.Fprintln(os.Stderr, "Read-only inventory and best-effort analysis of DEX, APK, JAR, and WAR artifacts.")
+		fmt.Fprintln(os.Stderr, "Read-only inventory and best-effort analysis of Java archives, JDK runtime images, and Android containers.")
 		fs.PrintDefaults()
 	}
 	format := fs.String("format", "json", "report format (json)")

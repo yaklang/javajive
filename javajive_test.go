@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	jj "github.com/yaklang/javajive"
+	"github.com/yaklang/javajive/internal/jimagefixture"
 )
 
 const helloStringStream = "aced000574000568656c6c6f"
@@ -78,6 +79,143 @@ func TestDecompileFileExport(t *testing.T) {
 	}
 	if !strings.Contains(src, "InvisibleAnnoSeed") {
 		t.Fatalf("unexpected source:\n%s", src)
+	}
+}
+
+func zipWith(t *testing.T, files map[string][]byte) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	writer := zip.NewWriter(&buffer)
+	for name, body := range files {
+		entry, err := writer.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := entry.Write(body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buffer.Bytes()
+}
+
+func TestClassifyInputExport(t *testing.T) {
+	apk := zipWith(t, map[string][]byte{"classes.dex": []byte("dex\n035\x00")})
+	cases := []struct {
+		name string
+		data []byte
+		file string
+		want jj.ContainerKind
+	}{
+		{"jmod", append([]byte{'J', 'M', 1, 0}, zipWith(t, nil)...), "java.base.jmod", jj.ContainerJMOD},
+		{"apks", zipWith(t, map[string][]byte{"base.apk": apk}), "app.apks", jj.ContainerAPKS},
+		{"aab", zipWith(t, map[string][]byte{"base/dex/classes.dex": []byte("dex\n035\x00")}), "app.aab", jj.ContainerAAB},
+		{"jar", zipWith(t, map[string][]byte{"META-INF/MANIFEST.MF": []byte("Manifest-Version: 1.0\r\n\r\n")}), "library.jar", jj.ContainerJAR},
+		{"unknown", []byte("not an artifact"), "notes.txt", jj.ContainerUnknown},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if got := jj.ClassifyInput(test.data, test.file); got != test.want {
+				t.Fatalf("ClassifyInput = %q, want %q", got, test.want)
+			}
+		})
+	}
+	if jj.DetectInputKind(cases[0].data) != jj.InputJMOD {
+		t.Fatal("DetectInputKind did not report JMOD")
+	}
+	if !jj.IsAndroidContainer(jj.ContainerAPKS) || jj.IsAndroidContainer(jj.ContainerJAR) {
+		t.Fatal("IsAndroidContainer groups are wrong")
+	}
+	if !jj.IsJavaArchiveContainer(jj.ContainerJMOD) || jj.IsJavaArchiveContainer(jj.ContainerAPK) {
+		t.Fatal("IsJavaArchiveContainer groups are wrong")
+	}
+}
+
+func TestClassifyInputFileExport(t *testing.T) {
+	apk := zipWith(t, map[string][]byte{"classes.dex": []byte("dex\n035\x00")})
+	bundle := zipWith(t, map[string][]byte{"base.apk": apk})
+	path := filepath.Join(t.TempDir(), "app.apks")
+	if err := os.WriteFile(path, bundle, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	kind, err := jj.ClassifyInputFile(path)
+	if err != nil {
+		t.Fatalf("ClassifyInputFile: %v", err)
+	}
+	if kind != jj.ContainerAPKS {
+		t.Fatalf("kind = %q, want apks", kind)
+	}
+}
+
+func TestJImageToJarExport(t *testing.T) {
+	classBytes := testdataClass(t)
+	image, err := jimagefixture.Build([]jimagefixture.Entry{
+		{Path: "/test/InvisibleAnnoSeed.class", Data: classBytes},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	src := filepath.Join(dir, "modules")
+	if err := os.WriteFile(src, image, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := jj.ClassifyInput(image, "modules"); got != jj.ContainerJImage {
+		t.Fatalf("ClassifyInput = %q, want jimage", got)
+	}
+	if got := jj.DetectInputKind(image); got != jj.InputJIMAGE {
+		t.Fatalf("DetectInputKind = %v, want InputJIMAGE", got)
+	}
+	if !jj.IsJavaArchiveContainer(jj.ContainerJImage) {
+		t.Fatal("JImage is not grouped as a Java archive")
+	}
+
+	dst := filepath.Join(dir, "image.jar")
+	if err := jj.JImageToJar(src, dst); err != nil {
+		t.Fatalf("JImageToJar: %v", err)
+	}
+	raw, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zipReader, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		t.Fatalf("open converted JAR: %v", err)
+	}
+	if len(zipReader.File) != 1 || zipReader.File[0].Name != "InvisibleAnnoSeed.class" {
+		t.Fatalf("JAR entries = %#v", zipReader.File)
+	}
+}
+
+func TestDecompileJImageArchiveExport(t *testing.T) {
+	classBytes := testdataClass(t)
+	image, err := jimagefixture.Build([]jimagefixture.Entry{
+		{Path: "/test/InvisibleAnnoSeed.class", Data: classBytes},
+		{Path: "/test/conf/app.properties", Data: []byte("key=value\n")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	src := filepath.Join(dir, "modules")
+	if err := os.WriteFile(src, image, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(dir, "src")
+	if err := jj.DecompileArchive(src, outDir); err != nil {
+		t.Fatalf("DecompileArchive: %v", err)
+	}
+	source, err := os.ReadFile(filepath.Join(outDir, "InvisibleAnnoSeed.java"))
+	if err != nil {
+		t.Fatalf("read decompiled source: %v", err)
+	}
+	if !strings.Contains(string(source), "class InvisibleAnnoSeed") {
+		t.Fatalf("unexpected source:\n%s", source)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "test/conf/app.properties")); err != nil {
+		t.Fatalf("JImage resource missing: %v", err)
 	}
 }
 

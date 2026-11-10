@@ -12,11 +12,12 @@ import (
 
 	"github.com/yaklang/javajive/classparser"
 	"github.com/yaklang/javajive/internal/filesys"
+	"github.com/yaklang/javajive/internal/inputkind"
 	"github.com/yaklang/javajive/internal/log"
 	"github.com/yaklang/javajive/internal/utils"
 )
 
-var archiveExtensions = []string{".jar", ".war", ".ear", ".zip", ".par"}
+var archiveExtensions = []string{".jar", ".war", ".ear", ".zip", ".par", ".aar", ".jmod"}
 
 func containsNestedArchivePath(path string) bool {
 	lower := strings.ToLower(path)
@@ -73,6 +74,7 @@ func NewJarParser(jarPath string) (*JarParser, error) {
 
 // NewJarParserFromBytes creates a new JarParser from JAR content in memory
 func NewJarParserFromBytes(jarContent []byte) (*JarParser, error) {
+	jarContent = inputkind.StripJMODHeader(jarContent)
 	zipFS, err := filesys.NewZipFSRaw(bytes.NewReader(jarContent), int64(len(jarContent)))
 	if err != nil {
 		return nil, utils.Wrapf(err, "failed to create zip filesystem from bytes")
@@ -114,6 +116,7 @@ func (j *JarParser) ListDirectory(dirPath string) ([]fs.DirEntry, error) {
 			if err != nil {
 				return nil, utils.Wrapf(err, "failed to read nested jar: %s", jarPath)
 			}
+			nestedContent = inputkind.StripJMODHeader(nestedContent)
 
 			zipFS, err := filesys.NewZipFSRaw(bytes.NewReader(nestedContent), int64(len(nestedContent)))
 			if err != nil {
@@ -254,6 +257,7 @@ func (j *JarParser) DecompileClass(className string) ([]byte, error) {
 				j.failedFiles[className] = err
 				return nil, utils.Wrapf(err, "failed to read nested jar: %s", jarPath)
 			}
+			nestedContent = inputkind.StripJMODHeader(nestedContent)
 
 			zipFS, err := filesys.NewZipFSRaw(bytes.NewReader(nestedContent), int64(len(nestedContent)))
 			if err != nil {
@@ -350,6 +354,7 @@ func (j *JarParser) GetNestedJarFS(nestedJarPath string) (*javaclassparser.JarFS
 	if err != nil {
 		return nil, utils.Wrapf(err, "failed to read nested jar: %s", nestedJarPath)
 	}
+	content = inputkind.StripJMODHeader(content)
 
 	zipFS, err := filesys.NewZipFSRaw(bytes.NewReader(content), int64(len(content)))
 	if err != nil {
@@ -450,6 +455,7 @@ func (j *JarParser) findNestedJarClasses(jarPath, prefix string, classes *[]stri
 	if err != nil {
 		return utils.Wrapf(err, "failed to read nested jar: %s", jarPath)
 	}
+	nestedContent = inputkind.StripJMODHeader(nestedContent)
 
 	// Create a filesystem for this JAR
 	zipFS, err := filesys.NewZipFSRaw(bytes.NewReader(nestedContent), int64(len(nestedContent)))

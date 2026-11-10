@@ -11,6 +11,7 @@ import (
 
 	javaclassparser "github.com/yaklang/javajive/classparser"
 	"github.com/yaklang/javajive/internal/filesys"
+	"github.com/yaklang/javajive/internal/inputkind"
 )
 
 const (
@@ -150,7 +151,8 @@ func exportNestedArchive(root string, parentZip *filesys.ZipFS, entryPath, paren
 		Size:       int64(len(raw)),
 	})
 
-	nestedZip, err := filesys.NewZipFSRawWithOptions(bytes.NewReader(raw), int64(len(raw)), parentZip.NestedArchiveOptions(depth)...)
+	payload := inputkind.StripJMODHeader(raw)
+	nestedZip, err := filesys.NewZipFSRawWithOptions(bytes.NewReader(payload), int64(len(payload)), parentZip.NestedArchiveOptions(depth)...)
 	if err != nil {
 		return fmt.Errorf("open nested archive %q: %w", provenance, err)
 	}
@@ -249,7 +251,7 @@ func provenancePath(archivePath, entryPath string) string {
 
 func isArchiveName(name string) bool {
 	lower := strings.ToLower(cleanArchivePath(name))
-	for _, suffix := range []string{".jar", ".war", ".ear", ".par", ".zip"} {
+	for _, suffix := range []string{".jar", ".war", ".ear", ".aar", ".par", ".jmod", ".zip"} {
 		if strings.HasSuffix(lower, suffix) {
 			return true
 		}

@@ -10,6 +10,7 @@ import (
 
 	"github.com/yaklang/javajive/internal/filesys"
 	fi "github.com/yaklang/javajive/internal/filesys/filesys_interface"
+	"github.com/yaklang/javajive/internal/inputkind"
 )
 
 // Declaration indexes contain entry locations, not parsed classes or decompiled
@@ -49,7 +50,8 @@ func (s *archiveDeclarationScope) index(root fi.FileSystem, rootDir string) {
 				}
 				continue
 			}
-			if strings.EqualFold(path.Ext(name), ".jar") {
+			switch strings.ToLower(path.Ext(name)) {
+			case ".jar", ".aar", ".jmod", ".par":
 				var z *filesys.ZipFS
 				if parent, ok := fsys.(*filesys.ZipFS); ok {
 					// Use the same nesting/budget admission as normal archive reads.
@@ -63,6 +65,7 @@ func (s *archiveDeclarationScope) index(root fi.FileSystem, rootDir string) {
 					if err != nil {
 						return false
 					}
+					raw = inputkind.StripJMODHeader(raw)
 					var errOpen error
 					z, errOpen = filesys.NewZipFSRaw(bytes.NewReader(raw), int64(len(raw)))
 					if errOpen != nil {
@@ -74,8 +77,9 @@ func (s *archiveDeclarationScope) index(root fi.FileSystem, rootDir string) {
 				}
 				continue
 			}
-			// Do not enter adjacent WAR/EAR/ZIP applications. Nested JARs are
-			// declarations in this scope; other deployments are not.
+			// Do not enter adjacent WAR/EAR/ZIP applications. Nested
+			// JAR/AAR/JMOD/PAR archives are declarations in this scope; other
+			// deployments are not.
 			if !strings.HasSuffix(name, ".class") {
 				continue
 			}

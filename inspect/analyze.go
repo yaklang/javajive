@@ -12,9 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/yaklang/javajive/dex2jar/input"
@@ -22,6 +20,8 @@ import (
 	"github.com/yaklang/javajive/dex2jar/lower"
 	"github.com/yaklang/javajive/dex2jar/model"
 	dexreport "github.com/yaklang/javajive/dex2jar/report"
+	"github.com/yaklang/javajive/internal/inputkind"
+	"github.com/yaklang/javajive/jimage"
 )
 
 const schemaVersion = 1
@@ -165,8 +165,6 @@ type Diagnostic struct {
 	Message string `json:"message"`
 }
 
-var canonicalDEXEntry = regexp.MustCompile(`^classes([0-9]*)\.dex$`)
-
 // AnalyzeFile reads and inspects path. Read failures return a failed report and
 // the underlying error; recognized but unsupported content is represented only
 // in the report.
@@ -203,8 +201,19 @@ func AnalyzeWithOptions(data []byte, name string, options Options) Report {
 		}, options))
 		report.Status = report.DEXFiles[0].Status
 		report.Diagnostics = append(report.Diagnostics, report.DEXFiles[0].Diagnostics...)
+	case "jmod":
+		report.Artifact.Format = "jmod"
+		if len(data) <= inputkind.JMODHeaderSize {
+			report.Status = StatusFailed
+			report.Diagnostics = append(report.Diagnostics, Diagnostic{Source: "jmod", Offset: 0, Op: "header", Message: "truncated JMOD header"})
+			break
+		}
+		analyzeArchive(&report, data[inputkind.JMODHeaderSize:], name, inputkind.JMOD, options)
+	case "jimage":
+		report.Artifact.Format = "jimage"
+		analyzeJImage(&report, data)
 	case "zip":
-		analyzeArchive(&report, data, name, options)
+		analyzeArchive(&report, data, name, inputkind.Unknown, options)
 	case "class":
 		report.Artifact.Format = "class"
 		report.Status = StatusUnsupported
@@ -234,6 +243,10 @@ func detectMagic(data []byte) string {
 	switch {
 	case len(data) >= 8 && bytes.Equal(data[:4], []byte("dex\n")) && data[7] == 0:
 		return "dex"
+	case inputkind.IsJMODHeader(data):
+		return "jmod"
+	case inputkind.IsJImageHeader(data):
+		return "jimage"
 	case len(data) >= 4 && (bytes.Equal(data[:4], []byte{'P', 'K', 3, 4}) || bytes.Equal(data[:4], []byte{'P', 'K', 5, 6}) || bytes.Equal(data[:4], []byte{'P', 'K', 7, 8})):
 		return "zip"
 	case len(data) >= 4 && bytes.Equal(data[:4], []byte{0xca, 0xfe, 0xba, 0xbe}):
@@ -243,89 +256,60 @@ func detectMagic(data []byte) string {
 	}
 }
 
-type retainedDEX struct {
-	name  string
-	index int
-	data  []byte
-}
-
-func analyzeArchive(report *Report, data []byte, name string, options Options) {
+func analyzeArchive(report *Report, data []byte, name string, forced inputkind.Kind, options Options) {
 	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		report.Artifact.Format = archiveHint(name)
+		if forced != inputkind.Unknown {
+			report.Artifact.Format = string(forced)
+		}
 		report.Status = StatusFailed
 		report.Diagnostics = append(report.Diagnostics, Diagnostic{Source: "archive", Offset: -1, Op: "zip", Message: err.Error()})
 		return
 	}
 
+	kind := forced
+	if kind == inputkind.Unknown {
+		kind = inputkind.DetectBytes(data, name)
+	}
+	report.Artifact.Format = string(kind)
+
 	archive := &Archive{Entries: []ArchiveEntry{}, Resources: []ArchiveEntry{}}
 	report.Archive = archive
-	retained := make([]retainedDEX, 0)
-	hasManifest, hasClass, hasWAR := false, false, false
-	seenDEXIndex := make(map[int]string)
 	for position, file := range reader.File {
-		if file.Name == "META-INF/MANIFEST.MF" {
-			hasManifest = true
-		}
-		if strings.HasSuffix(strings.ToLower(file.Name), ".class") {
-			hasClass = true
-		}
-		if file.Name == "WEB-INF/web.xml" || strings.HasPrefix(file.Name, "WEB-INF/classes/") || strings.HasPrefix(file.Name, "WEB-INF/lib/") {
-			hasWAR = true
-		}
-
-		entry, contents, readErr := inspectArchiveEntry(file, position)
+		entry, _, readErr := inspectArchiveEntry(file, position)
 		archive.Entries = append(archive.Entries, entry)
-		index, canonical := multidexIndex(file.Name)
-		if !entry.Directory && !strings.HasSuffix(strings.ToLower(file.Name), ".class") && !canonical {
+		if !entry.Directory && !strings.HasSuffix(strings.ToLower(file.Name), ".class") && !isDEXEntry(file.Name) {
 			archive.Resources = append(archive.Resources, entry)
 		}
 		if readErr != nil {
 			report.Status = StatusPartial
 			report.Diagnostics = append(report.Diagnostics, Diagnostic{Source: "archive", Entry: file.Name, Offset: -1, Op: "read entry", Message: readErr.Error()})
-			continue
-		}
-		if canonical {
-			if previous, exists := seenDEXIndex[index]; exists {
-				report.Status = StatusPartial
-				report.Diagnostics = append(report.Diagnostics, Diagnostic{Source: "archive", Entry: file.Name, Offset: -1, Op: "multidex provenance", Message: fmt.Sprintf("duplicate canonical multidex index %d also used by %q", index, previous)})
-			} else {
-				seenDEXIndex[index] = file.Name
-			}
-			retained = append(retained, retainedDEX{name: file.Name, index: index, data: contents})
 		}
 	}
-
 	sortArchiveEntries(archive.Entries)
 	sortArchiveEntries(archive.Resources)
-	sort.SliceStable(retained, func(i, j int) bool {
-		if retained[i].index != retained[j].index {
-			return retained[i].index < retained[j].index
-		}
-		return retained[i].name < retained[j].name
-	})
 
-	switch {
-	case len(retained) > 0:
-		report.Artifact.Format = "apk"
-	case hasWAR:
-		report.Artifact.Format = "war"
-	case hasManifest || hasClass:
-		report.Artifact.Format = "jar"
-	default:
-		report.Artifact.Format = archiveHint(name)
-		if report.Artifact.Format == "zip" {
+	if !inputkind.IsAndroid(kind) {
+		if kind == inputkind.ZIP {
 			report.Status = StatusUnsupported
-			report.Diagnostics = append(report.Diagnostics, Diagnostic{Source: "inspect", Offset: 0, Op: "archive type", Message: "ZIP is not identifiable as JAR, WAR, or APK"})
+			report.Diagnostics = append(report.Diagnostics, Diagnostic{Source: "inspect", Offset: 0, Op: "archive type", Message: "ZIP is not identifiable as a Java archive or Android container"})
 		}
-	}
-
-	if report.Artifact.Format != "apk" {
 		return
 	}
-	hierarchy := dexHierarchy(retained)
-	for _, item := range retained {
-		dex := analyzeDEX(item.data, hierarchy, DEXProvenance{Container: "apk", Entry: item.name, MultidexIndex: item.index, Canonical: true}, options)
+
+	sources, _, err := input.CollectDEXSources(data, name, input.Options{})
+	if err != nil {
+		report.Status = StatusPartial
+		report.Diagnostics = append(report.Diagnostics, diagnosticFromError("container", err))
+		return
+	}
+	hierarchy := dexHierarchy(sources)
+	for _, source := range sources {
+		dex := analyzeDEX(source.Data, hierarchy, DEXProvenance{
+			Container: string(kind), Entry: source.Entry,
+			MultidexIndex: source.MultidexIndex, Canonical: source.Canonical,
+		}, options)
 		report.DEXFiles = append(report.DEXFiles, dex)
 		report.Diagnostics = append(report.Diagnostics, dex.Diagnostics...)
 		if dex.Status != StatusComplete && report.Status == StatusComplete {
@@ -334,12 +318,92 @@ func analyzeArchive(report *Report, data []byte, name string, options Options) {
 	}
 }
 
+func analyzeJImage(report *Report, data []byte) {
+	reader, err := jimage.OpenBytes(data)
+	if err != nil {
+		report.Status = StatusFailed
+		report.Diagnostics = append(report.Diagnostics, Diagnostic{Source: "jimage", Offset: 0, Op: "header", Message: err.Error()})
+		return
+	}
+	defer reader.Close()
+
+	archive := &Archive{Entries: []ArchiveEntry{}, Resources: []ArchiveEntry{}}
+	report.Archive = archive
+	const diagnosticLimit = 64
+	failures := 0
+	for position, entry := range reader.Entries() {
+		kind := "resource"
+		if entry.Directory {
+			kind = "directory"
+		} else if entry.Extension == "class" {
+			kind = "class"
+		}
+		compression := uint16(0)
+		if entry.CompressedSize != 0 {
+			compression = 8
+		}
+		item := ArchiveEntry{
+			Name: entry.Name(), Kind: kind, Size: entry.UncompressedSize,
+			CompressedSize: entry.CompressedSize, Compression: compression,
+			Directory: entry.Directory, ArchivePosition: position,
+		}
+		if !entry.Directory {
+			content, readErr := reader.Read(entry.Path)
+			if readErr != nil {
+				report.Status = StatusPartial
+				failures++
+				if failures <= diagnosticLimit {
+					report.Diagnostics = append(report.Diagnostics, Diagnostic{Source: "jimage", Entry: entry.Name(), Offset: -1, Op: "read", Message: readErr.Error()})
+				}
+			} else {
+				sum := sha256.Sum256(content)
+				item.SHA256 = hex.EncodeToString(sum[:])
+			}
+		}
+		archive.Entries = append(archive.Entries, item)
+		if kind != "class" && kind != "directory" {
+			archive.Resources = append(archive.Resources, item)
+		}
+	}
+	if failures > diagnosticLimit {
+		report.Diagnostics = append(report.Diagnostics, Diagnostic{Source: "jimage", Offset: -1, Op: "read", Message: fmt.Sprintf("%d additional JImage resources could not be read", failures-diagnosticLimit)})
+	}
+	sortArchiveEntries(archive.Entries)
+	sortArchiveEntries(archive.Resources)
+}
+
+func isDEXEntry(name string) bool {
+	if _, ok := inputkind.RootDEXIndex(name); ok {
+		return true
+	}
+	_, _, ok := inputkind.AABDEX(name)
+	return ok
+}
+
 func archiveHint(name string) string {
 	switch strings.ToLower(filepath.Ext(name)) {
 	case ".apk":
 		return "apk"
+	case ".apks":
+		return "apks"
+	case ".xapk", ".apkx":
+		return "xapk"
+	case ".apkm":
+		return "apkm"
+	case ".aab":
+		return "aab"
 	case ".war":
 		return "war"
+	case ".ear":
+		return "ear"
+	case ".aar":
+		return "aar"
+	case ".par":
+		return "par"
+	case ".jmod":
+		return "jmod"
+	case ".jimage":
+		return "jimage"
 	case ".jar":
 		return "jar"
 	default:
@@ -377,11 +441,20 @@ func archiveEntryKind(name string, directory bool) string {
 	if directory {
 		return "directory"
 	}
-	if _, ok := multidexIndex(name); ok {
+	lower := strings.ToLower(name)
+	if isDEXEntry(name) {
 		return "dex"
 	}
-	if strings.HasSuffix(strings.ToLower(name), ".class") {
+	if strings.HasSuffix(lower, ".class") {
 		return "class"
+	}
+	if strings.HasSuffix(lower, ".apk") {
+		return "apk"
+	}
+	if strings.HasSuffix(lower, ".jar") || strings.HasSuffix(lower, ".aar") ||
+		strings.HasSuffix(lower, ".war") || strings.HasSuffix(lower, ".ear") ||
+		strings.HasSuffix(lower, ".par") || strings.HasSuffix(lower, ".jmod") {
+		return "archive"
 	}
 	return "resource"
 }
@@ -393,24 +466,6 @@ func sortArchiveEntries(entries []ArchiveEntry) {
 		}
 		return entries[i].ArchivePosition < entries[j].ArchivePosition
 	})
-}
-
-func multidexIndex(name string) (int, bool) {
-	match := canonicalDEXEntry.FindStringSubmatch(name)
-	if match == nil {
-		return 0, false
-	}
-	if match[1] == "" {
-		return 1, true
-	}
-	if match[1][0] == '0' {
-		return 0, false
-	}
-	index, err := strconv.Atoi(match[1])
-	if err != nil || index < 2 {
-		return 0, false
-	}
-	return index, true
 }
 
 func analyzeDEX(data []byte, hierarchy map[string]*model.Class, provenance DEXProvenance, options Options) DEXFile {
@@ -642,10 +697,10 @@ func diagnosticFromError(source string, err error) Diagnostic {
 // dexHierarchy indexes the classes of every DEX entry in an application so a
 // class can prove assignability to a supertype declared in another multidex
 // file.
-func dexHierarchy(entries []retainedDEX) map[string]*model.Class {
+func dexHierarchy(entries []input.DEXSource) map[string]*model.Class {
 	index := make(map[string]*model.Class)
 	for _, item := range entries {
-		parsed, err := input.ParseDEX(item.data, item.name)
+		parsed, err := input.ParseDEX(item.Data, item.Entry)
 		if err != nil {
 			continue
 		}

@@ -1,4 +1,5 @@
-// Package dex2jar translates raw DEX files and APK archives into deterministic
+// Package dex2jar translates raw DEX files, APK archives, Android split
+// bundles (APKS/XAPK/APKM), and Android App Bundles (AAB) into deterministic
 // Java archives using the native, pure-Go translation pipeline.
 package dex2jar
 
@@ -19,18 +20,26 @@ import (
 	"github.com/yaklang/javajive/dex2jar/lower"
 	"github.com/yaklang/javajive/dex2jar/model"
 	dexreport "github.com/yaklang/javajive/dex2jar/report"
+	"github.com/yaklang/javajive/internal/inputkind"
 )
 
 const manifest = "Manifest-Version: 1.0\r\n\r\n"
 
 var archiveTimestamp = time.Date(1980, time.January, 1, 0, 0, 0, 0, time.UTC)
 
-// Options controls DEX and APK input bounds. Non-positive values use defaults.
+// Options controls DEX and Android container input bounds. Non-positive values
+// use defaults.
 type Options struct {
 	MaxDEXSize      int64
 	MaxAPKSize      int64
 	MaxTotalDEXSize int64
+	// MaxTotalAPKSize bounds the sum of nested APK sizes in APKS/XAPK/APKM
+	// containers. Non-positive values use the input package default.
+	MaxTotalAPKSize int64
 	MaxDEXFiles     int
+	// MaxNestedAPKs bounds the number of nested APK entries in a split bundle.
+	// Non-positive values use the input package default.
+	MaxNestedAPKs int
 }
 
 // Report summarizes a successful conversion. The current strict translator
@@ -56,26 +65,81 @@ const (
 	InputClass
 	InputDEX
 	InputZIP
+	// InputJMOD identifies a JMOD archive: "JM\x01\x00" followed by a ZIP.
+	InputJMOD
+	// InputJIMAGE identifies a JDK modular runtime image.
+	InputJIMAGE
 )
 
 // DetectInputKind classifies supported reverse-toolchain input by content magic.
 func DetectInputKind(data []byte) InputKind {
-	switch {
-	case hasDEXMagic(data):
+	switch inputkind.DetectMagic(data) {
+	case inputkind.DEX:
 		return InputDEX
-	case hasZIPMagic(data):
-		return InputZIP
-	case len(data) >= 4 && data[0] == 0xca && data[1] == 0xfe && data[2] == 0xba && data[3] == 0xbe:
+	case inputkind.Class:
 		return InputClass
+	case inputkind.JMOD:
+		return InputJMOD
+	case inputkind.JIMAGE:
+		return InputJIMAGE
+	case inputkind.ZIP:
+		return InputZIP
 	default:
 		return InputUnknown
 	}
 }
 
-// DexToJar translates either a raw DEX file or an APK, selected by input magic.
-// On any parse or translation failure it returns no JAR bytes.
+// ContainerKind is the structure-aware classification of an input. It refines
+// InputKind for ZIP containers (APK vs APKS vs JAR, and so on).
+type ContainerKind string
+
+const (
+	ContainerUnknown ContainerKind = "unknown"
+	ContainerClass   ContainerKind = "class"
+	ContainerDEX     ContainerKind = "dex"
+	ContainerJMOD    ContainerKind = "jmod"
+	ContainerJImage  ContainerKind = "jimage"
+	ContainerJAR     ContainerKind = "jar"
+	ContainerWAR     ContainerKind = "war"
+	ContainerEAR     ContainerKind = "ear"
+	ContainerAAR     ContainerKind = "aar"
+	ContainerPAR     ContainerKind = "par"
+	ContainerZIP     ContainerKind = "zip"
+	ContainerAPK     ContainerKind = "apk"
+	ContainerAPKS    ContainerKind = "apks"
+	ContainerXAPK    ContainerKind = "xapk"
+	ContainerAPKM    ContainerKind = "apkm"
+	ContainerAAB     ContainerKind = "aab"
+)
+
+// ClassifyInput classifies data by magic, archive structure, and finally the
+// supplied name's extension.
+func ClassifyInput(data []byte, name string) ContainerKind {
+	return ContainerKind(inputkind.DetectBytes(data, name))
+}
+
+// ClassifyInputFile classifies a file without loading the whole archive.
+func ClassifyInputFile(name string) (ContainerKind, error) {
+	kind, err := inputkind.DetectFile(name)
+	return ContainerKind(kind), err
+}
+
+// IsAndroidContainer reports whether kind is translated by the DEX pipeline.
+func IsAndroidContainer(kind ContainerKind) bool {
+	return inputkind.IsAndroid(inputkind.Kind(kind))
+}
+
+// IsJavaArchiveContainer reports whether kind is exported by the Java archive
+// decompiler.
+func IsJavaArchiveContainer(kind ContainerKind) bool {
+	return inputkind.IsJavaArchive(inputkind.Kind(kind))
+}
+
+// DexToJar translates a raw DEX, APK, APKS/XAPK/APKM bundle, or AAB, selected
+// by content magic and archive structure. On any parse or translation failure
+// it returns no JAR bytes.
 func DexToJar(data []byte, options Options) ([]byte, Report, error) {
-	app, err := parseApplication(data, options)
+	app, _, err := parseApplication(data, options)
 	if err != nil {
 		return nil, Report{}, err
 	}
@@ -115,12 +179,16 @@ func DexFileToJar(src, dst string, options Options) (Report, error) {
 	if readErr != nil && readErr != io.ErrUnexpectedEOF {
 		return Report{}, fmt.Errorf("dex2jar: read magic from %q: %w", src, readErr)
 	}
+	if inputkind.IsJImageHeader(magic[:read]) {
+		return Report{}, fmt.Errorf("dex2jar: unsupported DEX input: detected jimage")
+	}
+	archiveInput := hasZIPMagic(magic[:read]) || inputkind.IsJMODHeader(magic[:read])
 	maxSize := options.MaxDEXSize
-	if hasZIPMagic(magic[:read]) {
+	if archiveInput {
 		maxSize = options.MaxAPKSize
 	}
 	if maxSize <= 0 {
-		if hasZIPMagic(magic[:read]) {
+		if archiveInput {
 			maxSize = input.DefaultMaxAPKSize
 		} else {
 			maxSize = input.DefaultMaxDEXSize
@@ -148,24 +216,18 @@ func inputOptions(options Options) input.Options {
 		MaxDEXSize:      options.MaxDEXSize,
 		MaxAPKSize:      options.MaxAPKSize,
 		MaxTotalDEXSize: options.MaxTotalDEXSize,
+		MaxTotalAPKSize: options.MaxTotalAPKSize,
 		MaxDEXFiles:     options.MaxDEXFiles,
+		MaxNestedAPKs:   options.MaxNestedAPKs,
 	}
 }
 
-func parseApplication(data []byte, options Options) (*model.Application, error) {
-	inputOptions := inputOptions(options)
-	switch DetectInputKind(data) {
-	case InputDEX:
-		file, err := input.ParseDEXWithOptions(data, "classes.dex", inputOptions)
-		if err != nil {
-			return nil, err
-		}
-		return &model.Application{Files: []*model.File{file}}, nil
-	case InputZIP:
-		return input.ParseAPKWithOptions(data, inputOptions)
-	default:
-		return nil, errors.New("dex2jar: unsupported input magic (want DEX or APK/ZIP)")
+func parseApplication(data []byte, options Options) (*model.Application, ContainerKind, error) {
+	app, kind, err := input.ParseApplicationWithOptions(data, "", inputOptions(options))
+	if err != nil {
+		return nil, ContainerKind(kind), err
 	}
+	return app, ContainerKind(kind), nil
 }
 
 func applicationToJar(app *model.Application) ([]byte, Report, error) {
