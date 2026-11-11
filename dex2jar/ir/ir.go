@@ -203,6 +203,11 @@ type Method struct {
 	exceptionTypes map[uint32]string
 	// demands records the categories each instruction requires of its operands.
 	demands [][]demand
+	// blockByInstruction provides constant-time instruction-to-block lookup for
+	// allocation shape checks.
+	blockByInstruction []int
+	allocationNew      map[int]bool
+	allocationCtor     map[int]bool
 }
 
 func contextFor(in Input) Context {

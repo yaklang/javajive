@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"sync"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
@@ -57,6 +58,11 @@ type SemanticCFG struct {
 	// analysis holds the T26 graph-analysis cache. SemanticCFG is immutable after
 	// construction; epoch stays 0. Lazy-initialized on first GetOrCompute.
 	analysis *graphAnalysisState
+	// adjacency caches immutable node indexes and deduplicated successor lists.
+	// Results are never exposed directly; analyses and test helpers receive clones.
+	adjacencyOnce sync.Once
+	nodeIndexes   map[*OpCode]int
+	successors    [2][][]int
 }
 
 // MayThrowOpcode conservatively includes resolution/linkage, allocation, array,

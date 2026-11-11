@@ -21,13 +21,11 @@ func (m *Method) EffectsAt(index int) (uses, defs []uint16) {
 		return nil, nil
 	}
 	instruction := m.Instructions[index]
-	for _, allocation := range m.Allocations {
-		if allocation.NewInstruction == index {
-			return nil, []uint16{instruction.Regs[0]}
-		}
-		if allocation.Constructor == index {
-			return append([]uint16(nil), instruction.Regs...), nil
-		}
+	if m.allocationNew[index] {
+		return nil, []uint16{instruction.Regs[0]}
+	}
+	if m.allocationCtor[index] {
+		return append([]uint16(nil), instruction.Regs...), nil
 	}
 	return instructionEffects(instruction)
 }

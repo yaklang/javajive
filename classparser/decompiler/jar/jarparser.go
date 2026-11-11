@@ -55,6 +55,12 @@ type JarParser struct {
 
 	// failedFiles tracks files that couldn't be parsed/decompiled
 	failedFiles map[string]error
+
+	// ownsJarFS is true for parsers created by the constructors in this package.
+	// Nested JarFS values are owned by the outer cache and are never closed here.
+	ownsJarFS bool
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // NewJarParser creates a new JarParser for the specified JAR file path
@@ -69,6 +75,7 @@ func NewJarParser(jarPath string) (*JarParser, error) {
 		jarFS:       jarFS,
 		classCache:  make(map[string][]byte),
 		failedFiles: make(map[string]error),
+		ownsJarFS:   true,
 	}, nil
 }
 
@@ -95,6 +102,30 @@ func (j *JarParser) GetJarFS() *javaclassparser.JarFS {
 	return j.jarFS
 }
 
+// Close releases the archive handle owned by this parser. It is idempotent.
+func (j *JarParser) Close() error {
+	if j == nil {
+		return nil
+	}
+	j.closeOnce.Do(func() {
+		if j.ownsJarFS && j.jarFS != nil {
+			j.closeErr = j.jarFS.Close()
+		}
+	})
+	return j.closeErr
+}
+
+func (j *JarParser) nestedJarFS(current *javaclassparser.JarFS, jarPath string) (*javaclassparser.JarFS, error) {
+	if current == nil {
+		return nil, utils.Error("nil jar filesystem")
+	}
+	nested, err := current.GetNestedJarFS(jarPath)
+	if err != nil {
+		return nil, utils.Wrapf(err, "failed to open nested jar: %s", jarPath)
+	}
+	return nested, nil
+}
+
 // ListDirectory lists the contents of a directory within the JAR
 // Handles nested JAR paths like "lib/fastjson.jar/com/example" or "lib/outer.jar/libs/inner.jar/com/example"
 func (j *JarParser) ListDirectory(dirPath string) ([]fs.DirEntry, error) {
@@ -112,18 +143,10 @@ func (j *JarParser) ListDirectory(dirPath string) ([]fs.DirEntry, error) {
 
 		// Traverse through the nested JARs
 		for _, jarPath := range jarPaths {
-			nestedContent, err := currentFS.ZipFS.ReadFile(jarPath)
+			currentFS, err = j.nestedJarFS(currentFS, jarPath)
 			if err != nil {
-				return nil, utils.Wrapf(err, "failed to read nested jar: %s", jarPath)
+				return nil, err
 			}
-			nestedContent = inputkind.StripJMODHeader(nestedContent)
-
-			zipFS, err := filesys.NewZipFSRaw(bytes.NewReader(nestedContent), int64(len(nestedContent)))
-			if err != nil {
-				return nil, utils.Wrapf(err, "failed to create zip filesystem for nested jar: %s", jarPath)
-			}
-
-			currentFS = javaclassparser.NewJarFS(zipFS)
 		}
 
 		// Read directory from the final filesystem
@@ -252,20 +275,11 @@ func (j *JarParser) DecompileClass(className string) ([]byte, error) {
 
 		// Traverse through the nested JARs
 		for _, jarPath := range jarPaths {
-			nestedContent, err := currentFS.ZipFS.ReadFile(jarPath)
+			currentFS, err = j.nestedJarFS(currentFS, jarPath)
 			if err != nil {
 				j.failedFiles[className] = err
-				return nil, utils.Wrapf(err, "failed to read nested jar: %s", jarPath)
+				return nil, err
 			}
-			nestedContent = inputkind.StripJMODHeader(nestedContent)
-
-			zipFS, err := filesys.NewZipFSRaw(bytes.NewReader(nestedContent), int64(len(nestedContent)))
-			if err != nil {
-				j.failedFiles[className] = err
-				return nil, utils.Wrapf(err, "failed to create zip filesystem for nested jar: %s", jarPath)
-			}
-
-			currentFS = javaclassparser.NewJarFS(zipFS)
 		}
 
 		// Read class from the final filesystem
@@ -350,18 +364,7 @@ func (j *JarParser) parseMultiLevelJarPath(fullPath string) ([]string, string, e
 // For multi-level nested JARs, the ListDirectory and DecompileClass methods now
 // automatically handle multiple levels of nesting.
 func (j *JarParser) GetNestedJarFS(nestedJarPath string) (*javaclassparser.JarFS, error) {
-	content, err := j.jarFS.ZipFS.ReadFile(nestedJarPath)
-	if err != nil {
-		return nil, utils.Wrapf(err, "failed to read nested jar: %s", nestedJarPath)
-	}
-	content = inputkind.StripJMODHeader(content)
-
-	zipFS, err := filesys.NewZipFSRaw(bytes.NewReader(content), int64(len(content)))
-	if err != nil {
-		return nil, utils.Wrapf(err, "failed to create zip filesystem for nested jar: %s", nestedJarPath)
-	}
-
-	return javaclassparser.NewJarFS(zipFS), nil
+	return j.nestedJarFS(j.jarFS, normalizeJarInternalPath(nestedJarPath))
 }
 
 // ParseNestedJarPath parses a path that may contain nested JAR files
@@ -429,7 +432,7 @@ func (j *JarParser) FindJavaClasses(includeNestedJars ...bool) ([]string, error)
 	if checkNested && len(nestedJars) > 0 {
 		for _, nestedJarPath := range nestedJars {
 			// Process this nested JAR
-			err := j.findNestedJarClasses(nestedJarPath, "", &classes)
+			err := j.findNestedJarClasses(j.jarFS, nestedJarPath, "", &classes)
 			if err != nil {
 				log.Warnf("Error processing nested JAR %s: %v", nestedJarPath, err)
 			}
@@ -443,27 +446,17 @@ func (j *JarParser) FindJavaClasses(includeNestedJars ...bool) ([]string, error)
 // jarPath is the current jar being processed
 // prefix is used for building the full path for nested jars
 // classes is a pointer to the slice where found classes will be stored
-func (j *JarParser) findNestedJarClasses(jarPath, prefix string, classes *[]string) error {
+func (j *JarParser) findNestedJarClasses(parent *javaclassparser.JarFS, jarPath, prefix string, classes *[]string) error {
 	// Construct full path for this JAR
 	fullJarPath := jarPath
 	if prefix != "" {
 		fullJarPath = prefix + "/" + jarPath
 	}
 
-	// Get the nested JAR content
-	nestedContent, err := j.jarFS.ZipFS.ReadFile(jarPath)
+	nestedFS, err := j.nestedJarFS(parent, jarPath)
 	if err != nil {
-		return utils.Wrapf(err, "failed to read nested jar: %s", jarPath)
+		return err
 	}
-	nestedContent = inputkind.StripJMODHeader(nestedContent)
-
-	// Create a filesystem for this JAR
-	zipFS, err := filesys.NewZipFSRaw(bytes.NewReader(nestedContent), int64(len(nestedContent)))
-	if err != nil {
-		return utils.Wrapf(err, "failed to create zip filesystem for nested jar: %s", jarPath)
-	}
-
-	nestedFS := javaclassparser.NewJarFS(zipFS)
 
 	// Track nested JARs found within this JAR
 	var deeperNestedJars []string
@@ -493,7 +486,7 @@ func (j *JarParser) findNestedJarClasses(jarPath, prefix string, classes *[]stri
 
 	// Recursively process deeper nested JARs if any
 	for _, deepJarPath := range deeperNestedJars {
-		err := j.findNestedJarClasses(deepJarPath, fullJarPath, classes)
+		err := j.findNestedJarClasses(nestedFS, deepJarPath, fullJarPath, classes)
 		if err != nil {
 			log.Warnf("Error processing deeper nested JAR %s in %s: %v", deepJarPath, fullJarPath, err)
 		}

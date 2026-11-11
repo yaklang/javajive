@@ -331,7 +331,7 @@ func (l *methodLowerer) emitDebug() error {
 	}
 	described := make(map[localRange]bool)
 	for _, local := range debug.Locals {
-		if local.Name == "" || local.Type == "" || local.Start >= local.End || local.End > codeUnits {
+		if local.Register >= l.method.Code.RegistersSize || local.Name == "" || local.Type == "" || local.Start >= local.End || local.End > codeUnits {
 			continue
 		}
 		if local.Type == "J" || local.Type == "D" || local.Type == "F" {
@@ -344,35 +344,43 @@ func (l *methodLowerer) emitDebug() error {
 		l.code.Local(start, end, local.Name, local.Type, l.home(local.Register))
 		described[localRange{register: local.Register, start: start, end: end}] = true
 	}
-	parameterRegister := l.method.Code.RegistersSize - l.method.Code.InsSize
-	if l.encoded.AccessFlags&dexStatic == 0 {
-		parameterRegister++
-	}
+	parameterRegisters := debugParameterRegisters(l.method.Code, l.method.Proto, l.encoded.AccessFlags)
 	if l.endLabel == nil || startLabel == nil {
 		return nil
 	}
 	for index, name := range debug.ParameterNames {
-		if name == "" {
-			return nil
+		if index >= len(parameterRegisters) {
+			break
 		}
-		register := int(parameterRegister) + index
-		if register >= int(l.method.Code.RegistersSize) {
-			return nil
-		}
-		// Without a proven descriptor the parameter name is dropped rather than
-		// described as java.lang.Object, which would invent a type.
-		descriptor := l.registerDescriptor[register]
-		if descriptor == "" {
+		descriptor := l.method.Proto.Parameters[index]
+		register := parameterRegisters[index]
+		if name == "" || register >= l.method.Code.RegistersSize {
 			continue
 		}
-		key := localRange{register: uint16(register), start: startLabel, end: l.endLabel}
+		key := localRange{register: register, start: startLabel, end: l.endLabel}
 		if described[key] {
 			continue
 		}
 		described[key] = true
-		l.code.Local(startLabel, l.endLabel, name, descriptor, l.home(uint16(register)))
+		l.code.Local(startLabel, l.endLabel, name, descriptor, l.home(register))
 	}
 	return nil
+}
+
+func debugParameterRegisters(code *model.Code, proto model.Proto, accessFlags uint32) []uint16 {
+	if code == nil {
+		return nil
+	}
+	register := code.RegistersSize - code.InsSize
+	if accessFlags&dexStatic == 0 {
+		register++
+	}
+	out := make([]uint16, len(proto.Parameters))
+	for index, descriptor := range proto.Parameters {
+		out[index] = register
+		register += uint16(descriptorWords(descriptor))
+	}
+	return out
 }
 
 func (l *methodLowerer) validateAllocationCFG(allocation ir.Allocation) error {

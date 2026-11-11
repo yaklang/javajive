@@ -1,11 +1,15 @@
 package statements
 
-import "github.com/yaklang/javajive/classparser/decompiler/core/class_context"
+import (
+	"strings"
+
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
+)
 
 func StatementsString(statements []Statement, funcCtx *class_context.ClassContext) string {
-	var res string
+	var res strings.Builder
 	for _, statement := range statements {
-		res += statement.String(funcCtx)
+		res.WriteString(statement.String(funcCtx))
 	}
-	return res
+	return res.String()
 }

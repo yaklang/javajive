@@ -95,11 +95,17 @@ type Class struct {
 	FieldAnnotations     []FieldAnnotation
 	MethodAnnotations    []MethodAnnotation
 	ParameterAnnotations []ParameterAnnotation
-	Signature            string
-	Throws               []string
-	InnerClasses         []InnerClass
-	Enclosing            *EnclosingMethod
-	SourceDebugExtension string
+	// Annotation indexes avoid repeated linear scans while lowering large
+	// classes. Parsers populate them; callers constructing models manually may
+	// leave them nil and lowering falls back to the slices above.
+	FieldAnnotationIndex     map[uint32]int
+	MethodAnnotationIndex    map[uint32]int
+	ParameterAnnotationIndex map[uint32]int
+	Signature                string
+	Throws                   []string
+	InnerClasses             []InnerClass
+	Enclosing                *EnclosingMethod
+	SourceDebugExtension     string
 }
 
 type EncodedField struct {

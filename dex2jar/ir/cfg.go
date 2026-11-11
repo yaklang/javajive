@@ -158,21 +158,24 @@ func buildBlocks(instructions []Instruction, codeUnits uint32, ctx Context, site
 	sort.Slice(starts, func(i, j int) bool { return starts[i] < starts[j] })
 	blocks := make([]Block, len(starts))
 	blockAt := make(map[uint32]int, len(starts))
+	instructionIndex := 0
 	for index, start := range starts {
 		end := codeUnits
 		if index+1 < len(starts) {
 			end = starts[index+1]
 		}
-		block := Block{ID: index, Start: start, End: end}
-		for instructionIndex, instruction := range instructions {
-			if instruction.Offset >= start && instruction.Offset < end {
-				block.Instructions = append(block.Instructions, instructionIndex)
-			}
+		first := instructionIndex
+		for instructionIndex < len(instructions) && instructions[instructionIndex].Offset < end {
+			instructionIndex++
 		}
-		if len(block.Instructions) == 0 {
+		if first == instructionIndex || instructions[first].Offset < start {
 			return nil, diagnostic(ctx, nil, "cfg", fmt.Errorf("block at code-unit offset %d is empty", start))
 		}
-		blocks[index] = block
+		indices := make([]int, instructionIndex-first)
+		for offset := range indices {
+			indices[offset] = first + offset
+		}
+		blocks[index] = Block{ID: index, Start: start, End: end, Instructions: indices}
 		blockAt[start] = index
 	}
 	addSuccessor := func(block *Block, successor int) {

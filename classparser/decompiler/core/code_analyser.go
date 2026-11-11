@@ -480,6 +480,17 @@ func (d *Decompiler) ScanJmp() error {
 		return err
 	}
 	opcodes := d.opCodes
+	// Exception entries are keyed once by protected-region start. The walk may visit
+	// an opcode more than once, but it no longer rescans the complete exception table
+	// at every instruction. Entry order inside a start bucket remains classfile order,
+	// preserving catch traversal and source output.
+	exceptionsByStart := make(map[uint16][]*ExceptionTableEntry, len(d.ExceptionTable))
+	for _, entry := range d.ExceptionTable {
+		if entry != nil {
+			exceptionsByStart[entry.StartPc] = append(exceptionsByStart[entry.StartPc], entry)
+		}
+	}
+	catchTypesByHandler := make(map[int]map[uint16]struct{})
 	// Plain map (single-goroutine walk) avoids the mutex + interface boxing of utils.Set.
 	visitNodeRecord := make(map[*OpCode]struct{})
 	endOp := &OpCode{Instr: InstrInfos[OP_END], Id: d.CurrentId}
@@ -506,33 +517,40 @@ func (d *Decompiler) ScanJmp() error {
 			if pre != nil {
 				LinkOpcode(pre, opcode)
 			}
-			for _, entry := range d.ExceptionTable {
-				if opcode.CurrentOffset == entry.StartPc {
-					if entry.StartPc == entry.HandlerPc {
-						continue
+			for _, entry := range exceptionsByStart[opcode.CurrentOffset] {
+				if entry.StartPc == entry.HandlerPc {
+					continue
+				}
+				gotoOp := d.offsetToOpcodeIndex[entry.HandlerPc]
+				d.opCodes[gotoOp].IsCatch = true
+				d.opCodes[gotoOp].ExceptionTypeIndex = entry.CatchType
+				// Accumulate every catch type that shares this handler PC so multi-catch
+				// (`catch (A | B)`) can be reconstructed. The per-handler set keeps
+				// dedupe O(1) while the slice retains first-seen classfile order.
+				seenTypes := catchTypesByHandler[gotoOp]
+				if seenTypes == nil {
+					seenTypes = make(map[uint16]struct{}, len(d.opCodes[gotoOp].ExceptionTypeIndexes)+1)
+					for _, catchType := range d.opCodes[gotoOp].ExceptionTypeIndexes {
+						seenTypes[catchType] = struct{}{}
 					}
-					gotoOp := d.offsetToOpcodeIndex[entry.HandlerPc]
-					d.opCodes[gotoOp].IsCatch = true
-					d.opCodes[gotoOp].ExceptionTypeIndex = entry.CatchType
-					// Accumulate every catch type that shares this handler PC so multi-catch
-					// (`catch (A | B)`) can be reconstructed. Dedupe because the exception-table
-					// scan may revisit the same start opcode while walking the graph.
-					if !slices.Contains(d.opCodes[gotoOp].ExceptionTypeIndexes, entry.CatchType) {
-						d.opCodes[gotoOp].ExceptionTypeIndexes = append(d.opCodes[gotoOp].ExceptionTypeIndexes, entry.CatchType)
-					}
-					deferWalkId = append(deferWalkId, gotoOp)
-					walkNode(gotoOp)
-					if pre != nil {
-						LinkOpcode(pre, d.opCodes[gotoOp])
-						pre.IsTryCatchParent = true
-						pre.TryNode = opcode
-						pre.CatchNode = append(pre.CatchNode, &CatchNode{
-							ExceptionTypeIndex: entry.CatchType,
-							StartIndex:         entry.StartPc,
-							EndIndex:           entry.EndPc,
-							OpCode:             d.opCodes[gotoOp],
-						})
-					}
+					catchTypesByHandler[gotoOp] = seenTypes
+				}
+				if _, seen := seenTypes[entry.CatchType]; !seen {
+					seenTypes[entry.CatchType] = struct{}{}
+					d.opCodes[gotoOp].ExceptionTypeIndexes = append(d.opCodes[gotoOp].ExceptionTypeIndexes, entry.CatchType)
+				}
+				deferWalkId = append(deferWalkId, gotoOp)
+				walkNode(gotoOp)
+				if pre != nil {
+					LinkOpcode(pre, d.opCodes[gotoOp])
+					pre.IsTryCatchParent = true
+					pre.TryNode = opcode
+					pre.CatchNode = append(pre.CatchNode, &CatchNode{
+						ExceptionTypeIndex: entry.CatchType,
+						StartIndex:         entry.StartPc,
+						EndIndex:           entry.EndPc,
+						OpCode:             d.opCodes[gotoOp],
+					})
 				}
 			}
 

@@ -47,7 +47,7 @@ func decompileArchiveStructured(from, to string, options ArchiveOptions) (Archiv
 	}
 
 	var report ArchiveReport
-	exportErr := exportStructuredArchive(to, zipFS, decompiler, "", 0, &report)
+	exportErr := exportStructuredArchive(to, zipFS, decompiler, "", 0, options.MaxAnalysisUpdates, &report)
 	closeErr := decompilerOwner.Close()
 	if exportErr != nil {
 		return ArchiveReport{}, exportErr
@@ -96,11 +96,11 @@ func prepareStructuredRoot(root string) error {
 	return nil
 }
 
-func exportStructuredArchive(root string, zipFS *filesys.ZipFS, decompiler *javaclassparser.JarFS, archivePath string, depth int, report *ArchiveReport) error {
-	return walkStructuredDirectory(root, zipFS, decompiler, ".", archivePath, depth, report)
+func exportStructuredArchive(root string, zipFS *filesys.ZipFS, decompiler *javaclassparser.JarFS, archivePath string, depth, maxAnalysisUpdates int, report *ArchiveReport) error {
+	return walkStructuredDirectory(root, zipFS, decompiler, ".", archivePath, depth, maxAnalysisUpdates, report)
 }
 
-func walkStructuredDirectory(root string, zipFS *filesys.ZipFS, decompiler *javaclassparser.JarFS, directory, archivePath string, depth int, report *ArchiveReport) error {
+func walkStructuredDirectory(root string, zipFS *filesys.ZipFS, decompiler *javaclassparser.JarFS, directory, archivePath string, depth, maxAnalysisUpdates int, report *ArchiveReport) error {
 	entries, err := decompiler.ReadDir(directory)
 	if err != nil {
 		return fmt.Errorf("read archive directory %q: %w", provenancePath(archivePath, cleanArchivePath(directory)), err)
@@ -111,13 +111,13 @@ func walkStructuredDirectory(root string, zipFS *filesys.ZipFS, decompiler *java
 		entryPath := path.Join(directory, javaclassparser.EntryOriginalName(entry))
 		entryPath = cleanArchivePath(entryPath)
 		if isArchiveName(entryPath) {
-			if err := exportNestedArchive(root, zipFS, entryPath, archivePath, depth+1, report); err != nil {
+			if err := exportNestedArchive(root, zipFS, entryPath, archivePath, depth+1, maxAnalysisUpdates, report); err != nil {
 				return err
 			}
 			continue
 		}
 		if entry.IsDir() {
-			if err := walkStructuredDirectory(root, zipFS, decompiler, entryPath, archivePath, depth, report); err != nil {
+			if err := walkStructuredDirectory(root, zipFS, decompiler, entryPath, archivePath, depth, maxAnalysisUpdates, report); err != nil {
 				return err
 			}
 			continue
@@ -129,7 +129,7 @@ func walkStructuredDirectory(root string, zipFS *filesys.ZipFS, decompiler *java
 	return nil
 }
 
-func exportNestedArchive(root string, parentZip *filesys.ZipFS, entryPath, parentArchive string, depth int, report *ArchiveReport) error {
+func exportNestedArchive(root string, parentZip *filesys.ZipFS, entryPath, parentArchive string, depth, maxAnalysisUpdates int, report *ArchiveReport) error {
 	raw, err := parentZip.ReadFile(entryPath)
 	if err != nil {
 		return fmt.Errorf("read nested archive %q: %w", provenancePath(parentArchive, entryPath), err)
@@ -156,8 +156,9 @@ func exportNestedArchive(root string, parentZip *filesys.ZipFS, entryPath, paren
 		return fmt.Errorf("open nested archive %q: %w", provenance, err)
 	}
 	nestedDecompiler := javaclassparser.NewJarFS(nestedZip)
+	nestedDecompiler.SetAnalysisBudget(maxAnalysisUpdates)
 	nestedDecompiler.SetRetainUnprovedSource(false)
-	if err := exportStructuredArchive(root, nestedZip, nestedDecompiler, provenance, depth, report); err != nil {
+	if err := exportStructuredArchive(root, nestedZip, nestedDecompiler, provenance, depth, maxAnalysisUpdates, report); err != nil {
 		return err
 	}
 	return nil

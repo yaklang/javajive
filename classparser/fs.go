@@ -595,6 +595,29 @@ func normalizeArchivePath(name string) string {
 	return name
 }
 
+// GetNestedJarFS returns a cached nested archive filesystem. The returned JarFS
+// is owned by the outer JarFS and must not be closed independently.
+func (z *JarFS) GetNestedJarFS(jarPath string) (*JarFS, error) {
+	unified, err := z.getNestedJarFS(jarPath)
+	if err != nil {
+		return nil, err
+	}
+	nested, ok := unified.GetFileSystem().(*JarFS)
+	if !ok || nested == nil {
+		return nil, fmt.Errorf("nested archive %q is not a JarFS", jarPath)
+	}
+	return nested, nil
+}
+
+// Close releases the outer archive handle. Nested archives are memory-backed
+// views owned by this JarFS and do not hold independent file descriptors.
+func (z *JarFS) Close() error {
+	if z == nil || z.ZipFS == nil {
+		return nil
+	}
+	return z.ZipFS.Close()
+}
+
 func (z *JarFS) getNestedJarFS(jarPath string) (*filesys.UnifiedFS, error) {
 	if _, err := z.boundJarReleaseSelection(); err != nil {
 		return nil, err

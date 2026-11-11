@@ -25,15 +25,9 @@ func (g *SemanticCFG) indexOfNode(n *OpCode) int {
 	if n == nil {
 		return -1
 	}
-	if g.order != nil {
-		if i, ok := g.order[n]; ok {
-			return i
-		}
-	}
-	for i, node := range g.Nodes {
-		if node == n {
-			return i
-		}
+	g.initAdjacency()
+	if i, ok := g.nodeIndexes[n]; ok {
+		return i
 	}
 	return -1
 }

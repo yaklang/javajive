@@ -110,6 +110,42 @@ type irreducibleEdge struct {
 	Kind string `json:"kind"`
 }
 
+func TestFixedIrreducibleCFGCorpusPureGo(t *testing.T) {
+	manifest, manifestBytes := readIrreducibleManifest(t)
+	assertIrreducibleCorpusInventory(t, manifest)
+	assertIrreducibleChecksums(t, manifest, manifestBytes)
+	assertIrreducibleGeneratorDeterminism(t, manifest)
+
+	classes := make(map[string][]byte, len(manifest.Cases))
+	for _, fixture := range manifest.Cases {
+		raw := mustReadIrreducibleFile(t, fixture.ClassFile)
+		classes[fixture.Name] = raw
+		assertIrreducibleClassfile(t, manifest, fixture, raw)
+	}
+	resolver := func(internalName string) ([]byte, bool) {
+		data, ok := classes[internalName]
+		return data, ok
+	}
+	for _, mode := range []classparser.DecompileMode{classparser.Precision, classparser.Compatibility} {
+		for _, fixture := range manifest.Cases {
+			result, err := classparser.DecompileWithOptions(classes[fixture.Name], classparser.DecompileOptions{
+				Mode: mode, Resolve: resolver, TargetSourceVersion: 8, EnvSnapshot: map[string]string{},
+				Limits: classparser.Limits{
+					MaxInputBytes: 1 << 20, MaxReadBytes: 1 << 20, MaxParseItems: 1_000_000,
+					MaxGraphScans: 1_000_000, MaxGraphEdges: 1_000_000, MaxSetElementWork: 10_000_000,
+					MaxRequestWork: 100_000_000, MaxOutputBytes: 1 << 20, MaxASTDepth: 10_000,
+					MaxDiagnostics: 64, MaxNodeCopies: 1_000_000,
+				},
+			})
+			if err != nil {
+				t.Fatalf("%s/%s: status=%q diagnostics=%+v error=%v", mode, fixture.Name, result.Status, result.Diagnostics, err)
+			}
+			assertHealthyIrreducibleDecompile(t, fixture.Name, mode, 0, result)
+			assertIrreducibleSourceBaseline(t, fixture.Name, mode, []byte(result.Source))
+		}
+	}
+}
+
 func TestRoundTripIrreducibleCFGCorpus(t *testing.T) {
 	manifest, manifestBytes := readIrreducibleManifest(t)
 	assertIrreducibleCorpusInventory(t, manifest)

@@ -55,6 +55,12 @@ func Build(in Input) (*Method, error) {
 	if err != nil {
 		return nil, err
 	}
+	result.blockByInstruction = make([]int, len(result.Instructions))
+	for blockIndex := range result.Blocks {
+		for _, instructionIndex := range result.Blocks[blockIndex].Instructions {
+			result.blockByInstruction[instructionIndex] = blockIndex
+		}
+	}
 	result.exceptionTypes = exceptionTypes(method.Code)
 	if err := validateExceptionEntries(result); err != nil {
 		return nil, err
@@ -65,6 +71,7 @@ func Build(in Input) (*Method, error) {
 	}
 	result.Allocations = allocations
 	for pass := 0; pass <= len(result.Instructions)+2; pass++ {
+		result.indexAllocations()
 		result.RegisterTypes, err = analyzeCategories(result, in.File, result.Allocations)
 		if err != nil {
 			return nil, err
@@ -94,8 +101,11 @@ func validateInstructions(method *Method, file *model.File) error {
 		}
 		for _, register := range instruction.Regs {
 			if uint32(register) >= registerCount {
-				return diagnostic(method.Context, instruction, "", fmt.Errorf("register v%d is outside register file v0..v%d", register, registerCount-1))
+				return diagnostic(method.Context, instruction, "", fmt.Errorf("register v%d is outside register file of %d registers", register, registerCount))
 			}
+		}
+		if wideDefinitionOpcode(instruction.Opcode) && len(instruction.Regs) > 0 && uint32(instruction.Regs[0])+1 >= registerCount {
+			return diagnostic(method.Context, instruction, "", fmt.Errorf("wide destination v%d requires register v%d within register file of %d registers", instruction.Regs[0], instruction.Regs[0]+1, registerCount))
 		}
 		if instruction.Opcode == 0x1a || instruction.Opcode == 0x1b {
 			if instruction.Index >= uint32(len(file.Strings)) {
@@ -430,6 +440,18 @@ func seedAllocationSite(method *Method, file *model.File, newIndex int) (site in
 // uninitialized value of that allocation. This is path-sensitive, so a
 // conditional constructor call or a branch that reuses a register cannot
 // confuse the pairing. It reports whether anything changed.
+func (method *Method) indexAllocations() {
+	method.allocationNew = make(map[int]bool, len(method.Allocations))
+	method.allocationCtor = make(map[int]bool, len(method.Allocations))
+	for index := range method.Allocations {
+		allocation := &method.Allocations[index]
+		method.allocationNew[allocation.NewInstruction] = true
+		for _, constructor := range allocation.Constructors {
+			method.allocationCtor[constructor] = true
+		}
+	}
+}
+
 func resolveAllocationSites(method *Method, file *model.File) (bool, error) {
 	position := make(map[uint32]int, len(method.Allocations))
 	for index := range method.Allocations {
@@ -509,14 +531,10 @@ func fusedAllocationShape(method *Method, allocation *Allocation, constructor in
 }
 
 func blockOf(method *Method, instruction int) int {
-	for index := range method.Blocks {
-		for _, candidate := range method.Blocks[index].Instructions {
-			if candidate == instruction {
-				return index
-			}
-		}
+	if method == nil || instruction < 0 || instruction >= len(method.blockByInstruction) {
+		return -1
 	}
-	return -1
+	return method.blockByInstruction[instruction]
 }
 
 func sameInstructionList(left, right []int) bool {

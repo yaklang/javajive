@@ -280,53 +280,79 @@ func (g *SemanticCFG) AnalysisNodesTouched() int64 {
 	return g.analysis.cache.NodesTouched()
 }
 
-func (g *SemanticCFG) nodeIndexMap() map[*OpCode]int {
-	m := make(map[*OpCode]int, len(g.Nodes))
-	if g.order != nil && len(g.order) == len(g.Nodes) {
-		for n, i := range g.order {
-			m[n] = i
+func (g *SemanticCFG) initAdjacency() {
+	g.adjacencyOnce.Do(func() {
+		idx := make(map[*OpCode]int, len(g.Nodes))
+		if g.order != nil && len(g.order) == len(g.Nodes) {
+			for n, i := range g.order {
+				idx[n] = i
+			}
+		} else {
+			for i, n := range g.Nodes {
+				idx[n] = i
+			}
 		}
-		return m
+		g.nodeIndexes = idx
+		for mode := range g.successors {
+			includeException := mode == 1
+			succs := make([][]int, len(g.Nodes))
+			seen := make([]map[int]struct{}, len(g.Nodes))
+			for _, e := range g.Edges {
+				if !includeException && e.Kind == EdgeException {
+					continue
+				}
+				u, ok1 := idx[e.From]
+				v, ok2 := idx[e.To]
+				if !ok1 || !ok2 {
+					continue
+				}
+				if seen[u] == nil {
+					seen[u] = map[int]struct{}{}
+				}
+				if _, dup := seen[u][v]; dup {
+					continue
+				}
+				seen[u][v] = struct{}{}
+				succs[u] = append(succs[u], v)
+			}
+			g.successors[mode] = succs
+		}
+	})
+}
+
+func (g *SemanticCFG) nodeIndexMap() map[*OpCode]int {
+	g.initAdjacency()
+	out := make(map[*OpCode]int, len(g.nodeIndexes))
+	for node, index := range g.nodeIndexes {
+		out[node] = index
 	}
-	for i, n := range g.Nodes {
-		m[n] = i
+	return out
+}
+
+func cloneIndexLists(in [][]int) [][]int {
+	out := make([][]int, len(in))
+	for i := range in {
+		out[i] = append([]int(nil), in[i]...)
 	}
-	return m
+	return out
+}
+
+func (g *SemanticCFG) cachedSuccessorIndexLists(includeException bool) [][]int {
+	g.initAdjacency()
+	if includeException {
+		return g.successors[1]
+	}
+	return g.successors[0]
 }
 
 func (g *SemanticCFG) successorIndexLists(includeException bool) [][]int {
-	n := len(g.Nodes)
-	succs := make([][]int, n)
-	if n == 0 {
-		return succs
-	}
-	idx := g.nodeIndexMap()
-	seen := make([]map[int]struct{}, n)
-	for _, e := range g.Edges {
-		if !includeException && e.Kind == EdgeException {
-			continue
-		}
-		u, ok1 := idx[e.From]
-		v, ok2 := idx[e.To]
-		if !ok1 || !ok2 {
-			continue
-		}
-		if seen[u] == nil {
-			seen[u] = map[int]struct{}{}
-		}
-		if _, dup := seen[u][v]; dup {
-			continue
-		}
-		seen[u][v] = struct{}{}
-		succs[u] = append(succs[u], v)
-	}
-	return succs
+	return cloneIndexLists(g.cachedSuccessorIndexLists(includeException))
 }
 
 // GetOrCompute returns a copied analysis snapshot for this immutable CFG.
 func (g *SemanticCFG) GetOrCompute(kind AnalysisKind, domain GraphAnalysisDomain) *GraphAnalysis {
 	st := g.analysisState()
-	return st.cache.getOrCompute(st.id, 0, kind, domain, g.successorIndexLists(domain.IncludeException))
+	return st.cache.getOrCompute(st.id, 0, kind, domain, g.cachedSuccessorIndexLists(domain.IncludeException))
 }
 
 // Dominates reports whether dominator dominates node in this snapshot.

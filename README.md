@@ -34,8 +34,9 @@ Built for portability and embedding:
   capabilities; the sub-packages remain available for advanced use.
 - **First-class CLI** — `decompile`, `dex2jar`, `classinfo`, and `serial`
   subcommands, built on the standard library.
-- **Cross-tested against a real JDK** — CI compiles real `.class` / `.jar` and
-  JDK-serialized blobs with `javac`/`java`, then verifies JavaJive against them
+- **Cross-tested against a real JDK** — the manual extended oracle compiles real
+  `.class` / `.jar` and JDK-serialized blobs, then verifies JavaJive against them.
+  Required PR CI stays pure Go and consumes hash-pinned class/JAR/DEX/JImage corpora
   (see [HARNESS-WORKFLOW.md](HARNESS-WORKFLOW.md)).
 - **Trimmed dependency graph** — `utils` / `codec` / `log` / `go-funk` are
   reimplemented as a minimal, self-contained `internal/` core.
@@ -49,8 +50,9 @@ See the [per-JAR results and reproduction](docs/historical-jar-audit.md).
 
 **250 isolated semantic round trips** record compilation, JVM verification, stubs
 and runtime equality separately; original application classes are absent from rebuilt
-classpaths. CI runs the semantic audit on JDK 17 and 21, the full historical comparison,
-and the OS/Go and race matrices. These checks do not prove equivalence of every library
+classpaths. Manual extended workflows run the semantic and historical JDK audits;
+required PR CI runs sealed pure-Go algorithm, race, coverage, and fixed-corpus gates.
+These checks do not prove equivalence of every library
 method. See the [implementation and remaining boundaries](docs/decompiler-semantic-audit.md).
 
 ## Historical benchmarks (v0.3.0)

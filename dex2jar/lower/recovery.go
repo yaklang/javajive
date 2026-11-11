@@ -256,57 +256,64 @@ func addShellInterfaces(class *model.Class, builder *classfilebuilder.Class) err
 func addShellFields(file *model.File, class *model.Class, builder *classfilebuilder.Class, metadata bool, recoveries *[]Recovery) (bool, error) {
 	seen := make(map[string]bool)
 	stubInitializer := false
-	fields := append(append([]model.EncodedField(nil), class.StaticFields...), class.InstanceFields...)
-	for index := range fields {
-		field := &fields[index]
-		if field.Field.Class != class.Descriptor {
-			return false, classDiagnostic(file, class, "class recovery field", fmt.Errorf("field %q owner %q does not match class", field.Field.Name, field.Field.Class))
-		}
-		if _, err := fieldKind(field.Field.Type); err != nil {
-			return false, classDiagnostic(file, class, "class recovery field", fmt.Errorf("field %q: %w", field.Field.Name, err))
-		}
-		if err := classfilebuilder.ValidateFieldSymbol(field.Field.Name, field.Field.Type); err != nil {
-			return false, classDiagnostic(file, class, "class recovery field", fmt.Errorf("field %q: %w", field.Field.Name, err))
-		}
-		key := field.Field.Name + "\x00" + field.Field.Type
-		if seen[key] {
-			return false, classDiagnostic(file, class, "class recovery field", fmt.Errorf("duplicate field %s %s", field.Field.Name, field.Field.Type))
-		}
-		seen[key] = true
-		access, err := fieldAccess(field.AccessFlags)
-		if err != nil {
-			return false, classDiagnostic(file, class, "class recovery field", fmt.Errorf("field %q: %w", field.Field.Name, err))
-		}
-		isStatic := index < len(class.StaticFields)
-		if isStatic != (field.AccessFlags&dexStatic != 0) {
-			return false, classDiagnostic(file, class, "class recovery field", fmt.Errorf("field %q static membership and access flag disagree", field.Field.Name))
-		}
-		if err := validateInterfaceFieldShape(class, field.AccessFlags); err != nil {
-			return false, classDiagnostic(file, class, "class recovery field", fmt.Errorf("field %q: %w", field.Field.Name, err))
-		}
-		member := builder.AddField(access, field.Field.Name, field.Field.Type)
-		if isStatic && index < len(class.StaticValues) {
-			if valueErr := applyStaticValue(file, class, field, member, builder, class.StaticValues[index]); valueErr != nil {
-				stubInitializer = true
-				*recoveries = append(*recoveries, Recovery{Code: "field.initializer_stubbed", Action: "stub_initializer", Scope: "field", Member: field.Field.Name, Descriptor: field.Field.Type, Feature: "static-initializer", Message: valueErr.Error()})
+	addFields := func(fields []model.EncodedField, isStatic bool) error {
+		for index := range fields {
+			field := &fields[index]
+			if field.Field.Class != class.Descriptor {
+				return classDiagnostic(file, class, "class recovery field", fmt.Errorf("field %q owner %q does not match class", field.Field.Name, field.Field.Class))
 			}
-		}
-		if !metadata {
-			continue
-		}
-		if annotations := fieldAnnotationsOf(class, field.FieldIndex); len(annotations) > 0 {
-			translated, translateErr := translateAnnotations(file, annotations)
-			if translateErr != nil {
-				*recoveries = append(*recoveries, Recovery{Code: "metadata.field_annotation_dropped", Action: "drop_attribute", Scope: "field", Member: field.Field.Name, Descriptor: field.Field.Type, Message: translateErr.Error()})
+			if _, err := fieldKind(field.Field.Type); err != nil {
+				return classDiagnostic(file, class, "class recovery field", fmt.Errorf("field %q: %w", field.Field.Name, err))
+			}
+			if err := classfilebuilder.ValidateFieldSymbol(field.Field.Name, field.Field.Type); err != nil {
+				return classDiagnostic(file, class, "class recovery field", fmt.Errorf("field %q: %w", field.Field.Name, err))
+			}
+			key := field.Field.Name + "\x00" + field.Field.Type
+			if seen[key] {
+				return classDiagnostic(file, class, "class recovery field", fmt.Errorf("duplicate field %s %s", field.Field.Name, field.Field.Type))
+			}
+			seen[key] = true
+			access, err := fieldAccess(field.AccessFlags)
+			if err != nil {
+				return classDiagnostic(file, class, "class recovery field", fmt.Errorf("field %q: %w", field.Field.Name, err))
+			}
+			if isStatic != (field.AccessFlags&dexStatic != 0) {
+				return classDiagnostic(file, class, "class recovery field", fmt.Errorf("field %q static membership and access flag disagree", field.Field.Name))
+			}
+			if err := validateInterfaceFieldShape(class, field.AccessFlags); err != nil {
+				return classDiagnostic(file, class, "class recovery field", fmt.Errorf("field %q: %w", field.Field.Name, err))
+			}
+			member := builder.AddField(access, field.Field.Name, field.Field.Type)
+			if isStatic && index < len(class.StaticValues) {
+				if valueErr := applyStaticValue(file, class, field, member, builder, class.StaticValues[index]); valueErr != nil {
+					stubInitializer = true
+					*recoveries = append(*recoveries, Recovery{Code: "field.initializer_stubbed", Action: "stub_initializer", Scope: "field", Member: field.Field.Name, Descriptor: field.Field.Type, Feature: "static-initializer", Message: valueErr.Error()})
+				}
+			}
+			if !metadata {
 				continue
 			}
-			if translated.signature != "" {
-				builder.SetFieldSignature(member, translated.signature)
-			}
-			for i, annotation := range translated.annotations {
-				builder.AddFieldAnnotation(member, annotation, translated.visible[i])
+			if annotations := fieldAnnotationsOf(class, field.FieldIndex); len(annotations) > 0 {
+				translated, translateErr := translateAnnotations(file, annotations)
+				if translateErr != nil {
+					*recoveries = append(*recoveries, Recovery{Code: "metadata.field_annotation_dropped", Action: "drop_attribute", Scope: "field", Member: field.Field.Name, Descriptor: field.Field.Type, Message: translateErr.Error()})
+					continue
+				}
+				if translated.signature != "" {
+					builder.SetFieldSignature(member, translated.signature)
+				}
+				for i, annotation := range translated.annotations {
+					builder.AddFieldAnnotation(member, annotation, translated.visible[i])
+				}
 			}
 		}
+		return nil
+	}
+	if err := addFields(class.StaticFields, true); err != nil {
+		return false, err
+	}
+	if err := addFields(class.InstanceFields, false); err != nil {
+		return false, err
 	}
 	return stubInitializer, nil
 }

@@ -18,6 +18,13 @@ bounded failure recovery for malformed and partially unsupported inputs.
 - Keep recovered DEX interface/annotation shells JVM-valid, preserve parameter
   annotations where representable, restore annotation-interface defaults, and
   bound JAR diagnostics with an explicit truncation record.
+- Replace required PR JVM/compiler process matrices with sealed pure-Go algorithm,
+  race, coverage, and SHA-256-pinned corpus gates. Live compiler, verifier,
+  reflection, and behavior oracles remain in the explicit extended workflow.
+- Remove avoidable quadratic and repeated work: index Java exception starts and
+  graph adjacency, render with builders, reuse nested archive filesystems, populate
+  DEX blocks in one pass, index DEX allocations/annotations/debug locals, bound
+  diagnostic collection, and propagate recovery dependencies with a reverse graph.
 
 - Harden DEX IR decoding: validate switch and fill-array payload targets with
   signed/`uint64` arithmetic before indexing, reject negative, wrapped, and

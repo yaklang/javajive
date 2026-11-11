@@ -287,7 +287,8 @@ func parseDEXSources(sources []DEXSource, options Options, strictDuplicates bool
 	seen := make(map[string]model.Class)
 	seenEntry := make(map[string]string)
 	var totalDEXSize uint64
-	for _, source := range sources {
+	for index := range sources {
+		source := &sources[index]
 		if int64(len(source.Data)) > options.maxDEXSize() {
 			return nil, report.New(source.Entry, "", "", 0, "input", fmt.Errorf("DEX size %d exceeds limit %d", len(source.Data), options.maxDEXSize()))
 		}
@@ -296,6 +297,10 @@ func parseDEXSources(sources []DEXSource, options Options, strictDuplicates bool
 		}
 		totalDEXSize += uint64(len(source.Data))
 		file, err := ParseDEXWithOptions(source.Data, source.Entry, options)
+		// Parsed model data owns resolved values, not the original DEX byte slice.
+		// Drop the source reference promptly so multidex inputs can be reclaimed as
+		// parsing advances.
+		source.Data = nil
 		if err != nil {
 			return nil, err
 		}

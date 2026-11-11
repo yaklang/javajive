@@ -56,8 +56,6 @@ func TestAcceptedRawDEXCorpus(t *testing.T) {
 		t.Fatalf("parsed class = %q with %d fields and %d methods", parsed.GetClassName(), len(parsed.Fields), len(parsed.Methods))
 	}
 
-	verifyAndExecute(t, classes, "accept.Arithmetic")
-
 	inputPath := filepath.Join(t.TempDir(), "arithmetic.input")
 	if err := os.WriteFile(inputPath, raw, 0o644); err != nil {
 		t.Fatal(err)
@@ -126,9 +124,6 @@ func TestAcceptedMultidexAPKCorpus(t *testing.T) {
 			t.Fatalf("parsed %s = %q with %d methods", entry, parsed.GetClassName(), len(parsed.Methods))
 		}
 	}
-	verifyAndExecute(t, classes, "accept.apk.Primary")
-	verifyAndExecute(t, classes, "accept.apk.Secondary")
-
 	sourceDir := filepath.Join(t.TempDir(), "source")
 	if err := javajive.DecompileDEXFile(fixture, sourceDir, javajive.DexOptions{}); err != nil {
 		t.Fatalf("DecompileDEXFile(APK): %v", err)
@@ -216,6 +211,31 @@ func readAcceptedJar(t *testing.T, jar []byte, wantNames []string) map[string][]
 		t.Fatalf("JAR entries = %v, want %v", names, wantNames)
 	}
 	return classes
+}
+
+func TestAcceptedCorpusJVMOracle(t *testing.T) {
+	fixtures := []struct {
+		file      string
+		inventory []string
+		mains     []string
+	}{
+		{file: "arithmetic.dex", inventory: []string{"META-INF/MANIFEST.MF", "accept/Arithmetic.class"}, mains: []string{"accept.Arithmetic"}},
+		{file: "multidex.apk", inventory: []string{"META-INF/MANIFEST.MF", "accept/apk/Primary.class", "accept/apk/Secondary.class"}, mains: []string{"accept.apk.Primary", "accept.apk.Secondary"}},
+	}
+	for _, fixture := range fixtures {
+		raw, err := os.ReadFile(filepath.Join("testdata", "accept", fixture.file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		jar, _, err := dex2jar.DexToJar(raw, dex2jar.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		classes := readAcceptedJar(t, jar, fixture.inventory)
+		for _, mainClass := range fixture.mains {
+			verifyAndExecute(t, classes, mainClass)
+		}
+	}
 }
 
 func verifyAndExecute(t *testing.T, classes map[string][]byte, mainClass string) {

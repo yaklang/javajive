@@ -19,6 +19,7 @@ func AnalyzeJarSecurity(jarPath string) (map[string]interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer parser.Close()
 
 	results := map[string]interface{}{
 		"jarPath":        jarPath,
@@ -138,6 +139,7 @@ func GetJarDependencyTree(jarPath string) (map[string]interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer parser.Close()
 
 	manifest, err := parser.GetJarManifest()
 	if err != nil {

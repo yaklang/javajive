@@ -29,8 +29,9 @@
 - **一个 import**：统一门面包 `javajive` 聚合四类能力；子包仍可用于高级用法。
 - **一流的命令行**：`decompile`、`dex2jar`、`classinfo`、`serial` 子命令，
   基于标准库实现。
-- **与真实 JDK 交叉测试**：CI 用 `javac`/`java` 编译真实 `.class` / `.jar` 与 JDK 序列化字节，
-  再用 JavaJive 验证（见 [HARNESS-WORKFLOW.md](HARNESS-WORKFLOW.md)）。
+- **与真实 JDK 交叉测试**：手动 extended oracle 用真实 JDK 编译 `.class` / `.jar` 与
+  JDK 序列化字节并验证 JavaJive；required PR CI 保持纯 Go，只消费 SHA-256 固定的
+  class/JAR/DEX/JImage 语料（见 [HARNESS-WORKFLOW.md](HARNESS-WORKFLOW.md)）。
 - **收敛的依赖图**：`utils` / `codec` / `log` / `go-funk` 被重写为 `internal/` 下最小自包含实现。
 
 ## v0.4.0 验证
@@ -40,8 +41,9 @@
 详见[逐包结果及复现方法](docs/historical-jar-audit.md)。
 
 **250 项隔离语义往返**分别记录编译、JVM 校验、stub 与运行结果一致性，重建类路径不含
-原始应用类。CI 在 JDK 17、21 重跑语义测试，并执行全量历史对比、OS/Go 矩阵及 race 语料。
-这些检查不证明全部库方法行为等价；完整说明见[实现与剩余边界](docs/decompiler-semantic-audit.md)。
+原始应用类。手动 extended workflow 运行 JDK 语义与历史审计；required PR CI 运行封闭的
+纯 Go 算法、race、coverage 和固定语料门禁。这些检查不证明全部库方法行为等价；完整说明见
+[实现与剩余边界](docs/decompiler-semantic-audit.md)。
 
 ## 历史评测（v0.3.0）
 

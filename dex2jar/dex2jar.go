@@ -100,14 +100,33 @@ type ConversionDiagnostic struct {
 // DetailedReport describes complete, partial, or failed conversion without
 // weakening the existing scalar Report contract.
 type DetailedReport struct {
-	Status            string                 `json:"status"`
-	Summary           Report                 `json:"summary"`
-	AttemptedClasses  int                    `json:"attempted_classes"`
-	StubbedClasses    int                    `json:"stubbed_classes"`
-	OmittedClasses    int                    `json:"omitted_classes"`
-	StubbedMethods    int                    `json:"stubbed_methods"`
-	DroppedAttributes int                    `json:"dropped_attributes"`
-	Diagnostics       []ConversionDiagnostic `json:"diagnostics,omitempty"`
+	Status             string                 `json:"status"`
+	Summary            Report                 `json:"summary"`
+	AttemptedClasses   int                    `json:"attempted_classes"`
+	StubbedClasses     int                    `json:"stubbed_classes"`
+	OmittedClasses     int                    `json:"omitted_classes"`
+	StubbedMethods     int                    `json:"stubbed_methods"`
+	DroppedAttributes  int                    `json:"dropped_attributes"`
+	Diagnostics        []ConversionDiagnostic `json:"diagnostics,omitempty"`
+	diagnosticsOmitted int
+}
+
+func appendConversionDiagnostic(detailed *DetailedReport, diagnostic ConversionDiagnostic) {
+	if len(detailed.Diagnostics) < maxConversionDiagnostics-1 {
+		detailed.Diagnostics = append(detailed.Diagnostics, diagnostic)
+		return
+	}
+	detailed.diagnosticsOmitted++
+	truncated := ConversionDiagnostic{
+		Category: "recovery", Action: "drop_attribute", Code: "diagnostics.truncated",
+		Kind: "resource_limit", Scope: "container", Stage: "collect", Severity: "warning",
+		Message: fmt.Sprintf("%d additional conversion diagnostics were omitted to keep collection bounded", detailed.diagnosticsOmitted),
+	}
+	if len(detailed.Diagnostics) == maxConversionDiagnostics-1 {
+		detailed.Diagnostics = append(detailed.Diagnostics, truncated)
+		return
+	}
+	detailed.Diagnostics[len(detailed.Diagnostics)-1] = truncated
 }
 
 type jarEntry struct {
@@ -217,7 +236,7 @@ func DexToJarWithOptions(data []byte, options ConvertOptions) (jar []byte, detai
 		if recovered := recover(); recovered != nil {
 			jar = nil
 			detailed.Status = "failed"
-			detailed.Diagnostics = append(detailed.Diagnostics, ConversionDiagnostic{
+			appendConversionDiagnostic(&detailed, ConversionDiagnostic{
 				Category: "internal",
 				Action:   "failed",
 				Message:  fmt.Sprintf("dex2jar internal panic: %v", recovered),
@@ -234,7 +253,7 @@ func DexToJarWithOptions(data []byte, options ConvertOptions) (jar []byte, detai
 	}
 	app, _, err := parseApplication(data, options.Input)
 	if err != nil {
-		detailed.Diagnostics = append(detailed.Diagnostics, diagnosticFromError(err, "failed", ""))
+		appendConversionDiagnostic(&detailed, diagnosticFromError(err, "failed", ""))
 		return nil, detailed, err
 	}
 	return applicationToJarWithPolicy(app, policy)
@@ -376,7 +395,7 @@ func applicationToJarWithPolicy(app *model.Application, policy FailurePolicy) ([
 		}
 		if err := ir.ValidateFile(file); err != nil {
 			err = dexreport.New(file.Entry, "", "", 0, "metadata", err)
-			detailed.Diagnostics = append(detailed.Diagnostics, diagnosticFromError(err, "failed", ""))
+			appendConversionDiagnostic(&detailed, diagnosticFromError(err, "failed", ""))
 			return nil, detailed, err
 		}
 		for classIndex := range file.Classes {
@@ -385,12 +404,12 @@ func applicationToJarWithPolicy(app *model.Application, policy FailurePolicy) ([
 			name, err := classEntryName(class.Descriptor)
 			if err != nil {
 				err = fmt.Errorf("dex2jar: class %q: %w", class.Descriptor, err)
-				detailed.Diagnostics = append(detailed.Diagnostics, diagnosticFromError(err, "failed", ""))
+				appendConversionDiagnostic(&detailed, diagnosticFromError(err, "failed", ""))
 				return nil, detailed, err
 			}
 			if previous, exists := seen[name]; exists {
 				err = fmt.Errorf("dex2jar: duplicate output entry %q from %q and %q", name, previous, file.Entry)
-				detailed.Diagnostics = append(detailed.Diagnostics, diagnosticFromError(err, "failed", ""))
+				appendConversionDiagnostic(&detailed, diagnosticFromError(err, "failed", ""))
 				return nil, detailed, err
 			}
 			seen[name] = file.Entry
@@ -398,7 +417,7 @@ func applicationToJarWithPolicy(app *model.Application, policy FailurePolicy) ([
 			result, err := lower.ClassWithPolicy(file, class, lower.ClassOptions{FileValidated: true, Hierarchy: hierarchy}, lowerPolicy)
 			if err != nil {
 				detailed.Summary.Classes = len(converted)
-				detailed.Diagnostics = append(detailed.Diagnostics, diagnosticFromError(err, "failed", ""))
+				appendConversionDiagnostic(&detailed, diagnosticFromError(err, "failed", ""))
 				return nil, detailed, err
 			}
 			converted = append(converted, convertedClass{file: file, class: class, name: name, result: result})
@@ -406,7 +425,7 @@ func applicationToJarWithPolicy(app *model.Application, policy FailurePolicy) ([
 	}
 	if policy == FailureRecover {
 		if err := recoverMinimalDependencies(converted, hierarchy); err != nil {
-			detailed.Diagnostics = append(detailed.Diagnostics, diagnosticFromError(err, "failed", "dependency-closure"))
+			appendConversionDiagnostic(&detailed, diagnosticFromError(err, "failed", "dependency-closure"))
 			return nil, detailed, err
 		}
 	}
@@ -427,7 +446,7 @@ func applicationToJarWithPolicy(app *model.Application, policy FailurePolicy) ([
 			if scope == "" {
 				scope = "class"
 			}
-			detailed.Diagnostics = append(detailed.Diagnostics, ConversionDiagnostic{
+			appendConversionDiagnostic(&detailed, ConversionDiagnostic{
 				Entry: file.Entry, Class: class.Descriptor, Method: recovery.Member,
 				Descriptor: recovery.Descriptor, Category: "recovery", Action: recovery.Action,
 				Feature: recovery.Feature, Code: recovery.Code, Kind: "structural",
@@ -449,7 +468,7 @@ func applicationToJarWithPolicy(app *model.Application, policy FailurePolicy) ([
 				detailed.Summary.Warnings++
 			}
 			if !recoveredMethods[stub.Method+"\x00"+stub.Descriptor] {
-				detailed.Diagnostics = append(detailed.Diagnostics, ConversionDiagnostic{
+				appendConversionDiagnostic(&detailed, ConversionDiagnostic{
 					Entry: file.Entry, Class: class.Descriptor, Method: stub.Method + stub.Descriptor,
 					Descriptor: stub.Descriptor, Category: "unsupported", Action: "stubbed",
 					Feature: stub.Feature, Code: "method.unsupported_stub", Kind: "capability",
@@ -479,7 +498,7 @@ func applicationToJarWithPolicy(app *model.Application, policy FailurePolicy) ([
 	}
 	jar, err := writeJar(entries)
 	if err != nil {
-		detailed.Diagnostics = append(detailed.Diagnostics, diagnosticFromError(err, "failed", ""))
+		appendConversionDiagnostic(&detailed, diagnosticFromError(err, "failed", ""))
 		return nil, detailed, err
 	}
 	detailed.Status = "complete"
@@ -723,46 +742,67 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) (err error) {
 // resolves across multidex files, where a superclass often lives in a
 // different DEX than its subclass.
 func recoverMinimalDependencies(classes []convertedClass, hierarchy map[string]*model.Class) error {
-	unsafeDependency := make(map[string]bool)
+	// Index reverse hierarchy edges once, then propagate minimal-shell damage with
+	// a queue. This preserves fixed-point semantics without repeatedly scanning
+	// every class for every newly unsafe dependency.
+	reverse := make(map[string][]int)
 	for index := range classes {
-		if classes[index].result.ClassMinimal {
-			unsafeDependency[classes[index].class.Descriptor] = true
+		class := classes[index].class
+		if class.Superclass != "" {
+			reverse[class.Superclass] = append(reverse[class.Superclass], index)
+		}
+		for _, descriptor := range class.Interfaces {
+			reverse[descriptor] = append(reverse[descriptor], index)
 		}
 	}
-	for changed := true; changed; {
-		changed = false
-		for index := range classes {
-			item := &classes[index]
-			if unsafeDependency[item.class.Descriptor] {
-				continue
+	unsafeDependency := make(map[string]bool)
+	queue := make([]string, 0)
+	for index := range classes {
+		if classes[index].result.ClassMinimal {
+			descriptor := classes[index].class.Descriptor
+			if !unsafeDependency[descriptor] {
+				unsafeDependency[descriptor] = true
+				queue = append(queue, descriptor)
 			}
-			dependency := ""
-			if unsafeDependency[item.class.Superclass] {
-				dependency = item.class.Superclass
-			} else {
-				for _, descriptor := range item.class.Interfaces {
-					if unsafeDependency[descriptor] {
-						dependency = descriptor
-						break
-					}
-				}
-			}
-			if dependency == "" {
-				continue
-			}
-			if !item.result.ClassStubbed {
-				result, err := lower.ClassWithPolicy(item.file, item.class, lower.ClassOptions{
-					FileValidated: true, Hierarchy: hierarchy, ForceClassShell: true,
-					RecoveryReason: fmt.Sprintf("dependency %s was reduced to a minimal class shell", dependency),
-				}, lower.Recover)
-				if err != nil {
-					return err
-				}
-				item.result = result
-			}
-			unsafeDependency[item.class.Descriptor] = true
-			changed = true
 		}
+	}
+	for head := 0; head < len(queue); head++ {
+		for _, index := range reverse[queue[head]] {
+			descriptor := classes[index].class.Descriptor
+			if unsafeDependency[descriptor] {
+				continue
+			}
+			unsafeDependency[descriptor] = true
+			queue = append(queue, descriptor)
+		}
+	}
+	for index := range classes {
+		item := &classes[index]
+		if item.result.ClassMinimal || !unsafeDependency[item.class.Descriptor] || item.result.ClassStubbed {
+			continue
+		}
+		dependency := ""
+		if unsafeDependency[item.class.Superclass] {
+			dependency = item.class.Superclass
+		} else {
+			for _, descriptor := range item.class.Interfaces {
+				if unsafeDependency[descriptor] {
+					dependency = descriptor
+					break
+				}
+			}
+		}
+		if dependency == "" {
+			return fmt.Errorf("dex2jar: unsafe dependency closure lost the cause for %q", item.class.Descriptor)
+		}
+		result, err := lower.ClassWithPolicy(item.file, item.class, lower.ClassOptions{
+			FileValidated: true, Hierarchy: hierarchy, ForceClassShell: true,
+			RecoveryReason: fmt.Sprintf("dependency %s was reduced to a minimal class shell", dependency),
+		}, lower.Recover)
+		if err != nil {
+			return err
+		}
+		item.result = result
 	}
 	return nil
 }

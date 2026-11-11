@@ -352,7 +352,11 @@ func addFields(file *model.File, class *model.Class, builder *classfilebuilder.C
 }
 
 func fieldAnnotationsOf(class *model.Class, index uint32) []model.Annotation {
-	for _, entry := range class.FieldAnnotations {
+	if position, ok := class.FieldAnnotationIndex[index]; ok && position >= 0 && position < len(class.FieldAnnotations) {
+		return class.FieldAnnotations[position].Annotations
+	}
+	for position := range class.FieldAnnotations {
+		entry := &class.FieldAnnotations[position]
 		if entry.FieldIndex == index {
 			return entry.Annotations
 		}
@@ -361,7 +365,11 @@ func fieldAnnotationsOf(class *model.Class, index uint32) []model.Annotation {
 }
 
 func methodAnnotationsOf(class *model.Class, index uint32) []model.Annotation {
-	for _, entry := range class.MethodAnnotations {
+	if position, ok := class.MethodAnnotationIndex[index]; ok && position >= 0 && position < len(class.MethodAnnotations) {
+		return class.MethodAnnotations[position].Annotations
+	}
+	for position := range class.MethodAnnotations {
+		entry := &class.MethodAnnotations[position]
 		if entry.MethodIndex == index {
 			return entry.Annotations
 		}
@@ -370,7 +378,11 @@ func methodAnnotationsOf(class *model.Class, index uint32) []model.Annotation {
 }
 
 func parameterAnnotationsOf(class *model.Class, index uint32) [][]model.Annotation {
-	for _, entry := range class.ParameterAnnotations {
+	if position, ok := class.ParameterAnnotationIndex[index]; ok && position >= 0 && position < len(class.ParameterAnnotations) {
+		return class.ParameterAnnotations[position].Parameters
+	}
+	for position := range class.ParameterAnnotations {
+		entry := &class.ParameterAnnotations[position]
 		if entry.MethodIndex == index {
 			return entry.Parameters
 		}

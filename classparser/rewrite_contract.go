@@ -3,6 +3,7 @@ package javaclassparser
 import (
 	"crypto/sha256"
 	"fmt"
+	"strings"
 )
 
 // Real sourceRewrite rule IDs contracted for T27. Names match dumper.go.
@@ -169,12 +170,12 @@ func (e *RewriteContractEngine) Apply(id, phase, source string, rule func(string
 }
 
 func joinRuleChain(chain []string) string {
-	out := ""
+	var out strings.Builder
 	for i, id := range chain {
 		if i > 0 {
-			out += "->"
+			out.WriteString("->")
 		}
-		out += id
+		out.WriteString(id)
 	}
-	return out
+	return out.String()
 }

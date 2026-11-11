@@ -205,7 +205,8 @@ func (p *parser) encodedMethods(cur *int, count uint32, direct bool) ([]model.En
 		}
 		method := model.EncodedMethod{MethodIndex: index, AccessFlags: flags, Method: methodID}
 		if codeOff != 0 {
-			method.Code, err = p.codeItem(codeOff)
+			declaredParameters := uint32(len(p.file.Protos[methodID.ProtoIndex].Parameters))
+			method.Code, err = p.codeItem(codeOff, declaredParameters)
 			if err != nil {
 				return nil, err
 			}
@@ -216,7 +217,7 @@ func (p *parser) encodedMethods(cur *int, count uint32, direct bool) ([]model.En
 	return out, nil
 }
 
-func (p *parser) codeItem(off uint32) (*model.Code, error) {
+func (p *parser) codeItem(off uint32, declaredParameters uint32) (*model.Code, error) {
 	if off%4 != 0 {
 		return nil, p.fail(int(off), "code_item", "offset is not 4-byte aligned")
 	}
@@ -241,7 +242,7 @@ func (p *parser) codeItem(off uint32) (*model.Code, error) {
 		code.Instructions[i] = binary.LittleEndian.Uint16(p.data[at : at+2])
 	}
 	if debugOff != 0 {
-		debug, err := p.parseDebugInfo(debugOff, insnsSize, registers)
+		debug, err := p.parseDebugInfo(debugOff, insnsSize, registers, declaredParameters)
 		if err != nil {
 			return nil, err
 		}
