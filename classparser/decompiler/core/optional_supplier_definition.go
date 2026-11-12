@@ -52,7 +52,7 @@ func (d *Decompiler) restoreOptionalSupplierDefinitionViews() {
 		if target := call.OptionalGenericThrowsSupplierTarget(factory.SourceReturnType, d.FunctionContext); target != nil {
 			storeIndex := d.semanticCFG.indexOfNode(stores[0])
 			callIndex := d.semanticCFG.indexOfNode(op)
-			if storeIndex < 0 || callIndex < 0 || !d.semanticCFG.GetOrCompute(AnalysisDominators, GraphAnalysisDomain{Roots: []int{0}, IncludeException: true}).Dominates(storeIndex, callIndex) {
+			if storeIndex < 0 || callIndex < 0 || !d.semanticCFG.Dominates(storeIndex, callIndex) {
 				continue
 			}
 			call.Arguments[0] = &values.CastExpression{Value: call.Arguments[0], TargetType: target, Binding: true, OriginPC: call.OriginPC}

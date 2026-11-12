@@ -3,12 +3,30 @@ package javaclassparser
 import (
 	"encoding/hex"
 	"encoding/json"
+	"reflect"
 	"sync"
 	"testing"
 
 	"github.com/yaklang/javajive/classparser/classes"
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 )
+
+func TestJDKObjectMetadataMatchesCatalog(t *testing.T) {
+	loadJDKInvocationCatalog()
+	if !jdkInvocationCatalog.valid {
+		t.Fatal("catalog did not load")
+	}
+	for release, classes := range jdkInvocationCatalog.profiles {
+		want, ok := classes["java/lang/Object"]
+		if !ok {
+			t.Fatalf("catalog lacks java/lang/Object for release %d", release)
+		}
+		got, ok := jdkObjectMetadata(release)
+		if !ok || !reflect.DeepEqual(got, want) {
+			t.Fatalf("static Object metadata drifted for release %d:\n got %+v\nwant %+v", release, got, want)
+		}
+	}
+}
 
 func TestJDKInvocationCatalogCompleteProfiles(t *testing.T) {
 	var document struct {

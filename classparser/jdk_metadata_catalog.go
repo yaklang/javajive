@@ -15,25 +15,37 @@ import (
 //go:embed jdk_metadata_catalog.json
 var jdkInvocationCatalogJSON []byte
 
+type jdkCatalogProvenance struct {
+	Archive string `json:"archive"`
+	SHA256  string `json:"sha256"`
+}
+
 var jdkInvocationCatalog struct {
 	once             sync.Once
+	valid            bool
 	profiles         map[int]map[string]callbinding.Class
 	throwableParents map[int]map[string][]string
 	referenceParents map[int]map[string][]string
+	archiveSHA       map[int]string
+	originalClasses  map[int]map[string]string
 }
 
-// jdkInvocationMetadata is a bounded platform-profile fallback. target must be
-// an exact catalog release; a newer/older profile is never silently substituted.
-// Caller-provided declaration bytes take priority over this fallback.
-func jdkInvocationMetadata(name string, target int) (callbinding.Class, bool) {
+// loadJDKInvocationCatalog decodes the embedded catalog exactly once. The
+// constructor-code loader also consumes the provenance tables from this decode;
+// it must not unmarshal the same 11 MB document a second time.
+func loadJDKInvocationCatalog() {
 	jdkInvocationCatalog.once.Do(func() {
 		var document struct {
 			Schema   int `json:"schema"`
 			Profiles []struct {
-				Release          int                          `json:"release"`
-				Classes          map[string]callbinding.Class `json:"classes"`
-				ThrowableParents map[string][]string          `json:"throwable_hierarchy"`
-				ReferenceParents map[string][]string          `json:"reference_hierarchy"`
+				Release          int                             `json:"release"`
+				ArchiveSHA256    string                          `json:"archive_sha256"`
+				Archives         map[string]string               `json:"archives"`
+				Provenance       map[string]jdkCatalogProvenance `json:"provenance"`
+				References       map[string]jdkCatalogProvenance `json:"reference_provenance"`
+				Classes          map[string]callbinding.Class    `json:"classes"`
+				ThrowableParents map[string][]string             `json:"throwable_hierarchy"`
+				ReferenceParents map[string][]string             `json:"reference_hierarchy"`
 			} `json:"profiles"`
 		}
 		if json.Unmarshal(jdkInvocationCatalogJSON, &document) != nil || document.Schema != 3 {
@@ -42,6 +54,8 @@ func jdkInvocationMetadata(name string, target int) (callbinding.Class, bool) {
 		profiles := make(map[int]map[string]callbinding.Class)
 		throwableParents := make(map[int]map[string][]string)
 		referenceParents := make(map[int]map[string][]string)
+		archiveSHA := make(map[int]string)
+		originalClasses := make(map[int]map[string]string)
 		for _, profile := range document.Profiles {
 			if _, duplicate := profiles[profile.Release]; duplicate {
 				return
@@ -61,7 +75,21 @@ func jdkInvocationMetadata(name string, target int) (callbinding.Class, bool) {
 					}
 				}
 			}
+			originals := map[string]string{}
+			for _, source := range []map[string]jdkCatalogProvenance{profile.Provenance, profile.References} {
+				for name, record := range source {
+					if profile.Archives[record.Archive] != profile.ArchiveSHA256 {
+						continue
+					}
+					if prior := originals[name]; prior != "" && prior != record.SHA256 {
+						return
+					}
+					originals[name] = record.SHA256
+				}
+			}
 			profiles[profile.Release] = profile.Classes
+			archiveSHA[profile.Release] = profile.ArchiveSHA256
+			originalClasses[profile.Release] = originals
 			for _, parents := range profile.ThrowableParents {
 				for _, parent := range parents {
 					if _, ok := profile.ThrowableParents[parent]; !ok {
@@ -82,10 +110,29 @@ func jdkInvocationMetadata(name string, target int) (callbinding.Class, bool) {
 			}
 			referenceParents[profile.Release] = profile.ReferenceParents
 		}
+		jdkInvocationCatalog.valid = true
 		jdkInvocationCatalog.profiles = profiles
 		jdkInvocationCatalog.throwableParents = throwableParents
 		jdkInvocationCatalog.referenceParents = referenceParents
+		jdkInvocationCatalog.archiveSHA = archiveSHA
+		jdkInvocationCatalog.originalClasses = originalClasses
 	})
+}
+
+// jdkInvocationMetadata is a bounded platform-profile fallback. target must be
+// an exact catalog release; a newer/older profile is never silently substituted.
+// Caller-provided declaration bytes take priority over this fallback.
+func jdkInvocationMetadata(name string, target int) (callbinding.Class, bool) {
+	if name == "java/lang/Object" {
+		return jdkObjectMetadata(target)
+	}
+	if !jdkConstructorNameCandidate(name) {
+		return callbinding.Class{}, false
+	}
+	loadJDKInvocationCatalog()
+	if !jdkInvocationCatalog.valid {
+		return callbinding.Class{}, false
+	}
 	class, ok := jdkInvocationCatalog.profiles[target][name]
 	if !ok {
 		return callbinding.Class{}, false
@@ -104,7 +151,12 @@ func jdkInvocationMetadata(name string, target int) (callbinding.Class, bool) {
 // deliberately carries no method, accessibility or constructor-effect claims.
 // Unknown releases and absent declarations remain unknown.
 func jdkReferenceSupertypes(name string, target int) ([]string, bool) {
-	jdkInvocationMetadata("java/lang/Object", target)
+	if !jdkConstructorNameCandidate(name) {
+		return nil, false
+	}
+	// Supertypes come from the catalog's reference_hierarchy; this is a real
+	// load, unlike the java/lang/Object metadata fast path.
+	loadJDKInvocationCatalog()
 	parents, known := jdkInvocationCatalog.referenceParents[target][name]
 	return append([]string(nil), parents...), known
 }
@@ -113,7 +165,10 @@ func jdkReferenceSupertypes(name string, target int) ([]string, bool) {
 // member-completeness claim. Checked-exception classification can use it;
 // synthetic-member naming and overload resolution must still reject it.
 func jdkThrowableAncestry(name string, target int) (callbinding.Class, bool) {
-	jdkInvocationMetadata("java/lang/Object", target)
+	if !jdkConstructorNameCandidate(name) {
+		return callbinding.Class{}, false
+	}
+	loadJDKInvocationCatalog()
 	parents, ok := jdkInvocationCatalog.throwableParents[target][name]
 	if !ok {
 		return callbinding.Class{}, false

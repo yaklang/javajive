@@ -61,6 +61,28 @@ func TestT26ScalarDominanceQueriesShareCachedAnalysis(t *testing.T) {
 	}
 }
 
+func TestSemanticCFGScalarDominatesMatchesSnapshot(t *testing.T) {
+	g := t09Graph(5,
+		t09Edge{0, 1, EdgeFallthrough},
+		t09Edge{0, 2, EdgeTaken},
+		t09Edge{1, 3, EdgeFallthrough},
+		t09Edge{2, 3, EdgeFallthrough},
+		t09Edge{3, 4, EdgeFallthrough},
+	)
+	domain := GraphAnalysisDomain{Roots: []int{0}, IncludeException: true}
+	want := g.GetOrCompute(AnalysisDominators, domain)
+	for a := 0; a < 5; a++ {
+		for b := 0; b < 5; b++ {
+			if got, expect := g.Dominates(a, b), want.Dominates(a, b); got != expect {
+				t.Fatalf("Dominates(%d,%d)=%v, want %v", a, b, got, expect)
+			}
+		}
+	}
+	if computes := g.AnalysisComputeCount(); computes != 1 {
+		t.Fatalf("scalar queries computed %d times, want 1 shared analysis", computes)
+	}
+}
+
 func TestT26ScalarPostDominanceQueriesShareCachedAnalysis(t *testing.T) {
 	graph, domain := t26ScalarGraph()
 

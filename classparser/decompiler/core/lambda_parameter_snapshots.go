@@ -135,7 +135,7 @@ func (d *Decompiler) unchangedCaptureLocalAt(ref *values.JavaRef, use *OpCode) b
 	}
 	stores, entry := g.ReachingDefinitions(use, slot)
 	a, b := g.indexOfNode(definition), g.indexOfNode(use)
-	return g.Err == nil && !entry && len(stores) == 1 && stores[0] == definition && a >= 0 && b >= 0 && g.GetOrCompute(AnalysisDominators, GraphAnalysisDomain{Roots: []int{0}, IncludeException: true}).Dominates(a, b)
+	return g.Err == nil && !entry && len(stores) == 1 && stores[0] == definition && a >= 0 && b >= 0 && g.Dominates(a, b)
 }
 
 func lambdaCaptureStoreDescriptor(opcode int, descriptor string) bool {

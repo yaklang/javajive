@@ -620,30 +620,33 @@ func retargetSwitchExitBreaks(sw *statements.SwitchStatement, label string) {
 func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*core.Node][]*core.Node, excludePreHeader bool) *utils2.Set[*core.Node] {
 	finalSet := utils2.NewSet[*core.Node]()
 	// Step 1: collect all nodes reachable from loopStart and build reverse adjacency.
+	// A plain map plus an append-order slice avoids utils.Set's mutex and avoids
+	// materializing/sorting a map-ordered List for every loop.
 	reverseAdj := map[*core.Node][]*core.Node{}
-	allNodes := utils2.NewSet[*core.Node]()
+	allNodes := make(map[*core.Node]struct{}, 64)
+	allNodesOrder := make([]*core.Node, 0, 64)
 	{
 		stk := []*core.Node{loopStart}
 		for len(stk) > 0 {
 			n := stk[len(stk)-1]
 			stk = stk[:len(stk)-1]
-			if allNodes.Has(n) {
+			if _, seen := allNodes[n]; seen {
 				continue
 			}
-			allNodes.Add(n)
+			allNodes[n] = struct{}{}
+			allNodesOrder = append(allNodesOrder, n)
 			for _, next := range loopAnalysisSuccessors(n) {
 				reverseAdj[next] = append(reverseAdj[next], n)
-				if !allNodes.Has(next) {
+				if _, seen := allNodes[next]; !seen {
 					stk = append(stk, next)
 				}
 			}
 		}
 	}
 	// Step 2: find back-edge sources — nodes whose Next includes circleNode. Iterate in stable id order
-	// (Set.List() is map-ordered) so allSources, and the reverse-BFS latch set derived from it, are
-	// deterministic.
+	// so allSources, and the reverse-BFS latch set derived from it, are deterministic.
 	var allSources []*core.Node
-	for _, n := range sortNodesByID(allNodes.List()) {
+	for _, n := range sortNodesByID(allNodesOrder) {
 		if slices.Contains(loopAnalysisSuccessors(n), circleNode) {
 			allSources = append(allSources, n)
 		}

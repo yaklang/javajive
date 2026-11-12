@@ -364,6 +364,20 @@ func (g *SemanticCFG) GetOrCompute(kind AnalysisKind, domain GraphAnalysisDomain
 	return st.cache.getOrCompute(st.id, 0, kind, domain, g.cachedSuccessorIndexLists(domain.IncludeException))
 }
 
+// Dominates is the scalar query used by proofs that only need a yes/no answer.
+// It reuses the cache-owned analysis and allocates nothing; callers must not use
+// it to obtain mutable analysis arrays.
+func (g *SemanticCFG) Dominates(dominator, node int) bool {
+	if g == nil || dominator < 0 || node < 0 {
+		return false
+	}
+	st := g.analysisState()
+	analysis := st.cache.getOrComputeShared(st.id, 0, AnalysisDominators,
+		GraphAnalysisDomain{Roots: []int{0}, IncludeException: true},
+		g.cachedSuccessorIndexLists(true))
+	return analysis != nil && analysis.Dominates(dominator, node)
+}
+
 // Dominates reports whether dominator dominates node in this snapshot.
 func (a *GraphAnalysis) Dominates(dominator, node int) bool {
 	if a == nil {

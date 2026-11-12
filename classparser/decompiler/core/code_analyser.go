@@ -168,9 +168,13 @@ type Decompiler struct {
 	ConstantPoolLiteralGetter     func(constantPoolGetterid int) values.JavaValue
 	ConstantPoolInvokeDynamicInfo func(id int) (uint16, string, string)
 	offsetToOpcodeIndex           map[uint16]int
-	opcodeIndexToOffset           map[int]uint16
-	ExceptionTable                []*ExceptionTableEntry
-	BootstrapMethods              []*BootstrapMethod
+	// opcodeOffsetsByID maps the stable opcode Id to its bytecode offset. This
+	// replaces a per-opcode map (about 4 MB on a large class) with a compact
+	// uint16 slice; Ids survive unreachable-code removal while slice positions
+	// do not.
+	opcodeOffsetsByID []uint16
+	ExceptionTable    []*ExceptionTableEntry
+	BootstrapMethods  []*BootstrapMethod
 	// Original declaration metadata qualifies source-body rendering. A source
 	// request or a method-name convention cannot provide that permission.
 	OriginalLambdaDeclaration        func(owner, name, descriptor string) LambdaOriginalDeclaration
@@ -299,7 +303,6 @@ func NewDecompiler(bytecodes []byte, constantPoolGetter func(id int) values.Java
 		bytecodes:            bytecodes,
 		constantPoolGetter:   constantPoolGetter,
 		offsetToOpcodeIndex:  map[uint16]int{},
-		opcodeIndexToOffset:  map[int]uint16{},
 		varTable:             map[int]*values.JavaRef{},
 		opcodeIdToRef:        map[*OpCode][][2]any{},
 		refToCreatingStore:   map[*values.JavaRef]*OpCode{},
@@ -438,7 +441,6 @@ func (d *Decompiler) ParseOpcode() (err error) {
 	opcodes := make([]*OpCode, 0, sizeHint)
 	opcodes = append(opcodes, &OpCode{Instr: &Instruction{OpCode: OP_START}})
 	offsetToIndex := make(map[uint16]int, sizeHint)
-	indexToOffset := make(map[int]uint16, sizeHint)
 	reader := NewJavaByteCodeReader(d.bytecodes)
 	id := 1
 	isWide := false
@@ -477,17 +479,45 @@ func (d *Decompiler) ParseOpcode() (err error) {
 		}
 		opcodes = append(opcodes, opcode)
 		offsetToIndex[opcode.CurrentOffset] = len(opcodes) - 1
-		indexToOffset[len(opcodes)-1] = opcode.CurrentOffset
 		id++
 	}
 	if isWide {
 		return fmt.Errorf("truncated wide at PC %d", wideOffset)
 	}
 	d.offsetToOpcodeIndex = offsetToIndex
-	d.opcodeIndexToOffset = indexToOffset
 	d.CurrentId = id
 	d.opCodes = opcodes
+	d.rebuildOpcodeOffsetsByID()
 	return nil
+}
+
+// rebuildOpcodeOffsetsByID indexes offsets by stable opcode Id. Slice order can
+// change when unreachable code is removed, so Id is the only safe key.
+func (d *Decompiler) rebuildOpcodeOffsetsByID() {
+	maxID := d.CurrentId
+	for _, op := range d.opCodes {
+		if op != nil && op.Id > maxID {
+			maxID = op.Id
+		}
+	}
+	if maxID < 0 {
+		maxID = 0
+	}
+	offsets := make([]uint16, maxID+1)
+	for _, op := range d.opCodes {
+		if op == nil || op.Id < 0 || op.Id >= len(offsets) {
+			continue
+		}
+		offsets[op.Id] = op.CurrentOffset
+	}
+	d.opcodeOffsetsByID = offsets
+}
+
+func (d *Decompiler) opcodeOffsetByID(id int) (uint16, bool) {
+	if d == nil || id < 0 || id >= len(d.opcodeOffsetsByID) {
+		return 0, false
+	}
+	return d.opcodeOffsetsByID[id], true
 }
 
 func (d *Decompiler) ScanJmp() error {

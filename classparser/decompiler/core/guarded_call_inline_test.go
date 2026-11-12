@@ -34,7 +34,8 @@ func guardedCallInlineFixture() (*Decompiler, *[]statements.Statement, *values.F
 	consumer := &statements.AssignStatement{LeftValue: result, JavaValue: ternary, OriginPC: 40, HasOriginPC: true}
 	root := []statements.Statement{producer, consumer}
 	d := NewDecompiler(nil, nil)
-	d.opcodeIndexToOffset[7] = 20
+	d.opcodeOffsetsByID = make([]uint16, 8)
+	d.opcodeOffsetsByID[7] = 20
 	return d, &root, call, ternary
 }
 

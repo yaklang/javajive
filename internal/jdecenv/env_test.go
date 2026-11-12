@@ -184,6 +184,90 @@ func TestUnboundGetDoesNotRequireBind(t *testing.T) {
 	}
 }
 
+func TestGetFastPathPreservesClosedAndLiveSemantics(t *testing.T) {
+	const key = "JDEC_FASTPATH_SEMANTICS"
+	t.Setenv(key, "host")
+
+	// A bound snapshot that does not override the key is closed.
+	if err := Run(map[string]string{}, func() error {
+		if got := Get(key); got != "" {
+			t.Fatalf("closed snapshot leaked host value %q", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A snapshot that does override it wins.
+	if err := Run(map[string]string{key: "snapshot"}, func() error {
+		if got := Get(key); got != "snapshot" {
+			t.Fatalf("snapshot value = %q", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A live sentinel reads the process environment.
+	if err := RunLive(func() error {
+		if got := Get(key); got != "host" {
+			t.Fatalf("live sentinel = %q, want host", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Nested snapshots must restore the outer closed/live choice.
+	if err := Run(map[string]string{key: "outer"}, func() error {
+		if err := Run(map[string]string{}, func() error {
+			if got := Get(key); got != "" {
+				t.Fatalf("inner closed snapshot = %q", got)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		if got := Get(key); got != "outer" {
+			t.Fatalf("outer snapshot was not restored: %q", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+var benchmarkGetSink string
+
+func BenchmarkGetWithoutActiveOverride(b *testing.B) {
+	const key = "JDEC_BENCH_ABSENT_KEY"
+	b.Setenv(key, "")
+	if err := Run(map[string]string{"PATH": "/usr/bin"}, func() error {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			benchmarkGetSink = Get(key)
+		}
+		return nil
+	}); err != nil {
+		b.Fatal(err)
+	}
+}
+
+func BenchmarkGetWithActiveOverride(b *testing.B) {
+	const key = "JDEC_BENCH_OVERRIDE_KEY"
+	if err := Run(map[string]string{key: "1"}, func() error {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			benchmarkGetSink = Get(key)
+		}
+		return nil
+	}); err != nil {
+		b.Fatal(err)
+	}
+}
+
 func TestNilRunDoesNotPush(t *testing.T) {
 	t.Setenv("JDEC_NESTED", "host")
 	_ = Run(map[string]string{"JDEC_NESTED": "outer"}, func() error {

@@ -49,6 +49,23 @@ bounded failure recovery for malformed and partially unsupported inputs.
   rebuilt after every accepted rewrite, SHA-256 state is carried forward, and the
   full rule order, diagnostics, hashes and repeated entries are locked by tests.
   A near-miss rewrite pipeline is ~11x faster with ~1290x fewer allocated bytes.
+- Add an ambient-environment fast path. `jdecenv.Get` no longer parses the
+  goroutine stack when the queried `JDEC_*` key is absent from every active
+  snapshot and the process environment; the common lookup drops from ~4 µs to
+  ~35 ns. Keys that are actually overridden keep the full goroutine-local path.
+- Eliminate cold-start platform metadata work. `java/lang/Object` metadata is a
+  verified static table derived from the pinned catalog, and the constructor
+  archive no longer decodes the 11 MB invocation catalog at runtime; catalog
+  consistency remains a pure-Go release test. A tiny single-class decompile drops
+  from ~208 ms / 38.6 MB / 354k allocations to ~7 ms / 0.16 MB / 2.6k allocations.
+- Replace the per-opcode slice-index-to-offset map with a compact opcode-Id
+  offset slice. A large class drops from ~272 MB to ~237 MB total allocation and
+  `ParseOpcode` from ~100 MB to ~77 MB. Add shared scalar `SemanticCFG.Dominates`
+  for proof callers, and replace `circleElementSet`'s locked `utils.Set` traversal
+  with plain map/slice state.
+- Measured T32 end-to-end changes: loop 10.4 → 4.1 ms, handler-dense 7.25 →
+  3.59 ms, slot 17.3 → 6.2 ms, render 4.67 → 1.02 ms; the Fastjson large-class
+  seed drops from ~1.37 s to ~0.83 s.
 
 - Harden DEX IR decoding: validate switch and fill-array payload targets with
   signed/`uint64` arithmetic before indexing, reject negative, wrapped, and
