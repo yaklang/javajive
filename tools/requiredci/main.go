@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -203,10 +204,7 @@ func validateSuites(root string, rows []suite) error {
 		seen[key] = true
 	}
 	results := make([]listedSuite, len(rows))
-	workers := len(rows)
-	if workers > maxListWorkers {
-		workers = maxListWorkers
-	}
+	workers := boundedWorkers(maxListWorkers, len(rows))
 	jobs := make(chan int)
 	var wait sync.WaitGroup
 	for worker := 0; worker < workers; worker++ {
@@ -400,6 +398,13 @@ func runSuites(root, group string) error {
 			prepared[index].binary = filepath.Join(work, fmt.Sprintf("suite-%d.test", index))
 			if group == "dex" {
 				prepared[index].profile = filepath.Join(work, fmt.Sprintf("coverage-%d.out", index))
+				// The external multidex APK test spends most of its time under
+				// instrumentation. Race and coverage are independent checks:
+				// run the same suite as a race-only binary and a coverage-only
+				// binary concurrently, and merge only the latter profile.
+				if prepared[index].item.Package == "./inspect" {
+					prepared[index].coverageBinary = filepath.Join(work, fmt.Sprintf("suite-%d-cover.test", index))
+				}
 			}
 		}
 		fmt.Printf("required CI: compiling %d suites for %s\n", len(prepared), group)
@@ -432,17 +437,29 @@ type suiteRunResult struct {
 
 // maxRunWorkers runs independent package test processes concurrently. Test
 // binaries are separate processes and the suites use no shared ports or
-// process-global state; two workers keep the four-vCPU runners busy while
-// leaving the 5-minute per-binary timeout far away from ordinary durations.
-const maxRunWorkers = 2
+// process-global state. Four workers fit the four-vCPU public runners; the
+// effective count is capped by GOMAXPROCS so a two-vCPU private runner keeps
+// its old behaviour. Each binary still has a five-minute timeout.
+const maxRunWorkers = 4
+
+func boundedWorkers(limit, jobs int) int {
+	workers := limit
+	if procs := runtime.GOMAXPROCS(0); workers > procs {
+		workers = procs
+	}
+	if jobs < workers {
+		workers = jobs
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	return workers
+}
 
 func runPreparedSuites(goPath, root, emptyPath string, raceGroup bool, prepared []preparedSuite) error {
 	results := make([]suiteRunResult, len(prepared))
 	if len(prepared) > 0 {
-		workers := maxRunWorkers
-		if len(prepared) < workers {
-			workers = len(prepared)
-		}
+		workers := boundedWorkers(maxRunWorkers, len(prepared))
 		fmt.Printf("required CI: running %d suites (%d at a time)\n", len(prepared), workers)
 		jobs := make(chan int)
 		stop := make(chan struct{})
@@ -491,24 +508,25 @@ func runPreparedSuites(goPath, root, emptyPath string, raceGroup bool, prepared 
 
 func executePreparedSuite(goPath, root, emptyPath string, raceGroup bool, run preparedSuite) suiteRunResult {
 	item := run.item
-	var output []byte
-	var runErr error
 	if raceGroup {
-		runArgs := []string{"tool", "test2json", "-t", "-p", item.Package, run.binary,
-			"-test.v=test2json", "-test.count=1", "-test.timeout=5m", "-test.run=" + run.selector}
-		if run.profile != "" {
-			runArgs = append(runArgs, "-test.coverprofile="+run.profile)
+		if run.coverageBinary != "" {
+			return executeSplitSuite(goPath, root, emptyPath, run)
 		}
-		command := exec.Command(goPath, runArgs...)
-		command.Dir = filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(item.Package, "./")))
-		command.Env = sanitizedEnvironment(emptyPath)
-		output, runErr = command.CombinedOutput()
-	} else {
-		command := exec.Command(goPath, "test", "-json", "-count=1", "-timeout=5m", "-run", run.selector, item.Package)
-		command.Dir = root
-		command.Env = sanitizedEnvironment(emptyPath)
-		output, runErr = command.CombinedOutput()
+		output, runErr := runTest2JSON(goPath, root, emptyPath, run, run.binary, run.profile)
+		result := suiteRunResult{output: output, ran: true}
+		if err := verifyEvents(item.Package, run.tests, output); err != nil {
+			result.err = err
+			return result
+		}
+		if runErr != nil {
+			result.err = fmt.Errorf("%s failed: %w", item.Package, runErr)
+		}
+		return result
 	}
+	command := exec.Command(goPath, "test", "-json", "-count=1", "-timeout=5m", "-run", run.selector, item.Package)
+	command.Dir = root
+	command.Env = sanitizedEnvironment(emptyPath)
+	output, runErr := command.CombinedOutput()
 	result := suiteRunResult{output: output, ran: true}
 	if err := verifyEvents(item.Package, run.tests, output); err != nil {
 		result.err = err
@@ -520,12 +538,64 @@ func executePreparedSuite(goPath, root, emptyPath string, raceGroup bool, run pr
 	return result
 }
 
+// executeSplitSuite runs the race-only and coverage-only binaries for one
+// suite concurrently. Both must pass the full sealed selector; only the
+// coverage binary publishes a profile.
+func executeSplitSuite(goPath, root, emptyPath string, run preparedSuite) suiteRunResult {
+	var raceOutput, coverOutput []byte
+	var raceErr, coverErr error
+	var wait sync.WaitGroup
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		raceOutput, raceErr = runTest2JSON(goPath, root, emptyPath, run, run.binary, "")
+	}()
+	go func() {
+		defer wait.Done()
+		coverOutput, coverErr = runTest2JSON(goPath, root, emptyPath, run, run.coverageBinary, run.profile)
+	}()
+	wait.Wait()
+	output := make([]byte, 0, len(raceOutput)+len(coverOutput))
+	output = append(output, raceOutput...)
+	output = append(output, coverOutput...)
+	result := suiteRunResult{output: output, ran: true}
+	if err := verifyEvents(run.item.Package, run.tests, raceOutput); err != nil {
+		result.err = err
+		return result
+	}
+	if err := verifyEvents(run.item.Package, run.tests, coverOutput); err != nil {
+		result.err = err
+		return result
+	}
+	if raceErr != nil {
+		result.err = fmt.Errorf("%s race run failed: %w", run.item.Package, raceErr)
+		return result
+	}
+	if coverErr != nil {
+		result.err = fmt.Errorf("%s coverage run failed: %w", run.item.Package, coverErr)
+	}
+	return result
+}
+
+func runTest2JSON(goPath, root, emptyPath string, run preparedSuite, binary, profile string) ([]byte, error) {
+	args := []string{"tool", "test2json", "-t", "-p", run.item.Package, binary,
+		"-test.v=test2json", "-test.count=1", "-test.timeout=5m", "-test.run=" + run.selector}
+	if profile != "" {
+		args = append(args, "-test.coverprofile="+profile)
+	}
+	command := exec.Command(goPath, args...)
+	command.Dir = filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(run.item.Package, "./")))
+	command.Env = sanitizedEnvironment(emptyPath)
+	return command.CombinedOutput()
+}
+
 type preparedSuite struct {
-	item     suite
-	tests    []string
-	selector string
-	binary   string
-	profile  string
+	item           suite
+	tests          []string
+	selector       string
+	binary         string
+	coverageBinary string
+	profile        string
 }
 
 // maxCompileWorkers bounds concurrent `go test -c` processes. Compilation is
@@ -534,10 +604,7 @@ type preparedSuite struct {
 const maxCompileWorkers = 2
 
 func compileSuites(goPath, root string, prepared []preparedSuite, group string) error {
-	workers := maxCompileWorkers
-	if len(prepared) < workers {
-		workers = len(prepared)
-	}
+	workers := boundedWorkers(maxCompileWorkers, len(prepared))
 	jobs := make(chan int)
 	errs := make([]error, len(prepared))
 	var wait sync.WaitGroup
@@ -548,15 +615,19 @@ func compileSuites(goPath, root string, prepared []preparedSuite, group string) 
 			for index := range jobs {
 				run := prepared[index]
 				args := []string{"test", "-c", "-race", "-o", run.binary}
-				if group == "dex" {
+				if group == "dex" && run.coverageBinary == "" {
 					args = append(args, "-covermode=atomic", "-coverpkg=./dex2jar/...,./internal/dexparser")
 				}
 				args = append(args, run.item.Package)
-				command := exec.Command(goPath, args...)
-				command.Dir = root
-				command.Env = compileEnvironment()
-				if output, err := command.CombinedOutput(); err != nil {
-					errs[index] = fmt.Errorf("compile %s: %w\n%s", run.item.Package, err, output)
+				if err := compileOne(goPath, root, run.item.Package, args); err != nil {
+					errs[index] = err
+					continue
+				}
+				if run.coverageBinary != "" {
+					args = []string{"test", "-c", "-covermode=atomic", "-coverpkg=./dex2jar/...,./internal/dexparser", "-o", run.coverageBinary, run.item.Package}
+					if err := compileOne(goPath, root, run.item.Package+" (coverage)", args); err != nil {
+						errs[index] = err
+					}
 				}
 			}
 		}()
@@ -570,6 +641,16 @@ func compileSuites(goPath, root string, prepared []preparedSuite, group string) 
 		if err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func compileOne(goPath, root, label string, args []string) error {
+	command := exec.Command(goPath, args...)
+	command.Dir = root
+	command.Env = compileEnvironment()
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("compile %s: %w\n%s", label, err, output)
 	}
 	return nil
 }

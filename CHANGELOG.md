@@ -24,11 +24,15 @@ bounded failure recovery for malformed and partially unsupported inputs.
 - Cut required-gate startup: validate only the requested inventory group instead
   of listing every package in every test job, memoize `go test -list` per package,
   list packages with bounded parallelism, precompile race/coverage suites in
-  parallel, and run at most two package test binaries concurrently. Warm-cache
-  times drop from ~78 s to ~27 s for algorithm, ~81 s to ~24 s for DEX, ~44 s to
-  ~15 s for corpus, and ~26 s to ~9 s for the full inventory check. Test binaries
-  remain separate processes with the same selectors, timeouts, clean environment,
-  sealed event checks, and fail-closed coverage baseline.
+  parallel, and run up to four package test binaries concurrently. Run the
+  instrumented external-APK inspect suite as concurrent race-only and
+  coverage-only binaries so each check keeps full coverage of its own concern.
+  Warm-cache times drop from ~78 s to ~17 s for algorithm, ~81 s to ~17 s for
+  DEX, ~44 s to ~15 s for corpus, and ~26 s to ~9 s for the full inventory
+  check. Test binaries remain separate processes with the same selectors,
+  timeouts, clean environment, sealed event checks, and fail-closed coverage
+  baseline. The exhaustive 797k-case stack-diagram test no longer allocates
+  per-case frame snapshots, cutting its allocation from ~2.4 GB to ~0.6 GB.
 - Remove avoidable quadratic and repeated work: index Java exception starts and
   graph adjacency, render with builders, reuse nested archive filesystems, populate
   DEX blocks in one pass, index DEX allocations/annotations/debug locals, bound

@@ -152,6 +152,10 @@ func boundedFrameUnpublished(out Frame) bool {
 func TestBoundedStackMoveDiagrams(t *testing.T) {
 	digest := sha256.New()
 	var encoded [20]byte
+	// Locals are read-only for stack moves. Sharing one slice avoids rebuilding
+	// it for all 797k cases; the snapshot still detects any in-place write.
+	locals := boundedStackLocals()
+	localsSnapshot := append([]Type(nil), locals...)
 	count, accepted, rejected := 0, 0, 0
 	for n, words := 0, 1; n <= 4; n, words = n+1, words*9 {
 		for word := 0; word < words; word++ {
@@ -162,6 +166,9 @@ func TestBoundedStackMoveDiagrams(t *testing.T) {
 				remaining /= 9
 			}
 			input := boundedStackSlots(logical)
+			if len(input) > boundedStackSnapshotSlots {
+				t.Fatalf("input slot count %d exceeds snapshot capacity", len(input))
+			}
 			for _, op := range boundedStackOps {
 				wantLogical, legal := boundedStackDiagram(logical, op)
 				want := boundedStackSlots(wantLogical)
@@ -170,22 +177,21 @@ func TestBoundedStackMoveDiagrams(t *testing.T) {
 					if limitIndex == 11 {
 						limit = 65535
 					}
-					f, err := NewFrameWithLimits(8, limit)
-					if err != nil {
-						t.Fatal(err)
-					}
-					f.Locals = boundedStackLocals()
-					f.Stack = append([]Type(nil), input...)
+					// NewFrameWithLimits(8, limit) followed by replacing Locals
+					// is the same frame without allocating a throwaway Locals.
+					f := Frame{Locals: locals, Stack: input, maxStack: limit, hasLimits: true}
 					f.ThisUninitialized, f.ThisClass, f.DirectSuperClass = true, "model/Owner", "model/Base"
-					before := f.Clone()
+					before := f
+					var beforeStack [boundedStackSnapshotSlots]Type
+					copy(beforeStack[:], input)
 					out, exception, err := Transfer(f, Instr{Op: op, Local: -1})
 					valid := legal && len(input) <= limit && len(want) <= limit
-					if !boundedFrameExact(f, before) || exception != nil {
+					if !boundedFrameUnchanged(f, before, localsSnapshot, beforeStack[:len(input)]) || exception != nil {
 						t.Fatalf("input mutation/exception n=%d word=%d op=%#x limit=%d", n, word, op, limit)
 					}
 					if valid {
 						accepted++
-						expected := before.Clone()
+						expected := before
 						expected.Stack = want
 						if err != nil || !boundedFrameExact(out, expected) {
 							t.Fatalf("diagram n=%d word=%d op=%#x limit=%d got=%+v want=%+v err=%v", n, word, op, limit, out, expected, err)
@@ -209,6 +215,31 @@ func TestBoundedStackMoveDiagrams(t *testing.T) {
 		t.Fatalf("incomplete grammar: count=%d accepted=%d rejected=%d", count, accepted, rejected)
 	}
 	t.Logf("JVMS bounded stack diagrams: %d cases (%d legal, %d refused), sha256=%x", count, accepted, rejected, digest.Sum(nil))
+}
+
+const boundedStackSnapshotSlots = 8
+
+// boundedFrameUnchanged verifies both frame scalars and the exact contents of
+// the caller-owned Locals and Stack backing arrays. before is a pre-call value
+// copy; the two snapshots are independent copies used to detect in-place
+// writes that a shallow struct copy alone would miss.
+func boundedFrameUnchanged(f, before Frame, localsSnapshot, stackSnapshot []Type) bool {
+	if f.maxStack != before.maxStack || f.hasLimits != before.hasLimits ||
+		f.ThisUninitialized != before.ThisUninitialized || f.ThisClass != before.ThisClass || f.DirectSuperClass != before.DirectSuperClass ||
+		len(f.Locals) != len(localsSnapshot) || len(f.Stack) != len(stackSnapshot) {
+		return false
+	}
+	for i := range localsSnapshot {
+		if f.Locals[i] != localsSnapshot[i] {
+			return false
+		}
+	}
+	for i := range stackSnapshot {
+		if f.Stack[i] != stackSnapshot[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Independently recognize head/tail layouts, including crossed/dangling pairs
