@@ -46,6 +46,50 @@ func TestAnnotationIndexesAndFallback(t *testing.T) {
 	}
 }
 
+func TestReferenceStateSharingIsImmutable(t *testing.T) {
+	original := newReferenceState(32)
+	original.setOne(3, "Lone;")
+	original.setOne(4, "Ltwo;")
+	copy := copyReferenceState(original)
+	copy.setOne(3, "Lchanged;")
+	if got := original[3]; len(got) != 1 || got[0] != "Lone;" {
+		t.Fatalf("copy mutation changed the shared descriptor set: %v", got)
+	}
+	merged := newReferenceState(32)
+	mergeReferenceState(merged, original)
+	mergeReferenceState(merged, copy)
+	if got := merged[3]; len(got) != 2 {
+		t.Fatalf("union descriptors = %v, want two", got)
+	}
+	if !referenceStatesEqual(original, copyReferenceState(original)) {
+		t.Fatal("shallow copy no longer equals its source")
+	}
+}
+
+func BenchmarkReferenceStateFixpointCopy(b *testing.B) {
+	const blocks = 512
+	const registers = 128
+	states := make([]referenceState, blocks)
+	for index := range states {
+		state := newReferenceState(registers)
+		for register := 0; register < registers; register += 8 {
+			state.setOne(uint16(register), "Ljava/lang/Object;")
+		}
+		states[index] = state
+	}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		for _, state := range states {
+			merged := newReferenceState(registers)
+			mergeReferenceState(merged, state)
+			copied := copyReferenceState(state)
+			if !referenceStatesEqual(merged, copied) {
+				b.Fatal("merge/copy disagree")
+			}
+		}
+	}
+}
+
 func BenchmarkMethodAnnotationIndexScale(b *testing.B) {
 	const count = 100000
 	class := &model.Class{

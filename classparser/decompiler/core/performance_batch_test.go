@@ -2,10 +2,19 @@ package core
 
 import (
 	"testing"
+	"unsafe"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 )
+
+func TestOpCodeStaysCompact(t *testing.T) {
+	// Every decoded instruction is an OpCode; a large class allocates hundreds
+	// of thousands. Field grouping keeps this at 320 bytes instead of 392.
+	if size := unsafe.Sizeof(OpCode{}); size > 320 {
+		t.Fatalf("OpCode is %d bytes, want <= 320", size)
+	}
+}
 
 func performanceStatements(count int) []statements.Statement {
 	out := make([]statements.Statement, count)

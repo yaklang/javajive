@@ -37,7 +37,7 @@ var requiredSuites = []suite{
 	{Group: "corpus", Package: "./jimage", Tests: 14, TestHash: "7c6617c457475dff8be3a1eb712d11488dae8fd3201994abdecc98b1e7c16758", Exclude: []string{"TestJLinkBigEndianImage", "TestJLinkCompactCPImage", "TestOpenJDKImage"}},
 	{Group: "corpus", Package: "./classparser", Tests: 4171, TestHash: "5598a3042c01d9c22b1472992e8aa5b7a427eacd44a4030fed865ec37fb6a93f", Include: []string{"TestDumpMethodsPointerFastPathKeepsDescriptor", "TestJoinRuleChainExactOutput", "TestSourceRewritePrecisionOuterGateSemantics", "TestRewriteSchedulerOrderMatchesDumperCallSites", "TestRewriteSchedulerPositiveAndNearMissExactOutput", "TestRewriteSchedulerPreservesRecordsDiagnosticsAndHashes", "TestRewriteSchedulerDecompileEquivalence", "TestJDKObjectMetadataMatchesCatalog", "TestAdversarialPlatformConstructorCodeIdentityAndEffectProof"}},
 
-	{Group: "algorithm", Package: "./classparser/decompiler/core", Tests: 409, TestHash: "1eec9b33c385716c4911830d60edf9d9669e4044285f808723639119164d8971"},
+	{Group: "algorithm", Package: "./classparser/decompiler/core", Tests: 410, TestHash: "50a3dad2a43cdab03ee0240eb5f4978bbab8857b189c4ca3233b815d8cae137d"},
 	{Group: "algorithm", Package: "./classparser/decompiler/core/callbinding", Tests: 17, TestHash: "e7eafd33ec36c2219f362b5c45872f126dde5a81dab84d931023fd1abc1836cc"},
 	{Group: "algorithm", Package: "./classparser/decompiler/core/class_context", Tests: 26, TestHash: "254c1ad1ea4a5da5d4bc6849e1067c11ef1953a2c171436e59d8b18627811c40"},
 	{Group: "algorithm", Package: "./classparser/decompiler/core/fieldbinding", Tests: 1, TestHash: "6ec3bd03aab62727a5d86c38f16a3e99142866db2c91b5d2872616162fc2b06e"},
@@ -55,8 +55,8 @@ var requiredSuites = []suite{
 
 	{Group: "dex", Package: "./dex2jar", Tests: 34, TestHash: "256aabae495907857f59e2a4960fd3ea0404cce6455ba30a6f69a1d4f0acf942", Exclude: []string{"TestAcceptedCorpusJVMOracle", "TestCoverageBaselineContract", "TestStrictAcceptedDEXRoundtripGate"}},
 	{Group: "dex", Package: "./dex2jar/input", Tests: 24, TestHash: "ef67f45d9b6d13e74806d6bd48a369073f355c14754ca6f93a01b03f3fe63d7a"},
-	{Group: "dex", Package: "./dex2jar/ir", Tests: 42, TestHash: "d858db8c7d5f33673d8fd0e3275298cf229ddb4a94046f7d54241b869872c06f"},
-	{Group: "dex", Package: "./dex2jar/lower", Tests: 53, TestHash: "cd86a4630c8e95271b56ca6eba7f64052ff4ec8473c8388d3069659ca1a83c80", Exclude: []string{
+	{Group: "dex", Package: "./dex2jar/ir", Tests: 43, TestHash: "1a8c256ed990bb96db287b1be2fa7f11786bbc5d30eadafd8db2376e3878a508"},
+	{Group: "dex", Package: "./dex2jar/lower", Tests: 54, TestHash: "ddc42bcad210f675f5b8ea1e15a38908ea834b7628d364dc13f2ac028b750e45", Exclude: []string{
 		"TestClassParsesVerifiesAndExecutes", "TestIntArrayPathVerifiesAndExecutes", "TestUnsupportedStubsVerifyAndThrow", "TestThisDelegationVerifiesAndExecutes",
 		"TestLowerEmitsMetadataAttributes", "TestLowerFilledNewArrayAndNarrowArrayElements", "TestLowerEmitsAnnotationDefaultForReflection", "TestLowerEmitsClassMetadataAndArrayOwnerInvoke", "TestLowerMovesPreDelegationFieldStoreAfterSuper", "TestLowerInterleavedAllocationKeepsArgumentOrder", "TestLowerCapturesDeferredStoreValueBeforeReassignment",
 		"TestRecoverFailsClosedForUnsupportedStaticInitializer", "TestRecoverClassVerifiesWithoutInitialization", "TestRecoverChildFirstInterfaceShellsVerifyOnJVM",

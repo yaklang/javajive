@@ -70,6 +70,33 @@ func (p *parser) parseDebugStream(off uint32, insnsSize uint32, registers uint16
 	// this budget across both record kinds prevents a malformed stream from
 	// amplifying a small debug item into large model slices.
 	recordBudget := len(p.data) - cur
+	if recordBudget < 0 {
+		recordBudget = 0
+	}
+	// Pre-size the common debug tables without trusting the stream length.
+	// Local restarts append additional ranges, so registers is only a lower
+	// bound; the cap avoids reserving a large table for a method with little
+	// debug data. The old append-only growth dominated DEX debug allocations.
+	localHint := int(registers)
+	if localHint > 256 {
+		localHint = 256
+	}
+	if maxByBytes := recordBudget / 3; localHint > maxByBytes {
+		localHint = maxByBytes
+	}
+	if localHint > 0 {
+		info.Locals = make([]model.DebugLocal, 0, localHint)
+	}
+	positionHint := int(insnsSize) / 2
+	if positionHint > 256 {
+		positionHint = 256
+	}
+	if maxByBytes := recordBudget / 2; positionHint > maxByBytes {
+		positionHint = maxByBytes
+	}
+	if positionHint > 0 {
+		info.Positions = make([]model.DebugPosition, 0, positionHint)
+	}
 	decodedRecords := 0
 	reserveRecord := func() error {
 		if decodedRecords >= recordBudget {

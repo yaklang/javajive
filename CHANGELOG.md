@@ -66,6 +66,20 @@ bounded failure recovery for malformed and partially unsupported inputs.
 - Measured T32 end-to-end changes: loop 10.4 → 4.1 ms, handler-dense 7.25 →
   3.59 ms, slot 17.3 → 6.2 ms, render 4.67 → 1.02 ms; the Fastjson large-class
   seed drops from ~1.37 s to ~0.83 s.
+- Repack `OpCode` from 392 to 320 bytes by grouping pointer/slice fields before
+  flags and removing three never-read fields. The Fastjson seed drops from
+  ~237 MB to ~212 MB total allocation, with `ParseOpcode` from ~77 MB to ~67 MB.
+- Replace DEX reference analysis's dense `[]map[string]bool` with a sparse map of
+  immutable sorted descriptor sets. A fixpoint block-copy benchmark changes from
+  ~10.7 ms / 13.7 MB / 221k allocations to ~1.55 ms / 1.59 MB / 1.2k
+  allocations (about 6.9x faster, 8.6x less memory, 189x fewer allocations).
+- Shrink `ir.Category` from 32 to 24 bytes by using existing alignment padding,
+  reducing a maximal dense category table by 25%.
+- Pre-size DEX debug local/position tables within bounded hints; the 8192-local
+  debug parse drops from ~5.87 MB to ~5.49 MB allocation.
+- Parse each DEX once during archive inspection: the multidex hierarchy and
+  per-class verdicts now share the same immutable `model.File` instead of
+  parsing every DEX twice.
 
 - Harden DEX IR decoding: validate switch and fill-array payload targets with
   signed/`uint64` arithmetic before indexing, reject negative, wrapped, and

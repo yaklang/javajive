@@ -304,9 +304,27 @@ func analyzeArchive(report *Report, data []byte, name string, forced inputkind.K
 		report.Diagnostics = append(report.Diagnostics, diagnosticFromError("container", err))
 		return
 	}
-	hierarchy := dexHierarchy(sources)
-	for _, source := range sources {
-		dex := analyzeDEX(source.Data, hierarchy, DEXProvenance{
+	// Parse each DEX once. The previous hierarchy pass parsed every file and the
+	// analysis pass parsed them again; hierarchy and per-class verdicts can share
+	// the same immutable model.File.
+	hierarchy := make(map[string]*model.Class)
+	parsedSources := make([]parsedDEXSource, len(sources))
+	for index, source := range sources {
+		parsed, parseErr := input.ParseDEX(source.Data, source.Entry)
+		parsedSources[index] = parsedDEXSource{source: source, file: parsed, err: parseErr}
+		if parseErr != nil {
+			continue
+		}
+		for position := range parsed.Classes {
+			class := &parsed.Classes[position]
+			if _, exists := hierarchy[class.Descriptor]; !exists {
+				hierarchy[class.Descriptor] = class
+			}
+		}
+	}
+	for _, item := range parsedSources {
+		source := item.source
+		dex := analyzeParsedDEX(source.Data, item.file, item.err, hierarchy, DEXProvenance{
 			Container: string(kind), Entry: source.Entry,
 			MultidexIndex: source.MultidexIndex, Canonical: source.Canonical,
 		}, options)
@@ -468,16 +486,26 @@ func sortArchiveEntries(entries []ArchiveEntry) {
 	})
 }
 
+type parsedDEXSource struct {
+	source input.DEXSource
+	file   *model.File
+	err    error
+}
+
 func analyzeDEX(data []byte, hierarchy map[string]*model.Class, provenance DEXProvenance, options Options) DEXFile {
+	parsed, err := input.ParseDEX(data, provenance.Entry)
+	return analyzeParsedDEX(data, parsed, err, hierarchy, provenance, options)
+}
+
+func analyzeParsedDEX(data []byte, parsed *model.File, parseErr error, hierarchy map[string]*model.Class, provenance DEXProvenance, options Options) DEXFile {
 	sum := sha256.Sum256(data)
 	dex := DEXFile{
 		Status: StatusComplete, Provenance: provenance, Version: dexVersion(data), Size: uint64(len(data)),
 		SHA256: hex.EncodeToString(sum[:]), Classes: []Class{}, Diagnostics: []Diagnostic{},
 	}
-	parsed, err := input.ParseDEX(data, provenance.Entry)
-	if err != nil {
+	if parseErr != nil {
 		dex.Status = StatusPartial
-		dex.Diagnostics = append(dex.Diagnostics, diagnosticFromError("strict-parser", err))
+		dex.Diagnostics = append(dex.Diagnostics, diagnosticFromError("strict-parser", parseErr))
 		return dex
 	}
 	classes := append([]model.Class(nil), parsed.Classes...)
@@ -692,24 +720,4 @@ func diagnosticFromError(source string, err error) Diagnostic {
 		}
 	}
 	return diagnostic
-}
-
-// dexHierarchy indexes the classes of every DEX entry in an application so a
-// class can prove assignability to a supertype declared in another multidex
-// file.
-func dexHierarchy(entries []input.DEXSource) map[string]*model.Class {
-	index := make(map[string]*model.Class)
-	for _, item := range entries {
-		parsed, err := input.ParseDEX(item.Data, item.Entry)
-		if err != nil {
-			continue
-		}
-		for position := range parsed.Classes {
-			class := &parsed.Classes[position]
-			if _, exists := index[class.Descriptor]; !exists {
-				index[class.Descriptor] = class
-			}
-		}
-	}
-	return index
 }

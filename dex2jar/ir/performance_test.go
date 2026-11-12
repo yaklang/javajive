@@ -3,7 +3,17 @@ package ir
 import (
 	"fmt"
 	"testing"
+	"unsafe"
 )
+
+func TestCategoryCellStaysCompact(t *testing.T) {
+	// Dense category tables can contain millions of cells. Keep the layout at
+	// 24 bytes; moving Descriptor before Allocation/Kind removed 8 bytes of
+	// alignment padding per cell.
+	if size := unsafe.Sizeof(Category{}); size > 24 {
+		t.Fatalf("Category cell is %d bytes, want <= 24", size)
+	}
+}
 
 func TestBuildBlocksScaleFixture(t *testing.T) {
 	instructions, codeUnits := branchScaleFixture(12000)
