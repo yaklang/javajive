@@ -622,31 +622,55 @@ func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*
 	// Step 1: collect all nodes reachable from loopStart and build reverse adjacency.
 	// A plain map plus an append-order slice avoids utils.Set's mutex and avoids
 	// materializing/sorting a map-ordered List for every loop.
-	reverseAdj := map[*core.Node][]*core.Node{}
-	allNodes := make(map[*core.Node]struct{}, 64)
-	allNodesOrder := make([]*core.Node, 0, 64)
-	{
-		stk := []*core.Node{loopStart}
-		for len(stk) > 0 {
-			n := stk[len(stk)-1]
-			stk = stk[:len(stk)-1]
-			if _, seen := allNodes[n]; seen {
-				continue
+	// A single nodeIndex map owns identity; all sets/adjacency are compact
+	// indexed slices. The previous reverseAdj map plus utils.Set added several
+	// map buckets per loop and dominating allocation traffic.
+	nodeIndex := make(map[*core.Node]int, 64)
+	nodes := make([]*core.Node, 0, 64)
+	incoming := make([]int, 0, 64)
+	discovered := make([]bool, 0, 64)
+	indexOf := func(node *core.Node) int {
+		if index, ok := nodeIndex[node]; ok {
+			return index
+		}
+		index := len(nodes)
+		nodeIndex[node] = index
+		nodes = append(nodes, node)
+		incoming = append(incoming, 0)
+		discovered = append(discovered, false)
+		return index
+	}
+	startIndex := indexOf(loopStart)
+	discovered[startIndex] = true
+	stk := []*core.Node{loopStart}
+	for len(stk) > 0 {
+		node := stk[len(stk)-1]
+		stk = stk[:len(stk)-1]
+		for _, next := range loopAnalysisSuccessors(node) {
+			nextIndex := indexOf(next)
+			incoming[nextIndex]++
+			if !discovered[nextIndex] {
+				discovered[nextIndex] = true
+				stk = append(stk, next)
 			}
-			allNodes[n] = struct{}{}
-			allNodesOrder = append(allNodesOrder, n)
-			for _, next := range loopAnalysisSuccessors(n) {
-				reverseAdj[next] = append(reverseAdj[next], n)
-				if _, seen := allNodes[next]; !seen {
-					stk = append(stk, next)
-				}
-			}
+		}
+	}
+	reverseAdj := make([][]*core.Node, len(nodes))
+	for index, count := range incoming {
+		if count > 0 {
+			reverseAdj[index] = make([]*core.Node, 0, count)
+		}
+	}
+	for _, node := range nodes {
+		for _, next := range loopAnalysisSuccessors(node) {
+			target := nodeIndex[next]
+			reverseAdj[target] = append(reverseAdj[target], node)
 		}
 	}
 	// Step 2: find back-edge sources — nodes whose Next includes circleNode. Iterate in stable id order
 	// so allSources, and the reverse-BFS latch set derived from it, are deterministic.
 	var allSources []*core.Node
-	for _, n := range sortNodesByID(allNodesOrder) {
+	for _, n := range sortNodesByID(nodes) {
 		if slices.Contains(loopAnalysisSuccessors(n), circleNode) {
 			allSources = append(allSources, n)
 		}
@@ -668,7 +692,7 @@ func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*
 		}
 		sources = kept
 	}
-	finalSet = reverseBFSStopAt(sources, reverseAdj, circleNode)
+	finalSet = reverseBFSStopAt(sources, reverseAdj, nodeIndex, circleNode)
 
 	// A retry may return to the header only through its catch. The synthetic
 	// try node represents exceptional edges at region entry, so reverse reachability
@@ -1065,7 +1089,7 @@ func isReducibleCFG(root *core.Node, domTree map[*core.Node][]*core.Node) bool {
 
 // reverseBFSStopAt returns {circleNode} ∪ all nodes that can reach a seed via reverse edges without
 // passing through circleNode.
-func reverseBFSStopAt(seeds []*core.Node, reverseAdj map[*core.Node][]*core.Node, circleNode *core.Node) *utils2.Set[*core.Node] {
+func reverseBFSStopAt(seeds []*core.Node, reverseAdj [][]*core.Node, nodeIndex map[*core.Node]int, circleNode *core.Node) *utils2.Set[*core.Node] {
 	set := utils2.NewSet[*core.Node]()
 	set.Add(circleNode)
 	queue := []*core.Node{}
@@ -1078,7 +1102,11 @@ func reverseBFSStopAt(seeds []*core.Node, reverseAdj map[*core.Node][]*core.Node
 	for len(queue) > 0 {
 		n := queue[0]
 		queue = queue[1:]
-		for _, pred := range reverseAdj[n] {
+		index, ok := nodeIndex[n]
+		if !ok {
+			continue
+		}
+		for _, pred := range reverseAdj[index] {
 			if pred != circleNode && !set.Has(pred) {
 				set.Add(pred)
 				queue = append(queue, pred)

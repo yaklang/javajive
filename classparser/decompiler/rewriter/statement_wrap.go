@@ -1063,6 +1063,29 @@ func (s *RewriteManager) Rewrite() error {
 		s.refreshDominatorsShared()
 	}
 	order := protectedSiblingRewriteOrder(s, s.TopologicalSortReverse(keyNodes))
+	// Membership tests below run inside the per-node rewrite loop. The old linear
+	// slices.Contains calls made a large method O(nodes²) before any rewriting
+	// work; index the four manager node classes once instead.
+	trySet := make(map[*core.Node]struct{}, len(s.TryNodes))
+	for _, node := range s.TryNodes {
+		trySet[node] = struct{}{}
+	}
+	ifSet := make(map[*core.Node]struct{}, len(s.IfNodes))
+	for _, node := range s.IfNodes {
+		ifSet[node] = struct{}{}
+	}
+	switchSet := make(map[*core.Node]struct{}, len(s.SwitchNode))
+	for _, node := range s.SwitchNode {
+		switchSet[node] = struct{}{}
+	}
+	whileSet := make(map[*core.Node]struct{}, len(s.WhileNode))
+	for _, node := range s.WhileNode {
+		whileSet[node] = struct{}{}
+	}
+	inSet := func(set map[*core.Node]struct{}, node *core.Node) bool {
+		_, ok := set[node]
+		return ok
+	}
 	loopJmpRewriterRecoed := map[*core.Node]struct{}{}
 	processed := map[*core.Node]struct{}{}
 	for i := 0; i < len(order); i++ {
@@ -1072,14 +1095,14 @@ func (s *RewriteManager) Rewrite() error {
 			continue
 		}
 
-		isTry := slices.Contains(s.TryNodes, node)
+		isTry := inSet(trySet, node)
 		// Protected retry branches need their loop exits before nested ifs
 		// consume the graph. Other loops retain the existing inner-if order.
 		materializeLoopExits := func(protectedRetryOnly bool) error {
-			if isTry || slices.Contains(s.IfNodes, node) || slices.Contains(s.SwitchNode, node) || slices.Contains(s.WhileNode, node) {
+			if isTry || inSet(ifSet, node) || inSet(switchSet, node) || inSet(whileSet, node) {
 				for j := i; j < len(order); j++ {
 					n := order[j]
-					if slices.Contains(s.WhileNode, n) && (loopOwnsRewriteNode(s, n, node) || (protectedRetryOnly && protectedRetryContinuationOwnsRewriteNode(s, n, node)) || (!protectedRetryOnly && s.LoopRegionReducible && len(n.Next) > 0 && searchCircleEndNode(n, n.Next[0], s.DominatorMap, true) == node)) {
+					if inSet(whileSet, n) && (loopOwnsRewriteNode(s, n, node) || (protectedRetryOnly && protectedRetryContinuationOwnsRewriteNode(s, n, node)) || (!protectedRetryOnly && s.LoopRegionReducible && len(n.Next) > 0 && searchCircleEndNode(n, n.Next[0], s.DominatorMap, true) == node)) {
 						if protectedRetryOnly && !loopHasProvedProtectedRetry(s, n) {
 							continue
 						}
@@ -1125,14 +1148,14 @@ func (s *RewriteManager) Rewrite() error {
 		// needs it and it is zero-regression). Extending it to if containers regressed passing
 		// methods catastrophically when applied globally (5->318), so it is gated behind aggressive
 		// mode: only a method that already failed conservatively takes the if-container path.
-		isAggrIf := s.Aggressive && slices.Contains(s.IfNodes, node)
+		isAggrIf := s.Aggressive && inSet(ifSet, node)
 		if isTry || isAggrIf {
 			body := s.containerBodyNodeSet(node)
 			for _, cand := range order[i+1:] {
 				if _, done := processed[cand]; done {
 					continue
 				}
-				if cand == node || !body[cand] || !slices.Contains(s.IfNodes, cand) {
+				if cand == node || !body[cand] || !inSet(ifSet, cand) {
 					continue
 				}
 				s.refreshDominatorsShared()

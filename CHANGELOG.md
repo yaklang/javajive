@@ -80,6 +80,15 @@ bounded failure recovery for malformed and partially unsupported inputs.
 - Parse each DEX once during archive inspection: the multidex hierarchy and
   per-class verdicts now share the same immutable `model.File` instead of
   parsing every DEX twice.
+- Precompute post-dominator set cardinalities once instead of recalculating a
+  bitset popcount for every immediate-parent candidate, changing extraction from
+  `O(n·candidates·words)` toward `O(n·words + n·candidates)`.
+- Replace the rewrite loop's repeated `slices.Contains` membership scans over
+  try/if/switch/while node lists with indexed sets, removing an avoidable
+  `O(nodes²)` component before any rewriting work.
+- Build loop reverse adjacency with one node-index map and exact-capacity
+  indexed slices. The `circleElementSet` allocation hotspot drops from ~30.6 MB
+  to ~14.0 MB in the large-class profile.
 
 - Harden DEX IR decoding: validate switch and fill-array payload targets with
   signed/`uint64` arithmetic before indexing, reject negative, wrapped, and
