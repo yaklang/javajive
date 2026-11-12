@@ -55,7 +55,13 @@ type RewriteManager struct {
 	// statement CFG topology. Use refreshDominators/Dominates/PostDominates
 	// instead of recomputing or reading the cache directly.
 	dominance *statementDominanceState
-	LabelId   int
+	// loopCache memoizes loop bodies and loop-exit searches for one rewrite
+	// step. Rewrite installs it only around an analysis-only scan and drops it
+	// before any graph mutation, so cached answers always describe the live
+	// graph. Nil means every query recomputes.
+	loopCache   *loopAnalysisCache
+	loopScratch loopElementScratch
+	LabelId     int
 	// LoopRegionReducible records whether the ORIGINAL method CFG (before any loop wrapping) is a
 	// reducible flow graph. It is computed once in Rewrite() because mid-pipeline the graph gains
 	// do-while wrapper nodes and rewrite-inserted break/continue edges that corrupt dominance, making a
@@ -1088,6 +1094,10 @@ func (s *RewriteManager) Rewrite() error {
 	}
 	loopJmpRewriterRecoed := map[*core.Node]struct{}{}
 	processed := map[*core.Node]struct{}{}
+	// Protected ranges are established by the parser and pre-rewrite
+	// normalization; this loop cannot introduce one into a method that had
+	// none. Check once instead of scanning the graph at every container.
+	loopCacheAllowed := s.loopCacheSafe()
 	for i := 0; i < len(order); i++ {
 		s.refreshDominatorsShared()
 		node := order[i]
@@ -1095,15 +1105,41 @@ func (s *RewriteManager) Rewrite() error {
 			continue
 		}
 
+		// Loop bodies and exits are pure functions of the live graph while the
+		// method has no protected ranges. The two scans below otherwise rebuild
+		// every loop body for every container node; reuse the answers within
+		// this rewrite step and drop them at the first mutation.
+		var loopCache *loopAnalysisCache
+		var domIndex *utils2.DominateIndex
+		useLoopCache := func() {
+			if loopCache == nil && loopCacheAllowed {
+				loopCache = newLoopAnalysisCache()
+			}
+			s.loopCache = loopCache
+			if domIndex == nil {
+				domIndex = utils2.NewDominateIndex(s.DominatorMap)
+			}
+		}
+		dropLoopCache := func() {
+			s.loopCache = nil
+			loopCache = nil
+			domIndex = nil
+		}
 		isTry := inSet(trySet, node)
 		// Protected retry branches need their loop exits before nested ifs
 		// consume the graph. Other loops retain the existing inner-if order.
 		materializeLoopExits := func(protectedRetryOnly bool) error {
 			if isTry || inSet(ifSet, node) || inSet(switchSet, node) || inSet(whileSet, node) {
+				useLoopCache()
+				defer func() { s.loopCache = nil }()
+				// An installed cache proves the method has no protected range,
+				// so retry-continuation queries cannot match and would only
+				// rescan every loop body.
+				noProtected := s.loopCache != nil
 				for j := i; j < len(order); j++ {
 					n := order[j]
-					if inSet(whileSet, n) && (loopOwnsRewriteNode(s, n, node) || (protectedRetryOnly && protectedRetryContinuationOwnsRewriteNode(s, n, node)) || (!protectedRetryOnly && s.LoopRegionReducible && len(n.Next) > 0 && searchCircleEndNode(n, n.Next[0], s.DominatorMap, true) == node)) {
-						if protectedRetryOnly && !loopHasProvedProtectedRetry(s, n) {
+					if inSet(whileSet, n) && (loopOwnsRewriteNodeWith(s, n, node, domIndex.IsDominate) || (protectedRetryOnly && !noProtected && protectedRetryContinuationOwnsRewriteNode(s, n, node)) || (!protectedRetryOnly && s.LoopRegionReducible && len(n.Next) > 0 && s.searchLoopEnd(n, n.Next[0], true) == node)) {
+						if protectedRetryOnly && !noProtected && !loopHasProvedProtectedRetry(s, n) {
 							continue
 						}
 						if isTry && (len(n.Next) == 0 || (n.Next[0] != node && !loopHeaderGuardsTry(s, n, node)) || (hasSharedCatchEntry(node) && !loopHasProvedProtectedRetry(s, n))) {
@@ -1114,7 +1150,7 @@ func (s *RewriteManager) Rewrite() error {
 							// until a nested terminal loop has been wrapped.
 							// Materialize newly exposed exits before this
 							// continuation becomes an opaque IfStatement.
-							if protectedRetryOnly || len(n.Next) == 0 || slices.Contains(n.Next, node) || searchCircleEndNode(n, n.Next[0], s.DominatorMap, s.LoopRegionReducible) != node {
+							if protectedRetryOnly || len(n.Next) == 0 || slices.Contains(n.Next, node) || s.searchLoopEnd(n, n.Next[0], s.LoopRegionReducible) != node {
 								// A loop that already owns this continuation
 								// needs no second pass. Keep looking for an
 								// enclosing loop whose branch also exits here.
@@ -1126,6 +1162,7 @@ func (s *RewriteManager) Rewrite() error {
 							return err
 						}
 						loopJmpRewriterRecoed[n] = struct{}{}
+						dropLoopCache()
 						s.refreshDominatorsShared()
 						break
 					}
@@ -1165,6 +1202,9 @@ func (s *RewriteManager) Rewrite() error {
 				processed[cand] = struct{}{}
 			}
 			s.refreshDominatorsShared()
+			// IfRewriter may have changed statements or edges inside this
+			// container; loop answers collected before it are stale.
+			dropLoopCache()
 		}
 
 		if err := materializeLoopExits(false); err != nil {

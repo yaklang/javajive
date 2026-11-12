@@ -923,8 +923,12 @@ func (m *MutableAnalysisGraph) successorIndexLists(includeException bool) [][]in
 }
 
 func (m *MutableAnalysisGraph) buildSuccessorIndexLists(includeException bool) [][]int {
-	succs := make([][]int, m.n)
-	seen := make([]map[int]struct{}, m.n)
+	// The previous implementation allocated one dedupe map per source node and
+	// let every successor list grow by append. Statement dominance rebuilds this
+	// table after each topology change, so on a loop-heavy method those maps
+	// dominated the analysis allocation. Count first to size each list exactly,
+	// then dedupe with generation stamps over two flat arrays.
+	counts := make([]int, m.n)
 	for _, e := range m.edges {
 		if !includeException && e.exception {
 			continue
@@ -932,13 +936,32 @@ func (m *MutableAnalysisGraph) buildSuccessorIndexLists(includeException bool) [
 		if e.from < 0 || e.from >= m.n || e.to < 0 || e.to >= m.n {
 			continue
 		}
-		if seen[e.from] == nil {
-			seen[e.from] = map[int]struct{}{}
+		counts[e.from]++
+	}
+	succs := make([][]int, m.n)
+	for from, count := range counts {
+		if count > 0 {
+			succs[from] = make([]int, 0, count)
 		}
-		if _, dup := seen[e.from][e.to]; dup {
+	}
+	stamps := make([]uint64, m.n)
+	marks := make([]uint64, m.n)
+	var stamp uint64
+	for _, e := range m.edges {
+		if !includeException && e.exception {
 			continue
 		}
-		seen[e.from][e.to] = struct{}{}
+		if e.from < 0 || e.from >= m.n || e.to < 0 || e.to >= m.n {
+			continue
+		}
+		if stamps[e.from] == 0 {
+			stamp++
+			stamps[e.from] = stamp
+		}
+		if marks[e.to] == stamps[e.from] {
+			continue
+		}
+		marks[e.to] = stamps[e.from]
 		succs[e.from] = append(succs[e.from], e.to)
 	}
 	return succs
@@ -947,6 +970,14 @@ func (m *MutableAnalysisGraph) buildSuccessorIndexLists(includeException bool) [
 // GetOrCompute is the mutable-graph counterpart of SemanticCFG.GetOrCompute.
 func (m *MutableAnalysisGraph) GetOrCompute(kind AnalysisKind, domain GraphAnalysisDomain) *GraphAnalysis {
 	return m.cache.getOrCompute(m.id, m.epoch, kind, domain, m.successorIndexLists(domain.IncludeException))
+}
+
+// GetOrComputeShared returns the cache-owned analysis without the defensive
+// deep copy. The caller must treat it as read-only and must not retain it past
+// a mutation of this graph. Rewriter-internal analysis state uses it to avoid
+// cloning IDom/IPDom/loop tables at every topology change.
+func (m *MutableAnalysisGraph) GetOrComputeShared(kind AnalysisKind, domain GraphAnalysisDomain) *GraphAnalysis {
+	return m.cache.getOrComputeShared(m.id, m.epoch, kind, domain, m.successorIndexLists(domain.IncludeException))
 }
 
 // Dominates reports whether dominator dominates node in the current graph

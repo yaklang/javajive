@@ -35,7 +35,7 @@ var requiredSuites = []suite{
 	{Group: "corpus", Package: "./classparser/jarwar", Tests: 18, TestHash: "b1195066bc29f6a35391695fb815b4eef9eb42a55ef53f7ba9786375a27afc25"},
 	{Group: "corpus", Package: "./classparser/decompiler/jar", Tests: 1, TestHash: "e84c19ac824483c172a763d735732079fb808d6dd0153c53e573b18513d23553"},
 	{Group: "corpus", Package: "./jimage", Tests: 14, TestHash: "7c6617c457475dff8be3a1eb712d11488dae8fd3201994abdecc98b1e7c16758", Exclude: []string{"TestJLinkBigEndianImage", "TestJLinkCompactCPImage", "TestOpenJDKImage"}},
-	{Group: "corpus", Package: "./classparser", Tests: 4171, TestHash: "5598a3042c01d9c22b1472992e8aa5b7a427eacd44a4030fed865ec37fb6a93f", Include: []string{"TestDumpMethodsPointerFastPathKeepsDescriptor", "TestJoinRuleChainExactOutput", "TestSourceRewritePrecisionOuterGateSemantics", "TestRewriteSchedulerOrderMatchesDumperCallSites", "TestRewriteSchedulerPositiveAndNearMissExactOutput", "TestRewriteSchedulerPreservesRecordsDiagnosticsAndHashes", "TestRewriteSchedulerDecompileEquivalence", "TestJDKObjectMetadataMatchesCatalog", "TestAdversarialPlatformConstructorCodeIdentityAndEffectProof"}},
+	{Group: "corpus", Package: "./classparser", Tests: 4175, TestHash: "34155c44d158d5a89fb061147fa21b5b3613717b811e756b335e9b7ca7cb028c", Include: []string{"TestDumpMethodsPointerFastPathKeepsDescriptor", "TestJoinRuleChainExactOutput", "TestSourceRewritePrecisionOuterGateSemantics", "TestRewriteSchedulerOrderMatchesDumperCallSites", "TestRewriteSchedulerPositiveAndNearMissExactOutput", "TestRewriteSchedulerPreservesRecordsDiagnosticsAndHashes", "TestRewriteSchedulerDecompileEquivalence", "TestJDKObjectMetadataMatchesCatalog", "TestAdversarialPlatformConstructorCodeIdentityAndEffectProof", "TestLoopAnalysisCacheMatchesUncachedDecompile"}},
 
 	{Group: "algorithm", Package: "./classparser/decompiler/core", Tests: 410, TestHash: "50a3dad2a43cdab03ee0240eb5f4978bbab8857b189c4ca3233b815d8cae137d"},
 	{Group: "algorithm", Package: "./classparser/decompiler/core/callbinding", Tests: 17, TestHash: "e7eafd33ec36c2219f362b5c45872f126dde5a81dab84d931023fd1abc1836cc"},
@@ -48,7 +48,7 @@ var requiredSuites = []suite{
 	{Group: "algorithm", Package: "./classparser/decompiler/core/statements", Tests: 47, TestHash: "9f3bcb9c125d2d07a5d09bf4a4f4c119f5e9055cfd55db989869e96b22e574aa"},
 	{Group: "algorithm", Package: "./classparser/decompiler/core/values", Tests: 283, TestHash: "1ef92dd8999fa01ec4702b98c9172efbe714dcdd6b35d8d13a8daa71363efb64", Exclude: []string{"TestJavaUnitsExhaustiveJVMCodeUnitOracle", "TestTaskT03C03_CharLiterals"}},
 	{Group: "algorithm", Package: "./classparser/decompiler/core/values/types", Tests: 71, TestHash: "03a89ddb73bfdfbb8de135dd84fc6af8ebdb054662e7126d92a58889b0055773"},
-	{Group: "algorithm", Package: "./classparser/decompiler/rewriter", Tests: 262, TestHash: "21381e2810021266ba9957a2d0320640f3b61688d7d9a76cece737ae3fb7dd7a"},
+	{Group: "algorithm", Package: "./classparser/decompiler/rewriter", Tests: 264, TestHash: "c5f0f1218adc82d7f8021d4d87ffb8b960eec5420940f3db837ea01557191a27"},
 	{Group: "algorithm", Package: "./internal/workbudget", Tests: 17, TestHash: "1f53605cb2386de80f254918d30db00ff803eed986bbc7087d0d42488f6dea8b"},
 	{Group: "algorithm", Package: "./internal/jdecenv", Tests: 13, TestHash: "51ee508a5994d7763fb87e1d2d9cf78a345237af650479b650dbf055625082ad"},
 	{Group: "algorithm", Package: "./internal/filesys", Tests: 9, TestHash: "f6485392fe079ab59aafa635aca0d9bbe00b7af50334a7c1362396d883d82e31"},

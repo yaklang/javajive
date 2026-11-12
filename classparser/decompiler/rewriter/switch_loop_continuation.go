@@ -17,7 +17,7 @@ import (
 // Each bypass gets its original step once; the arm's effects stay in place.
 // A potentially throwing assignment additionally requires identical protected
 // membership on the direct incoming edge, so its handler selection is unchanged.
-func materializeSwitchLatchContinues(manager *RewriteManager, loop *core.Node) {
+func materializeSwitchLatchContinues(manager *RewriteManager, loop *core.Node) bool {
 	changed := false
 	for _, latch := range slices.Clone(loop.Source) {
 		copyStep, pure := switchLoopLocalStep(latch)
@@ -61,6 +61,7 @@ func materializeSwitchLatchContinues(manager *RewriteManager, loop *core.Node) {
 	if changed {
 		manager.refreshDominatorsShared()
 	}
+	return changed
 }
 
 // Certify a finite continuation whose every CFG path reaches the step. A

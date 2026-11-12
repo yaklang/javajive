@@ -7114,6 +7114,11 @@ func fixLoopCatchThrow(body string) string {
 	return strings.Join(lines, "\n")
 }
 
+var (
+	throwTypeVarSignatureRe = regexp.MustCompile(`\)\s*throws\s+([A-Z]\w*)\s*\{`)
+	throwTypeVarStatementRe = regexp.MustCompile(`^(\s*)throw\s+(\w+)\s*;\s*$`)
+)
+
 // Canonical: commons-lang3 ExceptionUtils.typeErasure `<R, T extends Throwable> R typeErasure(
 // Throwable throwable) throws T { throw (T) throwable; }`.
 func fixThrowTypeVarCast(body string) string {
@@ -7124,8 +7129,9 @@ func fixThrowTypeVarCast(body string) string {
 	// Pattern: a method signature line containing `throws <TypeVar>` (a single bare identifier,
 	// not a class name), followed by a body containing `throw <var>;` where <var> is a variable
 	// of type Throwable (not already cast). We detect the method signature by the `throws T` clause
-	// and scan the method body for `throw <var>;`.
-	throwsTypeVarRe := regexp.MustCompile(`\)\s*throws\s+([A-Z]\w*)\s*\{`)
+	// and scan the method body for `throw <var>;`. The regexps are package-level: compiling them
+	// inside the per-line loop accounted for most of this pass's allocation on large classes.
+	throwsTypeVarRe := throwTypeVarSignatureRe
 	type edits struct {
 		lineIdx int
 		oldText string
@@ -7160,8 +7166,7 @@ func fixThrowTypeVarCast(body string) string {
 				break
 			}
 			// Match `throw <var>;` where <var> is a simple identifier (not already cast).
-			throwRe := regexp.MustCompile(`^(\s*)throw\s+(\w+)\s*;\s*$`)
-			tm := throwRe.FindStringSubmatch(jl)
+			tm := throwTypeVarStatementRe.FindStringSubmatch(jl)
 			if tm == nil {
 				continue
 			}

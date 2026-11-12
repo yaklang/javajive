@@ -89,6 +89,31 @@ bounded failure recovery for malformed and partially unsupported inputs.
 - Build loop reverse adjacency with one node-index map and exact-capacity
   indexed slices. The `circleElementSet` allocation hotspot drops from ~30.6 MB
   to ~14.0 MB in the large-class profile.
+- Replace arm64's goroutine-identity fallback with the runtime `g` register.
+  `jdecenv.Goid` previously formatted the complete goroutine stack through
+  `runtime.Stack` on every ambient lookup; `ReplaceVar` alone made that 40% of
+  class-analysis CPU on Apple Silicon. An overridden `jdecenv.Get` drops from
+  ~4 µs to ~23 ns, and the FMParser regression class decompile from 4.51 s to
+  1.47 s.
+- Restore shielded Java literals and comments in one linear marker pass instead
+  of one `strings.ReplaceAll` per span. The previous loop was O(spans × source)
+  and accounted for 445 MB of copying in the FMParser profile. A differential
+  test against the sequential implementation covers duplicated, reordered,
+  deleted and wrapper-mangled markers, with an exact fallback for overlapping
+  matches. Hoist the throw-type-variable regexes out of their per-line loop.
+- Cache loop bodies and loop-exit searches for the analysis-only window between
+  graph mutations, and let `LoopJmpRewriter` reuse the scan's answers when its
+  two pre-rewrites changed nothing. A 7 KB, 60-loop class drops from
+  7.78 s / 4.79 GB / 38.6M allocations to 1.70 s / 635 MB / 3.55M allocations.
+  The cache is disabled whenever protected retry boundaries could mutate node
+  state, and parity with the uncached rewriter is locked by a kill-switch test
+  on loop-bearing class fixtures.
+- Index statement dominance queries with child-to-parent links instead of a
+  recursive subtree walk, preserve the old walk for non-tree test maps, and
+  reuse the cached immediate-dominator analysis without a defensive deep copy.
+  Rebuild successor lists with two flat generation-stamp arrays instead of one
+  dedupe map per source node. `circleElementSet` reuses its index map, slices
+  and reverse adjacency across queries and no longer sorts every loop body.
 
 - Harden DEX IR decoding: validate switch and fill-array payload targets with
   signed/`uint64` arithmetic before indexing, reject negative, wrapped, and

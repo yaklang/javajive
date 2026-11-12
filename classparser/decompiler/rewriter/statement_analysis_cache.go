@@ -170,7 +170,10 @@ func (s *statementDominanceState) dominatorTree() map[*core.Node][]*core.Node {
 	if s.graph == nil {
 		s.graph = newStatementAnalysisGraph(s.snapshot)
 	}
-	analysis := s.graph.GetOrCompute(core.AnalysisDominators, core.GraphAnalysisDomain{Roots: []int{0}})
+	// The state only reads IDom and the graph is replaced on every topology
+	// change, so the cache-owned analysis is safe to borrow here; a defensive
+	// deep copy per rewrite step would only add allocation.
+	analysis := s.graph.GetOrComputeShared(core.AnalysisDominators, core.GraphAnalysisDomain{Roots: []int{0}})
 	s.domAnalysis = analysis
 	tree := make(map[*core.Node][]*core.Node)
 	if analysis == nil {

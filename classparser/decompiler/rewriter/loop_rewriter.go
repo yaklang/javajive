@@ -24,19 +24,28 @@ type LoopStatement struct {
 // jumps before an if/try is consumed, use body membership as well as dominance;
 // otherwise an already processed inner loop hides the pending enclosing loop.
 func loopOwnsRewriteNode(manager *RewriteManager, loop, node *core.Node) bool {
+	return loopOwnsRewriteNodeWith(manager, loop, node, func(dominator, dominated *core.Node) bool {
+		return utils.IsDominate(manager.DominatorMap, dominator, dominated)
+	})
+}
+
+// loopOwnsRewriteNodeWith is loopOwnsRewriteNode with a caller-supplied
+// dominance query. The rewrite scan passes an indexed query so its repeated
+// ownership tests cost tree depth instead of the whole dominated subtree.
+func loopOwnsRewriteNodeWith(manager *RewriteManager, loop, node *core.Node, dominates func(dominator, dominated *core.Node) bool) bool {
 	if loop == node {
 		return true
 	}
-	if len(loop.Next) == 0 || !utils.IsDominate(manager.DominatorMap, loop, node) {
+	if len(loop.Next) == 0 || !dominates(loop, node) {
 		return false
 	}
-	if !manager.LoopRegionReducible || circleElementSet(loop, loop.Next[0], manager.DominatorMap, true).Has(node) {
+	if !manager.LoopRegionReducible || manager.loopBody(loop, loop.Next[0], true).Has(node) {
 		return true
 	}
 	// A successful break arm need not reach any backedge. Its private exit
 	// prefix still belongs to this loop until the normal boundary. Structure
 	// those transfers before an if on that prefix becomes an opaque container.
-	boundary := searchCircleEndNode(loop, loop.Next[0], manager.DominatorMap, true)
+	boundary := manager.searchLoopEnd(loop, loop.Next[0], true)
 	if boundary == nil || boundary == node {
 		return false
 	}
@@ -81,7 +90,7 @@ func loopHeaderGuardsTry(manager *RewriteManager, loop, tr *core.Node) bool {
 	} else {
 		return false
 	}
-	return other != tr && other == searchCircleEndNode(loop, header, manager.DominatorMap, manager.LoopRegionReducible)
+	return other != tr && other == manager.searchLoopEnd(loop, header, manager.LoopRegionReducible)
 }
 
 func RebuildLoopNode(manager *RewriteManager) error {
@@ -189,10 +198,11 @@ func asLatchIncExpr(n *core.Node) (*values.JavaExpression, bool) {
 // displacements and Java int overflow. The ordinary tail retains its step.
 // Require at least two bypass predecessors and one normal predecessor, with
 // all copied edges owned by this loop; other loop shapes retain their proofs.
-func convertSplitContinueToLatch(manager *RewriteManager, circleNode *core.Node) {
+func convertSplitContinueToLatch(manager *RewriteManager, circleNode *core.Node) bool {
 	if jdecenv.Get("JDEC_SPLIT_CONTINUE_LATCH_OFF") != "" {
-		return
+		return false
 	}
+	changed := false
 	for _, latch := range slices.Clone(circleNode.Source) {
 		if latch == circleNode {
 			continue
@@ -239,22 +249,35 @@ func convertSplitContinueToLatch(manager *RewriteManager, circleNode *core.Node)
 			replaceNextInPlace(p, latch, incrNode)
 			incrNode.AddNext(contNode)
 			contNode.AddNext(circleNode)
+			changed = true
 		}
 	}
+	return changed
 }
 
 func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
-	materializeSwitchLatchContinues(manager, circleNode)
-	convertSplitContinueToLatch(manager, circleNode)
-	loopEnd := searchCircleEndNode(circleNode, circleNode.Next[0], manager.DominatorMap, manager.LoopRegionReducible)
+	changed := materializeSwitchLatchContinues(manager, circleNode)
+	changed = convertSplitContinueToLatch(manager, circleNode) || changed
+	if changed {
+		// The two pre-rewrites may have rewritten edges after the caller's
+		// loop-analysis cache was filled.
+		manager.loopCache = nil
+	}
+	// The caller's cache already contains this loop when its scan found the
+	// exit; reuse it instead of rebuilding the same body here. If a
+	// pre-rewrite changed the graph, the cache was just discarded.
+	loopEnd := manager.searchLoopEnd(circleNode, circleNode.Next[0], manager.LoopRegionReducible)
 
 	preWhileNodes := utils.NodeFilter(manager.WhileNode, func(node *core.Node) bool {
 		return utils.IsDominate(manager.DominatorMap, node, circleNode)
 	})
 	preWhileNodeEnds := map[*core.Node]*core.Node{}
 	for _, n := range preWhileNodes {
-		preWhileNodeEnds[n] = searchCircleEndNode(n, n.Next[0], manager.DominatorMap, manager.LoopRegionReducible)
+		preWhileNodeEnds[n] = manager.searchLoopEnd(n, n.Next[0], manager.LoopRegionReducible)
 	}
+	// The rewrite below inserts break/continue nodes and edges; no analysis
+	// answer collected above may be reused after that.
+	manager.loopCache = nil
 	checkNode := func(node *core.Node) ([]*core.Node, error) {
 		if node.IsJmp {
 			manager.qualifyLoopTransfer(node, circleNode)
@@ -569,6 +592,110 @@ func getCircleElementSet(circleNode *core.Node, loopStart *core.Node, domTree ma
 	return circleElementSet(circleNode, loopStart, domTree, false)
 }
 
+// loopAnalysisCache memoizes loop bodies and loop-exit searches for one rewrite
+// step. The exit search for a container node otherwise rebuilds the same loop
+// body several times: ownership, retry ownership, the direct exit comparison and
+// LoopJmpRewriter all ask about the same loop. On a loop-heavy class that made
+// circleElementSet the dominant cost (tens of millions of node visits).
+//
+// The cache is only installed around an analysis-only scan (see
+// materializeLoopExits) and is dropped before any graph mutation, so a cached
+// answer always describes the live CFG. Methods whose loop analysis can mutate
+// node state (protected-retry boundaries) keep the cache disabled; see
+// loopCacheSafe.
+type loopBodyKey struct {
+	loop    *core.Node
+	start   *core.Node
+	exclude bool
+}
+
+type loopExitKey struct {
+	loop      *core.Node
+	start     *core.Node
+	reducible bool
+}
+
+type loopAnalysisCache struct {
+	bodies map[loopBodyKey]*utils2.Set[*core.Node]
+	exits  map[loopExitKey]*core.Node
+}
+
+func newLoopAnalysisCache() *loopAnalysisCache {
+	return &loopAnalysisCache{
+		bodies: map[loopBodyKey]*utils2.Set[*core.Node]{},
+		exits:  map[loopExitKey]*core.Node{},
+	}
+}
+
+// loopCacheSafe reports whether circleElementSet is a pure function of the
+// current graph. Its protected-retry augmentation mutates tr.ProtectedEnd and
+// depends on that field on a later call, so reuse is only valid when the method
+// has no protected ranges at all.
+func (s *RewriteManager) loopCacheSafe() bool {
+	if s == nil || s.DominatorMap == nil || len(s.TryNodes) != 0 || len(s.originalHandlers) != 0 {
+		return false
+	}
+	if jdecenv.Get("JDEC_LOOP_ANALYSIS_CACHE_OFF") == "1" {
+		return false
+	}
+	dirty := func(n *core.Node) bool {
+		return n != nil && (n.HasProtectedRange || n.SharedProtectedHandler ||
+			n.ProtectedEnd != nil || len(n.SharedProtectedRanges) != 0)
+	}
+	if dirty(s.RootNode) {
+		return false
+	}
+	for parent, children := range s.DominatorMap {
+		if dirty(parent) {
+			return false
+		}
+		for _, child := range children {
+			if dirty(child) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// loopBody returns the loop body, reusing the current analysis cache when one is
+// installed. A nil manager or cache preserves the previous recompute behavior.
+func (s *RewriteManager) loopBody(loop, start *core.Node, excludePreHeader bool) *utils2.Set[*core.Node] {
+	if s == nil || s.loopCache == nil {
+		var dom map[*core.Node][]*core.Node
+		if s != nil {
+			dom = s.DominatorMap
+		}
+		return circleElementSet(loop, start, dom, excludePreHeader)
+	}
+	key := loopBodyKey{loop: loop, start: start, exclude: excludePreHeader}
+	if body, ok := s.loopCache.bodies[key]; ok {
+		return body
+	}
+	body := circleElementSetInto(loop, start, s.DominatorMap, excludePreHeader, &s.loopScratch)
+	s.loopCache.bodies[key] = body
+	return body
+}
+
+// searchLoopEnd returns the loop's normal exit, reusing the current analysis
+// cache when one is installed.
+func (s *RewriteManager) searchLoopEnd(loop, start *core.Node, reducible bool) *core.Node {
+	if s == nil || s.loopCache == nil {
+		var dom map[*core.Node][]*core.Node
+		if s != nil {
+			dom = s.DominatorMap
+		}
+		return searchCircleEndNode(loop, start, dom, reducible)
+	}
+	key := loopExitKey{loop: loop, start: start, reducible: reducible}
+	if end, ok := s.loopCache.exits[key]; ok {
+		return end
+	}
+	end := searchCircleEndNodeInBody(loop, start, s.loopBody(loop, start, reducible), s.DominatorMap, reducible)
+	s.loopCache.exits[key] = end
+	return end
+}
+
 // retargetSwitchExitBreaks labels unlabeled breaks in the direct case bodies of
 // a switch that forms the whole infinite loop body. A case break then leaves
 // both the switch and the loop, which is what the original CFG edge to the
@@ -618,61 +745,106 @@ func retargetSwitchExitBreaks(sw *statements.SwitchStatement, label string) {
 // so the exit of a reducible nested loop is computed from the tight body instead of leaking into the
 // enclosing loop.
 func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*core.Node][]*core.Node, excludePreHeader bool) *utils2.Set[*core.Node] {
-	finalSet := utils2.NewSet[*core.Node]()
+	return circleElementSetInto(circleNode, loopStart, domTree, excludePreHeader, nil)
+}
+
+// loopElementScratch reuses the index map, node slices, and reverse adjacency
+// across one method's loop-body queries. The returned set never aliases scratch
+// storage, so cached bodies stay independent. Only a single RewriteManager uses
+// a scratch instance, and rewriter analysis is sequential.
+type loopElementScratch struct {
+	index      map[*core.Node]int
+	nodes      []*core.Node
+	incoming   []int
+	discovered []bool
+	reverseAdj [][]*core.Node
+	stack      []*core.Node
+}
+
+func (s *loopElementScratch) reset() {
+	if s.index == nil {
+		s.index = make(map[*core.Node]int, 64)
+		s.nodes = make([]*core.Node, 0, 64)
+		s.incoming = make([]int, 0, 64)
+		s.discovered = make([]bool, 0, 64)
+	} else {
+		clear(s.index)
+		s.nodes = s.nodes[:0]
+		s.incoming = s.incoming[:0]
+		s.discovered = s.discovered[:0]
+	}
+	s.stack = s.stack[:0]
+}
+
+// circleElementSetInto is circleElementSet with optional reused scratch storage.
+func circleElementSetInto(circleNode *core.Node, loopStart *core.Node, domTree map[*core.Node][]*core.Node, excludePreHeader bool, scratch *loopElementScratch) *utils2.Set[*core.Node] {
+	if scratch == nil {
+		scratch = &loopElementScratch{}
+	}
+	sc := scratch
+	sc.reset()
 	// Step 1: collect all nodes reachable from loopStart and build reverse adjacency.
 	// A plain map plus an append-order slice avoids utils.Set's mutex and avoids
 	// materializing/sorting a map-ordered List for every loop.
 	// A single nodeIndex map owns identity; all sets/adjacency are compact
 	// indexed slices. The previous reverseAdj map plus utils.Set added several
 	// map buckets per loop and dominating allocation traffic.
-	nodeIndex := make(map[*core.Node]int, 64)
-	nodes := make([]*core.Node, 0, 64)
-	incoming := make([]int, 0, 64)
-	discovered := make([]bool, 0, 64)
 	indexOf := func(node *core.Node) int {
-		if index, ok := nodeIndex[node]; ok {
+		if index, ok := sc.index[node]; ok {
 			return index
 		}
-		index := len(nodes)
-		nodeIndex[node] = index
-		nodes = append(nodes, node)
-		incoming = append(incoming, 0)
-		discovered = append(discovered, false)
+		index := len(sc.nodes)
+		sc.index[node] = index
+		sc.nodes = append(sc.nodes, node)
+		sc.incoming = append(sc.incoming, 0)
+		sc.discovered = append(sc.discovered, false)
 		return index
 	}
 	startIndex := indexOf(loopStart)
-	discovered[startIndex] = true
-	stk := []*core.Node{loopStart}
-	for len(stk) > 0 {
-		node := stk[len(stk)-1]
-		stk = stk[:len(stk)-1]
+	sc.discovered[startIndex] = true
+	sc.stack = append(sc.stack[:0], loopStart)
+	for len(sc.stack) > 0 {
+		node := sc.stack[len(sc.stack)-1]
+		sc.stack = sc.stack[:len(sc.stack)-1]
 		for _, next := range loopAnalysisSuccessors(node) {
 			nextIndex := indexOf(next)
-			incoming[nextIndex]++
-			if !discovered[nextIndex] {
-				discovered[nextIndex] = true
-				stk = append(stk, next)
+			sc.incoming[nextIndex]++
+			if !sc.discovered[nextIndex] {
+				sc.discovered[nextIndex] = true
+				sc.stack = append(sc.stack, next)
 			}
 		}
 	}
-	reverseAdj := make([][]*core.Node, len(nodes))
-	for index, count := range incoming {
-		if count > 0 {
+	n := len(sc.nodes)
+	if cap(sc.reverseAdj) < n {
+		sc.reverseAdj = make([][]*core.Node, n)
+	} else {
+		sc.reverseAdj = sc.reverseAdj[:n]
+		for i := range sc.reverseAdj {
+			sc.reverseAdj[i] = sc.reverseAdj[i][:0]
+		}
+	}
+	reverseAdj := sc.reverseAdj
+	for index, count := range sc.incoming {
+		if count > 0 && cap(reverseAdj[index]) < count {
 			reverseAdj[index] = make([]*core.Node, 0, count)
 		}
 	}
-	for _, node := range nodes {
+	for _, node := range sc.nodes {
 		for _, next := range loopAnalysisSuccessors(node) {
-			target := nodeIndex[next]
+			target := sc.index[next]
 			reverseAdj[target] = append(reverseAdj[target], node)
 		}
 	}
-	// Step 2: find back-edge sources — nodes whose Next includes circleNode. Iterate in stable id order
-	// so allSources, and the reverse-BFS latch set derived from it, are deterministic.
+	// Step 2: find back-edge sources — nodes whose Next includes circleNode. Only the SET of
+	// sources matters: reverseBFSStopAt consumes them as seeds for a set-valued reachability
+	// query, so discovery order cannot change membership. The previous sortNodesByID(nodes)
+	// paid O(body log body) on every call (96k calls on one 7 KB loop-heavy class) to order a
+	// map-backed result that is never read in order.
 	var allSources []*core.Node
-	for _, n := range sortNodesByID(nodes) {
-		if slices.Contains(loopAnalysisSuccessors(n), circleNode) {
-			allSources = append(allSources, n)
+	for _, node := range sc.nodes {
+		if slices.Contains(loopAnalysisSuccessors(node), circleNode) {
+			allSources = append(allSources, node)
 		}
 	}
 	sources := allSources
@@ -685,14 +857,14 @@ func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*
 		// edge. Require dominance even for synthetic predecessors; otherwise
 		// reverse reachability leaks through the pre-header into an outer loop.
 		var kept []*core.Node
-		for _, n := range allSources {
-			if utils.IsDominate(domTree, circleNode, n) {
-				kept = append(kept, n)
+		for _, node := range allSources {
+			if utils.IsDominate(domTree, circleNode, node) {
+				kept = append(kept, node)
 			}
 		}
 		sources = kept
 	}
-	finalSet = reverseBFSStopAt(sources, reverseAdj, nodeIndex, circleNode)
+	finalSet := reverseBFSStopAt(sources, reverseAdj, sc.index, circleNode)
 
 	// A retry may return to the header only through its catch. The synthetic
 	// try node represents exceptional edges at region entry, so reverse reachability
@@ -977,6 +1149,19 @@ func hasPrivateRetryHandler(tr *core.Node, body *utils2.Set[*core.Node]) bool {
 }
 
 func protectedRetryContinuations(body *utils2.Set[*core.Node], header *core.Node) map[*core.Node]bool {
+	// A loop with no protected region cannot have a retry continuation. Check
+	// the body in place instead of materializing body.List() (a body-sized
+	// allocation on every exit query) just to discover that.
+	hasProtected := false
+	body.ForEach(func(n *core.Node) {
+		if n != nil && (n.HasProtectedRange || n.SharedProtectedHandler ||
+			n.ProtectedEnd != nil || len(n.SharedProtectedRanges) != 0) {
+			hasProtected = true
+		}
+	})
+	if !hasProtected {
+		return nil
+	}
 	exits := map[*core.Node]bool{}
 	for _, tr := range body.List() {
 		if closed := protectedRetryClosedRegion(tr, header, body); closed != nil && closed.continuation != nil && !body.Has(closed.continuation) {
@@ -1090,30 +1275,36 @@ func isReducibleCFG(root *core.Node, domTree map[*core.Node][]*core.Node) bool {
 // reverseBFSStopAt returns {circleNode} ∪ all nodes that can reach a seed via reverse edges without
 // passing through circleNode.
 func reverseBFSStopAt(seeds []*core.Node, reverseAdj [][]*core.Node, nodeIndex map[*core.Node]int, circleNode *core.Node) *utils2.Set[*core.Node] {
-	set := utils2.NewSet[*core.Node]()
-	set.Add(circleNode)
-	queue := []*core.Node{}
+	// The traversal set is local to this call, so a plain map avoids the
+	// thread-safe Set's per-element RWMutex traffic during the BFS. The map is
+	// handed to the returned Set afterwards; no goroutine can observe it while
+	// it is being built.
+	seen := make(map[*core.Node]struct{}, len(seeds)+len(reverseAdj)+1)
+	seen[circleNode] = struct{}{}
+	queue := make([]*core.Node, 0, len(seeds)+len(reverseAdj))
 	for _, n := range seeds {
-		if !set.Has(n) {
-			set.Add(n)
+		if _, ok := seen[n]; !ok {
+			seen[n] = struct{}{}
 			queue = append(queue, n)
 		}
 	}
-	for len(queue) > 0 {
-		n := queue[0]
-		queue = queue[1:]
+	for head := 0; head < len(queue); head++ {
+		n := queue[head]
 		index, ok := nodeIndex[n]
 		if !ok {
 			continue
 		}
 		for _, pred := range reverseAdj[index] {
-			if pred != circleNode && !set.Has(pred) {
-				set.Add(pred)
+			if pred == circleNode {
+				continue
+			}
+			if _, ok := seen[pred]; !ok {
+				seen[pred] = struct{}{}
 				queue = append(queue, pred)
 			}
 		}
 	}
-	return set
+	return utils2.NewSetFromMap(seen)
 }
 
 func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree map[*core.Node][]*core.Node, reducible bool) *core.Node {
@@ -1123,7 +1314,13 @@ func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree ma
 	// never gets its `else{break}` and becomes a non-terminating do-while(true). Irreducible methods keep
 	// the legacy body to avoid collapsing the loop. The LOOP BODY itself always stays on the legacy path
 	// (getCircleElementSet); only this exit search prunes pre-headers.
-	elementSet := circleElementSet(circleNode, loopStart, domTree, reducible)
+	return searchCircleEndNodeInBody(circleNode, loopStart, circleElementSet(circleNode, loopStart, domTree, reducible), domTree, reducible)
+}
+
+// searchCircleEndNodeInBody is searchCircleEndNode with a caller-supplied loop
+// body, so the analysis cache can reuse one body across the exit query, the
+// ownership query, and the retry-continuation query.
+func searchCircleEndNodeInBody(circleNode *core.Node, loopStart *core.Node, elementSet *utils2.Set[*core.Node], domTree map[*core.Node][]*core.Node, reducible bool) *core.Node {
 	outNodes := []*core.Node{}
 	elementSet.ForEach(func(node *core.Node) {
 		for _, n := range loopAnalysisSuccessors(node) {
@@ -1212,18 +1409,18 @@ func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree ma
 	// terminal case shared by fall-through labels must remain inside switch,
 	// rather than becoming an enclosing-loop break that skips its effects.
 	inlineCases := map[*core.Node]bool{}
-	for _, sw := range elementSet.List() {
+	elementSet.ForEach(func(sw *core.Node) {
 		middle, ok := sw.Statement.(*statements.MiddleStatement)
 		if !ok || middle.Flag != statements.MiddleSwitch {
-			continue
+			return
 		}
 		data, ok := middle.Data.([]any)
 		if !ok {
-			continue
+			return
 		}
 		cases, err := switchCaseNodes(data, sw)
 		if err != nil {
-			continue
+			return
 		}
 		for _, target := range cases.Values() {
 			if target == sw.MergeNode && (sw.SwitchEmptyCaseMerge || sw.SwitchEmptyDefaultMerge) {
@@ -1233,7 +1430,7 @@ func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree ma
 				inlineCases[target] = true
 			}
 		}
-	}
+	})
 	var continuations []*core.Node
 	protectedExits := map[*core.Node]bool{}
 	if reducible {
@@ -1283,7 +1480,7 @@ func loopHasProvedProtectedRetry(manager *RewriteManager, loop *core.Node) bool 
 	if len(loop.Next) == 0 {
 		return false
 	}
-	body := circleElementSet(loop, loop.Next[0], manager.DominatorMap, true)
+	body := manager.loopBody(loop, loop.Next[0], true)
 	for _, tr := range body.List() {
 		if hasPrivateRetryHandler(tr, body) {
 			if _, boundary := protectedRetryBranchPrefix(tr, loop); boundary != nil {
@@ -1301,7 +1498,7 @@ func protectedRetryContinuationOwnsRewriteNode(manager *RewriteManager, loop, no
 	if loop == nil || node == nil || len(loop.Next) != 1 {
 		return false
 	}
-	body := circleElementSet(loop, loop.Next[0], manager.DominatorMap, true)
+	body := manager.loopBody(loop, loop.Next[0], true)
 	return protectedRetryContinuations(body, loop)[node]
 }
 

@@ -19,6 +19,24 @@ func NewSet[T comparable](list ...[]T) *Set[T] {
 	return s
 }
 
+// NewSetFromMap takes ownership of m. It lets a caller build a set with a
+// plain map (no per-element locking) and publish it as a Set afterwards. The
+// caller must not retain or mutate m after the call.
+func NewSetFromMap[T comparable](m map[T]struct{}) *Set[T] {
+	if m == nil {
+		m = make(map[T]struct{})
+	}
+	return &Set[T]{m: m}
+}
+
+// NewSetSized allocates a set whose backing map is sized for n elements.
+func NewSetSized[T comparable](n int) *Set[T] {
+	if n < 0 {
+		n = 0
+	}
+	return &Set[T]{m: make(map[T]struct{}, n)}
+}
+
 //func main() {
 //	// Initialize our Set
 //	s := New()
