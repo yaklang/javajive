@@ -126,6 +126,7 @@ type Decompiler struct {
 	FunctionContext     *class_context.ClassContext
 	varTable            map[int]*values.JavaRef
 	opcodeIdToRef       map[*OpCode][][2]any
+	reachWalk           reachWalkScratch
 	branchArrayCalls    []branchArrayCall
 	branchArrayLeaves   []branchArrayLeaf
 	valueTernaryMerges  map[*values.TernaryExpression]*OpCode
@@ -1552,6 +1553,78 @@ func (d *Decompiler) reachingSlotStoreRefs(start *OpCode, slot int) map[string]*
 	return out
 }
 
+// reachWalkScratch reuses the visited map and work queue of consecutive
+// backward reaching-store queries. The Decompiler is method-local and the
+// query is not re-entrant, so generation stamps replace clearing the map.
+type reachWalkScratch struct {
+	visited    map[*OpCode]uint64
+	queue      []*OpCode
+	generation uint64
+}
+
+// reachingSlotStoreRefUnique answers the only question the read/store repair
+// passes ask: is there exactly one distinct reaching same-slot definition, and
+// is it different from current? It stops as soon as it encounters current (the
+// read/store already continues correctly) or a second distinct definition (a
+// real merge). The map-returning form explored the entire backward graph even
+// when the nearest store was already current; on a large token-manager method
+// that was tens of millions of visited opcodes.
+func (d *Decompiler) reachingSlotStoreRefUnique(start *OpCode, slot int, current *values.JavaRef) *values.JavaRef {
+	if start == nil {
+		return nil
+	}
+	sc := &d.reachWalk
+	if sc.visited == nil {
+		sc.visited = make(map[*OpCode]uint64)
+	}
+	sc.generation++
+	if sc.generation == 0 {
+		clear(sc.visited)
+		sc.generation = 1
+	}
+	gen := sc.generation
+	sc.visited[start] = gen
+	queue := append(sc.queue[:0], start.Source...)
+	var found *values.JavaRef
+	for head := 0; head < len(queue); head++ {
+		cur := queue[head]
+		if cur == nil || sc.visited[cur] == gen {
+			continue
+		}
+		sc.visited[cur] = gen
+		if isLocalStoreOpcode(cur.Instr.OpCode) && GetStoreIdx(cur) == slot {
+			refs, ok := d.opcodeIdToRef[cur]
+			if !ok || len(refs) == 0 {
+				continue
+			}
+			ref, ok := refs[len(refs)-1][0].(*values.JavaRef)
+			if !ok || ref == nil {
+				continue
+			}
+			if current != nil && ref.VarUid == current.VarUid {
+				// current is a genuine reaching definition; no repair is safe.
+				sc.queue = queue[:0]
+				return nil
+			}
+			if found == nil {
+				found = ref
+				continue
+			}
+			if found.VarUid != ref.VarUid {
+				// Distinct reaching definitions form a real merge.
+				sc.queue = queue[:0]
+				return nil
+			}
+			// Match the map form, which keeps the last ref seen for a VarUid.
+			found = ref
+			continue
+		}
+		queue = append(queue, cur.Source...)
+	}
+	sc.queue = queue[:0]
+	return found
+}
+
 // reachingSlotVersionGeneral repairs a slot read that the single global slot table resolved to a ref
 // whose defining store does NOT reach the load along the CFG — a later/disjoint-branch version that
 // leaked in through DFS traversal order, EVEN WHEN the category (reference vs primitive) agrees so
@@ -1572,24 +1645,13 @@ func (d *Decompiler) reachingSlotVersionGeneral(load *OpCode, slot int, current 
 	if load == nil || !isLocalLoadOpcode(load.Instr.OpCode) || current == nil {
 		return nil
 	}
-	reaching := d.reachingSlotStoreRefs(load, slot)
-	if len(reaching) == 0 {
+	ref := d.reachingSlotStoreRefUnique(load, slot, current)
+	if ref == nil || ref.VarUid == current.VarUid {
+		// current is a genuine reaching definition, no definition reaches, or
+		// multiple distinct definitions form a real merge.
 		return nil
 	}
-	if _, ok := reaching[current.VarUid]; ok {
-		// current is a genuine reaching definition: the read is already correct.
-		return nil
-	}
-	if len(reaching) != 1 {
-		// Multiple distinct reaching definitions = a real merge point; do not override.
-		return nil
-	}
-	for _, ref := range reaching {
-		if ref != nil && ref.VarUid != current.VarUid {
-			return ref
-		}
-	}
-	return nil
+	return ref
 }
 
 // reachingStoreVersion repairs the SAME single-global-slot-table DFS corruption as
@@ -1623,20 +1685,15 @@ func (d *Decompiler) reachingStoreVersion(store *OpCode, slot int, current *valu
 		// The current global version already continues this store correctly; leave it alone.
 		return nil
 	}
-	reaching := d.reachingSlotStoreRefs(store, slot)
-	if len(reaching) != 1 {
+	ref := d.reachingSlotStoreRefUnique(store, slot, current)
+	if ref == nil || ref.Type() == nil {
 		return nil
 	}
-	for _, ref := range reaching {
-		if ref == nil || ref.Type() == nil {
-			return nil
-		}
-		if current != nil && ref.VarUid == current.VarUid {
-			return nil
-		}
-		if ref.Type().String(ctx) == typStr {
-			return ref
-		}
+	if current != nil && ref.VarUid == current.VarUid {
+		return nil
+	}
+	if ref.Type().String(ctx) == typStr {
+		return ref
 	}
 	return nil
 }

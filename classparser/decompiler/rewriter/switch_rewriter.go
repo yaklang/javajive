@@ -274,6 +274,77 @@ func switchCaseHasOnlyJumpEntries(node, candidate *core.Node, cases *omap.Ordere
 	return found && onlyJumps
 }
 
+// switchJumpOnlyTargets computes switchCaseHasOnlyJumpEntries for every case
+// target in one pass. Callers that test more than one candidate previously
+// rescanned the whole case map per target, which is O(cases²) and rebuilds the
+// ordered-map key/value snapshot on every test.
+func switchJumpOnlyTargets(node *core.Node, cases *omap.OrderedMap[switchLabel, *core.Node]) map[*core.Node]bool {
+	if node == nil || cases == nil {
+		return nil
+	}
+	only := make(map[*core.Node]bool, cases.Len())
+	cases.ForEach(func(label switchLabel, target *core.Node) bool {
+		if target == nil {
+			return true
+		}
+		jumpOnly := !label.Default && node.SwitchJumpOnlyCases[int(label.Value)]
+		if previous, exists := only[target]; exists {
+			only[target] = previous && jumpOnly
+		} else {
+			only[target] = jumpOnly
+		}
+		return true
+	})
+	return only
+}
+
+// switchNodeJumpOnlyTargets derives the same per-target property straight from
+// the prepared switch tables, avoiding a throwaway label-keyed OrderedMap for
+// every loop-exit query.
+func switchNodeJumpOnlyTargets(node *core.Node, middle *statements.MiddleStatement) (map[*core.Node]bool, bool) {
+	if node == nil {
+		return nil, false
+	}
+	only := map[*core.Node]bool{}
+	add := func(label switchLabel, target *core.Node) {
+		if target == nil {
+			return
+		}
+		jumpOnly := !label.Default && node.SwitchJumpOnlyCases[int(label.Value)]
+		if previous, exists := only[target]; exists {
+			only[target] = previous && jumpOnly
+		} else {
+			only[target] = jumpOnly
+		}
+	}
+	if node.SwitchCases != nil {
+		node.SwitchCases.ForEach(func(value int, target *core.Node) bool {
+			add(switchLabel{Value: int32(value)}, target)
+			return true
+		})
+		if node.SwitchDefault != nil {
+			add(switchLabel{Default: true}, node.SwitchDefault)
+		}
+		return only, true
+	}
+	if middle == nil {
+		return nil, false
+	}
+	data, ok := middle.Data.([]any)
+	if !ok {
+		return nil, false
+	}
+	cases, err := switchCaseNodes(data, node)
+	if err != nil {
+		return nil, false
+	}
+	cases.ForEach(func(label switchLabel, target *core.Node) bool {
+		add(label, target)
+		return true
+	})
+	return only, true
+}
+
 // Dominance alone cannot identify a switch continuation also reached by an
 // enclosing if arm. Prove a unique forward boundary shared by distinct case
 // bodies. A label remains a label (real fall-through); terminal returns were
@@ -426,6 +497,7 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 		// through into `default: throw` ("Impossible modulus N"). Kill-switch:
 		// JDEC_SWITCH_EMPTY_CASE_MERGE_OFF=1.
 		caseStarts := caseMap.Values()
+		jumpOnly := switchJumpOnlyTargets(node, caseMap)
 		var best *core.Node
 		bestCnt := 0
 		caseMap.ForEach(func(k switchLabel, cand *core.Node) bool {
@@ -433,7 +505,7 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 				return true
 			}
 			c := countOtherCasesExitingTo(manager, node, cand, caseStarts)
-			if (c >= 2 || (c == 1 && switchCaseHasOnlyJumpEntries(node, cand, caseMap))) && c > bestCnt {
+			if (c >= 2 || (c == 1 && jumpOnly[cand])) && c > bestCnt {
 				best = cand
 				bestCnt = c
 			}

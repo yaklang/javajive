@@ -126,6 +126,22 @@ bounded failure recovery for malformed and partially unsupported inputs.
   Rebuild successor lists with two flat generation-stamp arrays instead of one
   dedupe map per source node. `circleElementSet` reuses its index map, slices
   and reverse adjacency across queries and no longer sorts every loop body.
+- Linearize switch-case jump-only detection. The loop-exit and switch-merge
+  passes asked `switchCaseHasOnlyJumpEntries` once per case target, and every
+  query rebuilt the entire ordered-map key/value snapshot: O(cases²) time and
+  allocation. One pass now derives the per-target predicate straight from the
+  prepared tables. On the 117 KB FMParserTokenManager class this alone drops
+  decompilation from 24.8 s / 21.9 GB / 45.2M allocations to
+  10.4 s / 8.7 GB / 43.0M.
+- Stop the per-load slot-reaching repair search as soon as it sees the current
+  definition or a second distinct reaching definition; the previous backwards
+  BFS always explored the whole graph to prove uniqueness. Reuse a
+  generation-stamped visited map and queue across queries, and reuse the loop
+  analysis scratch even when protected-retry boundaries keep the body memo
+  disabled. FMParserTokenManager falls to 7.9 s / 3.65 GB / 17.7M allocations
+  (3.1x faster, 6.0x less memory, 2.6x fewer allocations). Differential tests
+  compare the one-pass switch predicate with the per-target query and the
+  early-exit reaching query with the map-returning oracle.
 
 - Harden DEX IR decoding: validate switch and fill-array payload targets with
   signed/`uint64` arithmetic before indexing, reject negative, wrapped, and

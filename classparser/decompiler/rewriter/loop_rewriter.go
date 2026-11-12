@@ -524,7 +524,9 @@ func LoopRewriter(manager *RewriteManager, node *core.Node) error {
 	body := []statements.Statement{}
 	bodyNodes := []*core.Node{}
 	endNodes := []*core.Node{}
-	circleSet := getCircleElementSet(circleNode, loopStart, manager.DominatorMap)
+	// The header edge was just removed, so this body must be recomputed; only
+	// the base-traversal scratch is reused.
+	circleSet := circleElementSetInto(circleNode, loopStart, manager.DominatorMap, false, &manager.loopScratch)
 	err := core.WalkGraph[*core.Node](loopStart, func(node *core.Node) ([]*core.Node, error) {
 		if !circleSet.Has(node) {
 			endNodes = append(endNodes, node)
@@ -661,12 +663,14 @@ func (s *RewriteManager) loopCacheSafe() bool {
 // loopBody returns the loop body, reusing the current analysis cache when one is
 // installed. A nil manager or cache preserves the previous recompute behavior.
 func (s *RewriteManager) loopBody(loop, start *core.Node, excludePreHeader bool) *utils2.Set[*core.Node] {
-	if s == nil || s.loopCache == nil {
-		var dom map[*core.Node][]*core.Node
-		if s != nil {
-			dom = s.DominatorMap
-		}
-		return circleElementSet(loop, start, dom, excludePreHeader)
+	if s == nil {
+		return circleElementSet(loop, start, nil, excludePreHeader)
+	}
+	if s.loopCache == nil {
+		// Methods with protected retry boundaries keep the memo disabled
+		// because their augmentation mutates ProtectedEnd, but the base
+		// traversal is still sequential and may reuse its scratch storage.
+		return circleElementSetInto(loop, start, s.DominatorMap, excludePreHeader, &s.loopScratch)
 	}
 	key := loopBodyKey{loop: loop, start: start, exclude: excludePreHeader}
 	if body, ok := s.loopCache.bodies[key]; ok {
@@ -680,12 +684,12 @@ func (s *RewriteManager) loopBody(loop, start *core.Node, excludePreHeader bool)
 // searchLoopEnd returns the loop's normal exit, reusing the current analysis
 // cache when one is installed.
 func (s *RewriteManager) searchLoopEnd(loop, start *core.Node, reducible bool) *core.Node {
-	if s == nil || s.loopCache == nil {
-		var dom map[*core.Node][]*core.Node
-		if s != nil {
-			dom = s.DominatorMap
-		}
-		return searchCircleEndNode(loop, start, dom, reducible)
+	if s == nil {
+		return searchCircleEndNode(loop, start, nil, reducible)
+	}
+	if s.loopCache == nil {
+		// No memo, but still reuse the manager's base-traversal scratch.
+		return searchCircleEndNodeInBody(loop, start, s.loopBody(loop, start, reducible), s.DominatorMap, reducible)
 	}
 	key := loopExitKey{loop: loop, start: start, reducible: reducible}
 	if end, ok := s.loopCache.exits[key]; ok {
@@ -1414,19 +1418,15 @@ func searchCircleEndNodeInBody(circleNode *core.Node, loopStart *core.Node, elem
 		if !ok || middle.Flag != statements.MiddleSwitch {
 			return
 		}
-		data, ok := middle.Data.([]any)
+		jumpOnly, ok := switchNodeJumpOnlyTargets(sw, middle)
 		if !ok {
 			return
 		}
-		cases, err := switchCaseNodes(data, sw)
-		if err != nil {
-			return
-		}
-		for _, target := range cases.Values() {
+		for target, only := range jumpOnly {
 			if target == sw.MergeNode && (sw.SwitchEmptyCaseMerge || sw.SwitchEmptyDefaultMerge) {
 				continue
 			}
-			if !switchCaseHasOnlyJumpEntries(sw, target, cases) {
+			if !only {
 				inlineCases[target] = true
 			}
 		}
