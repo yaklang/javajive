@@ -135,7 +135,7 @@ func materializeForwardRegionExits(manager *RewriteManager, condition *core.Node
 			jump.EncodedJumps = map[*core.Node]bool{exit: true}
 			replaceNextInPlace(e.from, exit, jump)
 		}
-		manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
+		manager.refreshDominatorsShared()
 		return
 	}
 }

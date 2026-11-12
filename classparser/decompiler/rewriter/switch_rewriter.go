@@ -665,7 +665,7 @@ func splitExternalSharedSwitchReturns(manager *RewriteManager, owner *core.Node)
 		replaceNextInPlace(e.source, e.target, leaf)
 	}
 	if len(edges) > 0 {
-		manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
+		manager.refreshDominatorsShared()
 	}
 }
 

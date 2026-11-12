@@ -131,9 +131,7 @@ func replaceNextInPlace(node, oldNext, newNext *core.Node) {
 		node.AddNext(newNext)
 		return
 	}
-	node.Next = slices.Insert(node.Next, idx, newNext)
-	// newNext is already spliced into node.Next; AddNext only fixes the reverse Source link here.
-	node.AddNext(newNext)
+	node.InsertNextAt(idx, newNext)
 }
 
 // outermostEnclosingLoopWithExit returns the outermost ENCLOSING loop (a while-node that dominates

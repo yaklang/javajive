@@ -51,7 +51,11 @@ type RewriteManager struct {
 	SwitchNode                 []*core.Node
 	TryNodes                   []*core.Node
 	DominatorMap               map[*core.Node][]*core.Node
-	LabelId                    int
+	// dominance memoizes the dominator/post-dominator analyses for the current
+	// statement CFG topology. Use refreshDominators/Dominates/PostDominates
+	// instead of recomputing or reading the cache directly.
+	dominance *statementDominanceState
+	LabelId   int
 	// LoopRegionReducible records whether the ORIGINAL method CFG (before any loop wrapping) is a
 	// reducible flow graph. It is computed once in Rewrite() because mid-pipeline the graph gains
 	// do-while wrapper nodes and rewrite-inserted break/continue edges that corrupt dominance, making a
@@ -514,7 +518,7 @@ func (s *RewriteManager) mergeIf() bool {
 				sourceSet.AddList(childNode.Source)
 				if sourceSet.Len() == 1 && CheckCanBeMerge(parentNode, childNode) {
 					if len(childNode.Next) == 1 {
-						childNode.Next = append(childNode.Next, childNode.Next[0])
+						childNode.DuplicateNext(0)
 					}
 					mergeCondition(parentNode, childNode)
 					if nextStNode != nil {
@@ -668,7 +672,7 @@ type NodeExtInfo struct {
 }
 
 func (s *RewriteManager) ScanCoreInfo() error {
-	s.DominatorMap = GenerateDominatorTree(s.RootNode)
+	s.refreshDominatorsShared()
 	nodeExtInfo := map[*core.Node]*NodeExtInfo{}
 	getNodeInfo := func(node *core.Node) *NodeExtInfo {
 		if info, ok := nodeExtInfo[node]; ok {
@@ -952,7 +956,7 @@ func collectSESEMergeConditions(s *RewriteManager, ifNodes *[]*core.Node, mergeN
 	circleSet := utils.NewSet[*core.Node]()
 	circleSet.AddList(circleNodes)
 
-	postDom := GeneratePostDominatorMap(s.RootNode)
+	postDom := s.postDominatorMap()
 
 	for _, current := range sortNodesByID(merges) {
 		if ifNodeSet.Has(current) {
@@ -1015,12 +1019,13 @@ func (s *RewriteManager) Rewrite() error {
 	}
 	// Reducibility must be measured on the pristine CFG, before RebuildLoopNode introduces do-while
 	// wrapper nodes (Id 0) and later passes splice in break/continue edges — both distort dominance.
-	s.LoopRegionReducible = isReducibleCFG(s.RootNode, GenerateDominatorTree(s.RootNode))
+	s.refreshDominatorsShared()
+	s.LoopRegionReducible = isReducibleCFG(s.RootNode, s.DominatorMap)
 	err = RebuildLoopNode(s)
 	if err != nil {
 		return err
 	}
-	s.DominatorMap = GenerateDominatorTree(s.RootNode)
+	s.refreshDominatorsShared()
 	partitionSharedLoopLatches(s)
 	partitionSharedLoopSteps(s)
 	nodeToRewriter := map[*core.Node]rewriterFunc{}
@@ -1055,13 +1060,13 @@ func (s *RewriteManager) Rewrite() error {
 		if err != nil {
 			return err
 		}
-		s.DominatorMap = GenerateDominatorTree(s.RootNode)
+		s.refreshDominatorsShared()
 	}
 	order := protectedSiblingRewriteOrder(s, s.TopologicalSortReverse(keyNodes))
 	loopJmpRewriterRecoed := map[*core.Node]struct{}{}
 	processed := map[*core.Node]struct{}{}
 	for i := 0; i < len(order); i++ {
-		s.DominatorMap = GenerateDominatorTree(s.RootNode)
+		s.refreshDominatorsShared()
 		node := order[i]
 		if _, done := processed[node]; done {
 			continue
@@ -1098,7 +1103,7 @@ func (s *RewriteManager) Rewrite() error {
 							return err
 						}
 						loopJmpRewriterRecoed[n] = struct{}{}
-						s.DominatorMap = GenerateDominatorTree(s.RootNode)
+						s.refreshDominatorsShared()
 						break
 					}
 				}
@@ -1130,13 +1135,13 @@ func (s *RewriteManager) Rewrite() error {
 				if cand == node || !body[cand] || !slices.Contains(s.IfNodes, cand) {
 					continue
 				}
-				s.DominatorMap = GenerateDominatorTree(s.RootNode)
+				s.refreshDominatorsShared()
 				if err := IfRewriter(s, cand); err != nil {
 					return err
 				}
 				processed[cand] = struct{}{}
 			}
-			s.DominatorMap = GenerateDominatorTree(s.RootNode)
+			s.refreshDominatorsShared()
 		}
 
 		if err := materializeLoopExits(false); err != nil {

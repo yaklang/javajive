@@ -3,9 +3,6 @@ package core
 import (
 	"fmt"
 	"math"
-	"sort"
-	"strconv"
-	"strings"
 
 	"github.com/yaklang/javajive/internal/workbudget"
 )
@@ -18,26 +15,6 @@ const entryDefID reachingDefID = -1
 
 type defSet struct {
 	ids []reachingDefID // sorted, unique
-}
-
-func (s defSet) clone() defSet {
-	if len(s.ids) == 0 {
-		return defSet{}
-	}
-	out := make([]reachingDefID, len(s.ids))
-	copy(out, s.ids)
-	return defSet{ids: out}
-}
-
-func (s defSet) key() string {
-	if len(s.ids) == 0 {
-		return ""
-	}
-	parts := make([]string, len(s.ids))
-	for i, id := range s.ids {
-		parts[i] = strconv.Itoa(int(id))
-	}
-	return strings.Join(parts, ",")
 }
 
 func addInt64(a, b int64) int64 {
@@ -75,16 +52,44 @@ func unionDef(a, b defSet, work *workbudget.Budget, merges *uint64) (defSet, boo
 	if err := chargeSetWork(work, need); err != nil {
 		return defSet{}, false, err
 	}
-	out := make([]reachingDefID, 0, len(a.ids)+len(b.ids))
+	// Determine whether the union grows before allocating. Reaching joins
+	// usually re-propagate an already-covered set to a loop predecessor; the
+	// temporary merged slice used to be allocated and immediately discarded.
 	i, j := 0, 0
 	changed := false
+	unionSize := 0
+	for i < len(a.ids) || j < len(b.ids) {
+		switch {
+		case i == len(a.ids):
+			j++
+			changed = true
+		case j == len(b.ids):
+			i++
+		case a.ids[i] == b.ids[j]:
+			i++
+			j++
+		case a.ids[i] < b.ids[j]:
+			i++
+		default:
+			j++
+			changed = true
+		}
+		unionSize++
+	}
+	if merges != nil {
+		*merges += uint64(unionSize)
+	}
+	if !changed {
+		return a, false, nil
+	}
+	out := make([]reachingDefID, 0, unionSize)
+	i, j = 0, 0
 	for i < len(a.ids) || j < len(b.ids) {
 		var pick reachingDefID
 		switch {
 		case i == len(a.ids):
 			pick = b.ids[j]
 			j++
-			changed = true
 		case j == len(b.ids):
 			pick = a.ids[i]
 			i++
@@ -98,14 +103,10 @@ func unionDef(a, b defSet, work *workbudget.Budget, merges *uint64) (defSet, boo
 		default:
 			pick = b.ids[j]
 			j++
-			changed = true
-		}
-		if merges != nil {
-			*merges++
 		}
 		out = append(out, pick)
 	}
-	return defSet{ids: out}, changed, nil
+	return defSet{ids: out}, true, nil
 }
 
 func singletonDef(id reachingDefID) defSet {
@@ -133,27 +134,29 @@ func transferReaching(slot int, nodeIdx int, writeSlot, writeWidth int, defWidth
 		if err := chargeSetWork(work, n); err != nil {
 			return defSet{}, err
 		}
-		out := make([]reachingDefID, 0, len(before.ids)+1)
-		sawNil := false
+		// A narrow write over the tail of a wide slot invalidates the wide
+		// definitions and leaves the entry/live-in marker. Without a wide
+		// definition the write changes nothing, and the immutable input set can
+		// be shared instead of copied.
+		sawWide := false
 		for _, id := range before.ids {
 			if defWidth(id) == 2 {
-				sawNil = true
+				sawWide = true
+				break
+			}
+		}
+		if !sawWide {
+			return before, nil
+		}
+		// entryDefID is -1 and ids are sorted, so prepending the marker and
+		// filtering once yields the same sorted, deduplicated set without sort.
+		out := make([]reachingDefID, 0, len(before.ids)+1)
+		out = append(out, entryDefID)
+		for _, id := range before.ids {
+			if id == entryDefID || defWidth(id) == 2 {
 				continue
 			}
 			out = append(out, id)
-		}
-		if sawNil {
-			out = append([]reachingDefID{entryDefID}, out...)
-			sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
-			u := out[:0]
-			var last reachingDefID
-			for i, id := range out {
-				if i == 0 || id != last {
-					u = append(u, id)
-					last = id
-				}
-			}
-			out = u
 		}
 		return defSet{ids: out}, nil
 	}
@@ -163,13 +166,23 @@ func transferReaching(slot int, nodeIdx int, writeSlot, writeWidth int, defWidth
 // SparseReaching is a per-slot reaching-definition solver with identity-set
 // sharing, query copies, and insert charging. Production solveSlot uses this.
 type SparseReaching struct {
-	g          *SemanticCFG
-	in         map[int][]defSet // slot -> per-node facts
-	reach      map[int][]bool
-	ready      map[int]bool
-	merges     uint64
-	visits     uint64
-	queryCache map[queryKey]cachedQuery
+	g      *SemanticCFG
+	in     map[int][]defSet // slot -> per-node facts
+	reach  map[int][]bool
+	ready  map[int]bool
+	merges uint64
+	visits uint64
+	// chargedQueries remembers which (slot,node) pairs already paid the
+	// definition-set query charge. It deliberately does not retain a second
+	// []*OpCode copy of the facts; callers still receive a fresh slice.
+	chargedQueries map[queryKey]struct{}
+	// Scratch state reused across sequential slot solves. Generation stamps
+	// avoid clearing O(nodes) arrays for every slot.
+	reachStamp []uint32
+	queueStamp []uint32
+	generation uint32
+	queue      []int
+	seen       []int
 }
 
 type queryKey struct {
@@ -177,20 +190,22 @@ type queryKey struct {
 	node int
 }
 
-type cachedQuery struct {
-	defs  []*OpCode
-	entry bool
-}
-
 // NewSparseReaching binds to an immutable SemanticCFG snapshot and charges
 // g.Work (nil Work is unlimited).
 func NewSparseReaching(g *SemanticCFG) *SparseReaching {
-	return &SparseReaching{
-		g:          g,
-		in:         map[int][]defSet{},
-		reach:      map[int][]bool{},
-		ready:      map[int]bool{},
-		queryCache: map[queryKey]cachedQuery{},
+	// The production path uses solveFacts and never touches these maps, so they
+	// are allocated only when the query API needs them.
+	return &SparseReaching{g: g}
+}
+
+func (s *SparseReaching) ensureQueryMaps() {
+	if s.in == nil {
+		s.in = map[int][]defSet{}
+		s.reach = map[int][]bool{}
+		s.ready = map[int]bool{}
+	}
+	if s.chargedQueries == nil {
+		s.chargedQueries = map[queryKey]struct{}{}
 	}
 }
 
@@ -240,6 +255,7 @@ func (s *SparseReaching) entryFact(slot int) defSet {
 }
 
 func (s *SparseReaching) solve(slot int) error {
+	s.ensureQueryMaps()
 	if s.ready[slot] {
 		return nil
 	}
@@ -248,16 +264,37 @@ func (s *SparseReaching) solve(slot int) error {
 		s.ready[slot] = true
 		return nil
 	}
+	facts, seen, err := s.solveFacts(slot)
+	if err != nil {
+		return err
+	}
+	reachable := make([]bool, len(g.Nodes))
+	for _, node := range seen {
+		reachable[node] = true
+	}
+	s.in[slot] = facts
+	s.reach[slot] = reachable
+	s.ready[slot] = true
+	return nil
+}
+
+// solveFacts runs the per-slot fixed point and returns node-indexed immutable
+// facts. The seen list is scratch owned by the solver; callers that retain
+// reachability must copy it before the next solve.
+func (s *SparseReaching) solveFacts(slot int) ([]defSet, []int, error) {
+	g := s.g
+	if g == nil || len(g.Nodes) == 0 {
+		return nil, nil, nil
+	}
 	n := len(g.Nodes)
 	// Bill one slot at a time so MaxSetElementWork L-1/L/L+1 can trip with
 	// Used>0 and Used<=L. A single Charge(n) against L<n fails with Used=0.
 	for i := 0; i < n; i++ {
 		if err := chargeSetWork(g.Work, 1); err != nil {
-			return err
+			return nil, nil, err
 		}
 	}
 	facts := make([]defSet, n)
-	reachable := make([]bool, n)
 	order := g.order
 	if order == nil {
 		order = map[*OpCode]int{}
@@ -265,24 +302,36 @@ func (s *SparseReaching) solve(slot int) error {
 			order[node] = i
 		}
 	}
+	if len(s.reachStamp) != n {
+		s.reachStamp = make([]uint32, n)
+		s.queueStamp = make([]uint32, n)
+	}
+	s.generation++
+	if s.generation == 0 {
+		clear(s.reachStamp)
+		clear(s.queueStamp)
+		s.generation = 1
+	}
+	gen := s.generation
+	s.seen = s.seen[:0]
+	s.queue = s.queue[:0]
 	facts[0] = s.entryFact(slot)
-	reachable[0] = true
-	queue := make([]int, 0, 8)
-	queued := make([]bool, n)
-	queue = append(queue, 0)
-	queued[0] = true
-	for head := 0; head < len(queue); head++ {
+	s.reachStamp[0] = gen
+	s.seen = append(s.seen, 0)
+	s.queueStamp[0] = gen
+	s.queue = append(s.queue, 0)
+	for head := 0; head < len(s.queue); head++ {
 		if g.MaxUpdates > 0 && g.Updates >= g.MaxUpdates {
 			g.Err = fmt.Errorf("analysis_budget_exceeded: reaching definitions after %d updates", g.Updates)
-			return g.Err
+			return nil, nil, g.Err
 		}
-		idx := queue[head]
-		queued[idx] = false
+		idx := s.queue[head]
+		s.queueStamp[idx] = 0
 		s.visits++
 		g.Updates++
 		if err := g.Work.Charge(workbudget.CounterAnalysisUpdates, 1); err != nil {
 			g.Err = err
-			return err
+			return nil, nil, err
 		}
 		op := g.Nodes[idx]
 		before := facts[idx]
@@ -292,7 +341,7 @@ func (s *SparseReaching) solve(slot int) error {
 		}, before, g.Work)
 		if err != nil {
 			g.Err = err
-			return err
+			return nil, nil, err
 		}
 		if g.outgoing == nil {
 			continue
@@ -307,33 +356,33 @@ func (s *SparseReaching) solve(slot int) error {
 			if !ok {
 				continue
 			}
-			changed := !reachable[to]
-			reachable[to] = true
+			changed := s.reachStamp[to] != gen
+			if changed {
+				s.reachStamp[to] = gen
+				s.seen = append(s.seen, to)
+			}
 			merged, grew, err := unionDef(facts[to], state, g.Work, &s.merges)
 			if err != nil {
 				g.Err = err
-				return err
+				return nil, nil, err
 			}
 			if grew {
 				facts[to] = merged
 				changed = true
-			} else if facts[to].ids == nil && reachable[to] && len(state.ids) == 0 {
+			} else if facts[to].ids == nil && len(state.ids) == 0 {
 				facts[to] = defSet{}
 			}
-			if changed && !queued[to] {
+			if changed && s.queueStamp[to] != gen {
 				if err := g.Work.Check(); err != nil {
 					g.Err = err
-					return err
+					return nil, nil, err
 				}
-				queued[to] = true
-				queue = append(queue, to)
+				s.queueStamp[to] = gen
+				s.queue = append(s.queue, to)
 			}
 		}
 	}
-	s.in[slot] = facts
-	s.reach[slot] = reachable
-	s.ready[slot] = true
-	return nil
+	return facts, s.seen, nil
 }
 
 // Definitions returns reaching stores at `at` for `slot`, including the entry
@@ -354,12 +403,9 @@ func (s *SparseReaching) Definitions(at *OpCode, slot int) ([]*OpCode, bool, err
 			return nil, false, nil
 		}
 	}
+	s.ensureQueryMaps()
 	key := queryKey{slot: slot, node: node}
-	if cached, hit := s.queryCache[key]; hit {
-		cp := make([]*OpCode, len(cached.defs))
-		copy(cp, cached.defs)
-		return cp, cached.entry, nil
-	}
+	_, charged := s.chargedQueries[key]
 	if err := s.solve(slot); err != nil {
 		return nil, false, err
 	}
@@ -368,9 +414,14 @@ func (s *SparseReaching) Definitions(at *OpCode, slot int) ([]*OpCode, bool, err
 		return nil, false, nil
 	}
 	set := facts[node]
-	if err := chargeSetWork(s.work(), int64(len(set.ids))); err != nil {
-		return nil, false, err
+	if !charged {
+		if err := chargeSetWork(s.work(), int64(len(set.ids))); err != nil {
+			return nil, false, err
+		}
+		s.chargedQueries[key] = struct{}{}
 	}
+	// Definition ids are SemanticCFG node indexes kept in sorted order, so
+	// translating them in place already yields bytecode order.
 	out := make([]*OpCode, 0, len(set.ids))
 	entry := false
 	for _, id := range set.ids {
@@ -382,11 +433,7 @@ func (s *SparseReaching) Definitions(at *OpCode, slot int) ([]*OpCode, bool, err
 			out = append(out, s.g.Nodes[id])
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return s.g.order[out[i]] < s.g.order[out[j]] })
-	s.queryCache[key] = cachedQuery{defs: out, entry: entry}
-	cp := make([]*OpCode, len(out))
-	copy(cp, out)
-	return cp, entry, nil
+	return out, entry, nil
 }
 
 func defOffsets(defs []*OpCode) []uint16 {

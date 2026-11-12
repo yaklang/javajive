@@ -249,6 +249,37 @@ func (n *Node) ReplaceNextSliceKeepOrder(oldNode *Node, news []*Node) {
 	}
 }
 
+// InsertNextAt splices nextNode into n.Next at index, preserving successor
+// order, and repairs the reverse Source link. Rewriters that must keep a
+// ConditionStatement's branch polarity use this instead of assigning n.Next
+// directly, keeping every in-place edge mutation on this type.
+func (n *Node) InsertNextAt(index int, nextNode *Node) {
+	if index < 0 || index > len(n.Next) {
+		index = len(n.Next)
+	}
+	n.Next = slices.Insert(n.Next, index, nextNode)
+	found := false
+	for _, source := range nextNode.Source {
+		if source == n {
+			found = true
+			break
+		}
+	}
+	if !found {
+		nextNode.Source = append(nextNode.Source, n)
+	}
+}
+
+// DuplicateNext appends another edge to the successor already at index. A
+// ConditionStatement uses duplicate edges to keep a selected branch reachable
+// while its condition is folded; the reverse Source link is already present.
+func (n *Node) DuplicateNext(index int) {
+	if index < 0 || index >= len(n.Next) {
+		return
+	}
+	n.Next = append(n.Next, n.Next[index])
+}
+
 // isEarlyReturnGuardFold reports whether beforeNode is an if-guard (a ConditionStatement with
 // exactly two successors) whose successor other than assignNode is a bare `return` terminal, and
 // whose fold target does NOT flow back to the guard. This is the early-return-guard shape behind

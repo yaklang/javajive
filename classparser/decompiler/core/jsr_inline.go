@@ -125,6 +125,7 @@ func (d *Decompiler) inlineJSRSubroutines() error {
 			d.opcodeIndexToOffset = work.opcodeIndexToOffset
 			d.CurrentId = work.CurrentId
 			d.RootOpCode = work.RootOpCode
+			d.jsrInlined = true
 			return nil
 		}
 	}

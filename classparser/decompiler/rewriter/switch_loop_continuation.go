@@ -59,7 +59,7 @@ func materializeSwitchLatchContinues(manager *RewriteManager, loop *core.Node) {
 		}
 	}
 	if changed {
-		manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
+		manager.refreshDominatorsShared()
 	}
 }
 

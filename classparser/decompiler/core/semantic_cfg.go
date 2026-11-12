@@ -63,6 +63,11 @@ type SemanticCFG struct {
 	adjacencyOnce sync.Once
 	nodeIndexes   map[*OpCode]int
 	successors    [2][][]int
+	// reaching owns the reusable sparse solver and graph-wide reachability for
+	// slot queries. Both are request-local and mutated by a single decompiler.
+	reaching    *SparseReaching
+	reachable   []bool
+	reachableOK bool
 }
 
 // MayThrowOpcode conservatively includes resolution/linkage, allocation, array,
@@ -85,6 +90,12 @@ func (d *Decompiler) buildSemanticCFG() (*SemanticCFG, error) {
 	if err := d.validateControlFlow(); err != nil {
 		return nil, err
 	}
+	return d.buildSemanticCFGUnchecked()
+}
+
+// buildSemanticCFGUnchecked assumes the opcode stream was already validated and
+// has not been rewritten since (JSR inlining invalidates that assumption).
+func (d *Decompiler) buildSemanticCFGUnchecked() (*SemanticCFG, error) {
 	g := &SemanticCFG{order: map[*OpCode]int{}, MaxUpdates: 1000000, incoming: map[*OpCode][]int{}, outgoing: map[*OpCode][]int{}, slots: map[int]*slotDefinitions{}, Work: d.Work, FunctionType: d.FunctionType}
 	if d.FunctionContext != nil {
 		g.IsStatic = d.FunctionContext.IsStatic
@@ -743,11 +754,13 @@ func (g *SemanticCFG) recordIndexStats(stats ExceptionIndexStats) {
 }
 
 type definitionSet map[*OpCode]struct{} // nil is the stable method-entry definition
-// Each slot is solved once on the immutable graph, then every load/store query is O(defs).
-// This avoids repeated reverse walks and makes loop joins independent of DFS order.
+// slotDefinitions holds one slot's facts. Production populates indexed from the
+// sparse solver; legacy unit fixtures may populate in/reachable instead.
 type slotDefinitions struct {
-	in        map[*OpCode]definitionSet
-	reachable map[*OpCode]bool
+	in               map[*OpCode]definitionSet // legacy fixture representation
+	reachable        map[*OpCode]bool          // legacy fixture representation
+	indexed          []defSet                  // production node-indexed immutable facts
+	reachableIndexed []bool
 }
 
 func (g *SemanticCFG) solveSlot(slot int) *slotDefinitions {
@@ -760,57 +773,102 @@ func (g *SemanticCFG) solveSlot(slot int) *slotDefinitions {
 }
 
 func (g *SemanticCFG) sparseSolveToSlotDefs(slot int) *slotDefinitions {
-	facts := &slotDefinitions{in: map[*OpCode]definitionSet{}, reachable: map[*OpCode]bool{}}
+	facts := &slotDefinitions{}
 	if g == nil || len(g.Nodes) == 0 {
 		return facts
 	}
-	s := NewSparseReaching(g)
-	if err := s.solve(slot); err != nil {
+	if g.reaching == nil {
+		g.reaching = NewSparseReaching(g)
+	}
+	beforeMerges := g.reaching.merges
+	arr, seen, err := g.reaching.solveFacts(slot)
+	g.SetWork += int(g.reaching.merges - beforeMerges)
+	if err != nil {
 		if g.Err == nil {
 			g.Err = err
 		}
+		// Preserve the legacy failure view: the entry node still reports its
+		// live-in identity while g.Err fails the analysis closed.
+		if len(g.Nodes) > 0 {
+			facts.in = map[*OpCode]definitionSet{g.Nodes[0]: {nil: {}}}
+			facts.reachable = map[*OpCode]bool{g.Nodes[0]: true}
+		}
 		return facts
 	}
-	arr := s.in[slot]
-	reach := s.reach[slot]
-	g.SetWork += int(s.merges)
+	if !g.reachableOK {
+		g.reachable = make([]bool, len(g.Nodes))
+		for _, node := range seen {
+			g.reachable[node] = true
+		}
+		g.reachableOK = true
+	}
+	indexed := make([]defSet, len(g.Nodes))
 	for i, set := range arr {
 		if err := g.Work.Check(); err != nil {
 			g.Err = err
 			return facts
 		}
-		n := g.Nodes[i]
-		if i >= len(reach) || !reach[i] {
+		if i >= len(g.reachable) || !g.reachable[i] {
 			continue
 		}
+		// Preserve the old pointer-map conversion's logical billing even though
+		// no pointer maps are allocated.
 		if err := g.Work.Charge(workbudget.CounterSetElementWork, int64(len(set.ids))); err != nil {
 			g.Err = err
 			return facts
 		}
-		ds := definitionSet{}
-		for _, id := range set.ids {
-			if id == entryDefID {
-				ds[nil] = struct{}{}
-				continue
-			}
-			if int(id) >= 0 && int(id) < len(g.Nodes) {
-				ds[g.Nodes[id]] = struct{}{}
-			}
-		}
-		facts.in[n] = ds
-		facts.reachable[n] = true
+		indexed[i] = set
 	}
-	if len(g.Nodes) > 0 && facts.in[g.Nodes[0]] == nil {
-		facts.in[g.Nodes[0]] = definitionSet{nil: {}}
-		facts.reachable[g.Nodes[0]] = true
-	}
+	facts.indexed = indexed
+	facts.reachableIndexed = g.reachable
 	return facts
+}
+
+// indexOfNodeCached resolves a node without allocating a per-query map and
+// without forcing the T26 adjacency cache: reaching queries only need the
+// construction-order index.
+func (g *SemanticCFG) indexOfNodeCached(at *OpCode) (int, bool) {
+	if g == nil || at == nil {
+		return 0, false
+	}
+	if g.order != nil {
+		if index, ok := g.order[at]; ok {
+			return index, true
+		}
+		return 0, false
+	}
+	for index, node := range g.Nodes {
+		if node == at {
+			return index, true
+		}
+	}
+	return 0, false
 }
 
 // ReachingDefinitions returns definition identities in bytecode order, including
 // iinc's read/write identity. The separate entry flag is not a fabricated store.
 func (g *SemanticCFG) ReachingDefinitions(at *OpCode, slot int) ([]*OpCode, bool) {
 	facts := g.solveSlot(slot)
+	if facts.indexed != nil {
+		index, ok := g.indexOfNodeCached(at)
+		if !ok || index < 0 || index >= len(facts.indexed) ||
+			index >= len(facts.reachableIndexed) || !facts.reachableIndexed[index] {
+			return nil, false
+		}
+		set := facts.indexed[index]
+		out := make([]*OpCode, 0, len(set.ids))
+		entry := false
+		for _, id := range set.ids {
+			if id == entryDefID {
+				entry = true
+				continue
+			}
+			if int(id) >= 0 && int(id) < len(g.Nodes) {
+				out = append(out, g.Nodes[id])
+			}
+		}
+		return out, entry
+	}
 	set := facts.in[at]
 	out := make([]*OpCode, 0, len(set))
 	_, entry := set[nil]
@@ -831,6 +889,19 @@ func (d *Decompiler) reachingStores(at *OpCode, slot int) ([]*OpCode, bool) {
 		return reachingStoresOf(at, slot)
 	}
 	g := d.semanticCFG
+	// The indexed query already returns a fresh slice in bytecode order. Only
+	// the iinc chain needs the transitive map/sort fallback.
+	direct, directEntry := g.ReachingDefinitions(at, slot)
+	hasIncrement := false
+	for _, store := range direct {
+		if store.Instr != nil && store.Instr.OpCode == OP_IINC {
+			hasIncrement = true
+			break
+		}
+	}
+	if !hasIncrement {
+		return direct, directEntry
+	}
 	pending := []*OpCode{at}
 	seen := map[*OpCode]bool{}
 	defs := map[*OpCode]bool{}

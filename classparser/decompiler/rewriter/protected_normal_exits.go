@@ -122,7 +122,7 @@ func materializeProtectedNormalExit(manager *RewriteManager, condition *core.Nod
 			jump.EncodedJumps = map[*core.Node]bool{alternate: true}
 			replaceNextInPlace(edge.from, alternate, jump)
 		}
-		manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
+		manager.refreshDominatorsShared()
 		return
 	}
 }

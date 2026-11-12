@@ -25,6 +25,30 @@ bounded failure recovery for malformed and partially unsupported inputs.
   graph adjacency, render with builders, reuse nested archive filesystems, populate
   DEX blocks in one pass, index DEX allocations/annotations/debug locals, bound
   diagnostic collection, and propagate recovery dependencies with a reverse graph.
+- Rework class analysis throughput. Sparse reaching definitions now keep canonical
+  node-indexed immutable facts instead of converting every slot to pointer maps;
+  unchanged unions and non-wide overwrites allocate nothing, definition order no
+  longer needs sorting, and repeated queries allocate only the caller's result.
+  A 32-slot/32-round production benchmark drops from ~11.6 ms / 10.5 MB / 72.5k
+  allocations to ~2.9 ms / 1.77 MB / 1.36k.
+- Replace exception-handler coverage set comparison with exact may-throw rank
+  intervals plus a single-span sweep. Validation at 1,024 handlers drops from
+  ~10.8 ms to ~0.58 ms while preserving nested/disjoint/crossing semantics,
+  including multi-span union crossings.
+- Memoize merge-point nearest-condition discovery and reuse control-flow
+  validation for non-JSR methods, removing per-merge reverse walks and two of
+  three full opcode validation scans. Index opcode PCs and stack-operand uses for
+  array/constructor proofs, and make the nested-array fixpoint reuse one use index
+  per pass.
+- Add an exact-topology statement dominator/post-dominator cache. Unchanged
+  topology refreshes are ~4.6x faster for dominators and ~11.2x for
+  post-dominators; scalar dominance queries allocate nothing. A randomized
+  differential test checks 10,500 topologies against fresh computation.
+- Add an ordered, conservative Compatibility rewrite scheduler. Seventeen audited
+  rules skip only when their own required literals are absent; applicability is
+  rebuilt after every accepted rewrite, SHA-256 state is carried forward, and the
+  full rule order, diagnostics, hashes and repeated entries are locked by tests.
+  A near-miss rewrite pipeline is ~11x faster with ~1290x fewer allocated bytes.
 
 - Harden DEX IR decoding: validate switch and fill-array payload targets with
   signed/`uint64` arithmetic before indexing, reject negative, wrapped, and

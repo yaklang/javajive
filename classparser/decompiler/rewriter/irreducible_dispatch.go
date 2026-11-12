@@ -20,7 +20,11 @@ type irreducibleDispatchRegion struct {
 // LowerIrreducibleDispatch converts supported normal-flow irreducible kernels
 // before ordinary if/loop/switch structuring consumes their edge identity.
 func (m *RewriteManager) LowerIrreducibleDispatch(admitted, constructor bool) bool {
-	if m == nil || m.RootNode == nil || isReducibleCFG(m.RootNode, GenerateDominatorTree(m.RootNode)) {
+	if m == nil || m.RootNode == nil {
+		return true
+	}
+	m.refreshDominatorsShared()
+	if isReducibleCFG(m.RootNode, m.DominatorMap) {
 		return true
 	}
 	if !admitted {
@@ -35,7 +39,8 @@ func (m *RewriteManager) LowerIrreducibleDispatch(admitted, constructor bool) bo
 	for rewrites := 0; rewrites < maxRewrites; rewrites++ {
 		region, found := m.nextIrreducibleDispatchRegion()
 		if !found {
-			if isReducibleCFG(m.RootNode, GenerateDominatorTree(m.RootNode)) {
+			m.refreshDominatorsShared()
+			if isReducibleCFG(m.RootNode, m.DominatorMap) {
 				return true
 			}
 			if m.irreducibleDispatchError == "" {
@@ -65,7 +70,8 @@ func reachableGraphNodes(root *core.Node) []*core.Node {
 
 func (m *RewriteManager) nextIrreducibleDispatchRegion() (irreducibleDispatchRegion, bool) {
 	nodes := reachableGraphNodes(m.RootNode)
-	dominators := GenerateDominatorTree(m.RootNode)
+	m.refreshDominatorsShared()
+	dominators := m.DominatorMap
 	forward := func(node *core.Node) []*core.Node {
 		out := make([]*core.Node, 0, len(node.Next))
 		for _, next := range node.Next {

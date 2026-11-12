@@ -91,8 +91,23 @@ type ClassObjectDumper struct {
 	recordReconstructionOK  bool
 	patternReconstructionOK bool
 	rewriteSeen             map[string]bool
-	Work                    *workbudget.Budget
-	diagTruncated           bool
+	// Rewrite scheduler state. The index is valid only for rewriteIndex.source
+	// at rewriteEpoch; every accepted source mutation advances the epoch and
+	// clears the index. Hash values are SHA-256 over source strings and are
+	// reused only while the exact string is in the bounded memo.
+	rewriteEpoch          uint64
+	rewriteIndex          *rewriteApplicabilityIndex
+	rewriteHashes         map[string]string
+	rewriteSchedulerStats rewriteSchedulerMetrics
+	// rewriteSchedulerDisabled is a test/benchmark override. Production
+	// bisection uses JDEC_REWRITE_SCHEDULER_OFF through jdecenv. The
+	// environment is read once per dumper: sourceRewrite runs this check on
+	// every one of the hundred-plus rules in the Compatibility chain.
+	rewriteSchedulerDisabled    bool
+	rewriteSchedulerSwitchReady bool
+	rewriteSchedulerSwitchOff   bool
+	Work                        *workbudget.Budget
+	diagTruncated               bool
 	// Set by actual degraded output, never by scanning user literals/comments.
 	sourceDegraded         bool
 	overloadFamilyUnproven bool

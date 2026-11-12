@@ -33,7 +33,7 @@ func partitionSharedLoopSteps(m *RewriteManager) {
 				private.AddNext(loop)
 			}
 			tail.RemoveAllNext()
-			m.DominatorMap = GenerateDominatorTree(m.RootNode)
+			m.refreshDominatorsShared()
 		}
 	}
 }

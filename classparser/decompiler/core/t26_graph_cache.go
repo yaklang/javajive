@@ -190,6 +190,15 @@ func cloneAnalysis(a *GraphAnalysis) *GraphAnalysis {
 }
 
 func (c *GraphAnalysisCache) getOrCompute(graphID, epoch uint64, kind AnalysisKind, domain GraphAnalysisDomain, succs [][]int) *GraphAnalysis {
+	return cloneAnalysis(c.getOrComputeShared(graphID, epoch, kind, domain, succs))
+}
+
+// getOrComputeShared returns the cache-owned immutable snapshot without the
+// defensive deep copy GetOrCompute performs. It is for scalar queries
+// (Dominates / PostDominates) that only read the result. The returned snapshot
+// must not be mutated or embedded in caller-visible state; holding the pointer
+// across eviction is safe because the value itself is never mutated.
+func (c *GraphAnalysisCache) getOrComputeShared(graphID, epoch uint64, kind AnalysisKind, domain GraphAnalysisDomain, succs [][]int) *GraphAnalysis {
 	key := cacheKey{
 		graphID:    graphID,
 		epoch:      epoch,
@@ -201,7 +210,7 @@ func (c *GraphAnalysisCache) getOrCompute(graphID, epoch uint64, kind AnalysisKi
 	defer c.mu.Unlock()
 	if ent, ok := c.entries[key]; ok {
 		c.lru.MoveToFront(ent.el)
-		return cloneAnalysis(ent.val)
+		return ent.val
 	}
 	n := len(succs)
 	var computed *GraphAnalysis
@@ -244,7 +253,7 @@ func (c *GraphAnalysisCache) getOrCompute(graphID, epoch uint64, kind AnalysisKi
 	if c.lru.Len() > c.capacity {
 		c.evictTailLocked()
 	}
-	return cloneAnalysis(computed)
+	return computed
 }
 
 func (g *SemanticCFG) analysisState() *graphAnalysisState {
@@ -813,6 +822,12 @@ type MutableAnalysisGraph struct {
 	n     int
 	edges []mutableEdge
 	cache *GraphAnalysisCache
+	// Successor index lists are derived from edges and are rebuilt only when
+	// the epoch changes. Scalar Dominates/PostDominates queries would otherwise
+	// rebuild the same lists on every call.
+	succNormal    [][]int
+	succException [][]int
+	succValid     bool
 }
 
 type mutableEdge struct {
@@ -832,7 +847,10 @@ func NewMutableAnalysisGraph(nodes int, cache *GraphAnalysisCache) *MutableAnaly
 	}
 }
 
-func (m *MutableAnalysisGraph) bump() { m.epoch++ }
+func (m *MutableAnalysisGraph) bump() {
+	m.epoch++
+	m.succValid = false
+}
 
 // Epoch is the mutation counter; any add/delete/replace of a node or edge misses
 // previously cached results.
@@ -879,6 +897,18 @@ func (m *MutableAnalysisGraph) ReplaceNode(id int) int {
 }
 
 func (m *MutableAnalysisGraph) successorIndexLists(includeException bool) [][]int {
+	if !m.succValid {
+		m.succNormal = m.buildSuccessorIndexLists(false)
+		m.succException = m.buildSuccessorIndexLists(true)
+		m.succValid = true
+	}
+	if includeException {
+		return m.succException
+	}
+	return m.succNormal
+}
+
+func (m *MutableAnalysisGraph) buildSuccessorIndexLists(includeException bool) [][]int {
 	succs := make([][]int, m.n)
 	seen := make([]map[int]struct{}, m.n)
 	for _, e := range m.edges {
@@ -903,6 +933,27 @@ func (m *MutableAnalysisGraph) successorIndexLists(includeException bool) [][]in
 // GetOrCompute is the mutable-graph counterpart of SemanticCFG.GetOrCompute.
 func (m *MutableAnalysisGraph) GetOrCompute(kind AnalysisKind, domain GraphAnalysisDomain) *GraphAnalysis {
 	return m.cache.getOrCompute(m.id, m.epoch, kind, domain, m.successorIndexLists(domain.IncludeException))
+}
+
+// Dominates reports whether dominator dominates node in the current graph
+// epoch. Unlike GetOrCompute it does not deep-copy the cached analysis, so it
+// is the scalar query for repeated dominance tests.
+func (m *MutableAnalysisGraph) Dominates(domain GraphAnalysisDomain, dominator, node int) bool {
+	if m == nil || m.cache == nil {
+		return false
+	}
+	analysis := m.cache.getOrComputeShared(m.id, m.epoch, AnalysisDominators, domain, m.successorIndexLists(domain.IncludeException))
+	return analysis != nil && analysis.Dominates(dominator, node)
+}
+
+// PostDominates reports whether post postdominates node in the current graph
+// epoch without copying the cached analysis.
+func (m *MutableAnalysisGraph) PostDominates(domain GraphAnalysisDomain, post, node int) bool {
+	if m == nil || m.cache == nil {
+		return false
+	}
+	analysis := m.cache.getOrComputeShared(m.id, m.epoch, AnalysisPostDominators, domain, m.successorIndexLists(domain.IncludeException))
+	return analysis != nil && analysis.PostDominates(post, node)
 }
 
 func (m *MutableAnalysisGraph) ComputeCount() int64 { return m.cache.ComputeCount() }
