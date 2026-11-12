@@ -49,26 +49,38 @@ type DominateIndex struct {
 }
 
 func NewDominateIndex(tree map[*core.Node][]*core.Node) *DominateIndex {
-	index := &DominateIndex{tree: tree, valid: true}
-	if len(tree) == 0 {
-		return index
+	index := &DominateIndex{}
+	index.Reset(tree)
+	return index
+}
+
+// Reset rebuilds the index for a new dominator tree while retaining the parent
+// map's buckets. Rewriter topology refreshes use this to avoid a new map per
+// rewrite step.
+func (d *DominateIndex) Reset(tree map[*core.Node][]*core.Node) {
+	if d == nil {
+		return
 	}
-	parent := make(map[*core.Node]*core.Node, len(tree))
+	d.tree = tree
+	d.valid = true
+	if d.parent == nil {
+		d.parent = make(map[*core.Node]*core.Node, len(tree))
+	} else {
+		clear(d.parent)
+	}
 	for dom, children := range tree {
 		for _, child := range children {
 			if child == nil {
-				index.valid = false
+				d.valid = false
 				continue
 			}
-			if previous, ok := parent[child]; ok && previous != dom {
-				index.valid = false
+			if previous, ok := d.parent[child]; ok && previous != dom {
+				d.valid = false
 				continue
 			}
-			parent[child] = dom
+			d.parent[child] = dom
 		}
 	}
-	index.parent = parent
-	return index
 }
 
 func (d *DominateIndex) IsDominate(node1, node2 *core.Node) bool {

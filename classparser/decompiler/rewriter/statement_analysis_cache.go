@@ -71,28 +71,74 @@ func (s *statementGraphSnapshot) build(root *core.Node) {
 	}
 }
 
-func (s *statementGraphSnapshot) equal(other *statementGraphSnapshot) bool {
+// statementTopologyDiff describes a snapshot change without hosing every
+// cached loop body. changed lists nodes whose ordered successor list differs;
+// neighbors is the union of their old and new successors. addedOrRemoved means
+// node identity changed, which invalidates all cached bodies conservatively.
+type statementTopologyDiff struct {
+	changed        []*core.Node
+	neighbors      []*core.Node
+	addedOrRemoved bool
+}
+
+func (d *statementTopologyDiff) reset() {
+	d.changed = d.changed[:0]
+	d.neighbors = d.neighbors[:0]
+	d.addedOrRemoved = false
+}
+
+// diff reports whether the snapshots are identical in node order and ordered
+// successor lists. Otherwise it records enough information for a loop-body
+// cache to keep entries whose loop region was untouched.
+func (s *statementGraphSnapshot) diff(other *statementGraphSnapshot, out *statementTopologyDiff) bool {
+	out.reset()
 	if s == nil || other == nil {
 		return s == other
 	}
-	if len(s.nodes) != len(other.nodes) || len(s.succs) != len(other.succs) {
-		return false
+	if len(s.nodes) != len(other.nodes) {
+		out.addedOrRemoved = true
 	}
-	for i := range s.nodes {
-		if s.nodes[i] != other.nodes[i] {
-			return false
+	orderSame := len(s.nodes) == len(other.nodes)
+	for i, node := range s.nodes {
+		j, ok := other.index[node]
+		if !ok {
+			out.addedOrRemoved = true
+			out.changed = append(out.changed, node)
+			continue
 		}
-		left, right := s.succs[i], other.succs[i]
-		if len(left) != len(right) {
-			return false
+		if i >= len(other.nodes) || other.nodes[i] != node {
+			orderSame = false
 		}
-		for j := range left {
-			if left[j] != right[j] {
-				return false
+		left, right := s.succs[i], other.succs[j]
+		same := len(left) == len(right)
+		if same {
+			for k := range left {
+				if s.nodes[left[k]] != other.nodes[right[k]] {
+					same = false
+					break
+				}
+			}
+		}
+		if !same {
+			out.changed = append(out.changed, node)
+			for _, index := range left {
+				out.neighbors = append(out.neighbors, s.nodes[index])
+			}
+			for _, index := range right {
+				out.neighbors = append(out.neighbors, other.nodes[index])
 			}
 		}
 	}
-	return true
+	for j, node := range other.nodes {
+		if _, ok := s.index[node]; !ok {
+			out.addedOrRemoved = true
+			out.changed = append(out.changed, node)
+			for _, index := range other.succs[j] {
+				out.neighbors = append(out.neighbors, other.nodes[index])
+			}
+		}
+	}
+	return orderSame && !out.addedOrRemoved && len(out.changed) == 0
 }
 
 // statementDominanceState owns the memoized analyses for one RewriteManager.
@@ -104,6 +150,10 @@ type statementDominanceState struct {
 	snapshot *statementGraphSnapshot
 	scratch  *statementGraphSnapshot
 	graph    *core.MutableAnalysisGraph
+	// diff describes the last topology change. topologyChanged is true when the
+	// snapshot was replaced; the loop-body cache consumes diff after refresh.
+	diff            statementTopologyDiff
+	topologyChanged bool
 
 	domAnalysis  *core.GraphAnalysis
 	domTree      map[*core.Node][]*core.Node
@@ -121,9 +171,17 @@ func (s *statementDominanceState) refresh(root *core.Node) {
 		s.scratch = &statementGraphSnapshot{}
 	}
 	s.scratch.build(root)
-	if s.snapshot != nil && s.snapshot.equal(s.scratch) {
-		s.root = root
-		return
+	if s.snapshot != nil {
+		if s.snapshot.diff(s.scratch, &s.diff) {
+			s.root = root
+			s.topologyChanged = false
+			return
+		}
+		s.topologyChanged = true
+	} else {
+		// No derived analysis or loop-body cache exists yet.
+		s.diff.reset()
+		s.topologyChanged = false
 	}
 	s.snapshot, s.scratch = s.scratch, s.snapshot
 	s.root = root
@@ -134,24 +192,30 @@ func (s *statementDominanceState) refresh(root *core.Node) {
 	s.postIndex = nil
 	s.postCanExit = nil
 	s.postReady = false
-	s.graph = newStatementAnalysisGraph(s.snapshot)
+	s.resetGraph()
 }
 
-func newStatementAnalysisGraph(snapshot *statementGraphSnapshot) *core.MutableAnalysisGraph {
+// resetGraph replaces the graph topology in place. The graph identity and its
+// edge/scratch storage survive, while the epoch changes so cached analyses from
+// the previous topology cannot be mistaken for the new one.
+func (s *statementDominanceState) resetGraph() {
 	nodes := 0
-	if snapshot != nil {
-		nodes = len(snapshot.nodes)
+	if s.snapshot != nil {
+		nodes = len(s.snapshot.nodes)
 	}
-	graph := core.NewMutableAnalysisGraph(nodes, core.NewGraphAnalysisCache(2))
-	if snapshot == nil {
-		return graph
+	if s.graph == nil {
+		s.graph = core.NewMutableAnalysisGraph(nodes, core.NewGraphAnalysisCache(2))
+	} else {
+		s.graph.Reset(nodes)
 	}
-	for from, succs := range snapshot.succs {
+	if s.snapshot == nil {
+		return
+	}
+	for from, succs := range s.snapshot.succs {
 		for _, to := range succs {
-			graph.AddEdge(from, to, false)
+			s.graph.AddEdge(from, to, false)
 		}
 	}
-	return graph
 }
 
 // dominatorTree computes the canonical child-list tree once per topology. The
@@ -168,7 +232,7 @@ func (s *statementDominanceState) dominatorTree() map[*core.Node][]*core.Node {
 		return s.domTree
 	}
 	if s.graph == nil {
-		s.graph = newStatementAnalysisGraph(s.snapshot)
+		s.resetGraph()
 	}
 	// The state only reads IDom and the graph is replaced on every topology
 	// change, so the cache-owned analysis is safe to borrow here; a defensive
@@ -330,6 +394,9 @@ func (s *RewriteManager) refreshDominators() {
 	state := s.dominanceState()
 	state.refresh(s.RootNode)
 	s.DominatorMap = cloneDominatorTree(state.dominatorTree())
+	s.domMapVersion++
+	s.domMapDirty = false
+	s.invalidateLoopBasesAfterTopology(state)
 }
 
 // refreshDominatorsShared refreshes the production rewriter's map in place.
@@ -341,6 +408,11 @@ func (s *RewriteManager) refreshDominatorsShared() {
 	state := s.dominanceState()
 	state.refresh(s.RootNode)
 	s.DominatorMap = state.dominatorTree()
+	if state.topologyChanged || s.domMapDirty {
+		s.domMapVersion++
+		s.domMapDirty = false
+	}
+	s.invalidateLoopBasesAfterTopology(state)
 }
 
 // postDominatorMap returns a defensive copy of the memoized immediate
@@ -348,6 +420,14 @@ func (s *RewriteManager) refreshDominatorsShared() {
 func (s *RewriteManager) postDominatorMap() map[*core.Node]*core.Node {
 	state := s.dominanceState()
 	state.refresh(s.RootNode)
+	if state.topologyChanged {
+		// These query methods do not publish a fresh DominatorMap; keep the
+		// base-body cache and dominance index conservative until the rewrite
+		// loop refreshes.
+		s.domMapDirty = true
+		s.domIndex = nil
+		s.clearLoopBases()
+	}
 	return clonePostDominatorMap(state.postDominatorMap())
 }
 
@@ -356,6 +436,11 @@ func (s *RewriteManager) postDominatorMap() map[*core.Node]*core.Node {
 func (s *RewriteManager) Dominates(dominator, node *core.Node) bool {
 	state := s.dominanceState()
 	state.refresh(s.RootNode)
+	if state.topologyChanged {
+		s.domMapDirty = true
+		s.domIndex = nil
+		s.clearLoopBases()
+	}
 	return state.dominates(dominator, node)
 }
 
@@ -365,6 +450,11 @@ func (s *RewriteManager) Dominates(dominator, node *core.Node) bool {
 func (s *RewriteManager) PostDominates(post, node *core.Node) bool {
 	state := s.dominanceState()
 	state.refresh(s.RootNode)
+	if state.topologyChanged {
+		s.domMapDirty = true
+		s.domIndex = nil
+		s.clearLoopBases()
+	}
 	return state.postDominates(post, node)
 }
 

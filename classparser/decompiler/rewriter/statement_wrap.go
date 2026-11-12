@@ -60,8 +60,15 @@ type RewriteManager struct {
 	// before any graph mutation, so cached answers always describe the live
 	// graph. Nil means every query recomputes.
 	loopCache   *loopAnalysisCache
+	loopBases   map[loopBodyKey]loopBaseEntry
 	loopScratch loopElementScratch
-	LabelId     int
+	// domIndex caches the child->parent dominance query for the current
+	// DominatorMap; topology refreshes invalidate it.
+	domIndex        *utils2.DominateIndex
+	domIndexVersion uint64
+	domMapVersion   uint64
+	domMapDirty     bool
+	LabelId         int
 	// LoopRegionReducible records whether the ORIGINAL method CFG (before any loop wrapping) is a
 	// reducible flow graph. It is computed once in Rewrite() because mid-pipeline the graph gains
 	// do-while wrapper nodes and rewrite-inserted break/continue edges that corrupt dominance, making a
@@ -1098,6 +1105,12 @@ func (s *RewriteManager) Rewrite() error {
 	// normalization; this loop cannot introduce one into a method that had
 	// none. Check once instead of scanning the graph at every container.
 	loopCacheAllowed := s.loopCacheSafe()
+	if jdecenv.Get("JDEC_LOOP_ANALYSIS_CACHE_OFF") != "1" {
+		// Topology-only loop bodies survive across rewrite steps; the snapshot
+		// diff keeps entries whose loop region was untouched.
+		s.loopBases = map[loopBodyKey]loopBaseEntry{}
+		defer func() { s.loopBases = nil }()
+	}
 	for i := 0; i < len(order); i++ {
 		s.refreshDominatorsShared()
 		node := order[i]
@@ -1110,20 +1123,15 @@ func (s *RewriteManager) Rewrite() error {
 		// every loop body for every container node; reuse the answers within
 		// this rewrite step and drop them at the first mutation.
 		var loopCache *loopAnalysisCache
-		var domIndex *utils2.DominateIndex
 		useLoopCache := func() {
 			if loopCache == nil && loopCacheAllowed {
 				loopCache = newLoopAnalysisCache()
 			}
 			s.loopCache = loopCache
-			if domIndex == nil {
-				domIndex = utils2.NewDominateIndex(s.DominatorMap)
-			}
 		}
 		dropLoopCache := func() {
 			s.loopCache = nil
 			loopCache = nil
-			domIndex = nil
 		}
 		isTry := inSet(trySet, node)
 		// Protected retry branches need their loop exits before nested ifs
@@ -1138,7 +1146,7 @@ func (s *RewriteManager) Rewrite() error {
 				noProtected := s.loopCache != nil
 				for j := i; j < len(order); j++ {
 					n := order[j]
-					if inSet(whileSet, n) && (loopOwnsRewriteNodeWith(s, n, node, domIndex.IsDominate) || (protectedRetryOnly && !noProtected && protectedRetryContinuationOwnsRewriteNode(s, n, node)) || (!protectedRetryOnly && s.LoopRegionReducible && len(n.Next) > 0 && s.searchLoopEnd(n, n.Next[0], true) == node)) {
+					if inSet(whileSet, n) && (loopOwnsRewriteNodeWith(s, n, node, s.ownsNode) || (protectedRetryOnly && !noProtected && protectedRetryContinuationOwnsRewriteNode(s, n, node)) || (!protectedRetryOnly && s.LoopRegionReducible && len(n.Next) > 0 && s.searchLoopEnd(n, n.Next[0], true) == node)) {
 						if protectedRetryOnly && !noProtected && !loopHasProvedProtectedRetry(s, n) {
 							continue
 						}

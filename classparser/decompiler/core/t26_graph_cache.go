@@ -842,6 +842,10 @@ type MutableAnalysisGraph struct {
 	succNormal    [][]int
 	succException [][]int
 	succValid     bool
+	// Scratch arrays reused by buildSuccessorIndexLists across topology epochs.
+	countsScratch []int
+	stampScratch  []uint64
+	markScratch   []uint64
 }
 
 type mutableEdge struct {
@@ -869,6 +873,20 @@ func (m *MutableAnalysisGraph) bump() {
 // Epoch is the mutation counter; any add/delete/replace of a node or edge misses
 // previously cached results.
 func (m *MutableAnalysisGraph) Epoch() uint64 { return m.epoch }
+
+// Reset discards every edge and sets a new node count while preserving the
+// graph identity and reusable scratch storage. The epoch advances, so cached
+// analyses for the previous topology remain distinct even if it is later
+// evicted from the LRU.
+func (m *MutableAnalysisGraph) Reset(nodes int) {
+	if nodes < 0 {
+		nodes = 0
+	}
+	m.n = nodes
+	m.edges = m.edges[:0]
+	m.epoch++
+	m.succValid = false
+}
 
 func (m *MutableAnalysisGraph) AddNode() int {
 	id := m.n
@@ -927,31 +945,63 @@ func (m *MutableAnalysisGraph) buildSuccessorIndexLists(includeException bool) [
 	// let every successor list grow by append. Statement dominance rebuilds this
 	// table after each topology change, so on a loop-heavy method those maps
 	// dominated the analysis allocation. Count first to size each list exactly,
-	// then dedupe with generation stamps over two flat arrays.
-	counts := make([]int, m.n)
+	// then dedupe with generation stamps over two flat arrays. The successor
+	// table, counts, and stamps are reused across epochs; no analysis result
+	// retains them after computation.
+	n := m.n
+	outer := &m.succNormal
+	if includeException {
+		outer = &m.succException
+	}
+	succs := *outer
+	if cap(succs) < n {
+		succs = make([][]int, n)
+	} else {
+		succs = succs[:n]
+		for i := range succs {
+			succs[i] = succs[i][:0]
+		}
+	}
+	if cap(m.countsScratch) < n {
+		m.countsScratch = make([]int, n)
+	} else {
+		m.countsScratch = m.countsScratch[:n]
+		clear(m.countsScratch)
+	}
+	counts := m.countsScratch
 	for _, e := range m.edges {
 		if !includeException && e.exception {
 			continue
 		}
-		if e.from < 0 || e.from >= m.n || e.to < 0 || e.to >= m.n {
+		if e.from < 0 || e.from >= n || e.to < 0 || e.to >= n {
 			continue
 		}
 		counts[e.from]++
 	}
-	succs := make([][]int, m.n)
 	for from, count := range counts {
-		if count > 0 {
+		if count > 0 && cap(succs[from]) < count {
 			succs[from] = make([]int, 0, count)
 		}
 	}
-	stamps := make([]uint64, m.n)
-	marks := make([]uint64, m.n)
+	if cap(m.stampScratch) < n {
+		m.stampScratch = make([]uint64, n)
+	} else {
+		m.stampScratch = m.stampScratch[:n]
+		clear(m.stampScratch)
+	}
+	if cap(m.markScratch) < n {
+		m.markScratch = make([]uint64, n)
+	} else {
+		m.markScratch = m.markScratch[:n]
+		clear(m.markScratch)
+	}
+	stamps, marks := m.stampScratch, m.markScratch
 	var stamp uint64
 	for _, e := range m.edges {
 		if !includeException && e.exception {
 			continue
 		}
-		if e.from < 0 || e.from >= m.n || e.to < 0 || e.to >= m.n {
+		if e.from < 0 || e.from >= n || e.to < 0 || e.to >= n {
 			continue
 		}
 		if stamps[e.from] == 0 {
@@ -964,6 +1014,7 @@ func (m *MutableAnalysisGraph) buildSuccessorIndexLists(includeException bool) [
 		marks[e.to] = stamps[e.from]
 		succs[e.from] = append(succs[e.from], e.to)
 	}
+	*outer = succs
 	return succs
 }
 

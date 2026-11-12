@@ -85,3 +85,60 @@ func TestReachingSlotStoreRefUniqueMatchesMapQuery(t *testing.T) {
 		}
 	}
 }
+
+// The production repair now answers from the sparse reaching facts whenever
+// the SemanticCFG knows the opcode. This fixture has a branch merge with two
+// definitions of slot 0, so the indexed solver and the structural Source walk
+// must agree on both the unique and ambiguous cases.
+func TestReachingSlotStoreRefDataflowMatchesStructuralWalk(t *testing.T) {
+	// 0 iconst_0; 1 istore_0; 2 iload_0; 3 ifeq +5 (target 8);
+	// 6 iconst_1; 7 istore_0; 8 iload_0; 9 ireturn.
+	d := auditCFG(t, []byte{
+		OP_ICONST_0, OP_ISTORE_0, OP_ILOAD_0, OP_IFEQ, 0, 5,
+		OP_ICONST_1, OP_ISTORE_0, OP_ILOAD_0, OP_IRETURN,
+	})
+	g, err := d.buildSemanticCFG()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.semanticCFG = g
+	// auditCFG only parses opcodes; the structural oracle reads Source edges, so
+	// materialize them from the same semantic edges the dataflow uses.
+	for _, edge := range g.Edges {
+		edge.From.Target = append(edge.From.Target, edge.To)
+		edge.To.Source = append(edge.To.Source, edge.From)
+	}
+	d.opcodeIdToRef = map[*OpCode][][2]any{}
+	refs := []*values.JavaRef{{VarUid: "a"}, {VarUid: "b"}}
+	nextRef := 0
+	for _, op := range g.Nodes {
+		if op.Instr != nil && isLocalStoreOpcode(op.Instr.OpCode) {
+			ref := refs[nextRef%len(refs)]
+			nextRef++
+			d.opcodeIdToRef[op] = [][2]any{{ref, nil}}
+		}
+	}
+	for _, load := range g.Nodes {
+		if load.Instr == nil || (!isLocalLoadOpcode(load.Instr.OpCode) && !isLocalStoreOpcode(load.Instr.OpCode)) {
+			continue
+		}
+		for slot := 0; slot < 2; slot++ {
+			for _, current := range append(append([]*values.JavaRef(nil), refs...), nil) {
+				legacy := legacyReachingSlotStoreRefs(d, load, slot)
+				var want *values.JavaRef
+				if len(legacy) == 1 {
+					for _, ref := range legacy {
+						if current == nil || ref.VarUid != current.VarUid {
+							want = ref
+						}
+					}
+				}
+				got := d.reachingSlotStoreRefUnique(load, slot, current)
+				if (got == nil) != (want == nil) || (got != nil && got.VarUid != want.VarUid) {
+					t.Fatalf("load@%d slot %d current %v: got %v want %v (structural=%v)",
+						load.CurrentOffset, slot, current, got, want, legacy)
+				}
+			}
+		}
+	}
+}

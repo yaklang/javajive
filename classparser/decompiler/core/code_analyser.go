@@ -1573,6 +1573,36 @@ func (d *Decompiler) reachingSlotStoreRefUnique(start *OpCode, slot int, current
 	if start == nil {
 		return nil
 	}
+	// The sparse reaching solver already has the per-slot definition sets. Use
+	// them when the CFG knows this opcode; only an unavailable node falls back
+	// to the structural Source walk.
+	if d.semanticCFG != nil {
+		if _, ok := d.semanticCFG.indexOfNodeCached(start); ok {
+			stores, _ := d.reachingStores(start, slot)
+			var found *values.JavaRef
+			for _, store := range stores {
+				refs, ok := d.opcodeIdToRef[store]
+				if !ok || len(refs) == 0 {
+					continue
+				}
+				ref, ok := refs[len(refs)-1][0].(*values.JavaRef)
+				if !ok || ref == nil {
+					continue
+				}
+				if current != nil && ref.VarUid == current.VarUid {
+					return nil
+				}
+				if found == nil {
+					found = ref
+					continue
+				}
+				if found.VarUid != ref.VarUid {
+					return nil
+				}
+			}
+			return found
+		}
+	}
 	sc := &d.reachWalk
 	if sc.visited == nil {
 		sc.visited = make(map[*OpCode]uint64)
@@ -1586,12 +1616,22 @@ func (d *Decompiler) reachingSlotStoreRefUnique(start *OpCode, slot int, current
 	sc.visited[start] = gen
 	queue := append(sc.queue[:0], start.Source...)
 	var found *values.JavaRef
+	visits := 0
 	for head := 0; head < len(queue); head++ {
 		cur := queue[head]
 		if cur == nil || sc.visited[cur] == gen {
 			continue
 		}
 		sc.visited[cur] = gen
+		visits++
+		if d.Work != nil && visits%128 == 0 {
+			if err := d.Work.Charge(workbudget.CounterGraphScans, 128); err != nil {
+				// The budget remains latched and fails the method at its next
+				// boundary; never continue an unbounded repair search.
+				sc.queue = queue[:0]
+				return nil
+			}
+		}
 		if isLocalStoreOpcode(cur.Instr.OpCode) && GetStoreIdx(cur) == slot {
 			refs, ok := d.opcodeIdToRef[cur]
 			if !ok || len(refs) == 0 {

@@ -101,6 +101,13 @@ func (s *Set[T]) Len() int {
 	return len(s.List())
 }
 
+// Size returns the number of items without materializing a list.
+func (s *Set[T]) Size() int {
+	s.RLock()
+	defer s.RUnlock()
+	return len(s.m)
+}
+
 // Clear removes all items from the set
 func (s *Set[T]) Clear() {
 	s.Lock()
@@ -128,10 +135,28 @@ func (s *Set[T]) List() []T {
 }
 
 func (s *Set[T]) ForEach(h func(T)) {
+	if s == nil {
+		return
+	}
 	s.RLock()
 	defer s.RUnlock()
 	for item := range s.m {
 		h(item)
+	}
+}
+
+// ForEachWhile iterates until the handler returns false. It avoids the
+// allocation of List for callers that only scan or stop at the first match.
+func (s *Set[T]) ForEachWhile(h func(T) bool) {
+	if s == nil {
+		return
+	}
+	s.RLock()
+	defer s.RUnlock()
+	for item := range s.m {
+		if !h(item) {
+			return
+		}
 	}
 }
 

@@ -142,6 +142,29 @@ bounded failure recovery for malformed and partially unsupported inputs.
   (3.1x faster, 6.0x less memory, 2.6x fewer allocations). Differential tests
   compare the one-pass switch predicate with the per-target query and the
   early-exit reaching query with the map-returning oracle.
+- Split loop bodies into a topology-only base set and the protected-retry
+  augmentation. Methods with protected ranges keep the final set uncached, but
+  the base traversal now survives rewrite steps: the statement snapshot diff
+  invalidates only loops whose dominator subtree or immediate adjacency changed,
+  added/removed nodes and irreducible CFGs invalidate conservatively, and a body
+  with no protected node shares the cached set. Bodies that do have protected
+  retry boundaries clone before augmenting, preserving every `ProtectedEnd`
+  side effect.
+- Answer the per-load reaching-store repair from the sparse reaching facts
+  instead of another backwards BFS; the structural Source walk remains only as a
+  fallback when the SemanticCFG does not know the opcode. Charge visited opcodes
+  against `CounterGraphScans` in batches so a pathological slot-reuse method
+  fails closed instead of searching without bound.
+- Reuse the mutable analysis graph, its edge storage and successor tables across
+  topology epochs, and cache the child-to-parent dominance index across rewrite
+  steps. `commonLoopExit` reuses generation-stamped distance maps and queues,
+  exclusive-terminal tests take a cached node-live predicate, and protected-body
+  augmentation no longer calls `Set.List`.
+- FMParserTokenManager now decompiles in 4.8 s / 1.79 GB / 14.2M allocations,
+  down from 24.8 s / 21.9 GB / 45.2M (5.2x faster, 12.2x less memory, 3.2x fewer
+  allocations). FMParser, JSONReaderUTF16 and the loop-structuring fixture also
+  improve to ~0.78 s, ~0.91 s and ~0.47 s. New tests cover localized loop-base
+  invalidation and compare the dataflow reaching query with the structural walk.
 
 - Harden DEX IR decoding: validate switch and fill-array payload targets with
   signed/`uint64` arithmetic before indexing, reject negative, wrapped, and
