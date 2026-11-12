@@ -59,6 +59,29 @@ func TestWorkflowContractRejectsBroadOrMissingInventory(t *testing.T) {
 	}
 }
 
+func TestSuitesForGroupFiltersAndRejectsUnknown(t *testing.T) {
+	rows, err := suitesForGroup("algorithm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("algorithm group is empty")
+	}
+	for _, row := range rows {
+		if row.Group != "algorithm" {
+			t.Fatalf("algorithm group leaked %+v", row)
+		}
+	}
+	for _, group := range requiredGroups {
+		if rows, err := suitesForGroup(group); err != nil || len(rows) == 0 {
+			t.Fatalf("group %q: rows=%d err=%v", group, len(rows), err)
+		}
+	}
+	if _, err := suitesForGroup("unknown"); err == nil {
+		t.Fatal("accepted unknown inventory group")
+	}
+}
+
 func TestSelectedTestsRejectsUnknownNames(t *testing.T) {
 	all := []string{"TestA", "TestB"}
 	if _, err := selectedTests(suite{Package: "./p", Include: []string{"TestMissing"}}, all); err == nil {

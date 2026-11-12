@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 type suite struct {
@@ -69,7 +70,7 @@ var requiredSuites = []suite{
 	{Group: "dex", Package: "./internal/mutf8", Tests: 6, TestHash: "f176fe43927c9dff4e9f378419d80c0d889d67e93aa568f3250e7edc8dd3ad72"},
 	{Group: "dex", Package: "./internal/zipx", Tests: 2, TestHash: "99bdca5967a4f3f345a748cfc3c8317ea9cb7055ae7fadcaca08ff4fc67abdd0"},
 
-	{Group: "contract", Package: "./tools/requiredci", Tests: 5, TestHash: "6b6056b6358c2517caed772186e1ce80c1609cc0c635ae08e76c83ae641560a6"},
+	{Group: "contract", Package: "./tools/requiredci", Tests: 6, TestHash: "76472166ee629021a07398756a3005174d8b6ca9adb8fe08d9671ea9f4f55742"},
 }
 
 var forbiddenWorkflowWord = regexp.MustCompile(`(?i)\b(?:java|javac|javap|jlink|jmod|jimage|python(?:2|3)?)\b`)
@@ -84,7 +85,14 @@ func main() {
 	}
 	root, err := repositoryRoot()
 	if err == nil {
-		err = validate(root)
+		if *run == "" {
+			err = validate(root)
+		} else {
+			// A group job only needs its own sealed rows. The contract job
+			// validates the complete inventory, so repeating that listing in
+			// every test job would add startup latency without adding a gate.
+			err = validateGroup(root, *run)
+		}
 	}
 	if err == nil && *run != "" {
 		err = runSuites(root, *run)
@@ -112,40 +120,143 @@ func repositoryRoot() (string, error) {
 	}
 }
 
+var requiredGroups = []string{"corpus", "algorithm", "dex", "contract"}
+
+// maxListWorkers bounds concurrent `go test -list` processes. Listing is
+// process-heavy but mostly independent; four workers fit the four-vCPU public
+// runners and keep startup latency off the critical path. The Go build cache
+// serializes its own writes safely.
+const maxListWorkers = 4
+
+var (
+	testListMu sync.Mutex
+	testLists  = map[string][]string{}
+)
+
 func validate(root string) error {
-	data, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "ci.yml"))
-	if err != nil {
-		return fmt.Errorf("read required workflow: %w", err)
-	}
-	if err := validateWorkflow(string(data)); err != nil {
+	if err := validateRequiredWorkflow(root); err != nil {
 		return err
 	}
-	seen := map[string]bool{}
+	if err := validateSuites(root, requiredSuites); err != nil {
+		return err
+	}
 	groups := map[string]bool{}
 	for _, item := range requiredSuites {
-		key := item.Group + "\x00" + item.Package
-		if seen[key] || item.Group == "" || !strings.HasPrefix(item.Package, "./") || len(item.Include) > 0 && len(item.Exclude) > 0 {
-			return fmt.Errorf("invalid inventory row: %+v", item)
-		}
-		seen[key] = true
 		groups[item.Group] = true
-		all, err := listTests(root, item.Package)
-		if err != nil {
-			return err
-		}
-		if item.TestHash != "" && (len(all) != item.Tests || testHash(all) != item.TestHash) {
-			return fmt.Errorf("%s inventory changed: tests=%d hash=%s; review and update the sealed row", item.Package, len(all), testHash(all))
-		}
-		if _, err := selectedTests(item, all); err != nil {
-			return err
-		}
 	}
-	for _, group := range []string{"corpus", "algorithm", "dex", "contract"} {
+	for _, group := range requiredGroups {
 		if !groups[group] {
 			return fmt.Errorf("required group %q has no inventory", group)
 		}
 	}
 	return nil
+}
+
+func validateGroup(root, group string) error {
+	if err := validateRequiredWorkflow(root); err != nil {
+		return err
+	}
+	rows, err := suitesForGroup(group)
+	if err != nil {
+		return err
+	}
+	return validateSuites(root, rows)
+}
+
+func validateRequiredWorkflow(root string) error {
+	data, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "ci.yml"))
+	if err != nil {
+		return fmt.Errorf("read required workflow: %w", err)
+	}
+	return validateWorkflow(string(data))
+}
+
+func suitesForGroup(group string) ([]suite, error) {
+	rows := make([]suite, 0, len(requiredSuites))
+	for _, item := range requiredSuites {
+		if item.Group == group {
+			rows = append(rows, item)
+		}
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("unknown or empty inventory group %q", group)
+	}
+	return rows, nil
+}
+
+type listedSuite struct {
+	item suite
+	all  []string
+	err  error
+}
+
+// validateSuites lists every package's tests and seals each row. Listings run
+// concurrently, then rows are checked in declaration order so inventory
+// failures stay deterministic.
+func validateSuites(root string, rows []suite) error {
+	seen := map[string]bool{}
+	for _, item := range rows {
+		key := item.Group + "\x00" + item.Package
+		if seen[key] || item.Group == "" || !strings.HasPrefix(item.Package, "./") || len(item.Include) > 0 && len(item.Exclude) > 0 {
+			return fmt.Errorf("invalid inventory row: %+v", item)
+		}
+		seen[key] = true
+	}
+	results := make([]listedSuite, len(rows))
+	workers := len(rows)
+	if workers > maxListWorkers {
+		workers = maxListWorkers
+	}
+	jobs := make(chan int)
+	var wait sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			for index := range jobs {
+				all, err := listTestsCached(root, rows[index].Package)
+				results[index] = listedSuite{item: rows[index], all: all, err: err}
+			}
+		}()
+	}
+	for index := range rows {
+		jobs <- index
+	}
+	close(jobs)
+	wait.Wait()
+	for _, result := range results {
+		if result.err != nil {
+			return result.err
+		}
+		item := result.item
+		if item.TestHash != "" && (len(result.all) != item.Tests || testHash(result.all) != item.TestHash) {
+			return fmt.Errorf("%s inventory changed: tests=%d hash=%s; review and update the sealed row", item.Package, len(result.all), testHash(result.all))
+		}
+		if _, err := selectedTests(item, result.all); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// listTestsCached memoizes the authoritative test inventory for this process.
+// Validation and runSuites ask for the same package list; without the cache
+// every job re-ran `go test -list` for every package in its group.
+func listTestsCached(root, pkg string) ([]string, error) {
+	testListMu.Lock()
+	if tests, ok := testLists[pkg]; ok {
+		testListMu.Unlock()
+		return tests, nil
+	}
+	testListMu.Unlock()
+	tests, err := listTests(root, pkg)
+	if err != nil {
+		return nil, err
+	}
+	testListMu.Lock()
+	testLists[pkg] = tests
+	testListMu.Unlock()
+	return tests, nil
 }
 
 func validateWorkflow(text string) error {
@@ -259,14 +370,13 @@ func runSuites(root, group string) error {
 		return err
 	}
 	defer os.RemoveAll(work)
-	var coverageProfiles []string
-	ran := false
-	for suiteIndex, item := range requiredSuites {
-		if item.Group != group {
-			continue
-		}
-		ran = true
-		all, err := listTests(root, item.Package)
+	rows, err := suitesForGroup(group)
+	if err != nil {
+		return err
+	}
+	prepared := make([]preparedSuite, 0, len(rows))
+	for _, item := range rows {
+		all, err := listTestsCached(root, item.Package)
 		if err != nil {
 			return err
 		}
@@ -278,53 +388,186 @@ func runSuites(root, group string) error {
 		for index, name := range tests {
 			parts[index] = regexp.QuoteMeta(name)
 		}
-		selector := "^(" + strings.Join(parts, "|") + ")$"
-		fmt.Printf("required CI: running %s (%d tests)\n", item.Package, len(tests))
-		var output []byte
-		var runErr error
-		if group == "algorithm" || group == "dex" {
-			binary := filepath.Join(work, fmt.Sprintf("suite-%d.test", suiteIndex))
-			compileArgs := []string{"test", "-c", "-race", "-o", binary}
+		prepared = append(prepared, preparedSuite{
+			item:     item,
+			tests:    tests,
+			selector: "^(" + strings.Join(parts, "|") + ")$",
+		})
+	}
+	raceGroup := group == "algorithm" || group == "dex"
+	if raceGroup {
+		for index := range prepared {
+			prepared[index].binary = filepath.Join(work, fmt.Sprintf("suite-%d.test", index))
 			if group == "dex" {
-				compileArgs = append(compileArgs, "-covermode=atomic", "-coverpkg=./dex2jar/...,./internal/dexparser")
+				prepared[index].profile = filepath.Join(work, fmt.Sprintf("coverage-%d.out", index))
 			}
-			compileArgs = append(compileArgs, item.Package)
-			compile := exec.Command(goPath, compileArgs...)
-			compile.Dir = root
-			compile.Env = compileEnvironment()
-			if compiled, compileErr := compile.CombinedOutput(); compileErr != nil {
-				return fmt.Errorf("compile %s: %w\n%s", item.Package, compileErr, compiled)
-			}
-			runArgs := []string{"tool", "test2json", "-t", "-p", item.Package, binary,
-				"-test.v=test2json", "-test.count=1", "-test.timeout=5m", "-test.run=" + selector}
-			if group == "dex" {
-				profile := filepath.Join(work, fmt.Sprintf("coverage-%d.out", suiteIndex))
-				coverageProfiles = append(coverageProfiles, profile)
-				runArgs = append(runArgs, "-test.coverprofile="+profile)
-			}
-			command := exec.Command(goPath, runArgs...)
-			command.Dir = filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(item.Package, "./")))
-			command.Env = sanitizedEnvironment(emptyPath)
-			output, runErr = command.CombinedOutput()
-		} else {
-			command := exec.Command(goPath, "test", "-json", "-count=1", "-timeout=5m", "-run", selector, item.Package)
-			command.Dir = root
-			command.Env = sanitizedEnvironment(emptyPath)
-			output, runErr = command.CombinedOutput()
 		}
-		_, _ = os.Stdout.Write(output)
-		if err := verifyEvents(item.Package, tests, output); err != nil {
+		fmt.Printf("required CI: compiling %d suites for %s\n", len(prepared), group)
+		if err := compileSuites(goPath, root, prepared, group); err != nil {
 			return err
 		}
-		if runErr != nil {
-			return fmt.Errorf("%s failed: %w", item.Package, runErr)
-		}
 	}
-	if !ran {
-		return fmt.Errorf("unknown or empty inventory group %q", group)
+	if err := runPreparedSuites(goPath, root, emptyPath, raceGroup, prepared); err != nil {
+		return err
 	}
 	if group == "dex" {
-		if err := checkCoverage(root, goPath, coverageProfiles); err != nil {
+		profiles := make([]string, 0, len(prepared))
+		for _, run := range prepared {
+			if run.profile != "" {
+				profiles = append(profiles, run.profile)
+			}
+		}
+		if err := checkCoverage(root, goPath, profiles); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type suiteRunResult struct {
+	output []byte
+	err    error
+	ran    bool
+}
+
+// maxRunWorkers runs independent package test processes concurrently. Test
+// binaries are separate processes and the suites use no shared ports or
+// process-global state; two workers keep the four-vCPU runners busy while
+// leaving the 5-minute per-binary timeout far away from ordinary durations.
+const maxRunWorkers = 2
+
+func runPreparedSuites(goPath, root, emptyPath string, raceGroup bool, prepared []preparedSuite) error {
+	results := make([]suiteRunResult, len(prepared))
+	if len(prepared) > 0 {
+		workers := maxRunWorkers
+		if len(prepared) < workers {
+			workers = len(prepared)
+		}
+		fmt.Printf("required CI: running %d suites (%d at a time)\n", len(prepared), workers)
+		jobs := make(chan int)
+		stop := make(chan struct{})
+		var stopOnce sync.Once
+		var wait sync.WaitGroup
+		for worker := 0; worker < workers; worker++ {
+			wait.Add(1)
+			go func() {
+				defer wait.Done()
+				for index := range jobs {
+					select {
+					case <-stop:
+						continue
+					default:
+					}
+					result := executePreparedSuite(goPath, root, emptyPath, raceGroup, prepared[index])
+					results[index] = result
+					if result.err != nil {
+						stopOnce.Do(func() { close(stop) })
+					}
+				}
+			}()
+		}
+	dispatch:
+		for index := range prepared {
+			select {
+			case <-stop:
+				break dispatch
+			case jobs <- index:
+			}
+		}
+		close(jobs)
+		wait.Wait()
+	}
+	for _, result := range results {
+		if !result.ran {
+			continue
+		}
+		_, _ = os.Stdout.Write(result.output)
+		if result.err != nil {
+			return result.err
+		}
+	}
+	return nil
+}
+
+func executePreparedSuite(goPath, root, emptyPath string, raceGroup bool, run preparedSuite) suiteRunResult {
+	item := run.item
+	var output []byte
+	var runErr error
+	if raceGroup {
+		runArgs := []string{"tool", "test2json", "-t", "-p", item.Package, run.binary,
+			"-test.v=test2json", "-test.count=1", "-test.timeout=5m", "-test.run=" + run.selector}
+		if run.profile != "" {
+			runArgs = append(runArgs, "-test.coverprofile="+run.profile)
+		}
+		command := exec.Command(goPath, runArgs...)
+		command.Dir = filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(item.Package, "./")))
+		command.Env = sanitizedEnvironment(emptyPath)
+		output, runErr = command.CombinedOutput()
+	} else {
+		command := exec.Command(goPath, "test", "-json", "-count=1", "-timeout=5m", "-run", run.selector, item.Package)
+		command.Dir = root
+		command.Env = sanitizedEnvironment(emptyPath)
+		output, runErr = command.CombinedOutput()
+	}
+	result := suiteRunResult{output: output, ran: true}
+	if err := verifyEvents(item.Package, run.tests, output); err != nil {
+		result.err = err
+		return result
+	}
+	if runErr != nil {
+		result.err = fmt.Errorf("%s failed: %w", item.Package, runErr)
+	}
+	return result
+}
+
+type preparedSuite struct {
+	item     suite
+	tests    []string
+	selector string
+	binary   string
+	profile  string
+}
+
+// maxCompileWorkers bounds concurrent `go test -c` processes. Compilation is
+// independent of test execution, and two workers overlap the race/coverage
+// link work without competing with the test process pool.
+const maxCompileWorkers = 2
+
+func compileSuites(goPath, root string, prepared []preparedSuite, group string) error {
+	workers := maxCompileWorkers
+	if len(prepared) < workers {
+		workers = len(prepared)
+	}
+	jobs := make(chan int)
+	errs := make([]error, len(prepared))
+	var wait sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			for index := range jobs {
+				run := prepared[index]
+				args := []string{"test", "-c", "-race", "-o", run.binary}
+				if group == "dex" {
+					args = append(args, "-covermode=atomic", "-coverpkg=./dex2jar/...,./internal/dexparser")
+				}
+				args = append(args, run.item.Package)
+				command := exec.Command(goPath, args...)
+				command.Dir = root
+				command.Env = compileEnvironment()
+				if output, err := command.CombinedOutput(); err != nil {
+					errs[index] = fmt.Errorf("compile %s: %w\n%s", run.item.Package, err, output)
+				}
+			}
+		}()
+	}
+	for index := range prepared {
+		jobs <- index
+	}
+	close(jobs)
+	wait.Wait()
+	for _, err := range errs {
+		if err != nil {
 			return err
 		}
 	}
