@@ -64,6 +64,18 @@ bounded failure recovery for malformed and partially unsupported inputs.
   topology refreshes are ~4.6x faster for dominators and ~11.2x for
   post-dominators; scalar dominance queries allocate nothing. A randomized
   differential test checks 10,500 topologies against fresh computation.
+- Remove the remaining class-analysis allocation hot spots. The dominator tree
+  now reuses its map and child slices across topology epochs; loop exit BFS uses
+  index-based scratch storage instead of a visited map sized for the whole
+  reachable graph; reaching-definition unions share the incoming set when one
+  side is a subset; switch jump-only targets are memoized because switch tables
+  are analyzer-owned and never rewritten; protected loop bodies clone under one
+  read lock; and per-name `\bname\b` regex compiles are replaced by an exact
+  literal word scanner (randomized equivalence test against Go regexp). On the
+  7 KB `FMParserTokenManager` class decompilation drops from ~4.45 s to ~3.81 s,
+  allocations from 10.75 M to 7.92 M and allocated bytes from 1.54 GB to
+  1.07 GB; `FMParser` drops from ~0.75 s to ~0.59 s and loop structuring from
+  ~0.45 s to ~0.40 s.
 - Add an ordered, conservative Compatibility rewrite scheduler. Seventeen audited
   rules skip only when their own required literals are absent; applicability is
   rebuilt after every accepted rewrite, SHA-256 state is carried forward, and the

@@ -283,7 +283,7 @@ func switchJumpOnlyTargets(node *core.Node, cases *omap.OrderedMap[switchLabel, 
 		return nil
 	}
 	only := make(map[*core.Node]bool, cases.Len())
-	cases.ForEach(func(label switchLabel, target *core.Node) bool {
+	cases.ForEachReadOnly(func(label switchLabel, target *core.Node) bool {
 		if target == nil {
 			return true
 		}
@@ -296,6 +296,36 @@ func switchJumpOnlyTargets(node *core.Node, cases *omap.OrderedMap[switchLabel, 
 		return true
 	})
 	return only
+}
+
+// switchOnlyEntry is the memoized result of switchNodeJumpOnlyTargets. The ok
+// flag distinguishes "not derivable" from "empty target set".
+type switchOnlyEntry struct {
+	targets map[*core.Node]bool
+	ok      bool
+}
+
+// switchOnlyCache memoizes switchNodeJumpOnlyTargets for one RewriteManager.
+// The analyzer builds SwitchCases/SwitchJumpOnlyCases once and no rewrite pass
+// mutates them, so the derived map is valid for the manager's lifetime. The
+// loop-exit search consults it for every switch in a body on every query.
+type switchOnlyCache struct {
+	entries map[*core.Node]switchOnlyEntry
+}
+
+func (c *switchOnlyCache) targets(node *core.Node, middle *statements.MiddleStatement) (map[*core.Node]bool, bool) {
+	if c == nil {
+		return switchNodeJumpOnlyTargets(node, middle)
+	}
+	if entry, found := c.entries[node]; found {
+		return entry.targets, entry.ok
+	}
+	targets, ok := switchNodeJumpOnlyTargets(node, middle)
+	if c.entries == nil {
+		c.entries = make(map[*core.Node]switchOnlyEntry)
+	}
+	c.entries[node] = switchOnlyEntry{targets: targets, ok: ok}
+	return targets, ok
 }
 
 // switchNodeJumpOnlyTargets derives the same per-target property straight from
@@ -318,7 +348,7 @@ func switchNodeJumpOnlyTargets(node *core.Node, middle *statements.MiddleStateme
 		}
 	}
 	if node.SwitchCases != nil {
-		node.SwitchCases.ForEach(func(value int, target *core.Node) bool {
+		node.SwitchCases.ForEachReadOnly(func(value int, target *core.Node) bool {
 			add(switchLabel{Value: int32(value)}, target)
 			return true
 		})
@@ -338,7 +368,7 @@ func switchNodeJumpOnlyTargets(node *core.Node, middle *statements.MiddleStateme
 	if err != nil {
 		return nil, false
 	}
-	cases.ForEach(func(label switchLabel, target *core.Node) bool {
+	cases.ForEachReadOnly(func(label switchLabel, target *core.Node) bool {
 		add(label, target)
 		return true
 	})
@@ -1004,7 +1034,7 @@ func sortSwitchLabels(labels []switchLabel) {
 func switchCaseNodes(data []any, node *core.Node) (*omap.OrderedMap[switchLabel, *core.Node], error) {
 	cases := omap.NewEmptyOrderedMap[switchLabel, *core.Node]()
 	if node.SwitchCases != nil {
-		node.SwitchCases.ForEach(func(v int, target *core.Node) bool { cases.Set(switchLabel{Value: int32(v)}, target); return true })
+		node.SwitchCases.ForEachReadOnly(func(v int, target *core.Node) bool { cases.Set(switchLabel{Value: int32(v)}, target); return true })
 		if node.SwitchDefault != nil {
 			cases.Set(switchLabel{Default: true}, node.SwitchDefault)
 		}
@@ -1021,7 +1051,7 @@ func switchCaseNodes(data []any, node *core.Node) (*omap.OrderedMap[switchLabel,
 		cases.Set(label, next[index])
 		return true
 	}
-	indices.ForEach(func(v, index int) bool { return add(switchLabel{Value: int32(v)}, index) })
+	indices.ForEachReadOnly(func(v, index int) bool { return add(switchLabel{Value: int32(v)}, index) })
 	if invalid != nil {
 		return nil, invalid
 	}

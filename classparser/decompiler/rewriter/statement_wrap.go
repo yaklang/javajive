@@ -62,6 +62,11 @@ type RewriteManager struct {
 	loopCache   *loopAnalysisCache
 	loopBases   map[loopBodyKey]loopBaseEntry
 	loopScratch loopElementScratch
+	// switchOnly memoizes switchNodeJumpOnlyTargets. Switch tables are built
+	// once by the analyzer and never rewritten, so the per-node result stays
+	// valid for this manager's lifetime; the exit search consults it for every
+	// switch inside a loop body.
+	switchOnly switchOnlyCache
 	// domIndex caches the child->parent dominance query for the current
 	// DominatorMap; topology refreshes invalidate it.
 	domIndex        *utils2.DominateIndex

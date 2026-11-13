@@ -81,6 +81,33 @@ func (s *Set[T]) AddList(items []T) {
 	}
 }
 
+// CloneWithList copies the set under a single read lock and returns the copied
+// elements. It is cheaper than NewSetSized plus Add because it does not take a
+// write lock per element.
+func (s *Set[T]) CloneWithList() (*Set[T], []T) {
+	s.RLock()
+	defer s.RUnlock()
+	dst := make(map[T]struct{}, len(s.m))
+	list := make([]T, 0, len(s.m))
+	for item := range s.m {
+		dst[item] = struct{}{}
+		list = append(list, item)
+	}
+	return &Set[T]{m: dst}, list
+}
+
+// ContainsAll reports whether every item is present, taking one read lock.
+func (s *Set[T]) ContainsAll(items []T) bool {
+	s.RLock()
+	defer s.RUnlock()
+	for _, item := range items {
+		if _, ok := s.m[item]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // Remove deletes the specified item from the map
 func (s *Set[T]) Remove(item T) {
 	s.Lock()

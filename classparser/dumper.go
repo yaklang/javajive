@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	utils2 "github.com/yaklang/javajive/classparser/decompiler/core/utils"
@@ -28,6 +30,31 @@ import (
 	"github.com/yaklang/javajive/internal/utils"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
+
+// cachedCompatibilityRegexp reuses immutable pattern objects across classes
+// and methods. Compatibility passes compile constant and name-derived patterns
+// inside per-method functions; without this cache a large class recompiles the
+// same pattern for every method it visits. The cache is bounded because a
+// long-running host can see arbitrarily many derived local names.
+var compatibilityRegexpCache sync.Map // string -> *regexp.Regexp
+var compatibilityRegexpCacheCount atomic.Int64
+
+const maxCachedCompatibilityRegexps = 1024
+
+func cachedCompatibilityRegexp(pattern string) *regexp.Regexp {
+	if cached, ok := compatibilityRegexpCache.Load(pattern); ok {
+		return cached.(*regexp.Regexp)
+	}
+	compiled := regexp.MustCompile(pattern)
+	if compatibilityRegexpCacheCount.Load() < maxCachedCompatibilityRegexps {
+		actual, loaded := compatibilityRegexpCache.LoadOrStore(pattern, compiled)
+		if !loaded {
+			compatibilityRegexpCacheCount.Add(1)
+		}
+		return actual.(*regexp.Regexp)
+	}
+	return compiled
+}
 
 type ClassObjectDumper struct {
 	serializableReferenceReady            bool
@@ -6181,8 +6208,7 @@ func renameLambdaBodyLocals(body string, seq int) string {
 // word-boundary match is unambiguous. Used to decide whether the parameters can be rendered implicitly.
 func lambdaParamsUsed(body string, names []string) bool {
 	for _, n := range names {
-		re := regexp.MustCompile(`\b` + regexp.QuoteMeta(n) + `\b`)
-		if re.MatchString(body) {
+		if utils.WordMatches(body, n) {
 			return true
 		}
 	}
@@ -6503,9 +6529,7 @@ func leadingTabs(ln string) string {
 // assignTargetIs reports whether ln assigns to name as a target (`name =` but not `==`), where name
 // is a standalone word not preceded by a type/declaration token.
 func assignTargetIs(ln, name string) bool {
-	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
-	locs := re.FindAllStringIndex(ln, -1)
-	for _, loc := range locs {
+	for _, loc := range utils.WordSpans(ln, name, nil) {
 		after := ln[loc[1]:]
 		aTrim := strings.TrimLeft(after, " \t")
 		if !strings.HasPrefix(aTrim, "=") || strings.HasPrefix(aTrim, "==") {
@@ -6766,8 +6790,7 @@ func lambdaLineIsStmtStart(lines []string, idx int) bool {
 // assignment targets (`name =`) and declarations untouched. This mirrors the read-detection logic
 // used elsewhere (control-keyword aware).
 func rewriteLambdaReads(ln, name, newName string) string {
-	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
-	locs := re.FindAllStringIndex(ln, -1)
+	locs := utils.WordSpans(ln, name, nil)
 	if len(locs) == 0 {
 		return ln
 	}
@@ -6822,7 +6845,7 @@ func removeUnreachableSwitchBreak(body string) string {
 		return body
 	}
 	lines := strings.Split(body, "\n")
-	breakRe := regexp.MustCompile(`^(\t+)break;\s*$`)
+	breakRe := cachedCompatibilityRegexp(`^(\t+)break;\s*$`)
 	var removeIdx []int
 	for i := 0; i < len(lines); i++ {
 		m := breakRe.FindStringSubmatch(strings.TrimRight(lines[i], "\r"))
@@ -7052,8 +7075,8 @@ func fixLoopCatchThrow(body string) string {
 	//   <indent+1>throw new RuntimeException(<var>);
 	//   <indent>}
 	//   <indent><continue|break>
-	catchRe := regexp.MustCompile(`^(\t+)}?catch\([^)]+\)\s*\{$`)
-	throwRe := regexp.MustCompile(`^\t+throw new RuntimeException\([^)]*\);\s*$`)
+	catchRe := cachedCompatibilityRegexp(`^(\t+)}?catch\([^)]+\)\s*\{$`)
+	throwRe := cachedCompatibilityRegexp(`^\t+throw new RuntimeException\([^)]*\);\s*$`)
 	removes := []int{}
 	for i := 0; i < len(lines)-3; i++ {
 		cm := catchRe.FindStringSubmatch(strings.TrimRight(lines[i], "\r"))
@@ -7243,7 +7266,7 @@ func fixTryCatchExceptionPlacement(body string) string {
 	// Scan for the pattern: an if-block whose body contains calls to methods that throw
 	// checked exceptions (getDeclaredConstructor, newInstance, getMethod, etc.), immediately
 	// followed by a try block whose catch lists those exception types.
-	throwingCallRe := regexp.MustCompile(`\.(getDeclaredConstructor|newInstance|getMethod|getConstructor)\(`)
+	throwingCallRe := cachedCompatibilityRegexp(`\.(getDeclaredConstructor|newInstance|getMethod|getConstructor)\(`)
 	for i := 0; i < len(lines); i++ {
 		// Check if this line starts an if block.
 		lnClean := strings.TrimRight(lines[i], "\r")
@@ -7408,7 +7431,7 @@ var methodThrows = map[string]string{
 // relies on the specific type of the variable; widening the multi-catch with an unrelated type
 // breaks the member access.
 func catchBodyAccessesCatchVar(lines []string, catchLineIdx int) bool {
-	catchRe := regexp.MustCompile(`\}catch\(([^)]*)\)\{`)
+	catchRe := cachedCompatibilityRegexp(`\}catch\(([^)]*)\)\{`)
 	cl := strings.TrimRight(lines[catchLineIdx], "\r")
 	cm := catchRe.FindStringSubmatch(cl)
 	if cm == nil {
@@ -7457,7 +7480,7 @@ func catchBodyAccessesCatchVar(lines []string, catchLineIdx int) bool {
 // caught variable (e.g. `catch(E var){ throw var; }`). Such a catch propagates the checked
 // exception; augmenting its type list would require a throws declaration on the enclosing method.
 func catchRethrowsVariable(lines []string, catchLineIdx int) bool {
-	catchRe := regexp.MustCompile(`\}catch\(([^)]*)\)\{`)
+	catchRe := cachedCompatibilityRegexp(`\}catch\(([^)]*)\)\{`)
 	cl := strings.TrimRight(lines[catchLineIdx], "\r")
 	cm := catchRe.FindStringSubmatch(cl)
 	if cm == nil {
@@ -7532,8 +7555,8 @@ func addMissingCatchException(body string) string {
 	}
 	dbg := jdecenv.Get("JDEC_ADD_MISSING_CATCH_DBG") == "1"
 	lines := strings.Split(body, "\n")
-	catchRe := regexp.MustCompile(`\}catch\(([^)]*)\)\{`)
-	callRe := regexp.MustCompile(`\.(getConstructor|getDeclaredConstructor|getMethod|getDeclaredMethod)\(`)
+	catchRe := cachedCompatibilityRegexp(`\}catch\(([^)]*)\)\{`)
+	callRe := cachedCompatibilityRegexp(`\.(getConstructor|getDeclaredConstructor|getMethod|getDeclaredMethod)\(`)
 
 	// Pre-compute all try/catch blocks: for each `try{`, find its body range [tryStart, tryBodyEnd)
 	// and the catch clause line + caught types. A try's catch is relevant for call sites INSIDE the
@@ -7544,7 +7567,7 @@ func addMissingCatchException(body string) string {
 		catchLine   int    // line index of the `}catch(...) {` line, -1 if no catch
 		caughtTypes string // the types listed in the catch clause
 	}
-	tryRe := regexp.MustCompile(`^(\t+)try\{\s*$`)
+	tryRe := cachedCompatibilityRegexp(`^(\t+)try\{\s*$`)
 	var tryBlocks []tryBlock
 	for i := 0; i < len(lines); i++ {
 		ln := strings.TrimRight(lines[i], "\r")
@@ -7611,8 +7634,7 @@ func addMissingCatchException(body string) string {
 	const exc = "NoSuchMethodException"
 	excOrSup := []string{"NoSuchMethodException", "ReflectiveOperationException", "Exception", "Throwable"}
 	caughtWord := func(typesStr, name string) bool {
-		re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
-		return re.MatchString(typesStr)
+		return utils.WordMatches(typesStr, name)
 	}
 	augment := map[int]bool{}
 	for i := 0; i < len(lines); i++ {
@@ -7752,7 +7774,7 @@ func wrapUncaughtThrowingCall(body string) string {
 		return body
 	}
 	lines := strings.Split(body, "\n")
-	allocRe := regexp.MustCompile(`^(\t+)(return .*\bUNSAFE\.allocateInstance\([^;]*\));\s*$`)
+	allocRe := cachedCompatibilityRegexp(`^(\t+)(return .*\bUNSAFE\.allocateInstance\([^;]*\));\s*$`)
 	type insert struct {
 		at       int
 		indent   string
@@ -7821,7 +7843,7 @@ func wrapUncaughtGetConstructor(body string) string {
 		return body
 	}
 	lines := strings.Split(body, "\n")
-	ctorRe := regexp.MustCompile(`^(\t+)(.*\.(getConstructor|getDeclaredConstructor)\([^;]*\));\s*$`)
+	ctorRe := cachedCompatibilityRegexp(`^(\t+)(.*\.(getConstructor|getDeclaredConstructor)\([^;]*\));\s*$`)
 	type insert struct {
 		at       int
 		indent   string
@@ -8919,7 +8941,7 @@ func fixGetFieldClassHoist(body string) string {
 	}
 	body = strings.ReplaceAll(body, "var4 = var1.getDeclaringClass();", "Class var4 = var1.getDeclaringClass();")
 	body = strings.ReplaceAll(body, "var5 = var3.getDeclaringClass();", "Class var5 = var3.getDeclaringClass();")
-	re := regexp.MustCompile(`if \(\(var4\) != \(var5\)\)\{\n(\s*)Class var4 = null;\n\s*Class var5 = null;\n`)
+	re := cachedCompatibilityRegexp(`if \(\(var4\) != \(var5\)\)\{\n(\s*)Class var4 = null;\n\s*Class var5 = null;\n`)
 	body = re.ReplaceAllString(body, "if ((var4) != (var5)){\n$1")
 	return body
 }
@@ -8948,7 +8970,7 @@ func fixJacksonRemainingReconstructs(body string) string {
 	// cannot stack. Gate on jackson LinkedDeque — caffeine AbstractLinkedDeque
 	// iterators do not use this.cursor.
 	if strings.Contains(body, "class LinkedDeque$") || strings.Contains(body, "class LinkedDeque ") {
-		computeNextRe := regexp.MustCompile(`E computeNext\(\) \{\s*return[^;]+;\s*\}`)
+		computeNextRe := cachedCompatibilityRegexp(`E computeNext\(\) \{\s*return[^;]+;\s*\}`)
 		body = computeNextRe.ReplaceAllStringFunc(body, func(s string) string {
 			if strings.Contains(s, "getPrevious") {
 				return "E computeNext() {\n\t\treturn (E)((Object)(this.cursor.getPrevious()));\n\t}"
@@ -9442,7 +9464,7 @@ func fixLogbackRemainingReconstructs(body string) string {
 		return body
 	}
 	if strings.Contains(body, "class ConsoleAppender") {
-		orElseGet := regexp.MustCompile(`\.orElseThrow\(\(Supplier<NoSuchElementException>\)\(\(\) -> \{\s*return new NoSuchElementException\("No value present"\);\s*\}\)\)`)
+		orElseGet := cachedCompatibilityRegexp(`\.orElseThrow\(\(Supplier<NoSuchElementException>\)\(\(\) -> \{\s*return new NoSuchElementException\("No value present"\);\s*\}\)\)`)
 		body = orElseGet.ReplaceAllString(body, ".get()")
 	}
 
@@ -9645,7 +9667,7 @@ func fixLog4jRemainingReconstructs(body string) string {
 		body = strings.ReplaceAll(body,
 			"lv2_6.setKey(l0);",
 			"lv2_6.setKey((String)(l0));")
-		pluginCacheDeferRe := regexp.MustCompile(`lv2_6\.setDefer\((var2_f\d+)\.readBoolean\(\)\);`)
+		pluginCacheDeferRe := cachedCompatibilityRegexp(`lv2_6\.setDefer\((var2_f\d+)\.readBoolean\(\)\);`)
 		body = pluginCacheDeferRe.ReplaceAllString(body,
 			"try{\n\t\t\tlv2_6.setDefer($1.readBoolean());\n\t\t\t}catch(IOException var_io){\n\t\t\tthrow new RuntimeException((Throwable)(var_io));\n\t\t\t}")
 		body = strings.ReplaceAll(body,
@@ -9707,7 +9729,7 @@ func fixLog4jRemainingReconstructs(body string) string {
 	// MulticastDnsAdvertiser: multi-catch already includes NoSuchMethodException,
 	// so the trailing catch(NoSuchMethodException) is a duplicate.
 	if strings.Contains(body, "class MulticastDnsAdvertiser") {
-		dupNsmeRe := regexp.MustCompile(`\}catch\(NoSuchMethodException var\d+\)\{\n\t+LOGGER\.warn\("[^"]+",\(Throwable\)\(var\d+\)\);\n\t+\}`)
+		dupNsmeRe := cachedCompatibilityRegexp(`\}catch\(NoSuchMethodException var\d+\)\{\n\t+LOGGER\.warn\("[^"]+",\(Throwable\)\(var\d+\)\);\n\t+\}`)
 		body = dupNsmeRe.ReplaceAllString(body, "}")
 	}
 	// TextEncoderHelper.drainIfByteBufferFull: CFG emptied the synchronized
@@ -9886,7 +9908,7 @@ func fixSpuriousNSMECatch(body string) string {
 	if jdecenv.Get("JDEC_SPURIOUS_NSME_CATCH_OFF") == "1" {
 		return body
 	}
-	emptyClinit := regexp.MustCompile(`static  \{\n\t+try\{\n\n\t+\}catch\(NoSuchMethodException \w+\)\{\n\t+throw new IllegalStateException\(\(Throwable\)\(\w+\)\);\n\t+\}\n\t+\}`)
+	emptyClinit := cachedCompatibilityRegexp(`static  \{\n\t+try\{\n\n\t+\}catch\(NoSuchMethodException \w+\)\{\n\t+throw new IllegalStateException\(\(Throwable\)\(\w+\)\);\n\t+\}\n\t+\}`)
 	body = emptyClinit.ReplaceAllString(body, "")
 	var b strings.Builder
 	rest := body
@@ -9964,7 +9986,7 @@ func tryThrowsNSME(tryBody string) bool {
 // An effectful Class[] initializer may remain in a local instead of being
 // folded into a reflective call. Its type still proves the checked exception.
 func reflectionUsesClassArrayLocal(beforeCall, afterOpen string) bool {
-	decl := regexp.MustCompile(`(?m)^\s*(?:java\.lang\.)?Class(?:<[^\n;]+?>)?\s*\[\]\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=`)
+	decl := cachedCompatibilityRegexp(`(?m)^\s*(?:java\.lang\.)?Class(?:<[^\n;]+?>)?\s*\[\]\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=`)
 	end := strings.IndexByte(afterOpen, ')')
 	if end < 0 {
 		return false
@@ -10726,7 +10748,7 @@ func fixDiskLruIteratorHasNext(body string) string {
 	}
 	// Core declaration synthesis can retain the unused monitor temporary after
 	// the compatibility monitor rewrite folds it back to this.this$0.
-	monitorDecl := regexp.MustCompile(`public boolean hasNext\(\) \{\n\t\tDiskLruCache var\d+;\n`)
+	monitorDecl := cachedCompatibilityRegexp(`public boolean hasNext\(\) \{\n\t\tDiskLruCache var\d+;\n`)
 	body = monitorDecl.ReplaceAllString(body, "public boolean hasNext() {\n")
 	return strings.ReplaceAll(body, diskLruHasNextEmpty, diskLruHasNextFixed)
 }
@@ -10883,7 +10905,7 @@ func min2(a, b int) int {
 // the given line range. Includes field assignments (e.g. `this.formatValidator =`).
 func collectSwitchAssignedVars(lines []string, start, end int) map[string]bool {
 	result := map[string]bool{}
-	assignRe := regexp.MustCompile(`\.?(\w+)\s*=[^=]`)
+	assignRe := cachedCompatibilityRegexp(`\.?(\w+)\s*=[^=]`)
 	for k := start; k < end && k < len(lines); k++ {
 		ln := strings.TrimRight(lines[k], "\r")
 		for _, m := range assignRe.FindAllStringSubmatch(ln, -1) {
@@ -10905,15 +10927,14 @@ func collectSwitchAssignedVars(lines []string, start, end int) map[string]bool {
 func collectSwitchDefaultSelfReads(lines []string, start, end int) map[string]bool {
 	result := map[string]bool{}
 	// Match `var = ... var ...` patterns: the LHS variable also appears on the RHS.
-	assignRe := regexp.MustCompile(`\b(\w+)\s*=\s*([^;]*)`)
+	assignRe := cachedCompatibilityRegexp(`\b(\w+)\s*=\s*([^;]*)`)
 	for k := start; k < end && k < len(lines); k++ {
 		ln := strings.TrimRight(lines[k], "\r")
 		for _, m := range assignRe.FindAllStringSubmatch(ln, -1) {
 			varName := m[1]
 			rhs := m[2]
 			// Check if varName appears in the RHS (self-read / compound assignment).
-			re := regexp.MustCompile(`\b` + regexp.QuoteMeta(varName) + `\b`)
-			if re.MatchString(rhs) {
+			if utils.WordMatches(rhs, varName) {
 				result[varName] = true
 			}
 		}
@@ -10921,20 +10942,47 @@ func collectSwitchDefaultSelfReads(lines []string, start, end int) map[string]bo
 	return result
 }
 
+// regexpSpaceByte reports whether c belongs to Go regexp's \s class.
+func regexpSpaceByte(c byte) bool {
+	switch c {
+	case ' ', '\t', '\n', '\f', '\r':
+		return true
+	}
+	return false
+}
+
+// wordAssignmentRHS returns the text after the first whole-token `name\s*=`
+// occurrence on ln, up to but excluding the first semicolon. It is the
+// literal-scan equivalent of `\b`+QuoteMeta(name)+`\s*=\s*([^;]*)`.
+func wordAssignmentRHS(ln, name string) (string, bool) {
+	for _, loc := range utils.WordSpans(ln, name, nil) {
+		i := loc[1]
+		for i < len(ln) && regexpSpaceByte(ln[i]) {
+			i++
+		}
+		if i >= len(ln) || ln[i] != '=' {
+			continue
+		}
+		rhs := ln[i+1:]
+		if semi := strings.IndexByte(rhs, ';'); semi >= 0 {
+			rhs = rhs[:semi]
+		}
+		return rhs, true
+	}
+	return "", false
+}
+
 // defaultAssignsIndependently reports whether the variable `name` is assigned in the given range
 // WITHOUT being read in the same assignment (an independent overwrite, not a compound assignment).
 func defaultAssignsIndependently(lines []string, start, end int, name string) bool {
-	assignRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\s*=\s*([^;]*)`)
 	for k := start; k < end && k < len(lines); k++ {
 		ln := strings.TrimRight(lines[k], "\r")
-		m := assignRe.FindStringSubmatch(ln)
-		if m == nil {
+		rhs, ok := wordAssignmentRHS(ln, name)
+		if !ok {
 			continue
 		}
-		rhs := m[1]
 		// Check if name appears in the RHS (self-read / compound assignment).
-		re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
-		if !re.MatchString(rhs) {
+		if !utils.WordMatches(rhs, name) {
 			return true // independent assignment (no self-read)
 		}
 	}
@@ -10945,7 +10993,7 @@ func defaultAssignsIndependently(lines []string, start, end int, name string) bo
 // the given line range.
 func collectSwitchReadVars(lines []string, start, end int) map[string]bool {
 	result := map[string]bool{}
-	wordRe := regexp.MustCompile(`\b(\w+)\b`)
+	wordRe := cachedCompatibilityRegexp(`\b(\w+)\b`)
 	for k := start; k < end && k < len(lines); k++ {
 		ln := strings.TrimRight(lines[k], "\r")
 		for _, m := range wordRe.FindAllStringSubmatch(ln, -1) {
@@ -10987,7 +11035,7 @@ func wrapFieldInitializerReflection(body string) string {
 	lines := strings.Split(body, "\n")
 	// Match a field initializer at class-body indent (1 tab) with a reflection call.
 	// Capture: indent, modifiers+type+name, init expression.
-	fieldRe := regexp.MustCompile(`^(\t+)((?:(?:final|static|public|private|protected)\s+)*[\w$.<>\[\]?, ]+?\s+(\w+))\s*=\s*(.*\.(getConstructor|getDeclaredConstructor|getMethod|getDeclaredMethod|getDeclaredField|getField)\(.*);\s*$`)
+	fieldRe := cachedCompatibilityRegexp(`^(\t+)((?:(?:final|static|public|private|protected)\s+)*[\w$.<>\[\]?, ]+?\s+(\w+))\s*=\s*(.*\.(getConstructor|getDeclaredConstructor|getMethod|getDeclaredMethod|getDeclaredField|getField)\(.*);\s*$`)
 	counter := 0
 	type edit struct {
 		at        int
@@ -11063,11 +11111,11 @@ func wrapReflectionCallInSwitchCase(body string) string {
 		return body
 	}
 	lines := strings.Split(body, "\n")
-	reflRe := regexp.MustCompile(`^(\t+)return .*\.(getConstructor|getDeclaredConstructor|getMethod|getDeclaredMethod)\([^;]*\);\s*$`)
+	reflRe := cachedCompatibilityRegexp(`^(\t+)return .*\.(getConstructor|getDeclaredConstructor|getMethod|getDeclaredMethod)\([^;]*\);\s*$`)
 	// Also match LambdaMetafactory chains (invokeExact/metafactory/findStatic) that throw checked
 	// exceptions (LambdaConversionException, NoSuchMethodException, Throwable).
-	lambdaChainRe := regexp.MustCompile(`^(\t+)return .*\.(invokeExact|metafactory|findStatic|findVirtual)\(.*;\s*$`)
-	caseRe := regexp.MustCompile(`^(\t+)case [^:]+:\s*$`)
+	lambdaChainRe := cachedCompatibilityRegexp(`^(\t+)return .*\.(invokeExact|metafactory|findStatic|findVirtual)\(.*;\s*$`)
+	caseRe := cachedCompatibilityRegexp(`^(\t+)case [^:]+:\s*$`)
 	counter := 0
 	type insert struct {
 		at        int
@@ -11168,10 +11216,10 @@ func addBreakToSwitchCases(body string) string {
 		return body
 	}
 	lines := strings.Split(body, "\n")
-	caseRe := regexp.MustCompile(`^(\t+)case [^:]+:\s*$`)
-	defaultRe := regexp.MustCompile(`^(\t+)default:\s*$`)
+	caseRe := cachedCompatibilityRegexp(`^(\t+)case [^:]+:\s*$`)
+	defaultRe := cachedCompatibilityRegexp(`^(\t+)default:\s*$`)
 	// `.*` not `[^)]*`: ASM ClassReader uses nested parens (`switch ((buf[off]) & 255){`).
-	switchRe := regexp.MustCompile(`^(\t+)switch \(.*\)\{\s*$`)
+	switchRe := cachedCompatibilityRegexp(`^(\t+)switch \(.*\)\{\s*$`)
 	type insert struct {
 		at     int
 		indent string
@@ -11272,7 +11320,7 @@ func addBreakToSwitchCases(body string) string {
 		}
 		// For each case (except the last which may be default), check if its body lacks a terminator
 		// AND has at least one non-empty statement (skip empty fall-through cases).
-		terminatorRe := regexp.MustCompile(`\b(break|return|throw|continue)\b`)
+		terminatorRe := cachedCompatibilityRegexp(`\b(break|return|throw|continue)\b`)
 		for ci, cs := range caseStarts {
 			var nextCase int
 			if ci+1 < len(caseStarts) {
@@ -11525,10 +11573,8 @@ var tryReLiteral = regexp.MustCompile(`try\{`)
 // countAssignTargets counts how many times name appears as an assignment target (`name =` but not
 // `name ==`) in body. Used to detect multi-branch if/else chains.
 func countAssignTargets(body, name string) int {
-	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
-	locs := re.FindAllStringIndex(body, -1)
 	count := 0
-	for _, loc := range locs {
+	for _, loc := range utils.WordSpans(body, name, nil) {
 		after := body[loc[1]:]
 		afterTrim := strings.TrimLeft(after, " \t")
 		if strings.HasPrefix(afterTrim, "=") && !strings.HasPrefix(afterTrim, "==") {
@@ -12020,25 +12066,107 @@ func generatedLocalIsDeclared(body, name string) bool {
 
 // generatedLocalOccurrences counts whole-token references to a generated local name in body.
 func generatedLocalOccurrences(body, name string) int {
-	return len(regexp.MustCompile(`\b`+regexp.QuoteMeta(name)+`\b`).FindAllString(body, -1))
+	return utils.WordCount(body, name)
+}
+
+// numericLiteralAt reports whether body at i starts a numeric literal after
+// optional whitespace, an optional '(', and an optional '-'. It is the literal
+// scan equivalent of `\s*\(?-?\d`.
+func numericLiteralAt(body string, i int) bool {
+	for i < len(body) && regexpSpaceByte(body[i]) {
+		i++
+	}
+	if i < len(body) && body[i] == '(' {
+		i++
+	}
+	if i < len(body) && body[i] == '-' {
+		i++
+	}
+	return i < len(body) && body[i] >= '0' && body[i] <= '9'
+}
+
+// generatedLocalIntSignals checks the five regexp patterns that prove an int
+// category: post/prefix increment-decrement, a bare relational or numeric
+// equality comparison, and an array index. Scanning avoids compiling and
+// caching five distinct regexps per generated-local name.
+//
+// A bare RELATIONAL comparison (`(v) < n`) is numeric-only in Java -> int
+// category for any right operand. A bare EQUALITY comparison (`(v) == X` /
+// `(v) != X`) is also valid for REFERENCES, so it only proves int when the
+// right operand is a numeric literal (`(0)`, `-1`). A reference comparison such
+// as `(v) != (HashMap.class)` or `(v) != (var2)` must NOT be read as int,
+// otherwise an `objectClass`-style local (fastjson2
+// JSONWriter.checkAndWriteTypeName, whose value is `(v = obj.getClass()) !=
+// type`) is mis-declared `int v = 0` and every Class comparison/use fails to
+// recompile.
+func generatedLocalIntSignals(body, name string) bool {
+	for _, loc := range utils.WordSpans(body, name, nil) {
+		i := loc[1]
+		for i < len(body) && regexpSpaceByte(body[i]) {
+			i++
+		}
+		if strings.HasPrefix(body[i:], "++") || strings.HasPrefix(body[i:], "--") {
+			return true
+		}
+		j := loc[0]
+		for j > 0 && regexpSpaceByte(body[j-1]) {
+			j--
+		}
+		if j >= 2 && (body[j-2:j] == "++" || body[j-2:j] == "--") {
+			return true
+		}
+	}
+	marker := "(" + name + ")"
+	for offset := 0; offset < len(body); {
+		rel := strings.Index(body[offset:], marker)
+		if rel < 0 {
+			break
+		}
+		start := offset + rel
+		i := start + len(marker)
+		for i < len(body) && regexpSpaceByte(body[i]) {
+			i++
+		}
+		if i < len(body) {
+			if body[i] == '<' || body[i] == '>' {
+				return true
+			}
+			if i+1 < len(body) && body[i] == '=' && body[i+1] == '=' && numericLiteralAt(body, i+2) {
+				return true
+			}
+			if i+1 < len(body) && body[i] == '!' && body[i+1] == '=' && numericLiteralAt(body, i+2) {
+				return true
+			}
+		}
+		offset = start + 1
+	}
+	for offset := 0; offset < len(body); {
+		rel := strings.IndexByte(body[offset:], '[')
+		if rel < 0 {
+			break
+		}
+		start := offset + rel
+		i := start + 1
+		for i < len(body) && regexpSpaceByte(body[i]) {
+			i++
+		}
+		if strings.HasPrefix(body[i:], name) {
+			i += len(name)
+			for i < len(body) && regexpSpaceByte(body[i]) {
+				i++
+			}
+			if i < len(body) && body[i] == ']' {
+				return true
+			}
+		}
+		offset = start + 1
+	}
+	return false
 }
 
 func generatedLocalLooksInt(body, name string) bool {
-	quoted := regexp.QuoteMeta(name)
-	patterns := []string{
-		`\b` + quoted + `\s*(?:\+\+|--)`,
-		`(?:\+\+|--)\s*` + quoted + `\b`,
-		// A bare RELATIONAL comparison (`(v) < n`) is numeric-only in Java -> int category for
-		// any right operand.
-		`\(` + quoted + `\)\s*(?:<|>|<=|>=)`,
-		// A bare EQUALITY comparison (`(v) == X` / `(v) != X`) is also valid for REFERENCES, so it
-		// only proves int when the right operand is a numeric literal (`(0)`, `-1`). A reference
-		// comparison such as `(v) != (HashMap.class)` or `(v) != (var2)` must NOT be read as int,
-		// otherwise an `objectClass`-style local (fastjson2 JSONWriter.checkAndWriteTypeName, whose
-		// value is `(v = obj.getClass()) != type`) is mis-declared `int v = 0` and every Class
-		// comparison/use fails to recompile.
-		`\(` + quoted + `\)\s*(?:==|!=)\s*\(?-?\d`,
-		`\[\s*` + quoted + `\s*\]`,
+	if generatedLocalIntSignals(body, name) {
+		return true
 	}
 	// Embedded-assignment-in-condition form produced by the dup-collapse, e.g.
 	// `(var4 = expr) == (0)` / `(var4 = expr) < (n)` (commons-codec Metaphone /
@@ -12061,15 +12189,15 @@ func generatedLocalLooksInt(body, name string) bool {
 		// call. The int-category guarantees are unchanged: a relational operator is numeric-only in
 		// Java regardless of the RHS, and the equality form still requires a NUMERIC-LITERAL right
 		// operand (`\(?-?\d`), so a reference null-check `(o = foo()) != null` is still NOT matched.
+		quoted := regexp.QuoteMeta(name)
 		rhs := `[^()]*(?:\([^()]*\)[^()]*)*`
-		patterns = append(patterns,
-			`\(`+quoted+` = `+rhs+`\)\s*(?:<|>|<=|>=)`,
-			`\(`+quoted+` = `+rhs+`\)\s*(?:==|!=)\s*\(?-?\d`,
-		)
-	}
-	for _, pattern := range patterns {
-		if regexp.MustCompile(pattern).MatchString(body) {
-			return true
+		for _, pattern := range []string{
+			`\(` + quoted + ` = ` + rhs + `\)\s*(?:<|>|<=|>=)`,
+			`\(` + quoted + ` = ` + rhs + `\)\s*(?:==|!=)\s*\(?-?\d`,
+		} {
+			if cachedCompatibilityRegexp(pattern).MatchString(body) {
+				return true
+			}
 		}
 	}
 	return false
@@ -12109,7 +12237,7 @@ func embeddedAssignRHS(body, name string) (string, bool) {
 // `T[]... arr` declaration from text, or "" when none is found. For a multi-dimensional array it
 // strips exactly one dimension (String[][] arr -> String[]).
 func declaredArrayElementType(text, arr string) string {
-	re := regexp.MustCompile(`\b([A-Za-z_$][A-Za-z0-9_$.<>?,]*)\s*((?:\[\s*\])+)\s+` + regexp.QuoteMeta(arr) + `\b`)
+	re := cachedCompatibilityRegexp(`\b([A-Za-z_$][A-Za-z0-9_$.<>?,]*)\s*((?:\[\s*\])+)\s+` + regexp.QuoteMeta(arr) + `\b`)
 	m := re.FindStringSubmatch(text)
 	if m == nil {
 		return ""
@@ -12127,7 +12255,7 @@ func declaredArrayElementType(text, arr string) string {
 // requirement distinguishes a method DEFINITION from a call site (`return method(...)` has no brace),
 // and a leading `.` rules out an instance-call spelled `recv.method(`.
 func declaredMethodReturnType(body, method string) string {
-	re := regexp.MustCompile(`(?:^|[^.\w$])([A-Za-z_$][A-Za-z0-9_$.<>?,\[\]]*)\s+` + regexp.QuoteMeta(method) + `\s*\([^;{}]*\)\s*\{`)
+	re := cachedCompatibilityRegexp(`(?:^|[^.\w$])([A-Za-z_$][A-Za-z0-9_$.<>?,\[\]]*)\s+` + regexp.QuoteMeta(method) + `\s*\([^;{}]*\)\s*\{`)
 	for _, m := range re.FindAllStringSubmatch(body, -1) {
 		ret := m[1]
 		switch ret {
@@ -12168,7 +12296,7 @@ func returnedLocalDeclType(body, name, methodReturnType string, enabled bool) st
 	if castEscapeScalarPrimitives[methodReturnType] {
 		return ""
 	}
-	if !regexp.MustCompile(`\breturn\s+` + regexp.QuoteMeta(name) + `\b`).MatchString(body) {
+	if !cachedCompatibilityRegexp(`\breturn\s+` + regexp.QuoteMeta(name) + `\b`).MatchString(body) {
 		return ""
 	}
 	return methodReturnType

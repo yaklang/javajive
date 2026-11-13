@@ -802,13 +802,13 @@ func (s *RewriteManager) searchLoopEnd(loop, start *core.Node, reducible bool) *
 	}
 	if s.loopCache == nil {
 		// No memo, but still reuse the manager's base-traversal scratch.
-		return searchCircleEndNodeInBody(loop, start, s.loopBody(loop, start, reducible), s.DominatorMap, reducible, s.nodeLive())
+		return searchCircleEndNodeInBody(loop, start, s.loopBody(loop, start, reducible), s.DominatorMap, reducible, s.nodeLive(), &s.switchOnly)
 	}
 	key := loopExitKey{loop: loop, start: start, reducible: reducible}
 	if end, ok := s.loopCache.exits[key]; ok {
 		return end
 	}
-	end := searchCircleEndNodeInBody(loop, start, s.loopBody(loop, start, reducible), s.DominatorMap, reducible, s.nodeLive())
+	end := searchCircleEndNodeInBody(loop, start, s.loopBody(loop, start, reducible), s.DominatorMap, reducible, s.nodeLive(), &s.switchOnly)
 	s.loopCache.exits[key] = end
 	return end
 }
@@ -874,8 +874,9 @@ type loopElementScratch struct {
 	nodes      []*core.Node
 	incoming   []int
 	discovered []bool
-	reverseAdj [][]*core.Node
+	reverseAdj [][]int
 	stack      []*core.Node
+	bfsQueue   []int
 }
 
 func (s *loopElementScratch) reset() {
@@ -891,6 +892,7 @@ func (s *loopElementScratch) reset() {
 		s.discovered = s.discovered[:0]
 	}
 	s.stack = s.stack[:0]
+	s.bfsQueue = s.bfsQueue[:0]
 }
 
 // circleElementSetInto is circleElementSet with optional reused scratch storage.
@@ -941,7 +943,7 @@ func circleBaseBodyInto(circleNode *core.Node, loopStart *core.Node, domTree map
 	}
 	n := len(sc.nodes)
 	if cap(sc.reverseAdj) < n {
-		sc.reverseAdj = make([][]*core.Node, n)
+		sc.reverseAdj = make([][]int, n)
 	} else {
 		sc.reverseAdj = sc.reverseAdj[:n]
 		for i := range sc.reverseAdj {
@@ -951,44 +953,75 @@ func circleBaseBodyInto(circleNode *core.Node, loopStart *core.Node, domTree map
 	reverseAdj := sc.reverseAdj
 	for index, count := range sc.incoming {
 		if count > 0 && cap(reverseAdj[index]) < count {
-			reverseAdj[index] = make([]*core.Node, 0, count)
+			reverseAdj[index] = make([]int, 0, count)
 		}
 	}
-	for _, node := range sc.nodes {
+	for index, node := range sc.nodes {
 		for _, next := range loopAnalysisSuccessors(node) {
 			target := sc.index[next]
-			reverseAdj[target] = append(reverseAdj[target], node)
+			reverseAdj[target] = append(reverseAdj[target], index)
 		}
 	}
 	// Step 2: find back-edge sources — nodes whose Next includes circleNode. Only the SET of
-	// sources matters: reverseBFSStopAt consumes them as seeds for a set-valued reachability
-	// query, so discovery order cannot change membership. The previous sortNodesByID(nodes)
-	// paid O(body log body) on every call (96k calls on one 7 KB loop-heavy class) to order a
+	// sources matters: the reverse reachability query below consumes them as seeds, so
+	// discovery order cannot change membership. The previous sortNodesByID(nodes) paid
+	// O(body log body) on every call (96k calls on one 7 KB loop-heavy class) to order a
 	// map-backed result that is never read in order.
-	var allSources []*core.Node
-	for _, node := range sc.nodes {
-		if slices.Contains(loopAnalysisSuccessors(node), circleNode) {
-			allSources = append(allSources, node)
+	//
+	// The traversal is index-based and reuses the scratch's visited marks and queue: the
+	// former reverseBFSStopAt allocated a map and queue sized for the whole reverse
+	// adjacency (the entire reachable graph) on every loop body query.
+	visited := sc.discovered
+	for i := range visited {
+		visited[i] = false
+	}
+	queue := sc.bfsQueue[:0]
+	circleIndex, circleIndexed := sc.index[circleNode]
+	if circleIndexed {
+		visited[circleIndex] = true
+	}
+	for index, node := range sc.nodes {
+		if index == circleIndex {
+			continue
+		}
+		if !slices.Contains(loopAnalysisSuccessors(node), circleNode) {
+			continue
+		}
+		if excludePreHeader && jdecenv.Get("JDEC_NO_LOOP_BACKEDGE_DOM_FILTER") == "" && !utils.IsDominate(domTree, circleNode, node) {
+			// Drop forward pre-header entry edges. The caller only sets excludePreHeader for a
+			// method whose ORIGINAL CFG is reducible (see RewriteManager.LoopRegionReducible), so a
+			// forward, non-dominated predecessor is a genuine pre-header rather than an alternate
+			// entry of an irreducible tangle. Node IDs are allocation order, not bytecode order; a
+			// preceding loop wrapper can have a larger ID than this header without being a back
+			// edge. Require dominance even for synthetic predecessors; otherwise reverse
+			// reachability leaks through the pre-header into an outer loop.
+			continue
+		}
+		if !visited[index] {
+			visited[index] = true
+			queue = append(queue, index)
 		}
 	}
-	sources := allSources
-	if excludePreHeader && jdecenv.Get("JDEC_NO_LOOP_BACKEDGE_DOM_FILTER") == "" {
-		// Drop forward pre-header entry edges. The caller only sets excludePreHeader for a method whose
-		// ORIGINAL CFG is reducible (see RewriteManager.LoopRegionReducible), so a forward, non-dominated
-		// predecessor is a genuine pre-header rather than an alternate entry of an irreducible tangle.
-		// Node IDs are allocation order, not bytecode order. A preceding loop
-		// wrapper can have a larger ID than this header without being a back
-		// edge. Require dominance even for synthetic predecessors; otherwise
-		// reverse reachability leaks through the pre-header into an outer loop.
-		var kept []*core.Node
-		for _, node := range allSources {
-			if utils.IsDominate(domTree, circleNode, node) {
-				kept = append(kept, node)
+	for head := 0; head < len(queue); head++ {
+		for _, pred := range reverseAdj[queue[head]] {
+			if pred == circleIndex {
+				continue
+			}
+			if !visited[pred] {
+				visited[pred] = true
+				queue = append(queue, pred)
 			}
 		}
-		sources = kept
 	}
-	return reverseBFSStopAt(sources, reverseAdj, sc.index, circleNode)
+	// Publish the closure as the cached set. The queue length is the exact
+	// result size (minus the header itself), so the set map is allocated once
+	// with the right capacity instead of growing from a guess.
+	result := make(map[*core.Node]struct{}, len(queue)+1)
+	result[circleNode] = struct{}{}
+	for _, index := range queue {
+		result[sc.nodes[index]] = struct{}{}
+	}
+	return utils2.NewSetFromMap(result)
 }
 
 // loopBodyHasProtectedRetry reports whether any body node can participate in
@@ -1007,14 +1040,7 @@ func loopBodyHasProtectedRetry(body *utils2.Set[*core.Node]) bool {
 }
 
 func cloneNodeSetWithList(src *utils2.Set[*core.Node]) (*utils2.Set[*core.Node], []*core.Node) {
-	size := src.Size()
-	dst := utils2.NewSetSized[*core.Node](size)
-	nodes := make([]*core.Node, 0, size)
-	src.ForEach(func(n *core.Node) {
-		dst.Add(n)
-		nodes = append(nodes, n)
-	})
-	return dst, nodes
+	return src.CloneWithList()
 }
 
 // augmentCircleBody applies the protected-retry paths on a private copy. The
@@ -1438,41 +1464,6 @@ func isReducibleCFG(root *core.Node, domTree map[*core.Node][]*core.Node) bool {
 	return true
 }
 
-// reverseBFSStopAt returns {circleNode} ∪ all nodes that can reach a seed via reverse edges without
-// passing through circleNode.
-func reverseBFSStopAt(seeds []*core.Node, reverseAdj [][]*core.Node, nodeIndex map[*core.Node]int, circleNode *core.Node) *utils2.Set[*core.Node] {
-	// The traversal set is local to this call, so a plain map avoids the
-	// thread-safe Set's per-element RWMutex traffic during the BFS. The map is
-	// handed to the returned Set afterwards; no goroutine can observe it while
-	// it is being built.
-	seen := make(map[*core.Node]struct{}, len(seeds)+len(reverseAdj)+1)
-	seen[circleNode] = struct{}{}
-	queue := make([]*core.Node, 0, len(seeds)+len(reverseAdj))
-	for _, n := range seeds {
-		if _, ok := seen[n]; !ok {
-			seen[n] = struct{}{}
-			queue = append(queue, n)
-		}
-	}
-	for head := 0; head < len(queue); head++ {
-		n := queue[head]
-		index, ok := nodeIndex[n]
-		if !ok {
-			continue
-		}
-		for _, pred := range reverseAdj[index] {
-			if pred == circleNode {
-				continue
-			}
-			if _, ok := seen[pred]; !ok {
-				seen[pred] = struct{}{}
-				queue = append(queue, pred)
-			}
-		}
-	}
-	return utils2.NewSetFromMap(seen)
-}
-
 func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree map[*core.Node][]*core.Node, reducible bool) *core.Node {
 	// For a reducible method, use the pre-header-excluding body so a nested loop's exit is computed from
 	// its tight body (Bug Q): with the legacy over-approximated body, the reverse-BFS leaks through this
@@ -1480,13 +1471,13 @@ func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree ma
 	// never gets its `else{break}` and becomes a non-terminating do-while(true). Irreducible methods keep
 	// the legacy body to avoid collapsing the loop. The LOOP BODY itself always stays on the legacy path
 	// (getCircleElementSet); only this exit search prunes pre-headers.
-	return searchCircleEndNodeInBody(circleNode, loopStart, circleElementSet(circleNode, loopStart, domTree, reducible), domTree, reducible, nil)
+	return searchCircleEndNodeInBody(circleNode, loopStart, circleElementSet(circleNode, loopStart, domTree, reducible), domTree, reducible, nil, nil)
 }
 
 // searchCircleEndNodeInBody is searchCircleEndNode with a caller-supplied loop
 // body, so the analysis cache can reuse one body across the exit query, the
 // ownership query, and the retry-continuation query.
-func searchCircleEndNodeInBody(circleNode *core.Node, loopStart *core.Node, elementSet *utils2.Set[*core.Node], domTree map[*core.Node][]*core.Node, reducible bool, live func(*core.Node) bool) *core.Node {
+func searchCircleEndNodeInBody(circleNode *core.Node, loopStart *core.Node, elementSet *utils2.Set[*core.Node], domTree map[*core.Node][]*core.Node, reducible bool, live func(*core.Node) bool, only *switchOnlyCache) *core.Node {
 	outNodes := []*core.Node{}
 	elementSet.ForEach(func(node *core.Node) {
 		for _, n := range loopAnalysisSuccessors(node) {
@@ -1580,7 +1571,7 @@ func searchCircleEndNodeInBody(circleNode *core.Node, loopStart *core.Node, elem
 		if !ok || middle.Flag != statements.MiddleSwitch {
 			return
 		}
-		jumpOnly, ok := switchNodeJumpOnlyTargets(sw, middle)
+		jumpOnly, ok := only.targets(sw, middle)
 		if !ok {
 			return
 		}

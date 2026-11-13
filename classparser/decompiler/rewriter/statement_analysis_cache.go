@@ -155,15 +155,17 @@ type statementDominanceState struct {
 	diff            statementTopologyDiff
 	topologyChanged bool
 
-	domAnalysis  *core.GraphAnalysis
-	domTree      map[*core.Node][]*core.Node
-	domReady     bool
-	domComputes  int
-	postMap      map[*core.Node]*core.Node
-	postIndex    []int
-	postCanExit  []bool
-	postReady    bool
-	postComputes int
+	domAnalysis      *core.GraphAnalysis
+	domTree          map[*core.Node][]*core.Node
+	domParents       []*core.Node
+	domParentScratch []*core.Node
+	domReady         bool
+	domComputes      int
+	postMap          map[*core.Node]*core.Node
+	postIndex        []int
+	postCanExit      []bool
+	postReady        bool
+	postComputes     int
 }
 
 func (s *statementDominanceState) refresh(root *core.Node) {
@@ -186,7 +188,6 @@ func (s *statementDominanceState) refresh(root *core.Node) {
 	s.snapshot, s.scratch = s.scratch, s.snapshot
 	s.root = root
 	s.domAnalysis = nil
-	s.domTree = nil
 	s.domReady = false
 	s.postMap = nil
 	s.postIndex = nil
@@ -221,14 +222,22 @@ func (s *statementDominanceState) resetGraph() {
 // dominatorTree computes the canonical child-list tree once per topology. The
 // node numbering is the snapshot's WalkGraph order, so iterating node indexes in
 // order appends children exactly like GenerateDominatorTree.
+//
+// The map and its child slices survive topology changes: each rebuild truncates
+// the previous parents' children in place and drops parents that lost all
+// children. Callers must treat the returned map as read-only, which the rewrite
+// loop already does (refreshDominators still clones for the exported field).
 func (s *statementDominanceState) dominatorTree() map[*core.Node][]*core.Node {
 	if s.domReady {
 		return s.domTree
 	}
 	s.domReady = true
 	s.domComputes++
+	if s.domTree == nil {
+		s.domTree = make(map[*core.Node][]*core.Node)
+	}
 	if s.snapshot == nil || len(s.snapshot.nodes) == 0 {
-		s.domTree = map[*core.Node][]*core.Node{}
+		s.clearDominatorTree()
 		return s.domTree
 	}
 	if s.graph == nil {
@@ -239,11 +248,19 @@ func (s *statementDominanceState) dominatorTree() map[*core.Node][]*core.Node {
 	// deep copy per rewrite step would only add allocation.
 	analysis := s.graph.GetOrComputeShared(core.AnalysisDominators, core.GraphAnalysisDomain{Roots: []int{0}})
 	s.domAnalysis = analysis
-	tree := make(map[*core.Node][]*core.Node)
 	if analysis == nil {
-		s.domTree = tree
-		return tree
+		s.clearDominatorTree()
+		return s.domTree
 	}
+	previous := s.domParents
+	for _, parent := range previous {
+		children, ok := s.domTree[parent]
+		if !ok {
+			continue
+		}
+		s.domTree[parent] = children[:0]
+	}
+	next := s.domParentScratch[:0]
 	for i, node := range s.snapshot.nodes {
 		if i >= len(analysis.IDom) {
 			break
@@ -253,10 +270,31 @@ func (s *statementDominanceState) dominatorTree() map[*core.Node][]*core.Node {
 			continue
 		}
 		parent := s.snapshot.nodes[idom]
-		tree[parent] = append(tree[parent], node)
+		children, ok := s.domTree[parent]
+		// Truncated parents have len 0 and must be re-registered on their first
+		// child; parents with no remaining children are dropped below.
+		if !ok || len(children) == 0 {
+			next = append(next, parent)
+		}
+		s.domTree[parent] = append(children, node)
 	}
-	s.domTree = tree
-	return tree
+	for _, parent := range previous {
+		if children, ok := s.domTree[parent]; ok && len(children) == 0 {
+			delete(s.domTree, parent)
+		}
+	}
+	s.domParentScratch = previous[:0]
+	s.domParents = next
+	return s.domTree
+}
+
+// clearDominatorTree empties the reusable tree and its parent index. The map
+// allocation survives; only the entries are dropped.
+func (s *statementDominanceState) clearDominatorTree() {
+	for _, parent := range s.domParents {
+		delete(s.domTree, parent)
+	}
+	s.domParents = s.domParents[:0]
 }
 
 // postDominatorMap computes the canonical immediate-post-dominator map once per

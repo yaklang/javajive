@@ -56,31 +56,38 @@ func unionDef(a, b defSet, work *workbudget.Budget, merges *uint64) (defSet, boo
 	// usually re-propagate an already-covered set to a loop predecessor; the
 	// temporary merged slice used to be allocated and immediately discarded.
 	i, j := 0, 0
-	changed := false
+	aOnly, bOnly := 0, 0
 	unionSize := 0
 	for i < len(a.ids) || j < len(b.ids) {
 		switch {
 		case i == len(a.ids):
 			j++
-			changed = true
+			bOnly++
 		case j == len(b.ids):
 			i++
+			aOnly++
 		case a.ids[i] == b.ids[j]:
 			i++
 			j++
 		case a.ids[i] < b.ids[j]:
 			i++
+			aOnly++
 		default:
 			j++
-			changed = true
+			bOnly++
 		}
 		unionSize++
 	}
 	if merges != nil {
 		*merges += uint64(unionSize)
 	}
-	if !changed {
+	if bOnly == 0 {
 		return a, false, nil
+	}
+	if aOnly == 0 {
+		// a is a subset of b, so the merged result is exactly b. Share the
+		// immutable incoming set instead of rebuilding an identical slice.
+		return b, true, nil
 	}
 	out := make([]reachingDefID, 0, unionSize)
 	i, j = 0, 0

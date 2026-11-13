@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
+	utils2 "github.com/yaklang/javajive/internal/utils"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
@@ -2151,13 +2152,12 @@ func statementsReadName(sts []statements.Statement, name string) (res bool) {
 			res = true
 		}
 	}()
-	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
 	for _, st := range sts {
 		if as, ok := st.(*statements.AssignStatement); ok {
-			if as.JavaValue != nil && re.MatchString(as.JavaValue.String(&class_context.ClassContext{})) {
+			if as.JavaValue != nil && utils2.WordMatches(as.JavaValue.String(&class_context.ClassContext{}), name) {
 				return true
 			}
-			if as.ArrayMember != nil && re.MatchString(as.ArrayMember.String(&class_context.ClassContext{})) {
+			if as.ArrayMember != nil && utils2.WordMatches(as.ArrayMember.String(&class_context.ClassContext{}), name) {
 				return true
 			}
 			if ref, ok := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok && ref.String(&class_context.ClassContext{}) == name && (as.IsFirst || as.IsDeclare) {
@@ -2165,20 +2165,20 @@ func statementsReadName(sts []statements.Statement, name string) (res bool) {
 			}
 			continue
 		}
-		if statementReadTextMatches(st, re) {
+		if statementReadTextMatches(st, name) {
 			return true
 		}
 	}
 	return false
 }
 
-func statementReadTextMatches(st statements.Statement, re *regexp.Regexp) (res bool) {
+func statementReadTextMatches(st statements.Statement, name string) (res bool) {
 	defer func() {
 		if recover() != nil {
 			res = true
 		}
 	}()
-	return re.MatchString(st.String(&class_context.ClassContext{Env: jdecenv.Lookup()}))
+	return utils2.WordMatches(st.String(&class_context.ClassContext{Env: jdecenv.Lookup()}), name)
 }
 
 // statementsReferenceName reports whether any of the statements textually reference the variable
@@ -2190,27 +2190,26 @@ func statementsReferenceName(sts []statements.Statement, name string, memos ...s
 	if len(memos) > 0 {
 		memo = memos[0]
 	}
-	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
 	for _, st := range sts {
 		if memo != nil {
 			text, ok := memo.render(st)
-			if !ok || re.MatchString(text) {
+			if !ok || utils2.WordMatches(text, name) {
 				return true
 			}
-		} else if statementTextMatches(st, re) {
+		} else if statementTextMatches(st, name) {
 			return true
 		}
 	}
 	return false
 }
 
-func statementTextMatches(st statements.Statement, re *regexp.Regexp) (res bool) {
+func statementTextMatches(st statements.Statement, name string) (res bool) {
 	defer func() {
 		if recover() != nil {
 			res = true
 		}
 	}()
-	return re.MatchString(st.String(&class_context.ClassContext{Env: jdecenv.Lookup()}))
+	return utils2.WordMatches(st.String(&class_context.ClassContext{Env: jdecenv.Lookup()}), name)
 }
 
 // generatedLocalNameRe matches a decompiler-generated local name (var0, var1, var2_1, ...). Only
@@ -2616,11 +2615,10 @@ func placeCrossScopeDeclarations(block *[]statements.Statement, reused map[*util
 					continue
 				}
 			}
-			re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
 			cnt := 0
 			singleIdx := -1
 			for i := range list {
-				if allMatch[i] || re.MatchString(texts[i]) {
+				if allMatch[i] || utils2.WordMatches(texts[i], name) {
 					cnt++
 					singleIdx = i
 				}
@@ -2699,6 +2697,7 @@ func isJavaLangObject(t types.JavaType) bool {
 // that immediately follows the name occurrence.
 var nullInitNarrowDot = regexp.MustCompile(`^\s*\.`)
 var nullInitNarrowAssign = regexp.MustCompile(`^\s*=([^=]|$)`)
+var lhsAssignedNameRe = regexp.MustCompile(`\b([A-Za-z_$][\w$]*)\s*=\s*$`)
 
 // nameUsedOnlyAsReceiverOrLHS reports whether every textual occurrence of `name` in `text` is either a
 // method/field receiver (`name.x`) or an assignment target (`name = ...`). This is the safety predicate
@@ -2709,8 +2708,7 @@ var nullInitNarrowAssign = regexp.MustCompile(`^\s*=([^=]|$)`)
 // other occurrence (argument, return, operand, array index, equality) makes the function return false,
 // so the caller conservatively leaves the declaration untouched.
 func nameUsedOnlyAsReceiverOrLHS(text, name string) bool {
-	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
-	locs := re.FindAllStringIndex(text, -1)
+	locs := utils2.WordSpans(text, name, nil)
 	if len(locs) == 0 {
 		return false
 	}
@@ -2971,12 +2969,10 @@ func widenConcreteDeclToObject(sts *[]statements.Statement) {
 }
 
 func nameOccurrencesAreObjectSafe(text, name string, objectNames map[string]struct{}) bool {
-	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
-	locs := re.FindAllStringIndex(text, -1)
+	locs := utils2.WordSpans(text, name, nil)
 	if len(locs) == 0 {
 		return false
 	}
-	lhsNameRe := regexp.MustCompile(`\b([A-Za-z_$][\w$]*)\s*=\s*$`)
 	for _, loc := range locs {
 		before := text[:loc[0]]
 		after := text[loc[1]:]
@@ -3003,7 +2999,7 @@ func nameOccurrencesAreObjectSafe(text, name string, objectNames map[string]stru
 		if strings.HasSuffix(rt, ")") {
 			continue
 		}
-		if m := lhsNameRe.FindStringSubmatch(before); m != nil {
+		if m := lhsAssignedNameRe.FindStringSubmatch(before); m != nil {
 			if _, ok := objectNames[m[1]]; ok {
 				continue
 			}

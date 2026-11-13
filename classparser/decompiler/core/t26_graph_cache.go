@@ -438,9 +438,36 @@ func uniqueInts(in []int) []int {
 	return out
 }
 
+type dominatorScratch struct {
+	reach    []bool
+	stack    []int
+	filtered []int
+	succs2   [][]int
+	preds    [][]int
+	rpoIndex []int
+	idom2    []int
+	color    []uint8
+	post     []int
+	frames   []rpoFrame
+}
+
+type rpoFrame struct{ u, i int }
+
+var dominatorScratchPool = sync.Pool{New: func() any { return &dominatorScratch{} }}
+
 func reachableFrom(n int, succs [][]int, roots []int) []bool {
-	mark := make([]bool, n)
-	stack := make([]int, 0, n)
+	mark, _ := reachableFromInto(n, succs, roots, nil, nil)
+	return mark
+}
+
+func reachableFromInto(n int, succs [][]int, roots []int, mark []bool, stack []int) ([]bool, []int) {
+	if cap(mark) < n {
+		mark = make([]bool, n)
+	} else {
+		mark = mark[:n]
+		clear(mark)
+	}
+	stack = stack[:0]
 	for _, r := range roots {
 		if r >= 0 && r < n && !mark[r] {
 			mark[r] = true
@@ -457,18 +484,31 @@ func reachableFrom(n int, succs [][]int, roots []int) []bool {
 			}
 		}
 	}
-	return mark
+	return mark, stack
 }
 
 func reversePostorder(n int, succs [][]int, starts []int) []int {
-	color := make([]uint8, n)
-	post := make([]int, 0, n)
-	type frame struct{ u, i int }
+	return reversePostorderInto(n, succs, starts, &dominatorScratch{})
+}
+
+func reversePostorderInto(n int, succs [][]int, starts []int, scratch *dominatorScratch) []int {
+	if scratch == nil {
+		scratch = &dominatorScratch{}
+	}
+	color := scratch.color
+	if cap(color) < n {
+		color = make([]uint8, n)
+	} else {
+		color = color[:n]
+		clear(color)
+	}
+	post := scratch.post[:0]
+	stack := scratch.frames[:0]
 	for _, s := range starts {
 		if s < 0 || s >= n || color[s] != 0 {
 			continue
 		}
-		stack := []frame{{s, 0}}
+		stack = append(stack, rpoFrame{s, 0})
 		color[s] = 1
 		for len(stack) > 0 {
 			top := &stack[len(stack)-1]
@@ -477,7 +517,7 @@ func reversePostorder(n int, succs [][]int, starts []int) []int {
 				top.i++
 				if v >= 0 && v < n && color[v] == 0 {
 					color[v] = 1
-					stack = append(stack, frame{v, 0})
+					stack = append(stack, rpoFrame{v, 0})
 				}
 				continue
 			}
@@ -489,7 +529,28 @@ func reversePostorder(n int, succs [][]int, starts []int) []int {
 	for i, j := 0, len(post)-1; i < j; i, j = i+1, j-1 {
 		post[i], post[j] = post[j], post[i]
 	}
+	scratch.color = color
+	scratch.post = post
+	scratch.frames = stack
 	return post
+}
+
+func resizeIntLists(lists [][]int, n int) [][]int {
+	if cap(lists) < n {
+		return make([][]int, n)
+	}
+	lists = lists[:n]
+	for i := range lists {
+		lists[i] = lists[i][:0]
+	}
+	return lists
+}
+
+func resizeIntSlice(values []int, n int) []int {
+	if cap(values) < n {
+		return make([]int, n)
+	}
+	return values[:n]
 }
 
 // computeImmediateDominators is the cached Lengauer-style iterative IDom
@@ -503,20 +564,25 @@ func computeImmediateDominators(n int, succs [][]int, roots []int) []int {
 	if n == 0 {
 		return idom
 	}
+	scratch := dominatorScratchPool.Get().(*dominatorScratch)
+	defer dominatorScratchPool.Put(scratch)
 	roots = uniqueInts(roots)
-	reach := reachableFrom(n, succs, roots)
-	filtered := make([]int, 0, len(roots))
+	reach, stack := reachableFromInto(n, succs, roots, scratch.reach, scratch.stack)
+	scratch.reach, scratch.stack = reach, stack[:0]
+	filtered := scratch.filtered[:0]
 	for _, r := range roots {
 		if r >= 0 && r < n && reach[r] {
 			filtered = append(filtered, r)
 		}
 	}
+	scratch.filtered = filtered[:0]
 	if len(filtered) == 0 {
 		return idom
 	}
 	vs := n
 	total := n + 1
-	succs2 := make([][]int, total)
+	succs2 := resizeIntLists(scratch.succs2, total)
+	scratch.succs2 = succs2
 	for i := 0; i < n; i++ {
 		if !reach[i] {
 			continue
@@ -527,22 +593,26 @@ func computeImmediateDominators(n int, succs [][]int, roots []int) []int {
 			}
 		}
 	}
-	succs2[vs] = append([]int(nil), filtered...)
-	preds := make([][]int, total)
+	succs2[vs] = append(succs2[vs][:0], filtered...)
+	preds := resizeIntLists(scratch.preds, total)
+	scratch.preds = preds
 	for u := 0; u < total; u++ {
 		for _, v := range succs2[u] {
 			preds[v] = append(preds[v], u)
 		}
 	}
-	rpo := reversePostorder(total, succs2, []int{vs})
-	rpoIndex := make([]int, total)
+	start := [1]int{vs}
+	rpo := reversePostorderInto(total, succs2, start[:], scratch)
+	rpoIndex := resizeIntSlice(scratch.rpoIndex, total)
+	scratch.rpoIndex = rpoIndex
 	for i := range rpoIndex {
 		rpoIndex[i] = -1
 	}
 	for i, u := range rpo {
 		rpoIndex[u] = i
 	}
-	idom2 := make([]int, total)
+	idom2 := resizeIntSlice(scratch.idom2, total)
+	scratch.idom2 = idom2
 	for i := range idom2 {
 		idom2[i] = -1
 	}
