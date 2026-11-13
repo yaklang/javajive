@@ -90,7 +90,15 @@ python3 classparser/jdk_metadata_catalog_generate.py \
   --jdk8 /path/to/jdk8 --jdk9 /path/to/jdk9 --jdk11 /path/to/jdk11 \
   --jdk16 /path/to/jdk16 --jdk17 /path/to/jdk17 --jdk21 /path/to/jdk21 \
   --out classparser/jdk_metadata_catalog.json
+go generate ./classparser
 ```
+
+The reviewed JSON remains the source of truth. Applications embed only
+`jdk_metadata_catalog.json.zst`; the catalog is decompressed on its first
+required lookup, within the existing one-time loader. The constructor classfile
+ZIP and all exact-profile/provenance checks remain unchanged. The required
+corpus tests compare decompressed bytes with the JSON source so regeneration
+cannot silently omit a catalog update.
 
 ## Evidence and limits
 

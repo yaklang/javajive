@@ -2,7 +2,6 @@ package javaclassparser
 
 import (
 	"encoding/hex"
-	"encoding/json"
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"testing"
 )
@@ -18,7 +17,7 @@ func TestJDKThrowableAncestryKeepsClassificationSeparateFromMembers(t *testing.T
 			} `json:"throwable_provenance"`
 		} `json:"profiles"`
 	}
-	if err := json.Unmarshal(jdkInvocationCatalogJSON, &document); err != nil {
+	if err := decodeJDKInvocationCatalog(&document); err != nil {
 		t.Fatal(err)
 	}
 	for _, profile := range document.Profiles {

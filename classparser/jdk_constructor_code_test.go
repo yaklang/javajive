@@ -2,7 +2,6 @@ package javaclassparser
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"testing"
@@ -26,7 +25,7 @@ func TestAdversarialPlatformInterfaceDeclarationsUsePinnedOriginalFlags(t *testi
 			}
 		}
 	}
-	if err := json.Unmarshal(jdkInvocationCatalogJSON, &catalog); err != nil {
+	if err := decodeJDKInvocationCatalog(&catalog); err != nil {
 		t.Fatal(err)
 	}
 	for _, profile := range catalog.Profiles {
@@ -73,7 +72,7 @@ func TestAdversarialPlatformConstructorCodeIdentityAndEffectProof(t *testing.T) 
 			References    map[string]struct{ Archive, SHA256 string } `json:"reference_provenance"`
 		}
 	}
-	if err := json.Unmarshal(jdkInvocationCatalogJSON, &declared); err != nil {
+	if err := decodeJDKInvocationCatalog(&declared); err != nil {
 		t.Fatal(err)
 	}
 	for _, profile := range declared.Profiles {

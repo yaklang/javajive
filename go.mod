@@ -5,6 +5,7 @@ go 1.22.0
 require (
 	github.com/go-viper/mapstructure/v2 v2.4.0
 	github.com/gobwas/glob v0.2.3
+	github.com/klauspost/compress v1.17.9
 	github.com/samber/lo v1.38.1
 	github.com/segmentio/ksuid v1.0.4
 	github.com/stretchr/testify v1.11.1

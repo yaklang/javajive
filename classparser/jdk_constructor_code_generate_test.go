@@ -50,7 +50,7 @@ func TestGenerateJDKConstructorCodeArchive(t *testing.T) {
 			Classes       map[string]json.RawMessage
 		}
 	}
-	if err = json.Unmarshal(jdkInvocationCatalogJSON, &declared); err != nil {
+	if err = decodeJDKInvocationCatalog(&declared); err != nil {
 		t.Fatal(err)
 	}
 	expected := map[int]string{}

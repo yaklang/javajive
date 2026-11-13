@@ -2,7 +2,6 @@ package javaclassparser
 
 import (
 	"encoding/hex"
-	"encoding/json"
 	"reflect"
 	"sync"
 	"testing"
@@ -40,7 +39,7 @@ func TestJDKInvocationCatalogCompleteProfiles(t *testing.T) {
 			} `json:"provenance"`
 		} `json:"profiles"`
 	}
-	if err := json.Unmarshal(jdkInvocationCatalogJSON, &document); err != nil {
+	if err := decodeJDKInvocationCatalog(&document); err != nil {
 		t.Fatal(err)
 	}
 	if len(document.Profiles) != 6 {
@@ -177,7 +176,7 @@ func TestJDKCatalogModularNamespaceAndCheckedDeclarations(t *testing.T) {
 			} `json:"provenance"`
 		} `json:"profiles"`
 	}
-	if err := json.Unmarshal(jdkInvocationCatalogJSON, &document); err != nil {
+	if err := decodeJDKInvocationCatalog(&document); err != nil {
 		t.Fatal(err)
 	}
 	for _, profile := range document.Profiles {
@@ -407,7 +406,7 @@ func TestInvocationMetadataReferenceCatalogRequiresOriginalClosedProfilesAndNeve
 			} `json:"reference_provenance"`
 		} `json:"profiles"`
 	}
-	if e := json.Unmarshal(jdkInvocationCatalogJSON, &document); e != nil {
+	if e := decodeJDKInvocationCatalog(&document); e != nil {
 		t.Fatal(e)
 	}
 	if document.Schema != 3 || len(document.Profiles) != 6 {
