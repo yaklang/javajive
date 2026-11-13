@@ -33,6 +33,14 @@ bounded failure recovery for malformed and partially unsupported inputs.
   timeouts, clean environment, sealed event checks, and fail-closed coverage
   baseline. The exhaustive 797k-case stack-diagram test no longer allocates
   per-case frame snapshots, cutting its allocation from ~2.4 GB to ~0.6 GB.
+- Extend required stability coverage without adding Java processes: the sealed
+  inventory now lists `Fuzz*` targets and runs every seed corpus (classparser,
+  decoder audit, DEX-to-JAR, DEX input, inspect, input kind, ZIP, JImage).
+  Add a concurrent class decompilation under the race detector, pre-canceled and
+  mid-flight cancellation checks that publish no source, and cross-process
+  fingerprint comparison so source, diagnostics, records and hashes cannot
+  depend on a process-local map hash seed. Gate times remain ~26 s for
+  algorithm, ~15 s for corpus and ~16 s for DEX on a warm cache.
 - Remove avoidable quadratic and repeated work: index Java exception starts and
   graph adjacency, render with builders, reuse nested archive filesystems, populate
   DEX blocks in one pass, index DEX allocations/annotations/debug locals, bound
