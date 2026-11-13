@@ -1,8 +1,6 @@
 package javaclassparser
 
 import (
-	_ "embed"
-	"encoding/json"
 	"sync"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
@@ -11,10 +9,6 @@ import (
 // These are full method tables extracted from specific trusted JDK8/9/11/16/17/21
 // classfiles, not guessed overload-name uniqueness rules. See the adjacent
 // provenance document and generator. No installed JDK is consulted at runtime.
-//
-//go:embed jdk_metadata_catalog.json
-var jdkInvocationCatalogJSON []byte
-
 type jdkCatalogProvenance struct {
 	Archive string `json:"archive"`
 	SHA256  string `json:"sha256"`
@@ -48,7 +42,7 @@ func loadJDKInvocationCatalog() {
 				ReferenceParents map[string][]string             `json:"reference_hierarchy"`
 			} `json:"profiles"`
 		}
-		if json.Unmarshal(jdkInvocationCatalogJSON, &document) != nil || document.Schema != 3 {
+		if decodeJDKInvocationCatalog(&document) != nil || document.Schema != 3 {
 			return
 		}
 		profiles := make(map[int]map[string]callbinding.Class)

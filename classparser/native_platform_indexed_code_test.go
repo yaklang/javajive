@@ -2,7 +2,6 @@ package javaclassparser
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"testing"
 )
@@ -17,7 +16,7 @@ func TestAdversarialPlatformIndexedDeclarationsRetainOriginalBytecode(t *testing
 			Provenance    map[string]struct{ Archive, SHA256 string }
 		}
 	}
-	if err := json.Unmarshal(jdkInvocationCatalogJSON, &catalog); err != nil {
+	if err := decodeJDKInvocationCatalog(&catalog); err != nil {
 		t.Fatal(err)
 	}
 	for _, profile := range catalog.Profiles {
