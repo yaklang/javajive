@@ -114,10 +114,31 @@ func (d *Decompiler) inlineBranchArrayLeaves() {
 	}
 }
 
+type arrayRefUse struct {
+	op    *OpCode
+	index int
+}
+
+// arrayRefUses indexes stack operands by JavaRef once per finalization pass.
+// The nested-array fixpoint previously rescanned every opcode for every
+// candidate array, even though the opcode stack map does not change between
+// waves.
+func (d *Decompiler) arrayRefUses() map[*values.JavaRef][]arrayRefUse {
+	uses := make(map[*values.JavaRef][]arrayRefUse)
+	for _, op := range d.opCodes {
+		for index, value := range op.stackConsumed {
+			if ref, ok := values.UnpackSoltValue(value).(*values.JavaRef); ok && ref != nil {
+				uses[ref] = append(uses[ref], arrayRefUse{op: op, index: index})
+			}
+		}
+	}
+	return uses
+}
+
 // Fold the innermost completed array into its single parent element store.
 // Repeating this bottom-up lets RewriteNewArrayList see contiguous outer
 // stores, without ever publishing an incomplete array or copying an alias.
-func (d *Decompiler) inlineNestedArrayInitializers(origins map[int]*OpCode) bool {
+func (d *Decompiler) inlineNestedArrayInitializers(origins map[int]*OpCode, refUses map[*values.JavaRef][]arrayRefUse) bool {
 	changed := false
 	WalkGraph[*Node](d.RootNode, func(n *Node) ([]*Node, error) {
 		if n == d.RootNode || len(n.Next) != 1 {
@@ -145,22 +166,18 @@ func (d *Decompiler) inlineNestedArrayInitializers(origins map[int]*OpCode) bool
 			return n.Next, nil
 		}
 		uses := 0
-		for _, op := range d.opCodes {
-			for index, value := range op.stackConsumed {
-				if values.UnpackSoltValue(value) != ref {
-					continue
-				}
-				if op == sink && index == 0 {
-					uses++
-					continue
-				}
-				if int(op.CurrentOffset) > array.OriginPC && int(op.CurrentOffset) <= array.EvaluationEndPC && op.Instr != nil {
-					if op.Instr.OpCode == OP_DUP || (index == 2 && isArrayElementStore(op.Instr.OpCode)) {
-						continue
-					}
-				}
-				return n.Next, nil
+		for _, use := range refUses[ref] {
+			op, index := use.op, use.index
+			if op == sink && index == 0 {
+				uses++
+				continue
 			}
+			if int(op.CurrentOffset) > array.OriginPC && int(op.CurrentOffset) <= array.EvaluationEndPC && op.Instr != nil {
+				if op.Instr.OpCode == OP_DUP || (index == 2 && isArrayElementStore(op.Instr.OpCode)) {
+					continue
+				}
+			}
+			return n.Next, nil
 		}
 		if uses != 1 {
 			return n.Next, nil

@@ -16,6 +16,9 @@ const (
 	AnnotationChar   AnnotationValueKind = 'C'
 	AnnotationShort  AnnotationValueKind = 'S'
 	AnnotationInt    AnnotationValueKind = 'I'
+	AnnotationLong   AnnotationValueKind = 'J'
+	AnnotationFloat  AnnotationValueKind = 'F'
+	AnnotationDouble AnnotationValueKind = 'D'
 	AnnotationBool   AnnotationValueKind = 'Z'
 	AnnotationString AnnotationValueKind = 's'
 	AnnotationEnum   AnnotationValueKind = 'e'
@@ -27,7 +30,8 @@ const (
 // AnnotationValue is one element_value.
 type AnnotationValue struct {
 	Kind   AnnotationValueKind
-	Int    int64  // for B/C/S/I/Z
+	Int    int64  // for B/C/S/I/J/Z
+	Bits   uint64 // IEEE-754 bits for F (low 32 bits) and D
 	Text   string // string constant, enum constant name, or class descriptor
 	Type   string // enum type descriptor, for Kind == AnnotationEnum
 	Nested *Annotation
@@ -93,12 +97,25 @@ func (t *annotationTarget) addPending(name string, encode func(*ConstantPool) ([
 	t.pending = append(t.pending, pendingAttribute{name: name, encode: encode})
 }
 
+func validateAttributePayloadLength(length uint64) error {
+	if length > uint64(math.MaxUint32) {
+		return fmt.Errorf("attribute length %d exceeds 4294967295", length)
+	}
+	if length > uint64(^uint(0)>>1) {
+		return fmt.Errorf("attribute length %d exceeds the platform int limit", length)
+	}
+	return nil
+}
+
 func writeAttribute(out *byteWriter, attribute pendingAttribute) error {
 	if attribute.encode != nil || attribute.nameIndex == 0 {
 		// Payloads and name indices must be resolved before the constant pool
 		// is serialized; resolving here would append entries past the written
 		// constant_pool_count.
 		return fmt.Errorf("%s attribute was not resolved before serialization", attribute.name)
+	}
+	if err := validateAttributePayloadLength(uint64(len(attribute.payload))); err != nil {
+		return fmt.Errorf("%s: %w", attribute.name, err)
 	}
 	out.u2(attribute.nameIndex)
 	out.u4(uint32(len(attribute.payload)))
@@ -109,6 +126,9 @@ func writeAttribute(out *byteWriter, attribute pendingAttribute) error {
 // encodeAnnotations writes a RuntimeVisibleAnnotations or
 // RuntimeInvisibleAnnotations payload.
 func encodeAnnotations(pool *ConstantPool, annotations []Annotation, visible []bool, wantVisible bool) ([]byte, error) {
+	if len(visible) != len(annotations) {
+		return nil, fmt.Errorf("annotations and visibility differ in length")
+	}
 	selected := make([]Annotation, 0, len(annotations))
 	for index, annotation := range annotations {
 		if visible[index] == wantVisible {
@@ -117,6 +137,9 @@ func encodeAnnotations(pool *ConstantPool, annotations []Annotation, visible []b
 	}
 	if len(selected) == 0 {
 		return nil, nil
+	}
+	if len(selected) > math.MaxUint16 {
+		return nil, fmt.Errorf("annotation count %d exceeds 65535", len(selected))
 	}
 	out := &byteWriter{}
 	out.u2(uint16(len(selected)))
@@ -162,6 +185,24 @@ func writeValue(pool *ConstantPool, out *byteWriter, value AnnotationValue) erro
 	switch value.Kind {
 	case AnnotationByte, AnnotationChar, AnnotationShort, AnnotationInt, AnnotationBool:
 		index, err := pool.Integer(int32(value.Int))
+		if err != nil {
+			return err
+		}
+		out.u2(index)
+	case AnnotationLong:
+		index, err := pool.Long(value.Int)
+		if err != nil {
+			return err
+		}
+		out.u2(index)
+	case AnnotationFloat:
+		index, err := pool.Float(uint32(value.Bits))
+		if err != nil {
+			return err
+		}
+		out.u2(index)
+	case AnnotationDouble:
+		index, err := pool.Double(value.Bits)
 		if err != nil {
 			return err
 		}
@@ -227,6 +268,9 @@ func encodeSignature(pool *ConstantPool, signature string) ([]byte, error) {
 }
 
 func encodeExceptions(pool *ConstantPool, descriptors []string) ([]byte, error) {
+	if len(descriptors) > math.MaxUint16 {
+		return nil, fmt.Errorf("Exceptions length %d exceeds 65535", len(descriptors))
+	}
 	out := &byteWriter{}
 	out.u2(uint16(len(descriptors)))
 	for _, descriptor := range descriptors {
@@ -244,6 +288,9 @@ func encodeExceptions(pool *ConstantPool, descriptors []string) ([]byte, error) 
 }
 
 func encodeInnerClasses(pool *ConstantPool, specs []InnerClassSpec) ([]byte, error) {
+	if len(specs) > math.MaxUint16 {
+		return nil, fmt.Errorf("InnerClasses count %d exceeds 65535", len(specs))
+	}
 	out := &byteWriter{}
 	out.u2(uint16(len(specs)))
 	for _, spec := range specs {
@@ -304,10 +351,19 @@ func encodeParameterAnnotations(pool *ConstantPool, annotations [][]Annotation, 
 	if len(annotations) == 0 {
 		return nil, nil
 	}
+	if len(annotations) > math.MaxUint8 {
+		return nil, fmt.Errorf("parameter annotation count %d exceeds 255", len(annotations))
+	}
+	if len(visible) != len(annotations) {
+		return nil, fmt.Errorf("parameter annotation sets and visibility differ in length")
+	}
 	out := &byteWriter{}
 	out.u1(uint8(len(annotations)))
 	any := false
 	for index, set := range annotations {
+		if len(visible[index]) != len(set) {
+			return nil, fmt.Errorf("parameter %d annotations and visibility differ in length", index)
+		}
 		selected := make([]Annotation, 0, len(set))
 		for i, annotation := range set {
 			if visible[index][i] == wantVisible {

@@ -5,9 +5,16 @@ import (
 	"strings"
 
 	"github.com/yaklang/javajive/dex2jar/model"
+	"github.com/yaklang/javajive/dex2jar/report"
 )
 
 const dexAccessStatic = 0x0008
+
+// maxRegisterStateCells bounds the dense per-instruction register category
+// table and the temporary states used to derive it. Four million cells leave
+// ample room for ordinary methods while preventing hostile code/register
+// dimensions from amplifying a small code item into an unbounded allocation.
+const maxRegisterStateCells = 4 << 20
 
 // Build decodes, validates, builds the CFG, and derives stable register homes.
 func Build(in Input) (*Method, error) {
@@ -32,6 +39,10 @@ func Build(in Input) (*Method, error) {
 	if err != nil {
 		return nil, err
 	}
+	stateCells := uint64(len(instructions)) * uint64(method.Code.RegistersSize)
+	if stateCells > maxRegisterStateCells {
+		return nil, diagnostic(ctx, nil, "resources", fmt.Errorf("instruction/register state space of %d instructions x %d registers (%d cells) exceeds limit %d", len(instructions), method.Code.RegistersSize, stateCells, maxRegisterStateCells))
+	}
 	result := &Method{Code: method.Code, Instructions: instructions, Context: ctx, Proto: proto, AccessFlags: method.AccessFlags}
 	if err := validateInstructions(result, in.File); err != nil {
 		return nil, err
@@ -44,6 +55,12 @@ func Build(in Input) (*Method, error) {
 	if err != nil {
 		return nil, err
 	}
+	result.blockByInstruction = make([]int, len(result.Instructions))
+	for blockIndex := range result.Blocks {
+		for _, instructionIndex := range result.Blocks[blockIndex].Instructions {
+			result.blockByInstruction[instructionIndex] = blockIndex
+		}
+	}
 	result.exceptionTypes = exceptionTypes(method.Code)
 	if err := validateExceptionEntries(result); err != nil {
 		return nil, err
@@ -54,6 +71,7 @@ func Build(in Input) (*Method, error) {
 	}
 	result.Allocations = allocations
 	for pass := 0; pass <= len(result.Instructions)+2; pass++ {
+		result.indexAllocations()
 		result.RegisterTypes, err = analyzeCategories(result, in.File, result.Allocations)
 		if err != nil {
 			return nil, err
@@ -78,12 +96,16 @@ func validateInstructions(method *Method, file *model.File) error {
 		instruction := &method.Instructions[index]
 		info := opcodeTable[instruction.Opcode]
 		if !info.supported {
-			return diagnostic(method.Context, instruction, "", fmt.Errorf("construct is outside the supported DEX 035 subset; unsupported opcode family: %s", unsupportedFamily(instruction.Opcode)))
+			family := unsupportedFamily(instruction.Opcode)
+			return diagnostic(method.Context, instruction, "", report.Unsupported(family, fmt.Errorf("construct is outside the supported DEX 035 subset; unsupported opcode family: %s", family)))
 		}
 		for _, register := range instruction.Regs {
 			if uint32(register) >= registerCount {
-				return diagnostic(method.Context, instruction, "", fmt.Errorf("register v%d is outside register file v0..v%d", register, registerCount-1))
+				return diagnostic(method.Context, instruction, "", fmt.Errorf("register v%d is outside register file of %d registers", register, registerCount))
 			}
+		}
+		if wideDefinitionOpcode(instruction.Opcode) && len(instruction.Regs) > 0 && uint32(instruction.Regs[0])+1 >= registerCount {
+			return diagnostic(method.Context, instruction, "", fmt.Errorf("wide destination v%d requires register v%d within register file of %d registers", instruction.Regs[0], instruction.Regs[0]+1, registerCount))
 		}
 		if instruction.Opcode == 0x1a || instruction.Opcode == 0x1b {
 			if instruction.Index >= uint32(len(file.Strings)) {
@@ -99,7 +121,7 @@ func validateInstructions(method *Method, file *model.File) error {
 				return diagnostic(method.Context, instruction, "", fmt.Errorf("filled-new-array type %q is not an array", descriptor))
 			}
 			if component := descriptor[1:]; component == "J" || component == "D" || component == "F" {
-				return diagnostic(method.Context, instruction, "", fmt.Errorf("filled-new-array of a wide or floating element is unsupported"))
+				return diagnostic(method.Context, instruction, "", report.Unsupported("filled-new-array wide or floating element", fmt.Errorf("filled-new-array of a wide or floating element is unsupported")))
 			}
 		}
 		if instruction.Opcode == 0x1c || instruction.Opcode == 0x1f || instruction.Opcode == 0x20 || instruction.Opcode == 0x22 || instruction.Opcode == 0x23 {
@@ -418,6 +440,18 @@ func seedAllocationSite(method *Method, file *model.File, newIndex int) (site in
 // uninitialized value of that allocation. This is path-sensitive, so a
 // conditional constructor call or a branch that reuses a register cannot
 // confuse the pairing. It reports whether anything changed.
+func (method *Method) indexAllocations() {
+	method.allocationNew = make(map[int]bool, len(method.Allocations))
+	method.allocationCtor = make(map[int]bool, len(method.Allocations))
+	for index := range method.Allocations {
+		allocation := &method.Allocations[index]
+		method.allocationNew[allocation.NewInstruction] = true
+		for _, constructor := range allocation.Constructors {
+			method.allocationCtor[constructor] = true
+		}
+	}
+}
+
 func resolveAllocationSites(method *Method, file *model.File) (bool, error) {
 	position := make(map[uint32]int, len(method.Allocations))
 	for index := range method.Allocations {
@@ -497,14 +531,10 @@ func fusedAllocationShape(method *Method, allocation *Allocation, constructor in
 }
 
 func blockOf(method *Method, instruction int) int {
-	for index := range method.Blocks {
-		for _, candidate := range method.Blocks[index].Instructions {
-			if candidate == instruction {
-				return index
-			}
-		}
+	if method == nil || instruction < 0 || instruction >= len(method.blockByInstruction) {
+		return -1
 	}
-	return -1
+	return method.blockByInstruction[instruction]
 }
 
 func sameInstructionList(left, right []int) bool {

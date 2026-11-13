@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"strings"
+
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 
 	"github.com/yaklang/javajive/internal/jdecenv"
@@ -235,6 +237,14 @@ func decompileWithBudget(data []byte, options DecompileOptions) (result Decompil
 		result.Status = "unsupported"
 		return result, budget, err
 	}
+	if err := ValidateClassMinor(obj.MajorVersion, obj.MinorVersion); err != nil {
+		if strings.Contains(err.Error(), "unsupported_classfile_preview") {
+			result.Status = "unsupported"
+		} else {
+			result.Status = "invalid_input"
+		}
+		return result, budget, err
+	}
 	result.Members = newMemberLedger(obj)
 	result.Syntax = ValidationObservation{Status: "not_run"}
 	defer func() {
@@ -302,12 +312,104 @@ func decompileWithBudget(data []byte, options DecompileOptions) (result Decompil
 	return result, budget, nil
 }
 
+// rewriteHashMemoLimit bounds source states whose SHA-256 is retained. A
+// class-source sequence normally changes only a handful of times; the cap
+// keeps a pathological oscillation from retaining many full source strings.
+const rewriteHashMemoLimit = 64
+
+// rewriteSchedulerMetrics counts rule-level decisions for one dumper. It is
+// request-local instrumentation and is never published as a diagnostic, so
+// enabling the scheduler cannot change Observable output.
+type rewriteSchedulerMetrics struct {
+	Considered       int // every Compatibility sourceRewrite call
+	Candidates       int // passed the necessary-literal prefilter (or Always)
+	Invoked          int // the rule implementation was actually entered
+	Skipped          int // rejected by the prefilter without invoking the rule
+	HashComputations int // SHA-256 calls; repeated source states reuse the memo
+}
+
+// rewriteSchedulerOff is the bisection kill switch. The conservative prefilter
+// is enabled by default; JDEC_REWRITE_SCHEDULER_OFF=1 restores unconditional
+// invocation without changing order, hashing or diagnostics.
+func (c *ClassObjectDumper) rewriteSchedulerOff() bool {
+	if c.rewriteSchedulerDisabled {
+		return true
+	}
+	if !c.rewriteSchedulerSwitchReady {
+		c.rewriteSchedulerSwitchReady = true
+		c.rewriteSchedulerSwitchOff = jdecenv.Get("JDEC_REWRITE_SCHEDULER_OFF") == "1"
+	}
+	return c.rewriteSchedulerSwitchOff
+}
+
+// applicabilityIndexFor returns the index for this exact source state. The
+// epoch and source string are both checked: an accepted rewrite advances the
+// epoch and clears the index, and a rollback/retry that restores an older
+// source cannot reuse the newer state's applicability.
+func (c *ClassObjectDumper) applicabilityIndexFor(source string) *rewriteApplicabilityIndex {
+	if c.rewriteIndex == nil || c.rewriteIndex.epoch != c.rewriteEpoch || c.rewriteIndex.source != source {
+		c.rewriteIndex = &rewriteApplicabilityIndex{
+			source:   source,
+			epoch:    c.rewriteEpoch,
+			presence: make(map[string]bool, len(rewriteRuleSpecs)),
+		}
+	}
+	return c.rewriteIndex
+}
+
+// rewriteRuleMayChange is a necessary-condition gate, never a proof of
+// applicability. Rules without registered metadata (including every
+// shaded-library family) are Always applicable.
+func (c *ClassObjectDumper) rewriteRuleMayChange(id, phase, source string) bool {
+	spec, ok := lookupRewriteRuleSpec(id, phase)
+	if !ok {
+		return true
+	}
+	return rewriteSpecApplicable(spec, c.applicabilityIndexFor(source))
+}
+
+// memoizedSourceHash hashes each exact source state at most once until the
+// bounded memo is reset. It preserves the historical SHA-256 hex values.
+func (c *ClassObjectDumper) memoizedSourceHash(source string) string {
+	if hash, ok := c.rewriteHashes[source]; ok {
+		return hash
+	}
+	hash := hashSource(source)
+	c.rewriteSchedulerStats.HashComputations++
+	if c.rewriteHashes == nil {
+		c.rewriteHashes = make(map[string]string, 8)
+	} else if len(c.rewriteHashes) >= rewriteHashMemoLimit {
+		c.rewriteHashes = make(map[string]string, 8)
+	}
+	c.rewriteHashes[source] = hash
+	return hash
+}
+
 func (c *ClassObjectDumper) sourceRewrite(id, phase, source string, rule func(string) string) string {
 	if c.options.Mode == Precision {
 		return source
 	}
+	c.rewriteSchedulerStats.Considered++
+	// The prefilter runs before contract shielding, anonymous-scope masking,
+	// hash computation and ordinary-constructor drafts. A missing literal
+	// means the rule cannot change any slice of this source, so skipping the
+	// whole invocation is output-equivalent.
+	if !c.rewriteSchedulerOff() && !c.rewriteRuleMayChange(id, phase, source) {
+		c.rewriteSchedulerStats.Skipped++
+		return source
+	}
+	c.rewriteSchedulerStats.Candidates++
 	if wrapped := wrapContractedSourceRule(id, rule); wrapped != nil {
 		rule = wrapped
+	}
+	invoked := false
+	scheduledRule := rule
+	rule = func(input string) string {
+		if !invoked {
+			invoked = true
+			c.rewriteSchedulerStats.Invoked++
+		}
+		return scheduledRule(input)
 	}
 	changed := source
 	// Inline anonymous members have already completed recovery under their
@@ -358,7 +460,7 @@ func (c *ClassObjectDumper) sourceRewrite(id, phase, source string, rule func(st
 	}
 	var before, after string
 	if changed != source && c.report != nil {
-		before, after = fmt.Sprintf("%x", sha256.Sum256([]byte(source))), fmt.Sprintf("%x", sha256.Sum256([]byte(changed)))
+		before, after = c.memoizedSourceHash(source), c.memoizedSourceHash(changed)
 		// The class phase is one bounded sequence. Reject oscillation between
 		// rules; method phases have separate contexts and are not compared.
 		if phase == "class_source" {
@@ -376,9 +478,14 @@ func (c *ClassObjectDumper) sourceRewrite(id, phase, source string, rule func(st
 	if ordinaryDraft != nil && !c.ordinaryConstructorClassSource.commit(ordinaryDraft) {
 		return source
 	}
-	if changed != source && c.report != nil {
-		c.report.RulesApplied = append(c.report.RulesApplied, RewriteRecord{Rule: id, Phase: phase, BeforeHash: before, AfterHash: after})
-		c.appendDiagnostic(DecompileDiagnostic{Code: "compatibility_rewrite", Rule: id, Message: "Legacy source recovery changed output without bytecode-level proof; validate behavior separately."})
+	if changed != source {
+		// An accepted rewrite invalidates every cached applicability decision.
+		c.rewriteEpoch++
+		c.rewriteIndex = nil
+		if c.report != nil {
+			c.report.RulesApplied = append(c.report.RulesApplied, RewriteRecord{Rule: id, Phase: phase, BeforeHash: before, AfterHash: after})
+			c.appendDiagnostic(DecompileDiagnostic{Code: "compatibility_rewrite", Rule: id, Message: "Legacy source recovery changed output without bytecode-level proof; validate behavior separately."})
+		}
 	}
 	return changed
 }

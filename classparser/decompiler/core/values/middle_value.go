@@ -2,6 +2,7 @@ package values
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
@@ -110,9 +111,10 @@ func (j *LambdaFuncRef) String(funcCtx *class_context.ClassContext) string {
 	if j.LambdaRender != nil {
 		return j.LambdaRender(funcCtx)
 	}
-	args := ""
+	var args strings.Builder
 	for _, arg := range j.Arguments {
-		args += arg.String(funcCtx) + ","
+		args.WriteString(arg.String(funcCtx))
+		args.WriteByte(',')
 	}
-	return fmt.Sprintf("getLambda(%d)(%s)", j.Id, args)
+	return fmt.Sprintf("getLambda(%d)(%s)", j.Id, args.String())
 }

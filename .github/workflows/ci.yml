@@ -1,7 +1,5 @@
-# Keep required PR feedback fast and attributable: one pinned JDK 21 runtime,
-# algorithm invariants under the race detector, and small production-path
-# counterexamples. A javac8 compiler covers its small source-protocol fixtures;
-# JVM execution stays on JDK 21. Full historical-corpus checks remain manual.
+# Required feedback is deliberately limited to reviewed Go algorithms and
+# hash-pinned corpus inputs. Runtime/compiler behavior remains in manual gates.
 name: CI
 on:
   push:
@@ -16,41 +14,27 @@ concurrency:
   cancel-in-progress: true
 env:
   GOTOOLCHAIN: local
-  PYTHONDONTWRITEBYTECODE: "1"
 jobs:
-  scope:
-    name: Classparser suite scope
+  contract:
+    name: Required inventory and build
     runs-on: ubuntu-22.04
     timeout-minutes: 10
-    outputs:
-      classparser: ${{ steps.scope.outputs.classparser }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-          fetch-depth: 0
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version-file: go.mod
           cache: true
-      - name: Decide whether the classparser suite can change
-        id: scope
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-          HEAD_SHA: ${{ github.sha }}
-          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
-        run: python3 -I tools/ci_scheduler/scope.py >> "$GITHUB_OUTPUT"
-  source:
-    name: Source algorithm regression (${{ matrix.shard }})
-    needs: [scope]
-    if: needs.scope.outputs.classparser == 'true'
+      - run: go run ./tools/requiredci -check
+      - run: CGO_ENABLED=0 go build ./...
+      - run: go run ./tools/requiredci -run contract
+
+  corpus:
+    name: Fixed corpus regression
     runs-on: ubuntu-22.04
-    timeout-minutes: 35
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -59,316 +43,51 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+      - run: go run ./tools/requiredci -run corpus
+
+  algorithm:
+    name: Go algorithm regression
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          distribution: temurin
-          java-version: '8'
-      - name: Retain compiler for javac8 protocol fixtures
-        run: echo "JAVA8_JAVAC=${JAVA8_JAVAC:-$JAVA_HOME/bin/javac}" >> "$GITHUB_ENV"
-      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
-          distribution: temurin
-          java-version: '21'
-      - name: Reduce startup cost for small Java fixtures
-        run: |
-          mkdir -p "$RUNNER_TEMP/fixture-java"
-          # These short JVM processes exit before full JIT warmup pays off.
-          # One CPU and serial GC avoid competing compiler/GC pools on the
-          # runner. Original and rebuilt programs use the same options;
-          # the fixtures, assertions, test set and individual deadlines stay unchanged.
-          # CDS shares compiler class metadata, never fixture source or compiler results.
-          printf 'final class Warmup {}\n' > "$RUNNER_TEMP/fixture-java/Warmup.java"
-          # Disable shared hsperfdata files: PID reuse across short JVMs can
-          # print a file-lock warning into an otherwise exact behavior oracle.
-          javac -J-XX:-UsePerfData -J-XX:TieredStopAtLevel=1 -J-XX:+UseSerialGC -J-XX:ActiveProcessorCount=1 \
-            "-J-XX:ArchiveClassesAtExit=$RUNNER_TEMP/fixture-java/javac.jsa" \
-            -proc:none -d "$RUNNER_TEMP/fixture-java" "$RUNNER_TEMP/fixture-java/Warmup.java"
-          test -s "$RUNNER_TEMP/fixture-java/javac.jsa"
-          printf '#!/bin/sh\nexec "%s" -J-XX:-UsePerfData -J-XX:TieredStopAtLevel=1 -J-XX:+UseSerialGC -J-XX:ActiveProcessorCount=1 "-J-XX:SharedArchiveFile=%s" "$@"\n' "$(command -v javac)" "$RUNNER_TEMP/fixture-java/javac.jsa" > "$RUNNER_TEMP/fixture-java/javac"
-          printf '#!/bin/sh\nexec "%s" -XX:-UsePerfData -XX:TieredStopAtLevel=1 -XX:+UseSerialGC -XX:ActiveProcessorCount=1 "$@"\n' "$(command -v java)" > "$RUNNER_TEMP/fixture-java/java"
-          # Apply the same startup budget to the retained javac8 compiler.
-          # This changes JVM scheduling only, not source targets or class bytes.
-          printf '#!/bin/sh\nexec "%s" -J-XX:-UsePerfData -J-XX:TieredStopAtLevel=1 -J-XX:+UseSerialGC -J-XX:ActiveProcessorCount=1 "$@"\n' "$JAVA8_JAVAC" > "$RUNNER_TEMP/fixture-java/javac8"
-          chmod +x "$RUNNER_TEMP/fixture-java/javac" "$RUNNER_TEMP/fixture-java/java" "$RUNNER_TEMP/fixture-java/javac8"
-          echo "JAVA8_JAVAC=$RUNNER_TEMP/fixture-java/javac8" >> "$GITHUB_ENV"
-          echo "$RUNNER_TEMP/fixture-java" >> "$GITHUB_PATH"
-      - name: Source algorithm regression tests
-        env:
-          SOURCE_SHARD: ${{ matrix.shard }}
-          SOURCE_SHARDS: "10"
-          SOURCE_WORKERS: "5"
-          EDGE_TEST_PATTERN: '^Test(Native|InheritedBridgeAnnotationPolicy|LexicalFormalSignature|InterfaceWrappedArrayRequires|MemberArity|PackageDescriptor|MemberGenericSupertype|ConstructorFinalizerSeal|ScopedClassNameBinding|CheckedEscape|CheckedConstructor|BindingPlan|CtorArrayThisSpillsRoundTrip|CtorArrayThisSpillPreservesEarlierArgumentOrder|CtorDelegationNestedArrayTempRoundTrip|CtorDelegationArgumentSpills|SuperDelegationTrailingArgumentSpills|SuperDelegationSpillAcrossSafePostSuperPrelude|ConditionalThisCtorCheckcastRoundTrip|TernaryCheckcastInvocationReceiverRoundTrip|CtorNPECheckBeforeThis|EnumArrayConstructorArgsRoundTrip|EnumClinit|ZxingEnum|GenericNull|GenericFieldElementOpsRoundTrip|GenericFunctionalThrows|GenericFunctionalValueKeepsErasedCallDescriptor|MaterializedBiFunctionErasureRoundTrip|SameClassBiFunctionTypeVariablesRoundTrip|SameClassFunctionAndSupplierErasureRoundTrip|SiblingClassFunctionalErasureRoundTrip|ChainedSiblingReturnFunctionalErasureRoundTrip|LowerBoundedFunctionalArgumentsRoundTrip|CapturedLowerBoundedFunctionalArgumentsRoundTrip|CapturedParameterizedLowerBoundRoundTrip|LambdaCaptureCopiesStayInsideGenericMethod|ClassCacheTernaryStoreRoundTrip|MapCacheTernaryLocalRoundTrip|ImmediateZeroArgCheckcastInvoke|NonConditionalForkDiamond|InheritedJDK|InvocationMetadata|JDKListNull|MemberLedger|MethodReferenceKeepsPolyTargetTypeRoundTrip|DirectoryStreamFilterKeepsInstantiatedMethodRefTypeRoundTrip|T04ExternalOverloadBindingRoundTrip|LogbackPutUninterruptibly|ProtobufRemainingReconstructs|ProtobufLazyStringArrayListThis|PublicSuffixDatabase|ThisCtorOverloadCast|GenericVarargsConstructorArrayRoundTrip|ShiftedThisCtorGenericArrayRoundTrip|ConditionalArrayCloneStoreRoundTrip|ToListSingleCallableCast|JacksonRemainingMapEntryDeserializerCast|JoinStreamCtorCast|RawGenericReceiver|SyntaxObservation|RetryRollback|ShadowBuilder|ShadowIRRunsFrameSSAAndLowering|T11_C01|Sentinels|Request|R06|T04|T05|T06|T07|T08|T18|T19|T27|TaskT20|TernaryCheckcastMergeRoundTrip|SelfCastNullMergeRoundTrip|ShortCircuitVarargsArraysRoundTrip|SharedFalseTargetFallthroughRoundTrip)'
-        run: |
-          set -o pipefail
-          mkdir -p artifacts
-          go test ./classparser -c -o "$RUNNER_TEMP/adversarial.test"
-          # The scope job skips this matrix when the diff cannot change the
-          # classparser binary or its fixtures. When it runs, ten disjoint
-          # shards with five batches each use the measured duration hints, so
-          # the lanes balance on observed cost. Parent groups run concurrently
-          # on the same pinned JDK. Five serial processes per shard isolate
-          # environment-changing tests.
-          # Exact original parent and nested-policy inventories remain checked;
-          # the required summary waits for every shard and the trusted fixtures.
-          python3 - <<'PYTHON'
-          import concurrent.futures, json, os, pathlib, re, shutil, signal, subprocess, sys, time
-          from tools.ci_scheduler.shard import source_parent_batches, source_parent_shards
-          binary = str(pathlib.Path(os.environ["RUNNER_TEMP"]) / "adversarial.test")
-          names = sorted(set(line for line in subprocess.check_output(
-              [binary, "-test.list", "^TestAdversarial|" + os.environ["EDGE_TEST_PATTERN"]], text=True, cwd="classparser").splitlines()
-              if line.startswith("Test")))
-          if not names:
-              raise SystemExit("no source-regression tests discovered")
-          # Split the large nested-capture matrix by its actual source scopes.
-          heavy = "TestNativeAnonymousNestedOriginalCaptureRoundTrip"
-          source = pathlib.Path("classparser/native_anonymous_nested_roundtrip_test.go").read_text()
-          scope_text = re.search(r'for _, scope := range \[\]string\{([^}]+)\}', source).group(1)
-          scopes = re.findall(r'"([^"\n]+)"', scope_text)
-          if heavy not in names or not scopes or len(scopes) != len(set(scopes)):
-              raise SystemExit("incomplete nested-capture scope inventory")
-          shard, count = int(os.environ["SOURCE_SHARD"]), int(os.environ["SOURCE_SHARDS"])
-          worker_count = int(os.environ["SOURCE_WORKERS"])
-          if count != 10 or worker_count != 5 or not 0 <= shard < count:
-              raise SystemExit("invalid source regression shard")
-          all_ordinary = [name for name in names if name != heavy]
-          # Measured costs affect placement only. The binary's complete test
-          # inventory stays authoritative, including newly discovered tests.
-          hints = json.loads(pathlib.Path("ci/task_t29/source-duration-hints.json").read_text())["seconds"]
-          lanes = source_parent_shards(all_ordinary, hints, count * worker_count)
-          selected_lanes = lanes[shard*worker_count:(shard+1)*worker_count]
-          ordinary = sorted(name for lane in selected_lanes for name in lane.items)
-          selected_scopes = scopes[shard::count]
-          if not ordinary or not selected_scopes:
-              raise SystemExit("empty source regression shard")
-          groups = [{"scopes": selected_scopes[index:index+2]} for index in range(0, len(selected_scopes), 2)]
-          # Keep each parent atomic, but let idle workers take another bounded
-          # batch instead of waiting on one underestimated, fixed lane.
-          groups += [{"parents": batch.items} for batch in source_parent_batches(ordinary, hints)]
-          if sorted(name for group in groups for name in group.get("parents", [])) != sorted(ordinary):
-              raise SystemExit("source parent inventory mismatch")
-          # Concurrent evidence must not mutate the source fingerprint checked
-          # while the trusted adapter is built and executed.
-          evidence = pathlib.Path(os.environ["RUNNER_TEMP"]) / "algorithm-regression-evidence"
-          evidence.mkdir(parents=True, exist_ok=True)
-          (evidence / "adversarial-manifest.json").write_text(json.dumps(groups, indent=2))
-          (evidence / "source-shard-selection.json").write_text(json.dumps({
-              "shard": shard, "shards": count, "all_parents": names, "all_scopes": scopes,
-              "parents": ordinary, "scopes": selected_scopes}, indent=2))
-          # Keep all batches/coverage mandatory. Leave measured runner
-          # variance headroom above the ~20m consolidated source phase; the
-          # 35m job limit also includes tool setup and binary compilation.
-          deadline = time.monotonic() + 28 * 60
-          def run_batch(item):
-              index, group = item
-              path = evidence / f"adversarial-tests-{index+1}.jsonl"
-              remaining = deadline - time.monotonic()
-              if remaining <= 0:
-                  path.write_text("phase deadline expired before batch started\n")
-                  return path, 1
-              command = ["go", "tool", "test2json", "-t", "-p",
-                         "github.com/yaklang/javajive/classparser", binary,
-                         "-test.v=test2json", "-test.count=1", "-test.parallel=1",
-                         f"-test.timeout={remaining:.3f}s",
-                         "-test.run=^(" + "|".join(map(re.escape, (group or {}).get("parents", [heavy]))) + ")$" +
-                         ("/^(" + "|".join(map(re.escape, group["scopes"])) + ")$" if group and "scopes" in group else "")]
-              with path.open("w") as output:
-                  process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT,
-                                             cwd="classparser", start_new_session=True)
-                  try:
-                      result = process.wait(timeout=max(0, deadline - time.monotonic()))
-                  except subprocess.TimeoutExpired:
-                      try:
-                          os.killpg(process.pid, signal.SIGKILL)
-                      except ProcessLookupError:
-                          pass
-                      process.wait()
-                      output.write("SOURCE_PHASE_DEADLINE_EXPIRED: " +
-                                   json.dumps({"batch": index + 1,
-                                               "parents": (group or {}).get("parents", [heavy]),
-                                               "scopes": (group or {}).get("scopes", [])}) + "\n")
-                      output.flush()
-                      result = 1
-              return path, result
-          failed = False
-          with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
-              for path, result in pool.map(run_batch, list(enumerate(groups))):
-                  print(f"{path}: exit={result}")
-                  if result:
-                      failed = True
-                      print("\n".join(path.read_text().splitlines()[-80:]))
-          terminal = []
-          for path in evidence.glob("adversarial-tests-*.jsonl"):
-              for line in path.read_text().splitlines():
-                  if not line.startswith("{"):
-                      continue
-                  row = json.loads(line)
-                  if row.get("Test") and row.get("Action") in ("pass", "fail", "skip"):
-                      terminal.append(row)
-          parents = [row for row in terminal if "/" not in row["Test"]]
-          for row in terminal:
-              if row["Action"] == "fail":
-                  print("SOURCE_TEST_FAILED: " + row["Test"])
-          leaves = [row for row in terminal if row["Test"].startswith(heavy+"/") and row["Test"].count("/") == 3]
-          expected = {heavy+"/"+scope+"/"+debug+"/"+policy for scope in selected_scopes
-                      for debug in ("none", "source,lines,vars")
-                      for policy in ("normal", "no-source-rewrites", "no-core-cleanups")}
-          if (set(row["Test"] for row in parents) != set(ordinary) | {heavy} or any(row["Action"] != "pass" for row in parents)
-                  or len(leaves) != len(expected) or set(row["Test"] for row in leaves) != expected
-                  or any(row["Action"] != "pass" for row in leaves)):
-              print("source parent or nested debug/policy coverage failed")
-              failed = True
-          if len({row["Test"] for row in parents if row["Test"] != heavy}) != sum(row["Test"] != heavy for row in parents):
-              print("duplicate source parent execution")
-              failed = True
-          (evidence / "source-shard-result.json").write_text(json.dumps({
-              "shard": shard, "parents": len(ordinary), "heavy_policy_leaves": len(expected), "passed": not failed}))
-          shutil.copytree(evidence, "artifacts", dirs_exist_ok=True)
-          sys.exit(int(failed))
-          PYTHON
-      - name: Roundtrip evidence
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+          go-version-file: go.mod
+          cache: true
+      - run: go run ./tools/requiredci -run algorithm
+
+  dex:
+    name: Go DEX regression
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          name: algorithm-regression-evidence-${{ matrix.shard }}
-          path: artifacts/
-          if-no-files-found: ignore
-          retention-days: 7
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go run ./tools/requiredci -run dex
+
   regression:
-    name: Algorithm regression suite
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
-        with:
-          go-version-file: go.mod
-          cache: true
-      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
-        with:
-          distribution: temurin
-          java-version: '21'
-      - name: Reduce startup cost for small Java fixtures
-        run: |
-          mkdir -p "$RUNNER_TEMP/fixture-java"
-          # These short JVM processes exit before full JIT warmup pays off.
-          # One CPU and serial GC avoid competing compiler/GC pools on the
-          # runner. Original and rebuilt programs use the same options;
-          # the fixtures, assertions, test set and individual deadlines stay unchanged.
-          # CDS shares compiler class metadata, never fixture source or compiler results.
-          printf 'final class Warmup {}\n' > "$RUNNER_TEMP/fixture-java/Warmup.java"
-          # Disable shared hsperfdata files: PID reuse across short JVMs can
-          # print a file-lock warning into an otherwise exact behavior oracle.
-          javac -J-XX:-UsePerfData -J-XX:TieredStopAtLevel=1 -J-XX:+UseSerialGC -J-XX:ActiveProcessorCount=1 \
-            "-J-XX:ArchiveClassesAtExit=$RUNNER_TEMP/fixture-java/javac.jsa" \
-            -proc:none -d "$RUNNER_TEMP/fixture-java" "$RUNNER_TEMP/fixture-java/Warmup.java"
-          test -s "$RUNNER_TEMP/fixture-java/javac.jsa"
-          printf '#!/bin/sh\nexec "%s" -J-XX:-UsePerfData -J-XX:TieredStopAtLevel=1 -J-XX:+UseSerialGC -J-XX:ActiveProcessorCount=1 "-J-XX:SharedArchiveFile=%s" "$@"\n' "$(command -v javac)" "$RUNNER_TEMP/fixture-java/javac.jsa" > "$RUNNER_TEMP/fixture-java/javac"
-          printf '#!/bin/sh\nexec "%s" -XX:-UsePerfData -XX:TieredStopAtLevel=1 -XX:+UseSerialGC -XX:ActiveProcessorCount=1 "$@"\n' "$(command -v java)" > "$RUNNER_TEMP/fixture-java/java"
-          # Apply the same startup budget to the retained javac8 compiler.
-          # This changes JVM scheduling only, not source targets or class bytes.
-          printf '#!/bin/sh\nexec "%s" -J-XX:-UsePerfData -J-XX:TieredStopAtLevel=1 -J-XX:+UseSerialGC -J-XX:ActiveProcessorCount=1 "$@"\n' "$JAVA8_JAVAC" > "$RUNNER_TEMP/fixture-java/javac8"
-          chmod +x "$RUNNER_TEMP/fixture-java/javac" "$RUNNER_TEMP/fixture-java/java" "$RUNNER_TEMP/fixture-java/javac8"
-          echo "JAVA8_JAVAC=$RUNNER_TEMP/fixture-java/javac8" >> "$GITHUB_ENV"
-          echo "$RUNNER_TEMP/fixture-java" >> "$GITHUB_PATH"
-      - name: Build
-        run: go build ./...
-      - name: Native DEX regression tests (race)
-        working-directory: ${{ github.workspace }}
-        run: |
-          set -o pipefail
-          mkdir -p artifacts
-          go test -json -race -count=1 -timeout=5m ./classparser/classfilebuilder ./dex2jar/... . ./cmd/javajive | tee artifacts/native-dex-race-tests.jsonl
-      - name: Native DEX coverage contract
-        working-directory: ${{ github.workspace }}
-        run: |
-          set -o pipefail
-          mkdir -p artifacts
-          go test -json -count=1 -covermode=atomic -coverpkg=./dex2jar/...,./internal/dexparser \
-            -coverprofile=artifacts/dex2jar.coverprofile ./dex2jar/... ./internal/dexparser \
-            | tee artifacts/dex2jar-coverage-tests.jsonl
-          python3 -I scripts/check_dex_coverage.py \
-            --profile artifacts/dex2jar.coverprofile \
-            --baseline dex2jar/coverage_baseline.json \
-            --summary artifacts/dex2jar-coverage-summary.json
-      - name: Core algorithm and resource-guard tests (race)
-        run: |
-          set -o pipefail
-          mkdir -p artifacts
-          go test -json ./classparser/decompiler/core/... ./classparser/decompiler/rewriter/... ./internal/workbudget ./internal/jdecenv ./internal/filesys -race -count=1 -timeout=3m | tee artifacts/core-algorithm-tests.jsonl
-      - name: Rebuilt JAR runtime selection regression
-        run: |
-          set -o pipefail
-          go test -json ./test/cross -run '^(TestRebuiltJarRuntimeSelectionPreservesOriginalAuthority|TestRebuiltJarRejectsUnknownMetadataAndKeepsPlainPacking)$' -count=1 -timeout=2m | tee artifacts/rebuilt-jar-runtime-tests.jsonl
-      - name: Irreducible CFG semantic round trip
-        run: |
-          set -o pipefail
-          test "$(go test ./test/cross -list '^TestRoundTripIrreducibleCFGCorpus$' | grep -xc 'TestRoundTripIrreducibleCFGCorpus')" -eq 1
-          go test -json ./test/cross -run '^TestRoundTripIrreducibleCFGCorpus$' -count=1 -timeout=3m | tee artifacts/irreducible-cfg-roundtrip-tests.jsonl
-      - name: Adversarial classfile decompiler evaluation
-        run: |
-          set -o pipefail
-          mkdir -p artifacts
-          JAVAJIVE_ADVERSARIAL_EVAL=1 go test -json ./test/adversarial -count=1 -timeout=5m | tee artifacts/adversarial-decompiler-tests.jsonl
-      - name: Complex JAR round-trip evaluation
-        run: |
-          set -o pipefail
-          mkdir -p artifacts
-          JAVAJIVE_COMPLEX_JAR_EVAL=1 go test -json ./test/complexjar -count=1 -timeout=5m | tee artifacts/complex-jar-tests.jsonl
-      - name: Trusted original and rebuilt algorithm round trips
-        run: |
-          evidence="$RUNNER_TEMP/algorithm-regression-evidence"
-          mkdir -p "$evidence" artifacts
-          git rev-parse HEAD > "$evidence/revision.txt"
-          python3 tools/curated_roundtrip/build_adapter.py --out "$RUNNER_TEMP/javajive-probe"
-          python3 tools/curated_roundtrip/roundtrip.py --adapter "$RUNNER_TEMP/javajive-probe" \
-            --out "$evidence/roundtrip" --allow-trusted-fixture-execution --expected-rows 40
-          cp -R "$evidence/." artifacts/
-      - name: Curated algorithm round-trip contracts
-        run: python3 -m unittest tools.curated_roundtrip.test_roundtrip
-      - name: Runtime arithmetic corpus and public-mode regression
-        run: python3 -m unittest ci.task_t28.test_runtime_stack_generation
-      - name: Source-shard summary contract regression
-        run: python3 -m unittest discover -s ci/task_t29
-      - name: Historical diagnostic-key regression
-        run: python3 -m unittest ci.task_t30.test_t30_historical_diagnostics
-      - name: Platform declaration and original-code generator regression
-        run: python3 -m unittest discover -s classparser -p 'test_jdk*generate.py'
-      - name: Roundtrip evidence
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: algorithm-regression-evidence
-          path: artifacts/
-          if-no-files-found: ignore
-          retention-days: 7
-  gate:
     name: Algorithm regression
-    needs: [scope, source, regression]
+    needs: [contract, corpus, algorithm, dex]
     if: always()
     runs-on: ubuntu-22.04
-    timeout-minutes: 5
+    timeout-minutes: 2
     steps:
-      - name: Require every algorithm job
+      - name: Require every reviewed gate
         env:
-          SCOPE_RESULT: ${{ needs.scope.result }}
-          CLASSPARSER: ${{ needs.scope.outputs.classparser }}
-          SOURCE_RESULT: ${{ needs.source.result }}
-          REGRESSION_RESULT: ${{ needs.regression.result }}
+          CONTRACT_RESULT: ${{ needs.contract.result }}
+          CORPUS_RESULT: ${{ needs.corpus.result }}
+          ALGORITHM_RESULT: ${{ needs.algorithm.result }}
+          DEX_RESULT: ${{ needs.dex.result }}
         run: |
-          test "$SCOPE_RESULT" = success
-          test "$REGRESSION_RESULT" = success
-          case "$CLASSPARSER" in
-            true) test "$SOURCE_RESULT" = success ;;
-            false)
-              # A skipped matrix is the expected fast path; success is
-              # tolerated so a host that reports skipped legs differently
-              # cannot fail the required check.
-              case "$SOURCE_RESULT" in
-                skipped|success) ;;
-                *) echo "unexpected source result: $SOURCE_RESULT"; exit 1 ;;
-              esac
-              ;;
-            *) echo "missing classparser scope output"; exit 1 ;;
-          esac
+          test "$CONTRACT_RESULT" = success
+          test "$CORPUS_RESULT" = success
+          test "$ALGORITHM_RESULT" = success
+          test "$DEX_RESULT" = success

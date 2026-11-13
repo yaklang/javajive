@@ -14,9 +14,13 @@
 A portable, **pure-Go** Java toolkit — extracted and trimmed from
 [yaklang](https://github.com/yaklang/yaklang) — focused on four things:
 
-- **Decompile** — `.class` / `.jar` / `.war` / `.zip` → readable Java source.
-- **Translate DEX** — native `.dex` / `.apk` → deterministic `.jar`, or directly
-  to readable Java source, without invoking an external dex2jar tool.
+- **Decompile** — `.class`, Java archives (`.jar` / `.war` / `.ear` / `.aar` /
+  `.par` / `.jmod` / `.zip`), and JDK runtime images (`.jimage` /
+  `$JAVA_HOME/lib/modules`) → readable Java source, including nested JARs inside
+  WAR/EAR/AAR and fat JARs.
+- **Translate DEX** — native `.dex` / `.apk` / `.apks` / `.xapk` / `.apkm` /
+  `.aab` → deterministic `.jar`, or directly to readable Java source, without
+  invoking an external dex2jar tool.
 - **Parse classes** — inspect the structure of a `.class` file (constant pool,
   fields, methods, version, access flags).
 - **(De)serialize** — parse and re-marshal the Java serialization (ObjectStream)
@@ -30,8 +34,9 @@ Built for portability and embedding:
   capabilities; the sub-packages remain available for advanced use.
 - **First-class CLI** — `decompile`, `dex2jar`, `classinfo`, and `serial`
   subcommands, built on the standard library.
-- **Cross-tested against a real JDK** — CI compiles real `.class` / `.jar` and
-  JDK-serialized blobs with `javac`/`java`, then verifies JavaJive against them
+- **Cross-tested against a real JDK** — the manual extended oracle compiles real
+  `.class` / `.jar` and JDK-serialized blobs, then verifies JavaJive against them.
+  Required PR CI stays pure Go and consumes hash-pinned class/JAR/DEX/JImage corpora
   (see [HARNESS-WORKFLOW.md](HARNESS-WORKFLOW.md)).
 - **Trimmed dependency graph** — `utils` / `codec` / `log` / `go-funk` are
   reimplemented as a minimal, self-contained `internal/` core.
@@ -45,8 +50,9 @@ See the [per-JAR results and reproduction](docs/historical-jar-audit.md).
 
 **250 isolated semantic round trips** record compilation, JVM verification, stubs
 and runtime equality separately; original application classes are absent from rebuilt
-classpaths. CI runs the semantic audit on JDK 17 and 21, the full historical comparison,
-and the OS/Go and race matrices. These checks do not prove equivalence of every library
+classpaths. Manual extended workflows run the semantic and historical JDK audits;
+required PR CI runs sealed pure-Go algorithm, race, coverage, and fixed-corpus gates.
+These checks do not prove equivalence of every library
 method. See the [implementation and remaining boundaries](docs/decompiler-semantic-audit.md).
 
 ## Historical benchmarks (v0.3.0)
@@ -108,59 +114,118 @@ Requires Go 1.22+.
 javajive <command> [arguments]
 
 Commands:
-  decompile   decompile Java artifacts or the supported DEX subset into Java source
-  dex2jar     convert the supported DEX subset in a DEX/APK to a deterministic JAR
-  inspect     read-only inventory and best-effort analysis of DEX/APK/JAR/WAR input
+  decompile   decompile .class files, Java archives, JDK runtime images, or Android containers into Java source
+  dex2jar     convert DEX/APK/APKS/XAPK/APKM/AAB input to a deterministic JAR
+  jimage2jar  convert a JDK runtime image (lib/modules, .jimage) to a JAR view
+  inspect     read-only inventory and best-effort analysis of Java/Android artifacts
   classinfo   print the structure of a .class file (version, fields, methods)
   serial      Java serialization tools (subcommands: tojson, fromjson)
   version     print the version
   help        show help
 ```
 
+Input is detected by content magic first, archive structure second, and the
+filename extension last, so renamed artifacts keep working.
+
+| Input | Handling |
+| --- | --- |
+| `.class`, directory | one class, or recursive `.class` decompilation |
+| `.jar` / `.war` / `.ear` / `.zip` | Java archive; nested `.jar`/`.war`/`.ear`/`.par`/`.jmod`/`.zip` layers are decompiled in place |
+| `.aar` | Android library archive; `classes.jar` and `libs/*.jar` are decompiled |
+| `.par` | Java archive (extension fallback when the ZIP has no stronger marker) |
+| `.jmod` | JDK module image; the four-byte `JM\x01\x00` prefix is stripped automatically |
+| `.jimage` / `$JAVA_HOME/lib/modules` | JDK 9+ runtime image; converted to a package-layout JAR view. Uncompressed, zlib `zip`, and `compact-cp` resources are supported |
+| `.dex` | raw DEX |
+| `.apk` | root `classes.dex`, `classes2.dex`, ... multidex entries |
+| `.apks` / `.xapk` / `.apkm` / `.apkx` | nested split APKs; `universal.apk` is preferred when present |
+| `.aab` | Android App Bundle; every `<module>/dex/classes*.dex` is translated |
+
+`--structured` separates `sources/`, `resources/`, and byte-exact `archives/`
+for Java archives. Flat and structured exports apply the same request-scoped
+cancellation, byte/entry, parser-work, output, and multi-release target policy;
+an entry read/path/write failure is returned instead of silently leaving a
+partial destination. Android containers always produce a translated source tree.
+
+JImage inputs are converted to a package-layout JAR view: class resources are
+exported at their package paths, while `module-info.class` and non-class
+resources keep their module prefix. Uncompressed, zlib-compressed (`zip`), and
+`compact-cp` (constant-pool string sharing) resources are supported, including
+big-endian images. A full JDK image contains tens of thousands of classes, so
+`inspect` or `JImageToJar` is a good first step.
+
 ### inspect
 
 ```bash
 javajive inspect app.apk --format json
+javajive inspect app.apks --format json
+javajive inspect app.aab --format json
 javajive inspect app.war --format json
+javajive inspect java.base.jmod --format json
+javajive inspect --format json /path/to/jdk/lib/modules
 
 # Large applications: omit per-instruction disassembly and raw code units.
 javajive inspect --disassembly=false --format json app.apk
 ```
 
 `inspect` never translates input or writes a JAR. It reports the artifact hash
-and format, a sorted archive inventory, canonical multidex provenance, per-class
-and per-method inventory, deterministic DEX disassembly, a per-class strict
-translation verdict, and precise diagnostics for the first unsupported feature
-of each method. This keeps real applications analyzable even when the strict
-translator cannot yet convert them.
+and format, a sorted archive inventory, canonical multidex provenance (including
+nested APK and AAB module DEX entries), per-class and per-method inventory,
+deterministic DEX disassembly, a per-class strict translation verdict, and
+precise diagnostics for the first unsupported feature of each method. This keeps
+real applications analyzable even when the strict translator cannot yet convert
+them.
 
 ### decompile
 
 ```bash
 # Single class: prints to stdout by default, or -o to write a file.
 javajive decompile Foo.class
-javajive decompile Foo.class -o Foo.java
+javajive decompile -o Foo.java Foo.class
 
 # Archive: defaults to a "<input>.src" directory, or -o to choose one.
 javajive decompile app.jar
-javajive decompile app.war -o ./app-src
+javajive decompile -o ./app-src app.war
 
 # Structured archive export: sources/, resources/, and preserved nested
-# archives/ (WEB-INF/lib and EAR/lib jars are decompiled in place).
-javajive decompile app.war --structured -o ./app-src
+# archives/ (WEB-INF/lib, EAR/lib, AAR classes.jar and fat-JAR libraries
+# are decompiled in place).
+javajive decompile --structured -o ./app-src app.war
 
-# DEX or APK: run the native DEX-to-JAR pipeline and decompile the result.
-# The default output directory is "<input>.src".
+# Archive classes are isolated: a malformed or future-version class becomes a
+# diagnostic fallback .java entry while the remaining classes continue. The
+# structured report marks each class complete, partial, or fallback and carries
+# stub-method and diagnostic details.
+
+# AAR and JMOD are ordinary archives once the container is identified.
+javajive decompile -o ./aar-src library.aar
+javajive decompile -o ./jmod-src java.base.jmod
+
+# JDK runtime image: classes are exported at package paths; module-info.class
+# and non-class resources keep their module prefix.
+javajive decompile -o ./jdk-src /path/to/jdk/lib/modules
+
+# DEX or Android container: run the native DEX-to-JAR pipeline and decompile
+# the result. The default output directory is "<input>.src".
 javajive decompile classes.dex
-javajive decompile app.apk -o ./app-src
+javajive decompile -o ./app-src app.apk
+javajive decompile -o ./app-src app.apks
+javajive decompile -o ./app-src app.xapk
+javajive decompile -o ./app-src app.aab
+
+# Full recovery: stub unsupported methods first, then emit traceable class
+# shells for otherwise valid classes that still cannot be lowered.
+javajive decompile --best-effort -o ./app-src app.apk
+
+# Narrow recovery: only recognized method-local capability gaps become stubs.
+javajive decompile --stub-methods-only -o ./app-src app.apk
 
 # Directory: recursively decompile .class files (requires -o output dir).
-javajive decompile ./classes -o ./src
+javajive decompile -o ./src ./classes
 
 # Very large generated methods: opt into a higher per-method analysis budget.
 # Values above 1,000,000 also scale graph/scan caps.
-javajive decompile Big.class -analysis-budget 2000000
-javajive decompile app.jar -o ./app-src -analysis-budget 2000000
+javajive decompile -analysis-budget 2000000 Big.class
+javajive decompile -analysis-budget 2000000 -o ./app-src app.jar
 ```
 
 ### dex2jar
@@ -168,12 +233,46 @@ javajive decompile app.jar -o ./app-src -analysis-budget 2000000
 ```bash
 javajive dex2jar -o classes.jar classes.dex
 javajive dex2jar -o app.jar app.apk
+javajive dex2jar -o app.jar app.apks
+javajive dex2jar -o app.jar app.aab
+
+# Full class-level recovery.
+javajive dex2jar --best-effort -o app.jar app.apk
+
+# Only recognized unsupported methods throw from a stub.
+javajive dex2jar --stub-methods-only -o app.jar app.apk
+```
+
+### jimage2jar
+
+```bash
+# Convert a JDK 9+ runtime image to a package-layout JAR view without
+# decompiling every class.
+javajive jimage2jar -o jdk.jar /path/to/jdk/lib/modules
 ```
 
 Input is detected by magic rather than the filename extension. Output is a
-reproducible JAR. `dex2jar` fails the complete conversion on any unsupported or
-malformed class or method; it writes a same-directory temporary file before
-replacing the destination and never substitutes method stubs.
+reproducible JAR. The default conversion is strict and transactional: it fails
+on any unsupported or malformed class or method, and never emits a JAR for that
+input. `--stub-methods-only` replaces only recognized method-local capability
+gaps with verifier-safe `UnsupportedOperationException` stubs. `--best-effort`
+includes those stubs and, when an otherwise valid class still cannot be lowered,
+emits a fresh declaration-preserving class shell; reduced-metadata and minimal
+shells are later fallback tiers. A minimal superclass/interface also causes its
+dependents to become shells. Unsupported static initializers are replaced by a
+throwing `<clinit>` rather than silently exposing null/zero values.
+
+A degraded conversion succeeds with a nil API error and CLI exit code zero, and
+is reported as `partial`; `complete` means no recorded degradation. Every
+partial JAR contains deterministic `META-INF/javajive/diagnostics.json`.
+Class-shell recovery also embeds a bounded, versioned `JavaJiveRecovery` class
+attribute. Decompiling that class renders valid records as leading
+`// javajive recovery: ...` comments. Diagnostics are field-, record-, and
+payload-bounded; an explicit `diagnostics.truncated` record reports omitted
+detail while summary counters retain the degradation total. Partial output is not a claim of semantic
+equivalence. Malformed containers, whole-file validation failures, unknown
+formats, resource limits, and internal failures still abort. All modes write a
+same-directory temporary file before replacing the destination.
 
 ### Native DEX/APK support boundary
 
@@ -199,12 +298,43 @@ hierarchy declared in the same DEX; a relation whose expected type is outside
 the application is accepted, because the platform hierarchy the input was
 verified against is not part of the DEX.
 
-Still unsupported: `filled-new-array` of wide or floating elements; DEX 038+
-dynamic invokes and method constants; CompactDex; and APK resources or native
-libraries. APK input
-means only canonically named `classes.dex`, `classes2.dex`, ... entries are
-translated. All selected DEX files must succeed transactionally or no JAR is
-produced; use `inspect` to analyze inputs that cross the strict boundary.
+Still unsupported as translated bodies: `filled-new-array` of wide or floating
+elements; DEX 038+ dynamic invokes and method constants; CompactDex; and APK
+resources or native libraries. With `--stub-methods-only`, methods whose only
+blocker is a recognized opcode/representation gap become explicit throwing
+stubs. `--best-effort` additionally recovers class-local lowering and emission
+failures through documented class shells. Container corruption, DEX
+header/table/verifier errors, unsupported DEX versions or unparsed sections,
+resource limits, and internal errors are never hidden by a shell.
+
+Android container handling is structural:
+
+- `.apk` input translates only canonically named `classes.dex`,
+  `classes2.dex`, ... entries at the archive root.
+- `.apks` / `.xapk` / `.apkm` / `.apkx` input walks nested `.apk` entries. A
+  `universal.apk` is preferred when present; resource-only split APKs are
+  skipped. Identical classes repeated across splits are collapsed, while
+  conflicting definitions fail the conversion.
+- `.aab` input translates every `<module>/dex/classes*.dex` entry across
+  `base` and feature modules.
+
+In strict mode all selected DEX files must succeed transactionally or no JAR is
+produced. Recovery modes may emit a traceable partial JAR after container parsing
+and whole-file validation succeed; use `inspect` for inputs that fail those
+boundaries.
+
+Container bounds default to 256 MB per DEX, 512 MB per archive/APK, 512 MB of
+total DEX data, 128 DEX files, 512 nested APKs, and 2 GB of total nested APK
+data. `DexOptions` fields raise these limits for larger bundles.
+
+The container corpus under [`testdata/external`](testdata/external/README.md)
+contains Tomcat WARs, bundletool APK/AAB/APKS bundles (including a 181-APK split
+bundle), an AndroidX AAR, Androguard/Apktool/dex2jar fixtures, and synthetic
+XAPK/APKM/EAR containers. These large real-world runs are explicit local
+evaluations (`JAVAJIVE_EXTERNAL_EVAL=1`), not part of the default PR CI.
+Ordinary CI keeps small synthetic container and no-panic regressions. Fuzz seed
+corpora cover the classifier, JImage and compact-cp readers, `inspect`, and
+Android container parsing.
 
 ### classinfo
 
@@ -249,8 +379,8 @@ import (
     "github.com/yaklang/javajive"
 )
 
-// Translate DEX or APK bytes in memory.
-jarBytes, report, err := javajive.DexToJar(dexOrAPKBytes, javajive.DexOptions{})
+// Translate DEX/APK/APKS/XAPK/APKM/AAB bytes in memory.
+jarBytes, report, err := javajive.DexToJar(dexOrContainerBytes, javajive.DexOptions{})
 if err == nil {
     err = os.WriteFile("app.jar", jarBytes, 0o644)
     _ = report.Classes
@@ -262,9 +392,20 @@ report, err = javajive.DexFileToJar("app.apk", "app.jar", javajive.DexOptions{})
 // Translate through a private temporary JAR and decompile directly to source.
 err = javajive.DecompileDEXFile("classes.dex", "app-src", javajive.DexOptions{})
 
-// Decompile a single class, or a whole Java archive into a directory.
+// Decompile a single class, a Java archive, or a JDK runtime image.
 src, err := javajive.Decompile(classBytes)
 err = javajive.DecompileArchive("app.jar", "app-src")
+err = javajive.DecompileArchive("/path/to/jdk/lib/modules", "jdk-src")
+
+// Convert a JDK runtime image to a JAR view, or read one resource directly.
+err = javajive.JImageToJar("/path/to/jdk/lib/modules", "jdk.jar")
+image, err := javajive.OpenJImageFile("/path/to/jdk/lib/modules")
+if err == nil {
+    objectClass, readErr := image.Read("java.base/java/lang/Object.class")
+    _ = objectClass
+    _ = readErr
+    _ = image.Close()
+}
 
 // Inspect class structure.
 obj, err := javajive.ParseClass(classBytes)
@@ -284,12 +425,19 @@ out := javajive.MarshalSerialized(restored...)
 | `Decompile(classBytes) (string, error)` | Decompile one `.class`'s bytes |
 | `DecompileFile(path) (string, error)` | Decompile one `.class` from disk |
 | `DecompileWithResolver(classBytes, resolve)` | Decompile with a class-bytes resolver |
-| `DecompileArchive(src, dst) error` | Decompile a `.jar`/`.war`/`.zip` into a directory |
-| `DecompileArchiveWithAnalysisBudget(src, dst, budget) error` | Archive decompilation with an explicit per-method analysis budget |
-| `DexToJar(input, options) ([]byte, DexReport, error)` | Convert DEX/APK bytes to a deterministic JAR |
-| `DexFileToJar(src, dst, options) (DexReport, error)` | Convert a DEX/APK file using a same-directory temporary JAR |
-| `DecompileDEXFile(src, dst, options) error` | Convert DEX/APK through a private temporary JAR and decompile it |
-| `DecompileDEXFileWithAnalysisBudget(src, dst, options, budget) error` | DEX/APK conversion plus budgeted archive decompilation |
+| `DecompileArchive(src, dst) error` | Decompile a Java archive or JDK runtime image into a directory |
+| `DecompileArchiveWithAnalysisBudget(src, dst, budget) error` | Archive/JImage decompilation with an explicit per-method analysis budget |
+| `JImageToJar(src, dst) error` | Convert a JDK runtime image to a deterministic JAR view |
+| `OpenJImageFile(path) (*JImageReader, error)` | Open a JDK runtime image for direct resource access |
+| `ClassifyInput(data, name) ContainerKind` | Classify bytes by magic, archive structure, then extension |
+| `ClassifyInputFile(path) (ContainerKind, error)` | Classify a file without loading the whole archive |
+| `DexToJar(input, options) ([]byte, DexReport, error)` | Strict DEX/APK/APKS/XAPK/APKM/AAB conversion to a deterministic JAR |
+| `DexToJarWithOptions(input, convertOptions) ([]byte, DexDetailedReport, error)` | Explicit strict or best-effort conversion with stub diagnostics |
+| `DexFileToJar(src, dst, options) (DexReport, error)` | Strict file conversion using an atomic temporary JAR |
+| `DexFileToJarWithOptions(src, dst, convertOptions) (DexDetailedReport, error)` | Policy-aware file conversion with atomic replacement |
+| `DecompileDEXFile(src, dst, options) error` | Convert DEX/Android container through a private temporary JAR and decompile it |
+| `DecompileDEXFileWithAnalysisBudget(src, dst, options, budget) error` | DEX/Android container conversion plus budgeted archive decompilation |
+| `DecompileDEXFileWithPolicy(src, dst, convertOptions, budget) (DexDetailedReport, error)` | Policy-aware DEX/Android conversion and decompilation |
 | `ParseClass(classBytes) (*ClassObject, error)` | Parse one `.class`'s bytes |
 | `ParseClassFile(path) (*ClassObject, error)` | Parse one `.class` from disk |
 | `ParseSerialized(raw) ([]JavaSerializable, error)` | Parse a serialization stream |
@@ -324,6 +472,10 @@ Third-party dependencies are confined to a small set of pure-Go libraries
 go test ./...                 # unit tests + JDK cross-tests (skipped if no JDK)
 go test ./... -race           # data-race free (linux)
 go test ./test/cross/ -v      # Java cross-tests only (needs javac/java on PATH)
+
+# Explicit large/real-world evaluations (not part of default PR CI):
+JAVAJIVE_EXTERNAL_EVAL=1 go test ./test/external
+JAVAJIVE_JIMAGE_INTEGRATION=1 go test ./jimage ./test/external
 ```
 
 The JDK cross-tests compile real Java artifacts at test time and verify them

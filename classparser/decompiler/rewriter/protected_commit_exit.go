@@ -150,7 +150,7 @@ func materializeProtectedCommitExit(m *RewriteManager, condition *core.Node) {
 				replaceNextInPlace(edge.from, alternate, jump)
 			}
 		}
-		m.DominatorMap = GenerateDominatorTree(m.RootNode)
+		m.refreshDominatorsShared()
 		return
 	}
 }

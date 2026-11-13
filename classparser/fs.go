@@ -2,8 +2,9 @@ package javaclassparser
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
-	"github.com/yaklang/javajive/internal/jdecenv"
 	"io/fs"
 	"os"
 	"path"
@@ -14,8 +15,11 @@ import (
 
 	"github.com/yaklang/javajive/internal/filesys"
 	fi "github.com/yaklang/javajive/internal/filesys/filesys_interface"
+	"github.com/yaklang/javajive/internal/inputkind"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"github.com/yaklang/javajive/internal/memfile"
 	"github.com/yaklang/javajive/internal/utils"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 type JarFS struct {
@@ -67,6 +71,27 @@ func (z *JarFS) RetainsUnprovedSource() bool {
 var _ fs.FS = (*JarFS)(nil)
 var _ fs.ReadFileFS = (*JarFS)(nil)
 var _ fs.ReadDirFS = (*JarFS)(nil)
+
+// ClassDecompileStatus describes one archive class-entry recovery attempt.
+// Fallback is a contained class-level failure represented by diagnostic source;
+// request resource and cancellation failures are returned as errors instead.
+type ClassDecompileStatus string
+
+const (
+	ClassDecompileComplete ClassDecompileStatus = "complete"
+	ClassDecompilePartial  ClassDecompileStatus = "partial"
+	ClassDecompileFallback ClassDecompileStatus = "fallback"
+)
+
+// ClassDecompileOutcome is the typed result at the JarFS class-entry boundary.
+// Source preserves the historical ReadFile bytes, while StubMethods and
+// Diagnostics expose degradation evidence to structured archive exporters.
+type ClassDecompileOutcome struct {
+	Source      []byte
+	Status      ClassDecompileStatus
+	StubMethods []string
+	Diagnostics []DecompileDiagnostic
+}
 
 func NewJarFSFromLocal(path string) (*JarFS, error) {
 	return NewJarFSFromLocalWithResolver(path, nil)
@@ -155,63 +180,94 @@ func NewJarFSWithOptions(zipFs *filesys.ZipFS, recursiveParse bool) *JarFS {
 	}
 }
 
-// decompileClassBytes decompiles a single .class entry from this jar. Beyond the per-class Dump it
-// performs enum constant-body CROSS-CLASS folding (Bug V): javac lowers each constant-specific body
-// `CONST { ...body... }` into a synthetic `Outer$N` subclass (ACC_ENUM, `extends Outer`). Decompiled
-// per class that is uncompilable two ways -- the outer enum's constants do not override its abstract
-// methods, and each `Outer$N` renders as illegal `class Outer$N extends <enum>`. Here, with the whole
-// jar in hand, we (a) when decompiling the OUTER enum, inline each `Outer$N` body back into its
-// constant via a sibling resolver over the zip, and (b) when decompiling a synthetic `Outer$N` itself,
-// emit only a suppression marker -- its body now lives in the enum and javac regenerates the real
-// `Outer$N.class` from the folded enum source on recompile. Gated by JDEC_NO_ENUM_FOLD so it can be
-// disabled for load-bearing regression and to fall back to the exact per-class behavior.
-func (z *JarFS) decompileClassBytes(name string, data []byte) []byte {
+// decompileClassOutcome decompiles a single .class entry from this jar and
+// contains class-level failures. Beyond the per-class Dump it performs enum
+// constant-body CROSS-CLASS folding (Bug V): javac lowers each constant-specific
+// body `CONST { ...body... }` into a synthetic `Outer$N` subclass (ACC_ENUM,
+// `extends Outer`). Decompiled per class that is uncompilable two ways -- the
+// outer enum's constants do not override its abstract methods, and each
+// `Outer$N` renders as illegal `class Outer$N extends <enum>`. Here, with the
+// whole jar in hand, we (a) when decompiling the OUTER enum, inline each
+// `Outer$N` body back into its constant via a sibling resolver over the zip, and
+// (b) when decompiling a synthetic `Outer$N` itself, emit only a suppression
+// marker -- its body now lives in the enum and javac regenerates the real
+// `Outer$N.class` from the folded enum source on recompile. Gated by
+// JDEC_NO_ENUM_FOLD so it can be disabled for load-bearing regression and to
+// fall back to the exact per-class behavior.
+func (z *JarFS) decompileClassOutcome(name string, data []byte) (outcome ClassDecompileOutcome, err error) {
 	if _, bound := jdecenv.Current(); !bound {
-		var out []byte
-		_ = jdecenv.Run(jdecenv.CaptureProcess(), func() error {
-			out = z.decompileClassBytes(name, data)
-			return nil
+		err = jdecenv.Run(jdecenv.CaptureProcess(), func() error {
+			var inner error
+			outcome, inner = z.decompileClassOutcome(name, data)
+			return inner
 		})
-		return out
+		return outcome, err
 	}
+	var work *workbudget.Budget
+	decompile := func() (ClassDecompileOutcome, error) {
+		return z.decompileClassOutcomeBound(name, data, &work)
+	}
+	return z.containClassDecompile(name, &work, decompile)
+}
+
+func (z *JarFS) decompileClassOutcomeBound(name string, data []byte, work **workbudget.Budget) (ClassDecompileOutcome, error) {
 	lower := strings.ToLower(name)
 	if !strings.HasSuffix(lower, ".class") && !strings.HasSuffix(lower, ".raw") {
-		return data
+		return ClassDecompileOutcome{Source: data, Status: ClassDecompileComplete}, nil
 	}
 	if strings.HasSuffix(lower, ".raw") && (len(data) < 4 || data[0] != 0xca || data[1] != 0xfe || data[2] != 0xba || data[3] != 0xbe) {
-		return data
+		return ClassDecompileOutcome{Source: data, Status: ClassDecompileComplete}, nil
 	}
-	cf, err := Parse(data)
+	if z.archive != nil && z.archive.budget != nil {
+		*work = z.archive.budget.Work()
+	}
+	cf, err := ParseWithBudget(data, *work)
 	if err != nil {
-		return []byte(fmt.Sprintf("// decompile parse failed for %s: %v\n", name, err))
+		if isClassResourceError(err) {
+			return ClassDecompileOutcome{}, err
+		}
+		message := sanitizeClassText(err.Error())
+		return ClassDecompileOutcome{
+			Source: []byte(fmt.Sprintf("// decompile parse failed for %s: %s\n", sanitizeClassText(name), message)),
+			Status: ClassDecompileFallback,
+			Diagnostics: []DecompileDiagnostic{{
+				Code:    "class_parse_failed",
+				Message: message,
+			}},
+		}, nil
+	}
+	if err := ValidateSupportedClassMajor(cf.MajorVersion); err != nil {
+		return classFallbackOutcome(name, "unsupported_classfile_version", err.Error()), nil
 	}
 	if jdecenv.Get("JDEC_NO_ENUM_FOLD") == "" {
 		if isSyntheticEnumConstantSubclass(cf) {
-			return []byte(fmt.Sprintf(
+			return ClassDecompileOutcome{Source: []byte(fmt.Sprintf(
 				"// %s: synthetic enum constant-body subclass folded into enum %s (regenerated by javac on recompile)\n",
 				strings.ReplaceAll(cf.GetClassName(), "/", "."),
-				strings.ReplaceAll(cf.GetSupperClassName(), "/", ".")))
+				strings.ReplaceAll(cf.GetSupperClassName(), "/", "."))), Status: ClassDecompileComplete}, nil
 		}
 	}
 	if release, logical, known := physicalClassNamespace(name); known && logical == cf.GetClassName()+".class" {
 		if view := z.sourceReleaseView(release); view != nil {
-			return view.decompileClassBytes(logical, data)
+			return view.decompileClassOutcome(logical, data)
 		}
 	}
 	if path.Clean(name) == cf.GetClassName()+".class" {
 		if source, owned := z.nativeMemberSource(cf); owned {
 			z.noteNativeConstructorSource(cf, source)
-			return source
+			return ClassDecompileOutcome{Source: source, Status: ClassDecompileComplete}, nil
 		}
 		if source, owned := z.nativeAnonymousSource(cf); owned {
 			z.noteNativeConstructorSource(cf, source)
-			return source
+			return ClassDecompileOutcome{Source: source, Status: ClassDecompileComplete}, nil
 		}
 	}
 	// Supply original sibling bytes for certified source ownership and enum
 	// constant-body reconstruction. Enum-switch syntax requires its original
 	// typed protocol; a mapping-looking source fragment grants no permission.
 	d := NewClassObjectDumper(cf)
+	report := DecompileResult{Members: newMemberLedger(cf)}
+	d.report = &report
 	d.options.TargetSourceVersion = z.targetSourceVersion
 	d.options.MaxAnalysisUpdates = z.maxAnalysisUpdates
 	d.options.SourceCompiler = z.sourceCompiler
@@ -232,11 +288,106 @@ func (z *JarFS) decompileClassBytes(name string, data []byte) []byte {
 	if d.Work == nil {
 		d.Work = largeMethodWorkBudget(z.maxAnalysisUpdates)
 	}
+	*work = d.Work
 	source, err := d.DumpClass()
 	if err != nil {
-		return []byte(fmt.Sprintf("// decompile dump failed for %s: %v\n", name, err))
+		if isClassResourceError(err) {
+			return ClassDecompileOutcome{}, err
+		}
+		message := sanitizeClassText(err.Error())
+		report.Diagnostics = append(report.Diagnostics, DecompileDiagnostic{Code: "class_decompile_failed", Message: message})
+		return ClassDecompileOutcome{
+			Source:      []byte(fmt.Sprintf("// decompile dump failed for %s: %s\n", sanitizeClassText(name), message)),
+			Status:      ClassDecompileFallback,
+			StubMethods: report.StubMethods,
+			Diagnostics: report.Diagnostics,
+		}, nil
 	}
-	return []byte(source)
+	if resourceErr := z.classResourceError(d.Work); resourceErr != nil {
+		return ClassDecompileOutcome{}, resourceErr
+	}
+	status := ClassDecompileComplete
+	if len(report.StubMethods) > 0 || d.typeAnnosUnsupported || d.enumParameterMetadataUnsupported {
+		status = ClassDecompilePartial
+	}
+	return ClassDecompileOutcome{
+		Source:      []byte(source),
+		Status:      status,
+		StubMethods: report.StubMethods,
+		Diagnostics: report.Diagnostics,
+	}, nil
+}
+
+func (z *JarFS) containClassDecompile(name string, work **workbudget.Budget, decompile func() (ClassDecompileOutcome, error)) (outcome ClassDecompileOutcome, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			var current *workbudget.Budget
+			if work != nil {
+				current = *work
+			}
+			if resourceErr := z.classResourceError(current); resourceErr != nil {
+				outcome = ClassDecompileOutcome{}
+				err = resourceErr
+				return
+			}
+			message := fmt.Sprintf("decompile panic: %v", recovered)
+			outcome = classFallbackOutcome(name, "class_decompile_panic", message)
+			err = nil
+		}
+	}()
+	return decompile()
+}
+
+func (z *JarFS) classResourceError(work *workbudget.Budget) error {
+	if work != nil && work.Err() != nil {
+		return work.Err()
+	}
+	if z != nil && z.archive != nil {
+		if z.archive.budget != nil && z.archive.budget.Err() != nil {
+			return z.archive.budget.Err()
+		}
+		if z.archive.ctx != nil && z.archive.ctx.Err() != nil {
+			return z.archive.ctx.Err()
+		}
+	}
+	return nil
+}
+
+func classFallbackOutcome(name, code, message string) ClassDecompileOutcome {
+	message = sanitizeClassText(message)
+	return ClassDecompileOutcome{
+		Source: []byte(fmt.Sprintf("// decompile fallback for %s: %s\n", sanitizeClassText(name), message)),
+		Status: ClassDecompileFallback,
+		Diagnostics: []DecompileDiagnostic{{
+			Code:    code,
+			Message: message,
+		}},
+	}
+}
+
+// sanitizeClassText keeps fallback comments on one line and bounds external
+// diagnostic text so malformed names or errors cannot inject source lines.
+func sanitizeClassText(text string) string {
+	runes := []rune(text)
+	out := make([]rune, 0, len(runes))
+	for _, r := range runes {
+		if r == '\n' || r == '\r' || r < 0x20 || r == 0x7f {
+			r = ' '
+		}
+		out = append(out, r)
+		if len(out) == 480 {
+			break
+		}
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func isClassResourceError(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var budgetErr *workbudget.Error
+	return errors.As(err, &budgetErr) && budgetErr.Kind != workbudget.KindBudget
 }
 
 // enumSiblingResolver resolves a sibling class's RAW bytes by binary internal name (slash form, e.g.
@@ -255,11 +406,58 @@ func (z *JarFS) ReadFile(name string) ([]byte, error) {
 	if isArchivePath(name) {
 		return z.readFileFromJar(name)
 	}
-	data, err := z.readJarEntry(name)
+	outcome, err := z.ReadClassOutcome(name)
 	if err != nil {
 		return nil, err
 	}
-	return z.decompileClassBytes(name, data), nil
+	return outcome.Source, nil
+}
+
+// ReadClassOutcome reads and decompiles one archive entry with typed
+// class-level degradation evidence. Non-class entries are returned complete.
+func (z *JarFS) ReadClassOutcome(name string) (ClassDecompileOutcome, error) {
+	if isArchivePath(name) {
+		jarPath, internalPath, ok := parseArchivePath(name)
+		if !ok {
+			return ClassDecompileOutcome{}, os.ErrNotExist
+		}
+		unifiedFS, err := z.getNestedJarFS(jarPath)
+		if err != nil {
+			return ClassDecompileOutcome{}, err
+		}
+		nested, ok := unifiedFS.GetFileSystem().(*JarFS)
+		if !ok {
+			return ClassDecompileOutcome{}, fmt.Errorf("nested archive %q is not a JarFS", jarPath)
+		}
+		return nested.ReadClassOutcome(internalPath)
+	}
+	data, err := z.readJarEntry(name)
+	if err != nil {
+		return ClassDecompileOutcome{}, err
+	}
+	return z.decompileClassOutcome(name, data)
+}
+
+// ReadRawFile returns the original bytes for name without decompiling class
+// entries. Nested archive paths such as "WEB-INF/lib/dep.jar/Foo.class" are
+// resolved through every archive layer.
+func (z *JarFS) ReadRawFile(name string) ([]byte, error) {
+	if isArchivePath(name) {
+		jarPath, internalPath, ok := parseArchivePath(name)
+		if !ok {
+			return nil, os.ErrNotExist
+		}
+		unifiedFS, err := z.getNestedJarFS(jarPath)
+		if err != nil {
+			return nil, err
+		}
+		nested, ok := unifiedFS.GetFileSystem().(*JarFS)
+		if !ok {
+			return nil, fmt.Errorf("nested archive %q is not a JarFS", jarPath)
+		}
+		return nested.ReadRawFile(internalPath)
+	}
+	return z.readJarEntry(name)
 }
 
 func (f *JarFS) OpenFile(name string, flag int, perm os.FileMode) (fs.File, error) {
@@ -271,7 +469,11 @@ func (z *JarFS) Open(name string) (fs.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	return memfile.New(z.decompileClassBytes(name, raw)), nil
+	outcome, err := z.decompileClassOutcome(name, raw)
+	if err != nil {
+		return nil, err
+	}
+	return memfile.New(outcome.Source), nil
 }
 
 func (z *JarFS) Stat(name string) (fs.FileInfo, error) {
@@ -301,8 +503,8 @@ func (z *JarFS) Stat(name string) (fs.FileInfo, error) {
 }
 
 var (
-	archiveFileSuffixes    = []string{".jar", ".war", ".ear", ".par", ".zip"}
-	jarLikeArchiveSuffixes = []string{".jar", ".war", ".ear", ".par"}
+	archiveFileSuffixes    = []string{".jar", ".war", ".ear", ".aar", ".par", ".jmod", ".zip"}
+	jarLikeArchiveSuffixes = []string{".jar", ".war", ".ear", ".aar", ".par", ".jmod"}
 )
 
 func isArchiveFile(path string) bool {
@@ -393,6 +595,29 @@ func normalizeArchivePath(name string) string {
 	return name
 }
 
+// GetNestedJarFS returns a cached nested archive filesystem. The returned JarFS
+// is owned by the outer JarFS and must not be closed independently.
+func (z *JarFS) GetNestedJarFS(jarPath string) (*JarFS, error) {
+	unified, err := z.getNestedJarFS(jarPath)
+	if err != nil {
+		return nil, err
+	}
+	nested, ok := unified.GetFileSystem().(*JarFS)
+	if !ok || nested == nil {
+		return nil, fmt.Errorf("nested archive %q is not a JarFS", jarPath)
+	}
+	return nested, nil
+}
+
+// Close releases the outer archive handle. Nested archives are memory-backed
+// views owned by this JarFS and do not hold independent file descriptors.
+func (z *JarFS) Close() error {
+	if z == nil || z.ZipFS == nil {
+		return nil
+	}
+	return z.ZipFS.Close()
+}
+
 func (z *JarFS) getNestedJarFS(jarPath string) (*filesys.UnifiedFS, error) {
 	if _, err := z.boundJarReleaseSelection(); err != nil {
 		return nil, err
@@ -415,6 +640,7 @@ func (z *JarFS) getNestedJarFS(jarPath string) (*filesys.UnifiedFS, error) {
 	if err != nil {
 		return nil, utils.Wrapf(err, "failed to read jar file: %s", jarPath)
 	}
+	jarContent = inputkind.StripJMODHeader(jarContent)
 
 	nestedZipFS, err := filesys.NewZipFSRawWithOptions(bytes.NewReader(jarContent), int64(len(jarContent)), z.nestedZipFSOptions()...)
 	if err != nil {
@@ -588,6 +814,7 @@ func (e *ExpandedZipFS) GetJarFS(jarPath string) (*filesys.UnifiedFS, error) {
 	if err != nil {
 		return nil, utils.Wrapf(err, "failed to read jar file: %s", jarPath)
 	}
+	jarContent = inputkind.StripJMODHeader(jarContent)
 
 	zipFS, err := filesys.NewZipFSRawWithOptions(bytes.NewReader(jarContent), int64(len(jarContent)), e.nestedZipFSOptions()...)
 	if err != nil {
@@ -630,6 +857,7 @@ func (e *ExpandedZipFS) getZipFS(zipPath string) (*filesys.ZipFS, error) {
 	if err != nil {
 		return nil, utils.Wrapf(err, "failed to read zip file: %s", zipPath)
 	}
+	zipContent = inputkind.StripJMODHeader(zipContent)
 
 	nestedZipFS, err := filesys.NewZipFSRawWithOptions(bytes.NewReader(zipContent), int64(len(zipContent)), e.nestedZipFSOptions()...)
 	if err != nil {

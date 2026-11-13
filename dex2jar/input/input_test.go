@@ -19,6 +19,20 @@ import (
 	"github.com/yaklang/javajive/internal/mutf8"
 )
 
+func TestParseDEXSourcesReleasesData(t *testing.T) {
+	sources := []DEXSource{{Entry: "classes.dex", Data: buildDEX(t, "Lexample/Release;")}}
+	app, err := parseDEXSources(sources, Options{}, true)
+	if err != nil {
+		t.Fatalf("parseDEXSources: %v", err)
+	}
+	if len(app.Files) != 1 {
+		t.Fatalf("files = %d, want 1", len(app.Files))
+	}
+	if sources[0].Data != nil {
+		t.Fatalf("source data retained %d bytes after parse", len(sources[0].Data))
+	}
+}
+
 func TestParseDEXFoundation(t *testing.T) {
 	raw := buildDEX(t, "Lexample/Main;")
 	file, err := ParseDEX(raw, "classes.dex")

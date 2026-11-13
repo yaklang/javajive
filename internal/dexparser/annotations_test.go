@@ -9,6 +9,44 @@ import (
 // fillInnerClassOuters must link nested classes only from file evidence:
 // a MemberClasses row declared by the outer class, or an EnclosingClass
 // annotation. A "$" in the descriptor is not evidence and must not be parsed.
+func TestTranslateSystemAnnotationsAssignsAnnotationDefaults(t *testing.T) {
+	const owner = "Lpkg/Defaults;"
+	file := &model.File{}
+	class := model.Class{
+		Descriptor: owner,
+		VirtualMethods: []model.EncodedMethod{{
+			MethodIndex: 7,
+			Method:      model.MethodID{Class: owner, Name: "value"},
+		}},
+		Annotations: []model.Annotation{{
+			Visibility: model.AnnotationSystem,
+			Type:       "Ldalvik/annotation/AnnotationDefault;",
+			Elements: []model.AnnotationElement{{
+				Name: "value",
+				Value: model.EncodedValue{Type: model.ValueAnnotation, Annotation: &model.EncodedAnnotation{
+					Type:     owner,
+					Elements: []model.AnnotationElement{{Name: "value", Value: model.EncodedValue{Type: model.ValueInt, Signed: 7}}},
+				}},
+			}},
+		}},
+	}
+	p := &parser{file: file}
+	if err := p.translateSystemAnnotations(&class); err != nil {
+		t.Fatal(err)
+	}
+	if len(class.Annotations) != 0 || len(class.MethodAnnotations) != 1 {
+		t.Fatalf("class = %#v", class)
+	}
+	annotation := class.MethodAnnotations[0]
+	if annotation.MethodIndex != 7 || len(annotation.Annotations) != 1 || annotation.Annotations[0].Type != "Ldalvik/annotation/AnnotationDefault;" {
+		t.Fatalf("method annotation = %#v", annotation)
+	}
+	value := annotation.Annotations[0].Elements[0].Value
+	if value.Type != model.ValueInt || value.Signed != 7 {
+		t.Fatalf("default value = %#v", value)
+	}
+}
+
 func TestFillInnerClassOutersUsesFileEvidence(t *testing.T) {
 	file := &model.File{Classes: []model.Class{
 		{

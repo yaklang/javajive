@@ -34,6 +34,15 @@ func (p *parser) parseAnnotationDirectory(off uint32, c *model.Class) error {
 		c.Annotations = annotations
 	}
 	cursor := pos + 16
+	if fieldsSize > 0 {
+		c.FieldAnnotationIndex = make(map[uint32]int, fieldsSize)
+	}
+	if methodsSize > 0 {
+		c.MethodAnnotationIndex = make(map[uint32]int, methodsSize)
+	}
+	if parametersSize > 0 {
+		c.ParameterAnnotationIndex = make(map[uint32]int, parametersSize)
+	}
 	seenFields := make(map[uint32]bool, fieldsSize)
 	for i := uint32(0); i < fieldsSize; i++ {
 		fieldIdx := binary.LittleEndian.Uint32(p.data[cursor : cursor+4])
@@ -50,6 +59,7 @@ func (p *parser) parseAnnotationDirectory(off uint32, c *model.Class) error {
 		if err != nil {
 			return err
 		}
+		c.FieldAnnotationIndex[fieldIdx] = len(c.FieldAnnotations)
 		c.FieldAnnotations = append(c.FieldAnnotations, model.FieldAnnotation{FieldIndex: fieldIdx, Annotations: annotations})
 	}
 	seenMethods := make(map[uint32]bool, methodsSize)
@@ -68,6 +78,7 @@ func (p *parser) parseAnnotationDirectory(off uint32, c *model.Class) error {
 		if err != nil {
 			return err
 		}
+		c.MethodAnnotationIndex[methodIdx] = len(c.MethodAnnotations)
 		c.MethodAnnotations = append(c.MethodAnnotations, model.MethodAnnotation{MethodIndex: methodIdx, Annotations: annotations})
 	}
 	seenParameters := make(map[uint32]bool, parametersSize)
@@ -86,6 +97,7 @@ func (p *parser) parseAnnotationDirectory(off uint32, c *model.Class) error {
 		if err != nil {
 			return err
 		}
+		c.ParameterAnnotationIndex[methodIdx] = len(c.ParameterAnnotations)
 		c.ParameterAnnotations = append(c.ParameterAnnotations, model.ParameterAnnotation{MethodIndex: methodIdx, Parameters: parameters})
 	}
 	return nil
@@ -309,6 +321,10 @@ func (p *parser) translateSystemAnnotations(c *model.Class) error {
 			for _, descriptor := range descriptors {
 				c.InnerClasses = append(c.InnerClasses, model.InnerClass{Inner: descriptor, Outer: c.Descriptor})
 			}
+		case "Ldalvik/annotation/AnnotationDefault;":
+			if err := p.applyAnnotationDefaults(c, annotation); err != nil {
+				return err
+			}
 		default:
 			// MethodParameters, Record, PermittedSubclasses, NestHost and other
 			// post-Java-5 system annotations have no representation in a
@@ -316,6 +332,63 @@ func (p *parser) translateSystemAnnotations(c *model.Class) error {
 		}
 	}
 	c.Annotations = kept
+	return nil
+}
+
+func (p *parser) applyAnnotationDefaults(c *model.Class, annotation model.Annotation) error {
+	value, ok := annotationElement(annotation, "value")
+	if !ok {
+		return p.fail(0, "system annotation", "AnnotationDefault is missing element %q", "value")
+	}
+	if value.Type != model.ValueAnnotation || value.Annotation == nil {
+		return p.fail(0, "system annotation", "AnnotationDefault element %q is not an annotation", "value")
+	}
+	methods := make(map[string]uint32)
+	addMethods := func(encoded []model.EncodedMethod) error {
+		for index := range encoded {
+			method := &encoded[index]
+			if previous, exists := methods[method.Method.Name]; exists && previous != method.MethodIndex {
+				return p.fail(0, "system annotation", "AnnotationDefault method name %q is ambiguous", method.Method.Name)
+			}
+			methods[method.Method.Name] = method.MethodIndex
+		}
+		return nil
+	}
+	if err := addMethods(c.DirectMethods); err != nil {
+		return err
+	}
+	if err := addMethods(c.VirtualMethods); err != nil {
+		return err
+	}
+	for _, element := range value.Annotation.Elements {
+		methodIndex, exists := methods[element.Name]
+		if !exists {
+			return p.fail(0, "system annotation", "AnnotationDefault element %q has no annotation method", element.Name)
+		}
+		annotation := model.Annotation{
+			Visibility: model.AnnotationSystem,
+			Type:       "Ldalvik/annotation/AnnotationDefault;",
+			Elements:   []model.AnnotationElement{{Name: "value", Value: element.Value}},
+		}
+		position, exists := c.MethodAnnotationIndex[methodIndex]
+		if !exists {
+			for index := range c.MethodAnnotations {
+				if c.MethodAnnotations[index].MethodIndex == methodIndex {
+					position, exists = index, true
+					break
+				}
+			}
+		}
+		if exists {
+			c.MethodAnnotations[position].Annotations = append(c.MethodAnnotations[position].Annotations, annotation)
+			continue
+		}
+		if c.MethodAnnotationIndex == nil {
+			c.MethodAnnotationIndex = make(map[uint32]int)
+		}
+		c.MethodAnnotationIndex[methodIndex] = len(c.MethodAnnotations)
+		c.MethodAnnotations = append(c.MethodAnnotations, model.MethodAnnotation{MethodIndex: methodIndex, Annotations: []model.Annotation{annotation}})
+	}
 	return nil
 }
 
@@ -407,9 +480,12 @@ func protoDescriptor(proto model.Proto) (string, error) {
 
 func (p *parser) checkAnnotationMethodMembership() error {
 	for _, class := range p.file.Classes {
-		owned := make(map[uint32]bool)
-		for _, method := range append(append([]model.EncodedMethod(nil), class.DirectMethods...), class.VirtualMethods...) {
-			owned[method.MethodIndex] = true
+		owned := make(map[uint32]bool, len(class.DirectMethods)+len(class.VirtualMethods))
+		for index := range class.DirectMethods {
+			owned[class.DirectMethods[index].MethodIndex] = true
+		}
+		for index := range class.VirtualMethods {
+			owned[class.VirtualMethods[index].MethodIndex] = true
 		}
 		for _, annotation := range class.MethodAnnotations {
 			if !owned[annotation.MethodIndex] {

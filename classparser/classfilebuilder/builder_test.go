@@ -732,6 +732,163 @@ func TestSourceDebugAndConstantValueAttributes(t *testing.T) {
 	}
 }
 
+func TestPreflightValidationAPIs(t *testing.T) {
+	tests := []struct {
+		name  string
+		valid func() error
+		bad   func() error
+	}{
+		{"class internal name", func() error { return ValidateClassInternalName("pkg/Outer$Inner") }, func() error { return ValidateClassInternalName("pkg.Bad") }},
+		{"object descriptor", func() error { return ValidateObjectDescriptor("Ljava/lang/String;") }, func() error { return ValidateObjectDescriptor("[Ljava/lang/String;") }},
+		{"field symbol", func() error { return ValidateFieldSymbol("value", "[[I") }, func() error { return ValidateFieldSymbol("bad/name", "I") }},
+		{"method symbol", func() error { return ValidateMethodSymbol("<init>", "(I)V") }, func() error { return ValidateMethodSymbol("<init>", "()I") }},
+		{"method symbol UTF limit", func() error { return ValidateMethodSymbol(strings.Repeat("m", math.MaxUint16), "()V") }, func() error { return ValidateMethodSymbol(strings.Repeat("m", math.MaxUint16+1), "()V") }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.valid(); err != nil {
+				t.Fatalf("valid input rejected: %v", err)
+			}
+			if err := test.bad(); err == nil {
+				t.Fatal("invalid input accepted")
+			}
+		})
+	}
+}
+
+func TestRawClassAttributesCopyAndPreserveOrder(t *testing.T) {
+	class := NewClass("RawAttributes", "java/lang/Object", ACC_PUBLIC|ACC_SUPER).SetSourceFile("RawAttributes.java")
+	first := []byte{1, 2, 3}
+	class.AddClassAttribute("Opaque", first)
+	class.AddClassAttribute("Opaque", []byte{4, 5})
+	first[0] = 99
+
+	raw, err := class.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := javaclassparser.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Attributes) != 3 {
+		t.Fatalf("class attributes = %d", len(parsed.Attributes))
+	}
+	if _, ok := parsed.Attributes[0].(*javaclassparser.SourceFileAttribute); !ok {
+		t.Fatalf("first attribute = %#v", parsed.Attributes[0])
+	}
+	for index, want := range [][]byte{{1, 2, 3}, {4, 5}} {
+		attribute, ok := parsed.Attributes[index+1].(*javaclassparser.UnparsedAttribute)
+		if !ok || attribute.Name != "Opaque" || !bytes.Equal(attribute.Info, want) {
+			t.Fatalf("raw attribute %d = %#v, want % x", index, parsed.Attributes[index+1], want)
+		}
+	}
+	again, err := class.Bytes()
+	if err != nil || !bytes.Equal(raw, again) {
+		t.Fatalf("raw attributes are not deterministic: %v", err)
+	}
+}
+
+func TestRawClassAttributeValidation(t *testing.T) {
+	class := NewClass("BadRawAttribute", "java/lang/Object", ACC_PUBLIC)
+	class.AddClassAttribute("", nil)
+	if _, err := class.Bytes(); err == nil || !strings.Contains(err.Error(), "attribute name is empty") {
+		t.Fatalf("empty name error = %v", err)
+	}
+
+	if err := validateAttributePayloadLength(uint64(math.MaxUint32)); err != nil {
+		t.Fatalf("u4 maximum rejected: %v", err)
+	}
+	if err := validateAttributePayloadLength(uint64(math.MaxUint32) + 1); err == nil || !strings.Contains(err.Error(), "4294967296") {
+		t.Fatalf("u4 overflow error = %v", err)
+	}
+}
+
+func TestAnnotationValueNumericKinds(t *testing.T) {
+	floatBits := math.Float32bits(float32(-1.25))
+	doubleBits := math.Float64bits(3.5)
+	class := NewClass("NumericAnnotation", "java/lang/Object", ACC_PUBLIC|ACC_SUPER)
+	class.AddClassAnnotation(Annotation{
+		Descriptor: "Lpkg/Numbers;",
+		Elements: []AnnotationEntry{
+			{Name: "longValue", Value: AnnotationValue{Kind: AnnotationLong, Int: -1 << 40}},
+			{Name: "floatValue", Value: AnnotationValue{Kind: AnnotationFloat, Bits: uint64(floatBits)}},
+			{Name: "doubleValue", Value: AnnotationValue{Kind: AnnotationDouble, Bits: doubleBits}},
+		},
+	}, true)
+
+	raw, err := class.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := javaclassparser.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attribute, ok := parsed.Attributes[0].(*javaclassparser.RuntimeVisibleAnnotationsAttribute)
+	if !ok || len(attribute.Annotations) != 1 {
+		t.Fatalf("annotations = %#v", parsed.Attributes)
+	}
+	values := attribute.Annotations[0].ElementValuePairs
+	if len(values) != 3 {
+		t.Fatalf("annotation values = %d", len(values))
+	}
+	if value, ok := values[0].Value.(*javaclassparser.ConstantLongInfo); !ok || value.Value != -1<<40 {
+		t.Fatalf("long value = %#v", values[0].Value)
+	}
+	if value, ok := values[1].Value.(*javaclassparser.ConstantFloatInfo); !ok || math.Float32bits(value.Value) != floatBits {
+		t.Fatalf("float value = %#v", values[1].Value)
+	}
+	if value, ok := values[2].Value.(*javaclassparser.ConstantDoubleInfo); !ok || math.Float64bits(value.Value) != doubleBits {
+		t.Fatalf("double value = %#v", values[2].Value)
+	}
+}
+
+func TestMetadataCountBounds(t *testing.T) {
+	annotations := make([]Annotation, math.MaxUint16+1)
+	visible := make([]bool, len(annotations))
+	for index := range visible {
+		visible[index] = true
+	}
+	if _, err := encodeAnnotations(newConstantPool(), annotations, visible, true); err == nil || !strings.Contains(err.Error(), "annotation count 65536") {
+		t.Fatalf("annotation count error = %v", err)
+	}
+	if _, err := encodeInnerClasses(newConstantPool(), make([]InnerClassSpec, math.MaxUint16+1)); err == nil || !strings.Contains(err.Error(), "InnerClasses count 65536") {
+		t.Fatalf("InnerClasses count error = %v", err)
+	}
+	if _, err := encodeExceptions(newConstantPool(), make([]string, math.MaxUint16+1)); err == nil || !strings.Contains(err.Error(), "Exceptions length 65536") {
+		t.Fatalf("Exceptions count error = %v", err)
+	}
+	if _, err := encodeParameterAnnotations(newConstantPool(), make([][]Annotation, math.MaxUint8+1), make([][]bool, math.MaxUint8+1), true); err == nil || !strings.Contains(err.Error(), "parameter annotation count 256") {
+		t.Fatalf("parameter count error = %v", err)
+	}
+	parameterAnnotations := [][]Annotation{make([]Annotation, math.MaxUint16+1)}
+	parameterVisible := [][]bool{make([]bool, math.MaxUint16+1)}
+	for index := range parameterVisible[0] {
+		parameterVisible[0][index] = true
+	}
+	if _, err := encodeParameterAnnotations(newConstantPool(), parameterAnnotations, parameterVisible, true); err == nil || !strings.Contains(err.Error(), "annotation count 65536") {
+		t.Fatalf("parameter annotation count error = %v", err)
+	}
+}
+
+func TestClassAndMemberAttributeCountBounds(t *testing.T) {
+	if count, err := checkedU2Count("attributes_count", math.MaxUint16); err != nil || count != math.MaxUint16 {
+		t.Fatalf("u2 maximum = %d, %v", count, err)
+	}
+	for _, kind := range []string{"class attributes_count", "field attributes_count", "method attributes_count"} {
+		if _, err := checkedU2Count(kind, math.MaxUint16+1); err == nil || !strings.Contains(err.Error(), kind+" 65536") {
+			t.Fatalf("%s overflow error = %v", kind, err)
+		}
+	}
+
+	class := NewClass("AttributeBounds", "java/lang/Object", ACC_PUBLIC)
+	class.rawClassAttrs = make([]pendingAttribute, math.MaxUint16+1)
+	if _, err := class.Bytes(); err == nil || !strings.Contains(err.Error(), "class attributes_count 65536") {
+		t.Fatalf("class attribute count error = %v", err)
+	}
+}
+
 func TestJavaVerifyAll(t *testing.T) {
 	java, err := exec.LookPath("java")
 	if err != nil {

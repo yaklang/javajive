@@ -3,7 +3,6 @@ package jarwar
 import (
 	"bytes"
 	"fmt"
-	"io/fs"
 	"os"
 	"path"
 	"sort"
@@ -11,6 +10,7 @@ import (
 
 	javaclassparser "github.com/yaklang/javajive/classparser"
 	"github.com/yaklang/javajive/internal/filesys"
+	"github.com/yaklang/javajive/internal/inputkind"
 )
 
 const (
@@ -47,7 +47,7 @@ func decompileArchiveStructured(from, to string, options ArchiveOptions) (Archiv
 	}
 
 	var report ArchiveReport
-	exportErr := exportStructuredArchive(to, zipFS, decompiler, "", 0, &report)
+	exportErr := exportStructuredArchive(to, zipFS, decompiler, "", 0, options.MaxAnalysisUpdates, &report)
 	closeErr := decompilerOwner.Close()
 	if exportErr != nil {
 		return ArchiveReport{}, exportErr
@@ -96,11 +96,11 @@ func prepareStructuredRoot(root string) error {
 	return nil
 }
 
-func exportStructuredArchive(root string, zipFS *filesys.ZipFS, decompiler *javaclassparser.JarFS, archivePath string, depth int, report *ArchiveReport) error {
-	return walkStructuredDirectory(root, zipFS, decompiler, ".", archivePath, depth, report)
+func exportStructuredArchive(root string, zipFS *filesys.ZipFS, decompiler *javaclassparser.JarFS, archivePath string, depth, maxAnalysisUpdates int, report *ArchiveReport) error {
+	return walkStructuredDirectory(root, zipFS, decompiler, ".", archivePath, depth, maxAnalysisUpdates, report)
 }
 
-func walkStructuredDirectory(root string, zipFS *filesys.ZipFS, decompiler *javaclassparser.JarFS, directory, archivePath string, depth int, report *ArchiveReport) error {
+func walkStructuredDirectory(root string, zipFS *filesys.ZipFS, decompiler *javaclassparser.JarFS, directory, archivePath string, depth, maxAnalysisUpdates int, report *ArchiveReport) error {
 	entries, err := decompiler.ReadDir(directory)
 	if err != nil {
 		return fmt.Errorf("read archive directory %q: %w", provenancePath(archivePath, cleanArchivePath(directory)), err)
@@ -111,13 +111,13 @@ func walkStructuredDirectory(root string, zipFS *filesys.ZipFS, decompiler *java
 		entryPath := path.Join(directory, javaclassparser.EntryOriginalName(entry))
 		entryPath = cleanArchivePath(entryPath)
 		if isArchiveName(entryPath) {
-			if err := exportNestedArchive(root, zipFS, entryPath, archivePath, depth+1, report); err != nil {
+			if err := exportNestedArchive(root, zipFS, entryPath, archivePath, depth+1, maxAnalysisUpdates, report); err != nil {
 				return err
 			}
 			continue
 		}
 		if entry.IsDir() {
-			if err := walkStructuredDirectory(root, zipFS, decompiler, entryPath, archivePath, depth, report); err != nil {
+			if err := walkStructuredDirectory(root, zipFS, decompiler, entryPath, archivePath, depth, maxAnalysisUpdates, report); err != nil {
 				return err
 			}
 			continue
@@ -129,7 +129,7 @@ func walkStructuredDirectory(root string, zipFS *filesys.ZipFS, decompiler *java
 	return nil
 }
 
-func exportNestedArchive(root string, parentZip *filesys.ZipFS, entryPath, parentArchive string, depth int, report *ArchiveReport) error {
+func exportNestedArchive(root string, parentZip *filesys.ZipFS, entryPath, parentArchive string, depth, maxAnalysisUpdates int, report *ArchiveReport) error {
 	raw, err := parentZip.ReadFile(entryPath)
 	if err != nil {
 		return fmt.Errorf("read nested archive %q: %w", provenancePath(parentArchive, entryPath), err)
@@ -150,30 +150,39 @@ func exportNestedArchive(root string, parentZip *filesys.ZipFS, entryPath, paren
 		Size:       int64(len(raw)),
 	})
 
-	nestedZip, err := filesys.NewZipFSRawWithOptions(bytes.NewReader(raw), int64(len(raw)), parentZip.NestedArchiveOptions(depth)...)
+	payload := inputkind.StripJMODHeader(raw)
+	nestedZip, err := filesys.NewZipFSRawWithOptions(bytes.NewReader(payload), int64(len(payload)), parentZip.NestedArchiveOptions(depth)...)
 	if err != nil {
 		return fmt.Errorf("open nested archive %q: %w", provenance, err)
 	}
 	nestedDecompiler := javaclassparser.NewJarFS(nestedZip)
+	nestedDecompiler.SetAnalysisBudget(maxAnalysisUpdates)
 	nestedDecompiler.SetRetainUnprovedSource(false)
-	if err := exportStructuredArchive(root, nestedZip, nestedDecompiler, provenance, depth, report); err != nil {
+	if err := exportStructuredArchive(root, nestedZip, nestedDecompiler, provenance, depth, maxAnalysisUpdates, report); err != nil {
 		return err
 	}
 	return nil
 }
 
-func exportStructuredFile(root string, decompiler fs.ReadFileFS, entryPath, archivePath string, report *ArchiveReport) error {
-	data, err := decompiler.ReadFile(entryPath)
+func exportStructuredFile(root string, decompiler *javaclassparser.JarFS, entryPath, archivePath string, report *ArchiveReport) error {
+	outcome, err := decompiler.ReadClassOutcome(entryPath)
 	if err != nil {
 		return fmt.Errorf("read archive entry %q: %w", provenancePath(archivePath, entryPath), err)
 	}
+	data := outcome.Source
 	kind := "resource"
 	outputEntry := entryPath
 	outputRoot := structuredResourcesRoot
+	status := javaclassparser.ClassDecompileStatus("")
+	var stubMethods []string
+	var diagnostics []javaclassparser.DecompileDiagnostic
 	if strings.EqualFold(path.Ext(entryPath), ".class") {
 		kind = "source"
 		outputEntry = strings.TrimSuffix(entryPath, path.Ext(entryPath)) + ".java"
 		outputRoot = structuredSourcesRoot
+		status = outcome.Status
+		stubMethods = outcome.StubMethods
+		diagnostics = outcome.Diagnostics
 	}
 	if archivePath != "" {
 		outputEntry = provenancePath(archivePath, outputEntry)
@@ -186,11 +195,14 @@ func exportStructuredFile(root string, decompiler fs.ReadFileFS, entryPath, arch
 		return fmt.Errorf("write archive entry %q: %w", provenancePath(archivePath, entryPath), err)
 	}
 	report.Entries = append(report.Entries, ArchiveEntryReport{
-		Kind:       kind,
-		SourcePath: provenancePath(archivePath, entryPath),
-		OutputPath: outputPath,
-		Archive:    archivePath,
-		Size:       int64(len(data)),
+		Kind:        kind,
+		SourcePath:  provenancePath(archivePath, entryPath),
+		OutputPath:  outputPath,
+		Archive:     archivePath,
+		Size:        int64(len(data)),
+		Status:      status,
+		StubMethods: stubMethods,
+		Diagnostics: diagnostics,
 	})
 	return nil
 }
@@ -249,7 +261,7 @@ func provenancePath(archivePath, entryPath string) string {
 
 func isArchiveName(name string) bool {
 	lower := strings.ToLower(cleanArchivePath(name))
-	for _, suffix := range []string{".jar", ".war", ".ear", ".par", ".zip"} {
+	for _, suffix := range []string{".jar", ".war", ".ear", ".aar", ".par", ".jmod", ".zip"} {
 		if strings.HasSuffix(lower, suffix) {
 			return true
 		}

@@ -160,6 +160,17 @@ func GeneratePostDominatorMap(rootNode *core.Node) map[*core.Node]*core.Node {
 		}
 	}
 
+	// Cardinality of each fixed-point set is immutable now. The previous extraction
+	// recomputed bitsetCard for every candidate of every node, making immediate
+	// post-dominator extraction O(n * candidates * words). One precomputation turns
+	// each candidate comparison into an integer read.
+	cardinality := make([]int, total)
+	for i := 0; i < total; i++ {
+		if pdom[i] != nil {
+			cardinality[i] = bitsetCard(pdom[i], words)
+		}
+	}
+
 	// immediate post-dominator = strict post-dominator with the largest pdom set
 	// (it is post-dominated by every other strict post-dominator, so its own set is
 	// the most inclusive). The sink as ipdom means "exits the method" -> nil.
@@ -180,9 +191,8 @@ func GeneratePostDominatorMap(rootNode *core.Node) map[*core.Node]*core.Node {
 				if pos == i || pos >= total {
 					continue
 				}
-				card := bitsetCard(pdom[pos], words)
-				if card > bestCard {
-					bestCard = card
+				if cardinality[pos] > bestCard {
+					bestCard = cardinality[pos]
 					bestId = pos
 				}
 			}

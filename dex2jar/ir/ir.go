@@ -107,9 +107,12 @@ func (k CategoryKind) isUntyped() bool {
 // Category records a register category at a program point. Allocation is the
 // code-unit offset of new-instance plus one; zero means no allocation identity.
 type Category struct {
-	Kind       CategoryKind
+	// Field order is load-bearing: the descriptor (16 B) and allocation (4 B)
+	// come first so Kind occupies existing tail padding. The previous layout
+	// padded Kind to 8 B and made every dense category cell 32 B instead of 24.
 	Descriptor string
 	Allocation uint32
+	Kind       CategoryKind
 }
 
 // Instruction is one decoded DEX instruction.
@@ -203,6 +206,11 @@ type Method struct {
 	exceptionTypes map[uint32]string
 	// demands records the categories each instruction requires of its operands.
 	demands [][]demand
+	// blockByInstruction provides constant-time instruction-to-block lookup for
+	// allocation shape checks.
+	blockByInstruction []int
+	allocationNew      map[int]bool
+	allocationCtor     map[int]bool
 }
 
 func contextFor(in Input) Context {

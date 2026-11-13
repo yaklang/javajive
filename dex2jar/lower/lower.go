@@ -2,6 +2,7 @@
 package lower
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -45,6 +46,41 @@ type ClassOptions struct {
 	// so assignability must be provable across files. When nil, only the file
 	// being lowered is consulted.
 	Hierarchy map[string]*model.Class
+	// ForceClassShell skips normal lowering and emits a declaration-preserving
+	// shell. Application recovery uses this when a superclass or interface was
+	// reduced to a minimal shell.
+	ForceClassShell bool
+	// RecoveryReason is embedded in diagnostics when ForceClassShell is set.
+	RecoveryReason string
+}
+
+// FailurePolicy controls whether a method-local unsupported capability aborts
+// the class or becomes a verifier-safe throwing stub. Malformed input and
+// internal failures are never eligible for stubbing.
+type FailurePolicy uint8
+
+const (
+	Strict FailurePolicy = iota
+	StubUnsupportedMethods
+	Recover
+)
+
+// StubbedMethod records one concrete method whose body was replaced because
+// the DEX construct is outside the translator's supported capability set.
+type StubbedMethod struct {
+	Method     string
+	Descriptor string
+	Feature    string
+	Message    string
+}
+
+// ClassResult is the classfile and any explicit method degradation evidence.
+type ClassResult struct {
+	Bytes          []byte
+	StubbedMethods []StubbedMethod
+	Recoveries     []Recovery
+	ClassStubbed   bool
+	ClassMinimal   bool
 }
 
 // Class lowers one parser-neutral DEX class. It never returns partial bytes.
@@ -54,40 +90,78 @@ func Class(file *model.File, class *model.Class) ([]byte, error) {
 
 // ClassWithOptions is Class with explicit caller-provided guarantees.
 func ClassWithOptions(file *model.File, class *model.Class, options ClassOptions) ([]byte, error) {
+	result, err := ClassWithPolicy(file, class, options, Strict)
+	return result.Bytes, err
+}
+
+// ClassWithPolicy lowers one DEX class with an explicit unsupported-capability
+// policy. It never returns partial class bytes.
+func ClassWithPolicy(file *model.File, class *model.Class, options ClassOptions, policy FailurePolicy) (ClassResult, error) {
 	if file == nil {
-		return nil, report.New("", "", "", -1, "class", fmt.Errorf("nil DEX file"))
+		return ClassResult{}, report.New("", "", "", -1, "class", fmt.Errorf("nil DEX file"))
 	}
 	if class == nil {
-		return nil, report.New(file.Entry, "", "", -1, "class", fmt.Errorf("nil class"))
+		return ClassResult{}, report.New(file.Entry, "", "", -1, "class", fmt.Errorf("nil class"))
 	}
+	if policy != Strict && policy != StubUnsupportedMethods && policy != Recover {
+		return ClassResult{}, classDiagnostic(file, class, "class", fmt.Errorf("unknown failure policy %d", policy))
+	}
+	if policy == Recover {
+		if options.ForceClassShell {
+			reason := options.RecoveryReason
+			if reason == "" {
+				reason = "application dependency requires a class shell"
+			}
+			return emitClassShell(file, class, options, errors.New(reason), false)
+		}
+		result, err := classWithPolicyOnce(file, class, options, StubUnsupportedMethods)
+		if err == nil {
+			return result, nil
+		}
+		shell, shellErr := emitClassShell(file, class, options, err, false)
+		if shellErr == nil {
+			return shell, nil
+		}
+		shell, reducedErr := emitClassShell(file, class, options, err, true)
+		if reducedErr == nil {
+			return shell, nil
+		}
+		return emitMinimalClassShell(file, class, fmt.Errorf("normal=%v; declaration shell=%v; reduced shell=%v", err, shellErr, reducedErr))
+	}
+	return classWithPolicyOnce(file, class, options, policy)
+}
+
+func classWithPolicyOnce(file *model.File, class *model.Class, options ClassOptions, policy FailurePolicy) (ClassResult, error) {
 	className, err := objectInternalName(class.Descriptor)
 	if err != nil {
-		return nil, classDiagnostic(file, class, "class", err)
+		return ClassResult{}, classDiagnostic(file, class, "class", err)
 	}
 	superName, err := superclassName(class)
 	if err != nil {
-		return nil, classDiagnostic(file, class, "class", err)
+		return ClassResult{}, classDiagnostic(file, class, "class", err)
 	}
 	access, err := classAccess(class.AccessFlags)
 	if err != nil {
-		return nil, classDiagnostic(file, class, "class", err)
+		return ClassResult{}, classDiagnostic(file, class, "class", err)
 	}
 	if class.AccessFlags&dexInterface != 0 && class.Superclass != "Ljava/lang/Object;" {
-		return nil, classDiagnostic(file, class, "class", fmt.Errorf("interface superclass must be java/lang/Object"))
+		return ClassResult{}, classDiagnostic(file, class, "class", fmt.Errorf("interface superclass must be java/lang/Object"))
 	}
 	if interfaceNeedsJava8(class) {
 		// Static and default interface methods require a Java 8 class file. The
-		// translator does not emit StackMapTable, so only methods without
-		// control flow or handlers can use it.
-		if err := validateNoControlFlow(file, class); err != nil {
-			return nil, err
+		// translator does not emit StackMapTable, so ordinary translated methods
+		// may not have control flow or handlers. Throwing stubs are straight-line.
+		if policy == Strict {
+			if err := validateNoControlFlow(file, class); err != nil {
+				return ClassResult{}, err
+			}
 		}
 		builder := classfilebuilder.NewClass(className, superName, access)
 		builder.SetVersion(classfilebuilder.VersionJava8)
-		return lowerClassBody(file, class, builder, options)
+		return lowerClassBody(file, class, builder, options, policy)
 	}
 	builder := classfilebuilder.NewClass(className, superName, access)
-	return lowerClassBody(file, class, builder, options)
+	return lowerClassBody(file, class, builder, options, policy)
 }
 
 // interfaceNeedsJava8 reports whether an interface carries a static or default
@@ -132,7 +206,7 @@ func validateNoControlFlow(file *model.File, class *model.Class) error {
 
 // lowerClassBody emits members and attributes into an already configured
 // builder.
-func lowerClassBody(file *model.File, class *model.Class, builder *classfilebuilder.Class, options ClassOptions) ([]byte, error) {
+func lowerClassBody(file *model.File, class *model.Class, builder *classfilebuilder.Class, options ClassOptions, policy FailurePolicy) (ClassResult, error) {
 	if class.SourceFile != "" {
 		builder.SetSourceFile(class.SourceFile)
 	}
@@ -159,7 +233,7 @@ func lowerClassBody(file *model.File, class *model.Class, builder *classfilebuil
 	if len(class.Annotations) > 0 {
 		translated, err := translateAnnotations(file, class.Annotations)
 		if err != nil {
-			return nil, classDiagnostic(file, class, "annotation", err)
+			return ClassResult{}, classDiagnostic(file, class, "annotation", err)
 		}
 		if translated.signature != "" {
 			builder.SetClassSignature(translated.signature)
@@ -171,36 +245,41 @@ func lowerClassBody(file *model.File, class *model.Class, builder *classfilebuil
 	for _, descriptor := range class.Interfaces {
 		name, err := objectInternalName(descriptor)
 		if err != nil {
-			return nil, classDiagnostic(file, class, "interface", err)
+			return ClassResult{}, classDiagnostic(file, class, "interface", err)
 		}
 		builder.AddInterface(name)
 	}
 	if err := addFields(file, class, builder); err != nil {
-		return nil, err
+		return ClassResult{}, err
 	}
 	seenMethods := make(map[string]bool)
+	var stubbed []StubbedMethod
 	for _, method := range appendMethods(class.DirectMethods, class.VirtualMethods) {
 		if int(method.Method.ProtoIndex) >= len(file.Protos) {
-			return nil, methodDiagnostic(methodContext(file, class, &method), nil, "method", fmt.Errorf("proto index %d is out of range", method.Method.ProtoIndex))
+			return ClassResult{}, methodDiagnostic(methodContext(file, class, &method), nil, "method", fmt.Errorf("proto index %d is out of range", method.Method.ProtoIndex))
 		}
 		descriptor, err := methodDescriptor(file.Protos[method.Method.ProtoIndex])
 		if err != nil {
-			return nil, methodDiagnostic(methodContext(file, class, &method), nil, "method", err)
+			return ClassResult{}, methodDiagnostic(methodContext(file, class, &method), nil, "method", err)
 		}
 		key := method.Method.Name + "\x00" + descriptor
 		if seenMethods[key] {
-			return nil, methodDiagnostic(methodContext(file, class, &method), nil, "method", fmt.Errorf("duplicate method %s%s", method.Method.Name, descriptor))
+			return ClassResult{}, methodDiagnostic(methodContext(file, class, &method), nil, "method", fmt.Errorf("duplicate method %s%s", method.Method.Name, descriptor))
 		}
 		seenMethods[key] = true
-		if err := addMethod(file, class, &method, builder, options); err != nil {
-			return nil, err
+		stub, err := addMethod(file, class, &method, builder, options, policy)
+		if err != nil {
+			return ClassResult{}, err
+		}
+		if stub != nil {
+			stubbed = append(stubbed, *stub)
 		}
 	}
 	raw, err := builder.Bytes()
 	if err != nil {
-		return nil, classDiagnostic(file, class, "classfile", err)
+		return ClassResult{}, classDiagnostic(file, class, "classfile", err)
 	}
-	return raw, nil
+	return ClassResult{Bytes: raw, StubbedMethods: stubbed}, nil
 }
 
 // LowerClass is an explicit-name alias for Class.
@@ -231,6 +310,9 @@ func addFields(file *model.File, class *model.Class, builder *classfilebuilder.C
 		if _, err := fieldKind(field.Field.Type); err != nil {
 			return classDiagnostic(file, class, "field", fmt.Errorf("field %q: %w", field.Field.Name, err))
 		}
+		if err := classfilebuilder.ValidateFieldSymbol(field.Field.Name, field.Field.Type); err != nil {
+			return classDiagnostic(file, class, "field", fmt.Errorf("field %q: %w", field.Field.Name, err))
+		}
 		key := field.Field.Name + "\x00" + field.Field.Type
 		if seen[key] {
 			return classDiagnostic(file, class, "field", fmt.Errorf("duplicate field %s %s", field.Field.Name, field.Field.Type))
@@ -244,8 +326,8 @@ func addFields(file *model.File, class *model.Class, builder *classfilebuilder.C
 		if isStatic != (field.AccessFlags&dexStatic != 0) {
 			return classDiagnostic(file, class, "field", fmt.Errorf("field %q static membership and access flag disagree", field.Field.Name))
 		}
-		if class.AccessFlags&dexInterface != 0 && field.AccessFlags&(dexPublic|dexStatic|dexFinal) != dexPublic|dexStatic|dexFinal {
-			return classDiagnostic(file, class, "field", fmt.Errorf("Java 5 interface field must be public static final"))
+		if err := validateInterfaceFieldShape(class, field.AccessFlags); err != nil {
+			return classDiagnostic(file, class, "field", fmt.Errorf("field %q: %w", field.Field.Name, err))
 		}
 		member := builder.AddField(access, field.Field.Name, field.Field.Type)
 		if isStatic && index < len(class.StaticValues) {
@@ -270,7 +352,11 @@ func addFields(file *model.File, class *model.Class, builder *classfilebuilder.C
 }
 
 func fieldAnnotationsOf(class *model.Class, index uint32) []model.Annotation {
-	for _, entry := range class.FieldAnnotations {
+	if position, ok := class.FieldAnnotationIndex[index]; ok && position >= 0 && position < len(class.FieldAnnotations) {
+		return class.FieldAnnotations[position].Annotations
+	}
+	for position := range class.FieldAnnotations {
+		entry := &class.FieldAnnotations[position]
 		if entry.FieldIndex == index {
 			return entry.Annotations
 		}
@@ -279,7 +365,11 @@ func fieldAnnotationsOf(class *model.Class, index uint32) []model.Annotation {
 }
 
 func methodAnnotationsOf(class *model.Class, index uint32) []model.Annotation {
-	for _, entry := range class.MethodAnnotations {
+	if position, ok := class.MethodAnnotationIndex[index]; ok && position >= 0 && position < len(class.MethodAnnotations) {
+		return class.MethodAnnotations[position].Annotations
+	}
+	for position := range class.MethodAnnotations {
+		entry := &class.MethodAnnotations[position]
 		if entry.MethodIndex == index {
 			return entry.Annotations
 		}
@@ -288,7 +378,11 @@ func methodAnnotationsOf(class *model.Class, index uint32) []model.Annotation {
 }
 
 func parameterAnnotationsOf(class *model.Class, index uint32) [][]model.Annotation {
-	for _, entry := range class.ParameterAnnotations {
+	if position, ok := class.ParameterAnnotationIndex[index]; ok && position >= 0 && position < len(class.ParameterAnnotations) {
+		return class.ParameterAnnotations[position].Parameters
+	}
+	for position := range class.ParameterAnnotations {
+		entry := &class.ParameterAnnotations[position]
 		if entry.MethodIndex == index {
 			return entry.Parameters
 		}
@@ -296,9 +390,9 @@ func parameterAnnotationsOf(class *model.Class, index uint32) [][]model.Annotati
 	return nil
 }
 
-// applyStaticValue turns a non-default encoded static initializer into a
-// ConstantValue attribute. Wide and non-scalar constants stay rejected: the
-// classfile builder has no Long/Float/Double constant pool entries yet.
+// applyStaticValue turns a representable encoded static initializer into a
+// ConstantValue attribute. Values that have no compatible classfile encoding
+// are rejected before mutating the builder.
 func applyStaticValue(file *model.File, class *model.Class, field *model.EncodedField, member *classfilebuilder.Field, builder *classfilebuilder.Class, value model.EncodedValue) error {
 	kind, err := fieldKind(field.Field.Type)
 	if err != nil {
@@ -309,6 +403,9 @@ func applyStaticValue(file *model.File, class *model.Class, field *model.Encoded
 		case model.ValueNull:
 			return nil
 		case model.ValueString:
+			if field.Field.Type != "Ljava/lang/String;" {
+				return classDiagnostic(file, class, "static-value", fmt.Errorf("field %q descriptor %q cannot use a String ConstantValue", field.Field.Name, field.Field.Type))
+			}
 			index := value.Unsigned
 			if index >= uint64(len(file.Strings)) {
 				return classDiagnostic(file, class, "static-value", fmt.Errorf("field %q string index %d is out of range", field.Field.Name, index))
@@ -321,20 +418,23 @@ func applyStaticValue(file *model.File, class *model.Class, field *model.Encoded
 	}
 	switch kind {
 	case ir.Long:
-		if value.Type == model.ValueLong || value.Type == model.ValueInt {
-			builder.SetConstantLong(member, value.Signed)
-			return nil
+		if value.Type != model.ValueLong && value.Type != model.ValueInt {
+			return classDiagnostic(file, class, "static-value", fmt.Errorf("field %q has incompatible long initializer kind %#x", field.Field.Name, value.Type))
 		}
+		builder.SetConstantLong(member, value.Signed)
+		return nil
 	case ir.Float:
-		if value.Type == model.ValueFloat {
-			builder.SetConstantFloat(member, uint32(value.Unsigned))
-			return nil
+		if value.Type != model.ValueFloat {
+			return classDiagnostic(file, class, "static-value", fmt.Errorf("field %q has incompatible float initializer kind %#x", field.Field.Name, value.Type))
 		}
+		builder.SetConstantFloat(member, uint32(value.Unsigned))
+		return nil
 	case ir.Double:
-		if value.Type == model.ValueDouble {
-			builder.SetConstantDouble(member, value.Unsigned)
-			return nil
+		if value.Type != model.ValueDouble {
+			return classDiagnostic(file, class, "static-value", fmt.Errorf("field %q has incompatible double initializer kind %#x", field.Field.Name, value.Type))
 		}
+		builder.SetConstantDouble(member, value.Unsigned)
+		return nil
 	}
 	switch value.Type {
 	case model.ValueBoolean:
@@ -375,63 +475,94 @@ func shrinkSigned(descriptor string, value model.EncodedValue) int32 {
 	}
 }
 
-func addMethod(file *model.File, class *model.Class, method *model.EncodedMethod, builder *classfilebuilder.Class, options ClassOptions) error {
+func addMethod(file *model.File, class *model.Class, method *model.EncodedMethod, builder *classfilebuilder.Class, options ClassOptions, policy FailurePolicy) (*StubbedMethod, error) {
 	ctx := methodContext(file, class, method)
 	if method.Method.Class != class.Descriptor {
-		return methodDiagnostic(ctx, nil, "method", fmt.Errorf("method owner %q does not match class", method.Method.Class))
+		return nil, methodDiagnostic(ctx, nil, "method", fmt.Errorf("method owner %q does not match class", method.Method.Class))
 	}
 	if method.Method.Name == "" {
-		return methodDiagnostic(ctx, nil, "method", fmt.Errorf("method name is empty"))
+		return nil, methodDiagnostic(ctx, nil, "method", fmt.Errorf("method name is empty"))
 	}
 	if int(method.Method.ProtoIndex) >= len(file.Protos) {
-		return methodDiagnostic(ctx, nil, "method", fmt.Errorf("proto index %d is out of range", method.Method.ProtoIndex))
+		return nil, methodDiagnostic(ctx, nil, "method", fmt.Errorf("proto index %d is out of range", method.Method.ProtoIndex))
 	}
 	proto := file.Protos[method.Method.ProtoIndex]
 	descriptor, err := methodDescriptor(proto)
 	if err != nil {
-		return methodDiagnostic(ctx, nil, "method", err)
+		return nil, methodDiagnostic(ctx, nil, "method", err)
+	}
+	if err := classfilebuilder.ValidateMethodSymbol(method.Method.Name, descriptor); err != nil {
+		return nil, methodDiagnostic(ctx, nil, "method", err)
+	}
+	if incomingWords(proto, method.AccessFlags) > 255 {
+		return nil, methodDiagnostic(ctx, nil, "method", fmt.Errorf("parameter word count plus receiver exceeds 255"))
 	}
 	access, err := methodAccess(method.AccessFlags, method.Method.Name)
 	if err != nil {
-		return methodDiagnostic(ctx, nil, "method", err)
+		return nil, methodDiagnostic(ctx, nil, "method", err)
 	}
 	declarationOnly := method.AccessFlags&(dexAbstract|dexNative) != 0
 	if declarationOnly && method.Code != nil {
-		return methodDiagnostic(ctx, nil, "method", fmt.Errorf("abstract/native method has code"))
+		return nil, methodDiagnostic(ctx, nil, "method", fmt.Errorf("abstract/native method has code"))
 	}
 	if !declarationOnly && method.Code == nil {
-		return methodDiagnostic(ctx, nil, "method", fmt.Errorf("concrete method has no code"))
+		return nil, methodDiagnostic(ctx, nil, "method", fmt.Errorf("concrete method has no code"))
 	}
 	if method.Method.Name == "<init>" {
 		if method.AccessFlags&dexStatic != 0 || proto.ReturnType != "V" {
-			return methodDiagnostic(ctx, nil, "method", fmt.Errorf("constructor must be non-static and return void"))
+			return nil, methodDiagnostic(ctx, nil, "method", fmt.Errorf("constructor must be non-static and return void"))
 		}
 	} else if method.AccessFlags&dexConstructor != 0 && method.Method.Name != "<clinit>" {
-		return methodDiagnostic(ctx, nil, "method", fmt.Errorf("constructor access flag is set on a non-initializer method"))
+		return nil, methodDiagnostic(ctx, nil, "method", fmt.Errorf("constructor access flag is set on a non-initializer method"))
 	}
 	if method.Method.Name == "<clinit>" {
 		if method.AccessFlags&dexStatic == 0 || len(proto.Parameters) != 0 || proto.ReturnType != "V" {
-			return methodDiagnostic(ctx, nil, "method", fmt.Errorf("class initializer must be static with descriptor ()V"))
+			return nil, methodDiagnostic(ctx, nil, "method", fmt.Errorf("class initializer must be static with descriptor ()V"))
 		}
 	}
-	if class.AccessFlags&dexInterface != 0 && method.Method.Name != "<clinit>" {
-		if builder.Version() >= classfilebuilder.VersionJava8 {
-			// Java 8 interfaces may carry public static and default methods.
-			if method.AccessFlags&dexPublic == 0 {
-				return methodDiagnostic(ctx, nil, "method", fmt.Errorf("Java 8 interface method must be public"))
+	if err := validateInterfaceMethodShape(class, method, builder.Version()); err != nil {
+		return nil, methodDiagnostic(ctx, nil, "method", err)
+	}
+
+	var built *ir.Method
+	var stub *StubbedMethod
+	if !declarationOnly {
+		built, err = ir.Build(ir.Input{File: file, Class: class, Method: method, SkipFileValidation: options.FileValidated})
+		if err != nil {
+			if policy != StubUnsupportedMethods || !report.IsUnsupported(err) {
+				return nil, err
 			}
-			if method.AccessFlags&dexAbstract == 0 && method.Code == nil {
-				return methodDiagnostic(ctx, nil, "method", fmt.Errorf("interface method has neither code nor the abstract flag"))
+			var capability *report.CapabilityError
+			if !errors.As(err, &capability) {
+				return nil, err
 			}
-		} else if method.AccessFlags&(dexPublic|dexAbstract) != dexPublic|dexAbstract {
-			return methodDiagnostic(ctx, nil, "method", fmt.Errorf("Java 5 interface method must be public abstract"))
+			stub = &StubbedMethod{
+				Method:     method.Method.Name,
+				Descriptor: descriptor,
+				Feature:    capability.Feature,
+				Message:    capability.Error(),
+			}
+		} else if builder.Version() >= classfilebuilder.VersionJava8 && class.AccessFlags&dexInterface != 0 {
+			if len(method.Code.Tries) > 0 || hasControlFlow(built.Instructions) {
+				message := fmt.Sprintf("method %s has control flow, which needs Java 8 stack maps", method.Method.Name)
+				if policy != StubUnsupportedMethods {
+					return nil, classDiagnostic(file, class, "interface", errors.New(message))
+				}
+				stub = &StubbedMethod{
+					Method:     method.Method.Name,
+					Descriptor: descriptor,
+					Feature:    "java8-interface-control-flow",
+					Message:    message,
+				}
+			}
 		}
 	}
+
 	member := builder.AddMethod(access, method.Method.Name, descriptor)
 	if annotations := methodAnnotationsOf(class, method.MethodIndex); len(annotations) > 0 {
 		translated, err := translateAnnotations(file, annotations)
 		if err != nil {
-			return methodDiagnostic(ctx, nil, "method annotation", err)
+			return nil, methodDiagnostic(ctx, nil, "method annotation", err)
 		}
 		if translated.signature != "" {
 			builder.SetMethodSignature(member, translated.signature)
@@ -447,31 +578,20 @@ func addMethod(file *model.File, class *model.Class, method *model.EncodedMethod
 		}
 	}
 	if parameters := parameterAnnotationsOf(class, method.MethodIndex); len(parameters) > 0 {
-		converted := make([][]classfilebuilder.Annotation, len(parameters))
-		visible := make([][]bool, len(parameters))
-		for index, set := range parameters {
-			converted[index] = make([]classfilebuilder.Annotation, 0, len(set))
-			visible[index] = make([]bool, 0, len(set))
-			for _, annotation := range set {
-				if isSystemAnnotation(annotation) {
-					continue
-				}
-				value, err := builderAnnotation(file, annotation)
-				if err != nil {
-					return methodDiagnostic(ctx, nil, "parameter annotation", err)
-				}
-				converted[index] = append(converted[index], value)
-				visible[index] = append(visible[index], annotation.Visibility == model.AnnotationRuntime)
-			}
+		converted, visible, err := translateParameterAnnotations(file, parameters, len(proto.Parameters))
+		if err != nil {
+			return nil, methodDiagnostic(ctx, nil, "parameter annotation", err)
 		}
 		builder.SetMethodParameterAnnotations(member, converted, visible)
 	}
 	if declarationOnly {
-		return nil
+		return nil, nil
 	}
-	built, err := ir.Build(ir.Input{File: file, Class: class, Method: method, SkipFileValidation: options.FileValidated})
-	if err != nil {
-		return err
+	if stub != nil {
+		if err := emitUnsupportedStub(builder, member, stub.Message); err != nil {
+			return nil, methodDiagnostic(ctx, nil, "method stub", err)
+		}
+		return stub, nil
 	}
 	lowerer := methodLowerer{
 		file:             file,
@@ -485,7 +605,80 @@ func addMethod(file *model.File, class *model.Class, method *model.EncodedMethod
 		allocationByCtor: make(map[int]ir.Allocation),
 		hierarchy:        options.Hierarchy,
 	}
-	return lowerer.lower()
+	if err := lowerer.lower(); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+func translateParameterAnnotations(file *model.File, parameters [][]model.Annotation, parameterCount int) ([][]classfilebuilder.Annotation, [][]bool, error) {
+	if len(parameters) != parameterCount {
+		return nil, nil, fmt.Errorf("parameter annotation count %d does not match descriptor parameter count %d", len(parameters), parameterCount)
+	}
+	converted := make([][]classfilebuilder.Annotation, len(parameters))
+	visible := make([][]bool, len(parameters))
+	for index, set := range parameters {
+		converted[index] = make([]classfilebuilder.Annotation, 0, len(set))
+		visible[index] = make([]bool, 0, len(set))
+		for _, annotation := range set {
+			if isSystemAnnotation(annotation) {
+				continue
+			}
+			value, err := builderAnnotation(file, annotation)
+			if err != nil {
+				return nil, nil, err
+			}
+			converted[index] = append(converted[index], value)
+			visible[index] = append(visible[index], annotation.Visibility == model.AnnotationRuntime)
+		}
+	}
+	return converted, visible, nil
+}
+
+func hasControlFlow(instructions []ir.Instruction) bool {
+	for _, instruction := range instructions {
+		if isBranchOpcode(instruction.Opcode) || instruction.Opcode == 0x2b || instruction.Opcode == 0x2c {
+			return true
+		}
+	}
+	return false
+}
+
+func emitUnsupportedStub(builder *classfilebuilder.Class, member *classfilebuilder.Method, reason string) error {
+	const exception = "java/lang/UnsupportedOperationException"
+	reason = sanitizeStubReason(reason)
+	classIndex, err := builder.Pool().Class(exception)
+	if err != nil {
+		return err
+	}
+	messageIndex, err := builder.Pool().String("javajive dex2jar stub: " + reason)
+	if err != nil {
+		return err
+	}
+	constructor, err := builder.Pool().Methodref(exception, "<init>", "(Ljava/lang/String;)V")
+	if err != nil {
+		return err
+	}
+	member.Code().CP(classfilebuilder.NEW, classIndex).
+		Emit(classfilebuilder.DUP).
+		LDC(messageIndex).
+		CP(classfilebuilder.INVOKESPECIAL, constructor).
+		Emit(classfilebuilder.ATHROW)
+	return nil
+}
+
+func sanitizeStubReason(reason string) string {
+	reason = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, reason)
+	runes := []rune(strings.TrimSpace(reason))
+	if len(runes) > 240 {
+		runes = runes[:240]
+	}
+	return string(runes)
 }
 
 func methodDescriptor(proto model.Proto) (string, error) {
@@ -596,6 +789,46 @@ func fieldAccess(flags uint32) (uint16, error) {
 		return 0, fmt.Errorf("field is both final and volatile")
 	}
 	return uint16(flags), nil
+}
+
+func validateInterfaceFieldShape(class *model.Class, flags uint32) error {
+	if class.AccessFlags&dexInterface == 0 {
+		return nil
+	}
+	const required = dexPublic | dexStatic | dexFinal
+	const allowed = required | dexSynthetic
+	if flags&required != required || flags&^allowed != 0 {
+		return fmt.Errorf("interface field must be public static final with only synthetic as an optional flag")
+	}
+	return nil
+}
+
+func validateInterfaceMethodShape(class *model.Class, method *model.EncodedMethod, version uint16) error {
+	if class.AccessFlags&dexInterface == 0 {
+		return nil
+	}
+	if method.Method.Name == "<clinit>" {
+		return nil
+	}
+	if method.Method.Name == "<init>" {
+		return fmt.Errorf("interface must not declare an instance constructor")
+	}
+	if version < classfilebuilder.VersionJava8 {
+		const required = dexPublic | dexAbstract
+		const allowed = required | dexBridge | dexVarargs | dexSynthetic
+		if method.AccessFlags&required != required || method.AccessFlags&^allowed != 0 {
+			return fmt.Errorf("Java 5 interface method must be public abstract with only bridge, varargs, and synthetic as optional flags")
+		}
+		return nil
+	}
+	const allowed = dexPublic | dexStatic | dexAbstract | dexStrict | dexBridge | dexVarargs | dexSynthetic
+	if method.AccessFlags&dexPublic == 0 || method.AccessFlags&^allowed != 0 {
+		return fmt.Errorf("Java 8 interface method has illegal access flags")
+	}
+	if method.AccessFlags&dexAbstract == 0 && method.Code == nil {
+		return fmt.Errorf("interface method has neither code nor the abstract flag")
+	}
+	return nil
 }
 
 func methodAccess(flags uint32, name string) (uint16, error) {

@@ -2,6 +2,7 @@ package rewriter
 
 import (
 	"github.com/yaklang/javajive/internal/jdecenv"
+	utils2 "github.com/yaklang/javajive/internal/utils"
 	"regexp"
 	"strings"
 
@@ -354,12 +355,10 @@ var numberMethodWhitelist = map[string]bool{
 // (longValue/intValue/etc.). This is the Number-specific gate used when Object-safe fails (because
 // the variable has `.longValue()` member access that Object doesn't support but Number does).
 func isNumberSafeWiden(text, name string, objectNames map[string]struct{}) bool {
-	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
-	locs := re.FindAllStringIndex(text, -1)
+	locs := utils2.WordSpans(text, name, nil)
 	if len(locs) == 0 {
 		return false
 	}
-	lhsNameRe := regexp.MustCompile(`\b([A-Za-z_$][\w$]*)\s*=\s*$`)
 	for _, loc := range locs {
 		before := text[:loc[0]]
 		after := text[loc[1]:]
@@ -392,7 +391,7 @@ func isNumberSafeWiden(text, name string, objectNames map[string]struct{}) bool 
 			continue
 		}
 		// RHS into Object-typed local (accept only if LHS name is also in objectNames).
-		if m := lhsNameRe.FindStringSubmatch(before); m != nil {
+		if m := lhsAssignedNameRe.FindStringSubmatch(before); m != nil {
 			if _, ok := objectNames[m[1]]; ok {
 				continue
 			}

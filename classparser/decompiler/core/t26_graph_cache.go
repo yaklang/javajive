@@ -190,6 +190,15 @@ func cloneAnalysis(a *GraphAnalysis) *GraphAnalysis {
 }
 
 func (c *GraphAnalysisCache) getOrCompute(graphID, epoch uint64, kind AnalysisKind, domain GraphAnalysisDomain, succs [][]int) *GraphAnalysis {
+	return cloneAnalysis(c.getOrComputeShared(graphID, epoch, kind, domain, succs))
+}
+
+// getOrComputeShared returns the cache-owned immutable snapshot without the
+// defensive deep copy GetOrCompute performs. It is for scalar queries
+// (Dominates / PostDominates) that only read the result. The returned snapshot
+// must not be mutated or embedded in caller-visible state; holding the pointer
+// across eviction is safe because the value itself is never mutated.
+func (c *GraphAnalysisCache) getOrComputeShared(graphID, epoch uint64, kind AnalysisKind, domain GraphAnalysisDomain, succs [][]int) *GraphAnalysis {
 	key := cacheKey{
 		graphID:    graphID,
 		epoch:      epoch,
@@ -201,7 +210,7 @@ func (c *GraphAnalysisCache) getOrCompute(graphID, epoch uint64, kind AnalysisKi
 	defer c.mu.Unlock()
 	if ent, ok := c.entries[key]; ok {
 		c.lru.MoveToFront(ent.el)
-		return cloneAnalysis(ent.val)
+		return ent.val
 	}
 	n := len(succs)
 	var computed *GraphAnalysis
@@ -244,7 +253,7 @@ func (c *GraphAnalysisCache) getOrCompute(graphID, epoch uint64, kind AnalysisKi
 	if c.lru.Len() > c.capacity {
 		c.evictTailLocked()
 	}
-	return cloneAnalysis(computed)
+	return computed
 }
 
 func (g *SemanticCFG) analysisState() *graphAnalysisState {
@@ -280,53 +289,93 @@ func (g *SemanticCFG) AnalysisNodesTouched() int64 {
 	return g.analysis.cache.NodesTouched()
 }
 
-func (g *SemanticCFG) nodeIndexMap() map[*OpCode]int {
-	m := make(map[*OpCode]int, len(g.Nodes))
-	if g.order != nil && len(g.order) == len(g.Nodes) {
-		for n, i := range g.order {
-			m[n] = i
+func (g *SemanticCFG) initAdjacency() {
+	g.adjacencyOnce.Do(func() {
+		idx := make(map[*OpCode]int, len(g.Nodes))
+		if g.order != nil && len(g.order) == len(g.Nodes) {
+			for n, i := range g.order {
+				idx[n] = i
+			}
+		} else {
+			for i, n := range g.Nodes {
+				idx[n] = i
+			}
 		}
-		return m
+		g.nodeIndexes = idx
+		for mode := range g.successors {
+			includeException := mode == 1
+			succs := make([][]int, len(g.Nodes))
+			seen := make([]map[int]struct{}, len(g.Nodes))
+			for _, e := range g.Edges {
+				if !includeException && e.Kind == EdgeException {
+					continue
+				}
+				u, ok1 := idx[e.From]
+				v, ok2 := idx[e.To]
+				if !ok1 || !ok2 {
+					continue
+				}
+				if seen[u] == nil {
+					seen[u] = map[int]struct{}{}
+				}
+				if _, dup := seen[u][v]; dup {
+					continue
+				}
+				seen[u][v] = struct{}{}
+				succs[u] = append(succs[u], v)
+			}
+			g.successors[mode] = succs
+		}
+	})
+}
+
+func (g *SemanticCFG) nodeIndexMap() map[*OpCode]int {
+	g.initAdjacency()
+	out := make(map[*OpCode]int, len(g.nodeIndexes))
+	for node, index := range g.nodeIndexes {
+		out[node] = index
 	}
-	for i, n := range g.Nodes {
-		m[n] = i
+	return out
+}
+
+func cloneIndexLists(in [][]int) [][]int {
+	out := make([][]int, len(in))
+	for i := range in {
+		out[i] = append([]int(nil), in[i]...)
 	}
-	return m
+	return out
+}
+
+func (g *SemanticCFG) cachedSuccessorIndexLists(includeException bool) [][]int {
+	g.initAdjacency()
+	if includeException {
+		return g.successors[1]
+	}
+	return g.successors[0]
 }
 
 func (g *SemanticCFG) successorIndexLists(includeException bool) [][]int {
-	n := len(g.Nodes)
-	succs := make([][]int, n)
-	if n == 0 {
-		return succs
-	}
-	idx := g.nodeIndexMap()
-	seen := make([]map[int]struct{}, n)
-	for _, e := range g.Edges {
-		if !includeException && e.Kind == EdgeException {
-			continue
-		}
-		u, ok1 := idx[e.From]
-		v, ok2 := idx[e.To]
-		if !ok1 || !ok2 {
-			continue
-		}
-		if seen[u] == nil {
-			seen[u] = map[int]struct{}{}
-		}
-		if _, dup := seen[u][v]; dup {
-			continue
-		}
-		seen[u][v] = struct{}{}
-		succs[u] = append(succs[u], v)
-	}
-	return succs
+	return cloneIndexLists(g.cachedSuccessorIndexLists(includeException))
 }
 
 // GetOrCompute returns a copied analysis snapshot for this immutable CFG.
 func (g *SemanticCFG) GetOrCompute(kind AnalysisKind, domain GraphAnalysisDomain) *GraphAnalysis {
 	st := g.analysisState()
-	return st.cache.getOrCompute(st.id, 0, kind, domain, g.successorIndexLists(domain.IncludeException))
+	return st.cache.getOrCompute(st.id, 0, kind, domain, g.cachedSuccessorIndexLists(domain.IncludeException))
+}
+
+// Dominates is the scalar query used by proofs that only need a yes/no answer.
+// It reuses the cache-owned analysis and allocates nothing; callers must not use
+// it to obtain mutable analysis arrays.
+func (g *SemanticCFG) Dominates(dominator, node int) bool {
+	if g == nil || dominator < 0 || node < 0 {
+		return false
+	}
+	st := g.analysisState()
+	analysis := st.cache.getOrComputeShared(st.id, 0, AnalysisDominators,
+		GraphAnalysisDomain{Roots: []int{0}, IncludeException: true},
+		g.cachedSuccessorIndexLists(true))
+	return analysis != nil && analysis.Dominates(dominator, node)
 }
 
 // Dominates reports whether dominator dominates node in this snapshot.
@@ -389,9 +438,36 @@ func uniqueInts(in []int) []int {
 	return out
 }
 
+type dominatorScratch struct {
+	reach    []bool
+	stack    []int
+	filtered []int
+	succs2   [][]int
+	preds    [][]int
+	rpoIndex []int
+	idom2    []int
+	color    []uint8
+	post     []int
+	frames   []rpoFrame
+}
+
+type rpoFrame struct{ u, i int }
+
+var dominatorScratchPool = sync.Pool{New: func() any { return &dominatorScratch{} }}
+
 func reachableFrom(n int, succs [][]int, roots []int) []bool {
-	mark := make([]bool, n)
-	stack := make([]int, 0, n)
+	mark, _ := reachableFromInto(n, succs, roots, nil, nil)
+	return mark
+}
+
+func reachableFromInto(n int, succs [][]int, roots []int, mark []bool, stack []int) ([]bool, []int) {
+	if cap(mark) < n {
+		mark = make([]bool, n)
+	} else {
+		mark = mark[:n]
+		clear(mark)
+	}
+	stack = stack[:0]
 	for _, r := range roots {
 		if r >= 0 && r < n && !mark[r] {
 			mark[r] = true
@@ -408,18 +484,31 @@ func reachableFrom(n int, succs [][]int, roots []int) []bool {
 			}
 		}
 	}
-	return mark
+	return mark, stack
 }
 
 func reversePostorder(n int, succs [][]int, starts []int) []int {
-	color := make([]uint8, n)
-	post := make([]int, 0, n)
-	type frame struct{ u, i int }
+	return reversePostorderInto(n, succs, starts, &dominatorScratch{})
+}
+
+func reversePostorderInto(n int, succs [][]int, starts []int, scratch *dominatorScratch) []int {
+	if scratch == nil {
+		scratch = &dominatorScratch{}
+	}
+	color := scratch.color
+	if cap(color) < n {
+		color = make([]uint8, n)
+	} else {
+		color = color[:n]
+		clear(color)
+	}
+	post := scratch.post[:0]
+	stack := scratch.frames[:0]
 	for _, s := range starts {
 		if s < 0 || s >= n || color[s] != 0 {
 			continue
 		}
-		stack := []frame{{s, 0}}
+		stack = append(stack, rpoFrame{s, 0})
 		color[s] = 1
 		for len(stack) > 0 {
 			top := &stack[len(stack)-1]
@@ -428,7 +517,7 @@ func reversePostorder(n int, succs [][]int, starts []int) []int {
 				top.i++
 				if v >= 0 && v < n && color[v] == 0 {
 					color[v] = 1
-					stack = append(stack, frame{v, 0})
+					stack = append(stack, rpoFrame{v, 0})
 				}
 				continue
 			}
@@ -440,7 +529,28 @@ func reversePostorder(n int, succs [][]int, starts []int) []int {
 	for i, j := 0, len(post)-1; i < j; i, j = i+1, j-1 {
 		post[i], post[j] = post[j], post[i]
 	}
+	scratch.color = color
+	scratch.post = post
+	scratch.frames = stack
 	return post
+}
+
+func resizeIntLists(lists [][]int, n int) [][]int {
+	if cap(lists) < n {
+		return make([][]int, n)
+	}
+	lists = lists[:n]
+	for i := range lists {
+		lists[i] = lists[i][:0]
+	}
+	return lists
+}
+
+func resizeIntSlice(values []int, n int) []int {
+	if cap(values) < n {
+		return make([]int, n)
+	}
+	return values[:n]
 }
 
 // computeImmediateDominators is the cached Lengauer-style iterative IDom
@@ -454,20 +564,25 @@ func computeImmediateDominators(n int, succs [][]int, roots []int) []int {
 	if n == 0 {
 		return idom
 	}
+	scratch := dominatorScratchPool.Get().(*dominatorScratch)
+	defer dominatorScratchPool.Put(scratch)
 	roots = uniqueInts(roots)
-	reach := reachableFrom(n, succs, roots)
-	filtered := make([]int, 0, len(roots))
+	reach, stack := reachableFromInto(n, succs, roots, scratch.reach, scratch.stack)
+	scratch.reach, scratch.stack = reach, stack[:0]
+	filtered := scratch.filtered[:0]
 	for _, r := range roots {
 		if r >= 0 && r < n && reach[r] {
 			filtered = append(filtered, r)
 		}
 	}
+	scratch.filtered = filtered[:0]
 	if len(filtered) == 0 {
 		return idom
 	}
 	vs := n
 	total := n + 1
-	succs2 := make([][]int, total)
+	succs2 := resizeIntLists(scratch.succs2, total)
+	scratch.succs2 = succs2
 	for i := 0; i < n; i++ {
 		if !reach[i] {
 			continue
@@ -478,22 +593,26 @@ func computeImmediateDominators(n int, succs [][]int, roots []int) []int {
 			}
 		}
 	}
-	succs2[vs] = append([]int(nil), filtered...)
-	preds := make([][]int, total)
+	succs2[vs] = append(succs2[vs][:0], filtered...)
+	preds := resizeIntLists(scratch.preds, total)
+	scratch.preds = preds
 	for u := 0; u < total; u++ {
 		for _, v := range succs2[u] {
 			preds[v] = append(preds[v], u)
 		}
 	}
-	rpo := reversePostorder(total, succs2, []int{vs})
-	rpoIndex := make([]int, total)
+	start := [1]int{vs}
+	rpo := reversePostorderInto(total, succs2, start[:], scratch)
+	rpoIndex := resizeIntSlice(scratch.rpoIndex, total)
+	scratch.rpoIndex = rpoIndex
 	for i := range rpoIndex {
 		rpoIndex[i] = -1
 	}
 	for i, u := range rpo {
 		rpoIndex[u] = i
 	}
-	idom2 := make([]int, total)
+	idom2 := resizeIntSlice(scratch.idom2, total)
+	scratch.idom2 = idom2
 	for i := range idom2 {
 		idom2[i] = -1
 	}
@@ -787,6 +906,16 @@ type MutableAnalysisGraph struct {
 	n     int
 	edges []mutableEdge
 	cache *GraphAnalysisCache
+	// Successor index lists are derived from edges and are rebuilt only when
+	// the epoch changes. Scalar Dominates/PostDominates queries would otherwise
+	// rebuild the same lists on every call.
+	succNormal    [][]int
+	succException [][]int
+	succValid     bool
+	// Scratch arrays reused by buildSuccessorIndexLists across topology epochs.
+	countsScratch []int
+	stampScratch  []uint64
+	markScratch   []uint64
 }
 
 type mutableEdge struct {
@@ -806,11 +935,28 @@ func NewMutableAnalysisGraph(nodes int, cache *GraphAnalysisCache) *MutableAnaly
 	}
 }
 
-func (m *MutableAnalysisGraph) bump() { m.epoch++ }
+func (m *MutableAnalysisGraph) bump() {
+	m.epoch++
+	m.succValid = false
+}
 
 // Epoch is the mutation counter; any add/delete/replace of a node or edge misses
 // previously cached results.
 func (m *MutableAnalysisGraph) Epoch() uint64 { return m.epoch }
+
+// Reset discards every edge and sets a new node count while preserving the
+// graph identity and reusable scratch storage. The epoch advances, so cached
+// analyses for the previous topology remain distinct even if it is later
+// evicted from the LRU.
+func (m *MutableAnalysisGraph) Reset(nodes int) {
+	if nodes < 0 {
+		nodes = 0
+	}
+	m.n = nodes
+	m.edges = m.edges[:0]
+	m.epoch++
+	m.succValid = false
+}
 
 func (m *MutableAnalysisGraph) AddNode() int {
 	id := m.n
@@ -853,30 +999,127 @@ func (m *MutableAnalysisGraph) ReplaceNode(id int) int {
 }
 
 func (m *MutableAnalysisGraph) successorIndexLists(includeException bool) [][]int {
-	succs := make([][]int, m.n)
-	seen := make([]map[int]struct{}, m.n)
+	if !m.succValid {
+		m.succNormal = m.buildSuccessorIndexLists(false)
+		m.succException = m.buildSuccessorIndexLists(true)
+		m.succValid = true
+	}
+	if includeException {
+		return m.succException
+	}
+	return m.succNormal
+}
+
+func (m *MutableAnalysisGraph) buildSuccessorIndexLists(includeException bool) [][]int {
+	// The previous implementation allocated one dedupe map per source node and
+	// let every successor list grow by append. Statement dominance rebuilds this
+	// table after each topology change, so on a loop-heavy method those maps
+	// dominated the analysis allocation. Count first to size each list exactly,
+	// then dedupe with generation stamps over two flat arrays. The successor
+	// table, counts, and stamps are reused across epochs; no analysis result
+	// retains them after computation.
+	n := m.n
+	outer := &m.succNormal
+	if includeException {
+		outer = &m.succException
+	}
+	succs := *outer
+	if cap(succs) < n {
+		succs = make([][]int, n)
+	} else {
+		succs = succs[:n]
+		for i := range succs {
+			succs[i] = succs[i][:0]
+		}
+	}
+	if cap(m.countsScratch) < n {
+		m.countsScratch = make([]int, n)
+	} else {
+		m.countsScratch = m.countsScratch[:n]
+		clear(m.countsScratch)
+	}
+	counts := m.countsScratch
 	for _, e := range m.edges {
 		if !includeException && e.exception {
 			continue
 		}
-		if e.from < 0 || e.from >= m.n || e.to < 0 || e.to >= m.n {
+		if e.from < 0 || e.from >= n || e.to < 0 || e.to >= n {
 			continue
 		}
-		if seen[e.from] == nil {
-			seen[e.from] = map[int]struct{}{}
+		counts[e.from]++
+	}
+	for from, count := range counts {
+		if count > 0 && cap(succs[from]) < count {
+			succs[from] = make([]int, 0, count)
 		}
-		if _, dup := seen[e.from][e.to]; dup {
+	}
+	if cap(m.stampScratch) < n {
+		m.stampScratch = make([]uint64, n)
+	} else {
+		m.stampScratch = m.stampScratch[:n]
+		clear(m.stampScratch)
+	}
+	if cap(m.markScratch) < n {
+		m.markScratch = make([]uint64, n)
+	} else {
+		m.markScratch = m.markScratch[:n]
+		clear(m.markScratch)
+	}
+	stamps, marks := m.stampScratch, m.markScratch
+	var stamp uint64
+	for _, e := range m.edges {
+		if !includeException && e.exception {
 			continue
 		}
-		seen[e.from][e.to] = struct{}{}
+		if e.from < 0 || e.from >= n || e.to < 0 || e.to >= n {
+			continue
+		}
+		if stamps[e.from] == 0 {
+			stamp++
+			stamps[e.from] = stamp
+		}
+		if marks[e.to] == stamps[e.from] {
+			continue
+		}
+		marks[e.to] = stamps[e.from]
 		succs[e.from] = append(succs[e.from], e.to)
 	}
+	*outer = succs
 	return succs
 }
 
 // GetOrCompute is the mutable-graph counterpart of SemanticCFG.GetOrCompute.
 func (m *MutableAnalysisGraph) GetOrCompute(kind AnalysisKind, domain GraphAnalysisDomain) *GraphAnalysis {
 	return m.cache.getOrCompute(m.id, m.epoch, kind, domain, m.successorIndexLists(domain.IncludeException))
+}
+
+// GetOrComputeShared returns the cache-owned analysis without the defensive
+// deep copy. The caller must treat it as read-only and must not retain it past
+// a mutation of this graph. Rewriter-internal analysis state uses it to avoid
+// cloning IDom/IPDom/loop tables at every topology change.
+func (m *MutableAnalysisGraph) GetOrComputeShared(kind AnalysisKind, domain GraphAnalysisDomain) *GraphAnalysis {
+	return m.cache.getOrComputeShared(m.id, m.epoch, kind, domain, m.successorIndexLists(domain.IncludeException))
+}
+
+// Dominates reports whether dominator dominates node in the current graph
+// epoch. Unlike GetOrCompute it does not deep-copy the cached analysis, so it
+// is the scalar query for repeated dominance tests.
+func (m *MutableAnalysisGraph) Dominates(domain GraphAnalysisDomain, dominator, node int) bool {
+	if m == nil || m.cache == nil {
+		return false
+	}
+	analysis := m.cache.getOrComputeShared(m.id, m.epoch, AnalysisDominators, domain, m.successorIndexLists(domain.IncludeException))
+	return analysis != nil && analysis.Dominates(dominator, node)
+}
+
+// PostDominates reports whether post postdominates node in the current graph
+// epoch without copying the cached analysis.
+func (m *MutableAnalysisGraph) PostDominates(domain GraphAnalysisDomain, post, node int) bool {
+	if m == nil || m.cache == nil {
+		return false
+	}
+	analysis := m.cache.getOrComputeShared(m.id, m.epoch, AnalysisPostDominators, domain, m.successorIndexLists(domain.IncludeException))
+	return analysis != nil && analysis.PostDominates(post, node)
 }
 
 func (m *MutableAnalysisGraph) ComputeCount() int64 { return m.cache.ComputeCount() }

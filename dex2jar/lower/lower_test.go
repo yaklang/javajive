@@ -105,6 +105,212 @@ func TestIntArrayPathVerifiesAndExecutes(t *testing.T) {
 	}
 }
 
+func TestUnsupportedMethodStubsWithExplicitPolicy(t *testing.T) {
+	file := &model.File{Entry: "classes.dex", Protos: []model.Proto{{ReturnType: "V"}}}
+	unsupported := func(name string, access uint32, registers, incoming uint16) model.EncodedMethod {
+		return model.EncodedMethod{
+			AccessFlags: access,
+			Method:      model.MethodID{Class: "Ldex/Stubbed;", Name: name, ProtoIndex: 0},
+			Code:        &model.Code{RegistersSize: registers, InsSize: incoming, Instructions: []uint16{0x00fa, 0, 0, 0}},
+		}
+	}
+	class := &model.Class{
+		Descriptor:  "Ldex/Stubbed;",
+		Superclass:  "Ljava/lang/Object;",
+		AccessFlags: dexPublic,
+		DirectMethods: []model.EncodedMethod{
+			unsupported("<init>", dexPublic|dexConstructor, 1, 1),
+			unsupported("<clinit>", dexStatic|dexConstructor, 0, 0),
+			unsupported("bad", dexPublic|dexStatic, 0, 0),
+		},
+	}
+	result, err := ClassWithPolicy(file, class, ClassOptions{}, StubUnsupportedMethods)
+	if err != nil {
+		t.Fatalf("ClassWithPolicy: %v", err)
+	}
+	if len(result.StubbedMethods) != 3 {
+		t.Fatalf("stubbed methods = %#v", result.StubbedMethods)
+	}
+	parsed, err := javaclassparser.Parse(result.Bytes)
+	if err != nil {
+		t.Fatalf("parse stubbed class: %v", err)
+	}
+	if len(parsed.Methods) != 3 {
+		t.Fatalf("methods = %d, want 3", len(parsed.Methods))
+	}
+	for _, method := range parsed.Methods {
+		if len(method.Attributes) == 0 {
+			t.Fatalf("stubbed method has no Code attribute: %#v", method)
+		}
+	}
+}
+
+func TestUnsupportedInterfaceMethodStubsWithExplicitPolicy(t *testing.T) {
+	file := &model.File{Entry: "classes.dex", Protos: []model.Proto{{ReturnType: "V"}}}
+	class := &model.Class{
+		Descriptor:  "Ldex/StubbedInterface;",
+		Superclass:  "Ljava/lang/Object;",
+		AccessFlags: dexPublic | dexInterface | dexAbstract,
+		DirectMethods: []model.EncodedMethod{{
+			AccessFlags: dexPublic | dexStatic,
+			Method:      model.MethodID{Class: "Ldex/StubbedInterface;", Name: "bad", ProtoIndex: 0},
+			Code:        &model.Code{Instructions: []uint16{0x00fa, 0, 0, 0}},
+		}},
+	}
+	result, err := ClassWithPolicy(file, class, ClassOptions{}, StubUnsupportedMethods)
+	if err != nil {
+		t.Fatalf("ClassWithPolicy: %v", err)
+	}
+	if len(result.StubbedMethods) != 1 {
+		t.Fatalf("stubbed methods = %#v", result.StubbedMethods)
+	}
+	parsed, err := javaclassparser.Parse(result.Bytes)
+	if err != nil {
+		t.Fatalf("parse stubbed interface: %v", err)
+	}
+	if parsed.MajorVersion != 52 {
+		t.Fatalf("interface major version = %d, want 52", parsed.MajorVersion)
+	}
+}
+
+func TestUnsupportedStubsVerifyAndThrow(t *testing.T) {
+	javac, javacErr := exec.LookPath("javac")
+	java, javaErr := exec.LookPath("java")
+	if javacErr != nil || javaErr != nil {
+		t.Skip("javac/java unavailable")
+	}
+	tests := []struct {
+		name       string
+		descriptor string
+		access     uint32
+		methodName string
+		registers  uint16
+		incoming   uint16
+		driver     string
+	}{
+		{
+			name:       "constructor",
+			descriptor: "Ldex/StubCtor;",
+			access:     dexPublic | dexConstructor,
+			methodName: "<init>",
+			registers:  1,
+			incoming:   1,
+			driver: `public class Driver {
+    public static void main(String[] args) {
+        try {
+            new dex.StubCtor();
+            throw new AssertionError("constructor returned");
+        } catch (UnsupportedOperationException expected) {
+        }
+    }
+}`,
+		},
+		{
+			name:       "static method",
+			descriptor: "Ldex/StubStatic;",
+			access:     dexPublic | dexStatic,
+			methodName: "bad",
+			registers:  0,
+			incoming:   0,
+			driver: `public class Driver {
+    public static void main(String[] args) {
+        try {
+            dex.StubStatic.bad();
+            throw new AssertionError("method returned");
+        } catch (UnsupportedOperationException expected) {
+        }
+    }
+}`,
+		},
+		{
+			name:       "class initializer",
+			descriptor: "Ldex/StubClinit;",
+			access:     dexStatic,
+			methodName: "<clinit>",
+			registers:  0,
+			incoming:   0,
+			driver: `public class Driver {
+    public static void main(String[] args) throws Exception {
+        try {
+            Class.forName("dex.StubClinit");
+            throw new AssertionError("class initialized");
+        } catch (ExceptionInInitializerError expected) {
+        }
+    }
+}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			file := &model.File{Entry: "classes.dex", Protos: []model.Proto{{ReturnType: "V"}}}
+			class := &model.Class{
+				Descriptor:  test.descriptor,
+				Superclass:  "Ljava/lang/Object;",
+				AccessFlags: dexPublic,
+				DirectMethods: []model.EncodedMethod{{
+					AccessFlags: test.access,
+					Method:      model.MethodID{Class: test.descriptor, Name: test.methodName, ProtoIndex: 0},
+					Code:        &model.Code{RegistersSize: test.registers, InsSize: test.incoming, Instructions: []uint16{0x00fa, 0, 0, 0}},
+				}},
+			}
+			result, err := ClassWithPolicy(file, class, ClassOptions{}, StubUnsupportedMethods)
+			if err != nil {
+				t.Fatalf("ClassWithPolicy: %v", err)
+			}
+			dir := t.TempDir()
+			className := strings.TrimPrefix(strings.TrimSuffix(test.descriptor, ";"), "L")
+			path := filepath.Join(dir, filepath.FromSlash(className)+".class")
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, result.Bytes, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			driver := filepath.Join(dir, "Driver.java")
+			if err := os.WriteFile(driver, []byte(test.driver), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if output, err := exec.Command(javac, "-cp", dir, "-d", dir, driver).CombinedOutput(); err != nil {
+				t.Fatalf("javac driver: %v\n%s", err, output)
+			}
+			if output, err := exec.Command(java, "-Xverify:all", "-cp", dir, "Driver").CombinedOutput(); err != nil {
+				t.Fatalf("stub driver execution: %v\n%s", err, output)
+			}
+		})
+	}
+}
+
+func TestJava8InterfaceControlFlowStubsWithExplicitPolicy(t *testing.T) {
+	file := &model.File{Entry: "classes.dex", Protos: []model.Proto{{ReturnType: "V"}}}
+	class := &model.Class{
+		Descriptor:  "Ldex/StubControlIface;",
+		Superclass:  "Ljava/lang/Object;",
+		AccessFlags: dexPublic | dexInterface | dexAbstract,
+		DirectMethods: []model.EncodedMethod{{
+			AccessFlags: dexPublic | dexStatic,
+			Method:      model.MethodID{Class: "Ldex/StubControlIface;", Name: "bad", ProtoIndex: 0},
+			Code:        &model.Code{Instructions: []uint16{0x0128, 0x000e}},
+		}},
+	}
+	if _, err := ClassWithPolicy(file, class, ClassOptions{}, Strict); err == nil {
+		t.Fatal("strict conversion accepted Java 8 interface control flow")
+	}
+	result, err := ClassWithPolicy(file, class, ClassOptions{}, StubUnsupportedMethods)
+	if err != nil {
+		t.Fatalf("ClassWithPolicy: %v", err)
+	}
+	if len(result.StubbedMethods) != 1 || result.StubbedMethods[0].Feature != "java8-interface-control-flow" {
+		t.Fatalf("stubbed methods = %#v", result.StubbedMethods)
+	}
+	parsed, err := javaclassparser.Parse(result.Bytes)
+	if err != nil {
+		t.Fatalf("parse stubbed interface: %v", err)
+	}
+	if parsed.MajorVersion != 52 || len(parsed.Methods) != 1 {
+		t.Fatalf("interface = version %d, %d methods", parsed.MajorVersion, len(parsed.Methods))
+	}
+}
+
 func TestUnsupportedMethodReturnsNoClassAndDiagnostic(t *testing.T) {
 	file := &model.File{Entry: "classes.dex", Protos: []model.Proto{{ReturnType: "V"}}}
 	class := &model.Class{

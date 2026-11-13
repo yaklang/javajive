@@ -51,7 +51,29 @@ type RewriteManager struct {
 	SwitchNode                 []*core.Node
 	TryNodes                   []*core.Node
 	DominatorMap               map[*core.Node][]*core.Node
-	LabelId                    int
+	// dominance memoizes the dominator/post-dominator analyses for the current
+	// statement CFG topology. Use refreshDominators/Dominates/PostDominates
+	// instead of recomputing or reading the cache directly.
+	dominance *statementDominanceState
+	// loopCache memoizes loop bodies and loop-exit searches for one rewrite
+	// step. Rewrite installs it only around an analysis-only scan and drops it
+	// before any graph mutation, so cached answers always describe the live
+	// graph. Nil means every query recomputes.
+	loopCache   *loopAnalysisCache
+	loopBases   map[loopBodyKey]loopBaseEntry
+	loopScratch loopElementScratch
+	// switchOnly memoizes switchNodeJumpOnlyTargets. Switch tables are built
+	// once by the analyzer and never rewritten, so the per-node result stays
+	// valid for this manager's lifetime; the exit search consults it for every
+	// switch inside a loop body.
+	switchOnly switchOnlyCache
+	// domIndex caches the child->parent dominance query for the current
+	// DominatorMap; topology refreshes invalidate it.
+	domIndex        *utils2.DominateIndex
+	domIndexVersion uint64
+	domMapVersion   uint64
+	domMapDirty     bool
+	LabelId         int
 	// LoopRegionReducible records whether the ORIGINAL method CFG (before any loop wrapping) is a
 	// reducible flow graph. It is computed once in Rewrite() because mid-pipeline the graph gains
 	// do-while wrapper nodes and rewrite-inserted break/continue edges that corrupt dominance, making a
@@ -514,7 +536,7 @@ func (s *RewriteManager) mergeIf() bool {
 				sourceSet.AddList(childNode.Source)
 				if sourceSet.Len() == 1 && CheckCanBeMerge(parentNode, childNode) {
 					if len(childNode.Next) == 1 {
-						childNode.Next = append(childNode.Next, childNode.Next[0])
+						childNode.DuplicateNext(0)
 					}
 					mergeCondition(parentNode, childNode)
 					if nextStNode != nil {
@@ -668,7 +690,7 @@ type NodeExtInfo struct {
 }
 
 func (s *RewriteManager) ScanCoreInfo() error {
-	s.DominatorMap = GenerateDominatorTree(s.RootNode)
+	s.refreshDominatorsShared()
 	nodeExtInfo := map[*core.Node]*NodeExtInfo{}
 	getNodeInfo := func(node *core.Node) *NodeExtInfo {
 		if info, ok := nodeExtInfo[node]; ok {
@@ -952,7 +974,7 @@ func collectSESEMergeConditions(s *RewriteManager, ifNodes *[]*core.Node, mergeN
 	circleSet := utils.NewSet[*core.Node]()
 	circleSet.AddList(circleNodes)
 
-	postDom := GeneratePostDominatorMap(s.RootNode)
+	postDom := s.postDominatorMap()
 
 	for _, current := range sortNodesByID(merges) {
 		if ifNodeSet.Has(current) {
@@ -1015,12 +1037,13 @@ func (s *RewriteManager) Rewrite() error {
 	}
 	// Reducibility must be measured on the pristine CFG, before RebuildLoopNode introduces do-while
 	// wrapper nodes (Id 0) and later passes splice in break/continue edges — both distort dominance.
-	s.LoopRegionReducible = isReducibleCFG(s.RootNode, GenerateDominatorTree(s.RootNode))
+	s.refreshDominatorsShared()
+	s.LoopRegionReducible = isReducibleCFG(s.RootNode, s.DominatorMap)
 	err = RebuildLoopNode(s)
 	if err != nil {
 		return err
 	}
-	s.DominatorMap = GenerateDominatorTree(s.RootNode)
+	s.refreshDominatorsShared()
 	partitionSharedLoopLatches(s)
 	partitionSharedLoopSteps(s)
 	nodeToRewriter := map[*core.Node]rewriterFunc{}
@@ -1055,27 +1078,81 @@ func (s *RewriteManager) Rewrite() error {
 		if err != nil {
 			return err
 		}
-		s.DominatorMap = GenerateDominatorTree(s.RootNode)
+		s.refreshDominatorsShared()
 	}
 	order := protectedSiblingRewriteOrder(s, s.TopologicalSortReverse(keyNodes))
+	// Membership tests below run inside the per-node rewrite loop. The old linear
+	// slices.Contains calls made a large method O(nodes²) before any rewriting
+	// work; index the four manager node classes once instead.
+	trySet := make(map[*core.Node]struct{}, len(s.TryNodes))
+	for _, node := range s.TryNodes {
+		trySet[node] = struct{}{}
+	}
+	ifSet := make(map[*core.Node]struct{}, len(s.IfNodes))
+	for _, node := range s.IfNodes {
+		ifSet[node] = struct{}{}
+	}
+	switchSet := make(map[*core.Node]struct{}, len(s.SwitchNode))
+	for _, node := range s.SwitchNode {
+		switchSet[node] = struct{}{}
+	}
+	whileSet := make(map[*core.Node]struct{}, len(s.WhileNode))
+	for _, node := range s.WhileNode {
+		whileSet[node] = struct{}{}
+	}
+	inSet := func(set map[*core.Node]struct{}, node *core.Node) bool {
+		_, ok := set[node]
+		return ok
+	}
 	loopJmpRewriterRecoed := map[*core.Node]struct{}{}
 	processed := map[*core.Node]struct{}{}
+	// Protected ranges are established by the parser and pre-rewrite
+	// normalization; this loop cannot introduce one into a method that had
+	// none. Check once instead of scanning the graph at every container.
+	loopCacheAllowed := s.loopCacheSafe()
+	if jdecenv.Get("JDEC_LOOP_ANALYSIS_CACHE_OFF") != "1" {
+		// Topology-only loop bodies survive across rewrite steps; the snapshot
+		// diff keeps entries whose loop region was untouched.
+		s.loopBases = map[loopBodyKey]loopBaseEntry{}
+		defer func() { s.loopBases = nil }()
+	}
 	for i := 0; i < len(order); i++ {
-		s.DominatorMap = GenerateDominatorTree(s.RootNode)
+		s.refreshDominatorsShared()
 		node := order[i]
 		if _, done := processed[node]; done {
 			continue
 		}
 
-		isTry := slices.Contains(s.TryNodes, node)
+		// Loop bodies and exits are pure functions of the live graph while the
+		// method has no protected ranges. The two scans below otherwise rebuild
+		// every loop body for every container node; reuse the answers within
+		// this rewrite step and drop them at the first mutation.
+		var loopCache *loopAnalysisCache
+		useLoopCache := func() {
+			if loopCache == nil && loopCacheAllowed {
+				loopCache = newLoopAnalysisCache()
+			}
+			s.loopCache = loopCache
+		}
+		dropLoopCache := func() {
+			s.loopCache = nil
+			loopCache = nil
+		}
+		isTry := inSet(trySet, node)
 		// Protected retry branches need their loop exits before nested ifs
 		// consume the graph. Other loops retain the existing inner-if order.
 		materializeLoopExits := func(protectedRetryOnly bool) error {
-			if isTry || slices.Contains(s.IfNodes, node) || slices.Contains(s.SwitchNode, node) || slices.Contains(s.WhileNode, node) {
+			if isTry || inSet(ifSet, node) || inSet(switchSet, node) || inSet(whileSet, node) {
+				useLoopCache()
+				defer func() { s.loopCache = nil }()
+				// An installed cache proves the method has no protected range,
+				// so retry-continuation queries cannot match and would only
+				// rescan every loop body.
+				noProtected := s.loopCache != nil
 				for j := i; j < len(order); j++ {
 					n := order[j]
-					if slices.Contains(s.WhileNode, n) && (loopOwnsRewriteNode(s, n, node) || (protectedRetryOnly && protectedRetryContinuationOwnsRewriteNode(s, n, node)) || (!protectedRetryOnly && s.LoopRegionReducible && len(n.Next) > 0 && searchCircleEndNode(n, n.Next[0], s.DominatorMap, true) == node)) {
-						if protectedRetryOnly && !loopHasProvedProtectedRetry(s, n) {
+					if inSet(whileSet, n) && (loopOwnsRewriteNodeWith(s, n, node, s.ownsNode) || (protectedRetryOnly && !noProtected && protectedRetryContinuationOwnsRewriteNode(s, n, node)) || (!protectedRetryOnly && s.LoopRegionReducible && len(n.Next) > 0 && s.searchLoopEnd(n, n.Next[0], true) == node)) {
+						if protectedRetryOnly && !noProtected && !loopHasProvedProtectedRetry(s, n) {
 							continue
 						}
 						if isTry && (len(n.Next) == 0 || (n.Next[0] != node && !loopHeaderGuardsTry(s, n, node)) || (hasSharedCatchEntry(node) && !loopHasProvedProtectedRetry(s, n))) {
@@ -1086,7 +1163,7 @@ func (s *RewriteManager) Rewrite() error {
 							// until a nested terminal loop has been wrapped.
 							// Materialize newly exposed exits before this
 							// continuation becomes an opaque IfStatement.
-							if protectedRetryOnly || len(n.Next) == 0 || slices.Contains(n.Next, node) || searchCircleEndNode(n, n.Next[0], s.DominatorMap, s.LoopRegionReducible) != node {
+							if protectedRetryOnly || len(n.Next) == 0 || slices.Contains(n.Next, node) || s.searchLoopEnd(n, n.Next[0], s.LoopRegionReducible) != node {
 								// A loop that already owns this continuation
 								// needs no second pass. Keep looking for an
 								// enclosing loop whose branch also exits here.
@@ -1098,7 +1175,8 @@ func (s *RewriteManager) Rewrite() error {
 							return err
 						}
 						loopJmpRewriterRecoed[n] = struct{}{}
-						s.DominatorMap = GenerateDominatorTree(s.RootNode)
+						dropLoopCache()
+						s.refreshDominatorsShared()
 						break
 					}
 				}
@@ -1120,23 +1198,26 @@ func (s *RewriteManager) Rewrite() error {
 		// needs it and it is zero-regression). Extending it to if containers regressed passing
 		// methods catastrophically when applied globally (5->318), so it is gated behind aggressive
 		// mode: only a method that already failed conservatively takes the if-container path.
-		isAggrIf := s.Aggressive && slices.Contains(s.IfNodes, node)
+		isAggrIf := s.Aggressive && inSet(ifSet, node)
 		if isTry || isAggrIf {
 			body := s.containerBodyNodeSet(node)
 			for _, cand := range order[i+1:] {
 				if _, done := processed[cand]; done {
 					continue
 				}
-				if cand == node || !body[cand] || !slices.Contains(s.IfNodes, cand) {
+				if cand == node || !body[cand] || !inSet(ifSet, cand) {
 					continue
 				}
-				s.DominatorMap = GenerateDominatorTree(s.RootNode)
+				s.refreshDominatorsShared()
 				if err := IfRewriter(s, cand); err != nil {
 					return err
 				}
 				processed[cand] = struct{}{}
 			}
-			s.DominatorMap = GenerateDominatorTree(s.RootNode)
+			s.refreshDominatorsShared()
+			// IfRewriter may have changed statements or edges inside this
+			// container; loop answers collected before it are stale.
+			dropLoopCache()
 		}
 
 		if err := materializeLoopExits(false); err != nil {

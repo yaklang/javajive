@@ -80,7 +80,7 @@ func splitSharedLiteralPhiStores(manager *RewriteManager, condition *core.Node) 
 		changed = true
 	}
 	if changed {
-		manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
+		manager.refreshDominatorsShared()
 	}
 }
 

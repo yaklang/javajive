@@ -49,7 +49,7 @@ func partitionSharedLoopLatches(manager *RewriteManager) {
 		}
 		plan.tail.RemoveAllNext()
 		manager.IfNodes = slices.DeleteFunc(manager.IfNodes, func(n *core.Node) bool { return n == plan.tail })
-		manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
+		manager.refreshDominatorsShared()
 	}
 }
 

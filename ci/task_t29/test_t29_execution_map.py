@@ -85,7 +85,7 @@ class TestExecutionEventMapping(unittest.TestCase):
     def test_pr_ci_stays_a_single_fast_algorithm_gate(self) -> None:
         snap = required_coverage_snapshot(ROOT)
         self.assertEqual(snap["jobs"]["ci.yml"], list(BASELINE_CI_JOBS))
-        self.assertEqual(snap["jobs"]["ci.yml"], ["scope", "source", "regression", "gate"])
+        self.assertEqual(snap["jobs"]["ci.yml"], ["contract", "corpus", "algorithm", "dex", "regression"])
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         self.assertIn("name: Algorithm regression", workflow)
         self.assertRegex(workflow, r"(?m)^\s+timeout-minutes:\s+(?:[1-9]|1[0-5])\s*$")
@@ -93,23 +93,13 @@ class TestExecutionEventMapping(unittest.TestCase):
         validate_fast_cross_scope(workflow)
 
     def test_required_cross_scope_cannot_expand_to_foreign_inputs(self) -> None:
-        reviewed = "\n".join(REQUIRED_CROSS_COMMANDS)
-        validate_fast_cross_scope(reviewed)
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        validate_fast_cross_scope(workflow)
         for command in (
-            "go test ./test/cross",
-            "go test ./test/cross -run .",
-            reviewed.replace("-run '^(", "-run '.*|(", 1),
-            reviewed.replace("-timeout=2m", "-timeout=30m", 1),
-            reviewed.replace("-count=1", "-count=0", 1),
-            reviewed.replace(FAST_REBUILT_JAR_TESTS[0], "TestHistoricalJarAudit", 1),
-            reviewed + "\ngo test ./test/cross",
-            reviewed + "\n" + IRREDUCIBLE_CFG_RUN_COMMAND,
-            reviewed.replace("-json ./test/cross", "-json ./test/cross ./...", 1),
-            reviewed.replace(IRREDUCIBLE_CFG_TEST, "TestHistoricalJarAudit", 1),
-            reviewed.replace("grep -xc", "grep -q", 1),
-            reviewed.replace("-timeout=3m", "-timeout=30m", 1),
-            "\n".join(REQUIRED_CROSS_COMMANDS[:-1]),
-            reviewed + " && go test ./...",
+            workflow + "\n# ./test/cross",
+            workflow.replace(IRREDUCIBLE_CFG_RUN_COMMAND, "go test ./test/cross", 1),
+            workflow.replace(IRREDUCIBLE_CFG_RUN_COMMAND, "", 1),
+            workflow + "\n" + IRREDUCIBLE_CFG_RUN_COMMAND,
             "",
         ):
             with self.subTest(command=command), self.assertRaises(ValueError):
@@ -120,26 +110,17 @@ class TestExecutionEventMapping(unittest.TestCase):
         names = []
         for path in (ROOT / "test" / "cross").glob("*_test.go"):
             names.extend(re.findall(r"(?m)^func (Test\w+)\(t \*testing\.T\)", path.read_text(encoding="utf-8")))
-        for name in (*FAST_REBUILT_JAR_TESTS, IRREDUCIBLE_CFG_TEST):
-            self.assertEqual(names.count(name), 1, msg=name)
+        self.assertEqual(names.count(IRREDUCIBLE_CFG_TEST), 1, msg=IRREDUCIBLE_CFG_TEST)
 
-    def test_ci_summary_requires_every_source_shard(self) -> None:
+    def test_ci_summary_requires_every_sealed_gate(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        source, summary = workflow.split("  regression:\n", 1)
-        self.assertRegex(source, r"shard:\s*\[0,\s*1,\s*2,\s*3,\s*4,\s*5,\s*6,\s*7,\s*8,\s*9\]")
-        self.assertIn('SOURCE_SHARDS: "10"', source)
-        self.assertIn('SOURCE_WORKERS: "5"', source)
-        self.assertIn("fail-fast: false", source)
-        self.assertIn("needs: [scope, source, regression]", summary)
+        _, summary = workflow.split("  regression:\n", 1)
+        self.assertIn("needs: [contract, corpus, algorithm, dex]", summary)
         self.assertIn("if: always()", summary)
-        self.assertIn("SCOPE_RESULT: ${{ needs.scope.result }}", summary)
-        self.assertIn("SOURCE_RESULT: ${{ needs.source.result }}", summary)
-        self.assertIn("REGRESSION_RESULT: ${{ needs.regression.result }}", summary)
-        self.assertIn("CLASSPARSER: ${{ needs.scope.outputs.classparser }}", summary)
-        self.assertIn('test "$SCOPE_RESULT" = success', summary)
-        self.assertIn('test "$REGRESSION_RESULT" = success', summary)
-        self.assertIn('true) test "$SOURCE_RESULT" = success', summary)
-        self.assertIn("skipped|success", summary)
+        for result in ("CONTRACT_RESULT", "CORPUS_RESULT", "ALGORITHM_RESULT", "DEX_RESULT"):
+            self.assertIn(f'test "${result}" = success', summary)
+        self.assertNotIn("SOURCE_SHARDS", workflow)
+        self.assertNotIn("setup-java", workflow)
 
     def test_slow_contracts_remain_manual_and_discoverable(self) -> None:
         workflows = ROOT / ".github" / "workflows"

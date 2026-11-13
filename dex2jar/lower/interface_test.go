@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	javaclassparser "github.com/yaklang/javajive/classparser"
@@ -59,6 +60,62 @@ func interfaceStaticFixture() (*model.File, *model.Class) {
 		},
 	}
 	return file, class
+}
+
+func TestLowerRejectsIllegalInterfaceMemberShapes(t *testing.T) {
+	const owner = "Ldex/IllegalInterface;"
+	tests := []struct {
+		name    string
+		prepare func(*model.File, *model.Class)
+		want    string
+	}{
+		{
+			name: "field visibility",
+			prepare: func(_ *model.File, class *model.Class) {
+				class.StaticFields = []model.EncodedField{{
+					AccessFlags: dexPrivate | dexStatic | dexFinal,
+					Field:       model.FieldID{Class: owner, Name: "VALUE", Type: "I"},
+				}}
+			},
+			want: "interface field must be public static final",
+		},
+		{
+			name: "instance constructor",
+			prepare: func(file *model.File, class *model.Class) {
+				class.DirectMethods = []model.EncodedMethod{{
+					AccessFlags: dexPublic | dexConstructor,
+					Method:      model.MethodID{Class: owner, Name: "<init>", ProtoIndex: 0},
+					Code:        &model.Code{RegistersSize: 1, InsSize: 1, Instructions: []uint16{0x000e}},
+				}}
+				file.Protos = []model.Proto{{ReturnType: "V"}}
+			},
+			want: "interface must not declare an instance constructor",
+		},
+		{
+			name: "abstract static method",
+			prepare: func(file *model.File, class *model.Class) {
+				class.DirectMethods = []model.EncodedMethod{{
+					AccessFlags: dexPublic | dexStatic | dexAbstract,
+					Method:      model.MethodID{Class: owner, Name: "run", ProtoIndex: 0},
+				}}
+				file.Protos = []model.Proto{{ReturnType: "V"}}
+			},
+			want: "abstract method has incompatible access flags",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			file := &model.File{Entry: "classes.dex"}
+			class := &model.Class{Descriptor: owner, Superclass: "Ljava/lang/Object;", AccessFlags: dexPublic | dexInterface | dexAbstract}
+			test.prepare(file, class)
+			if _, err := ClassWithPolicy(file, class, ClassOptions{}, Recover); err != nil {
+				t.Fatalf("Recover should fall back to a minimal shell: %v", err)
+			}
+			if _, err := Class(file, class); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Class error = %v, want %q", err, test.want)
+			}
+		})
+	}
 }
 
 func TestLowerInterfaceStaticMethodsVerifyAndExecute(t *testing.T) {

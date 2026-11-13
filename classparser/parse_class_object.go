@@ -341,6 +341,9 @@ func parseWithMetadataLayout(reader *ClassReader, offsets map[*MemberInfo]int, l
 		if err := obj.CheckUtf8UseSites(); err != nil {
 			return nil, err
 		}
+		if err := obj.CheckConstantPoolLinks(); err != nil {
+			return nil, err
+		}
 	}
 	if err := reader.work.CheckContext(reader.context); err != nil {
 		return nil, err

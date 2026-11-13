@@ -19,6 +19,24 @@ func NewSet[T comparable](list ...[]T) *Set[T] {
 	return s
 }
 
+// NewSetFromMap takes ownership of m. It lets a caller build a set with a
+// plain map (no per-element locking) and publish it as a Set afterwards. The
+// caller must not retain or mutate m after the call.
+func NewSetFromMap[T comparable](m map[T]struct{}) *Set[T] {
+	if m == nil {
+		m = make(map[T]struct{})
+	}
+	return &Set[T]{m: m}
+}
+
+// NewSetSized allocates a set whose backing map is sized for n elements.
+func NewSetSized[T comparable](n int) *Set[T] {
+	if n < 0 {
+		n = 0
+	}
+	return &Set[T]{m: make(map[T]struct{}, n)}
+}
+
 //func main() {
 //	// Initialize our Set
 //	s := New()
@@ -63,6 +81,33 @@ func (s *Set[T]) AddList(items []T) {
 	}
 }
 
+// CloneWithList copies the set under a single read lock and returns the copied
+// elements. It is cheaper than NewSetSized plus Add because it does not take a
+// write lock per element.
+func (s *Set[T]) CloneWithList() (*Set[T], []T) {
+	s.RLock()
+	defer s.RUnlock()
+	dst := make(map[T]struct{}, len(s.m))
+	list := make([]T, 0, len(s.m))
+	for item := range s.m {
+		dst[item] = struct{}{}
+		list = append(list, item)
+	}
+	return &Set[T]{m: dst}, list
+}
+
+// ContainsAll reports whether every item is present, taking one read lock.
+func (s *Set[T]) ContainsAll(items []T) bool {
+	s.RLock()
+	defer s.RUnlock()
+	for _, item := range items {
+		if _, ok := s.m[item]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // Remove deletes the specified item from the map
 func (s *Set[T]) Remove(item T) {
 	s.Lock()
@@ -81,6 +126,13 @@ func (s *Set[T]) Has(item T) bool {
 // Len returns the number of items in a set.
 func (s *Set[T]) Len() int {
 	return len(s.List())
+}
+
+// Size returns the number of items without materializing a list.
+func (s *Set[T]) Size() int {
+	s.RLock()
+	defer s.RUnlock()
+	return len(s.m)
 }
 
 // Clear removes all items from the set
@@ -110,10 +162,28 @@ func (s *Set[T]) List() []T {
 }
 
 func (s *Set[T]) ForEach(h func(T)) {
+	if s == nil {
+		return
+	}
 	s.RLock()
 	defer s.RUnlock()
 	for item := range s.m {
 		h(item)
+	}
+}
+
+// ForEachWhile iterates until the handler returns false. It avoids the
+// allocation of List for callers that only scan or stop at the first match.
+func (s *Set[T]) ForEachWhile(h func(T) bool) {
+	if s == nil {
+		return
+	}
+	s.RLock()
+	defer s.RUnlock()
+	for item := range s.m {
+		if !h(item) {
+			return
+		}
 	}
 }
 

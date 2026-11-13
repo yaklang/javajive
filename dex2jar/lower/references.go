@@ -2,6 +2,7 @@ package lower
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -11,19 +12,104 @@ import (
 
 const nullDescriptor = "<null>"
 
-type referenceState []map[string]bool
+// descriptorSet is an immutable sorted set. States share these slices, so a
+// fixpoint copy is shallow and a merge allocates only when the union grows.
+type descriptorSet []string
+
+// referenceState is sparse: only registers with a provable reference descriptor
+// appear. The previous dense []map[string]bool allocated one map per register
+// for every block and deep-copied all of them on every pass.
+type referenceState map[uint16]descriptorSet
+
+func (s referenceState) setOne(register uint16, descriptor string) {
+	if descriptor == "" {
+		return
+	}
+	s[register] = descriptorSet{descriptor}
+}
+
+func (s referenceState) set(register uint16, descriptors descriptorSet) {
+	if len(descriptors) == 0 {
+		delete(s, register)
+		return
+	}
+	s[register] = descriptors
+}
+
+func descriptorSetsEqual(left, right descriptorSet) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for _, descriptor := range left {
+		found := false
+		for _, other := range right {
+			if descriptor == other {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func unionDescriptorSets(left, right descriptorSet) descriptorSet {
+	if len(left) == 0 {
+		return right
+	}
+	if len(right) == 0 {
+		return left
+	}
+	newCount := 0
+	for _, descriptor := range right {
+		present := false
+		for _, existing := range left {
+			if existing == descriptor {
+				present = true
+				break
+			}
+		}
+		if !present {
+			newCount++
+		}
+	}
+	if newCount == 0 {
+		// No new descriptor: keep sharing the original immutable set instead of
+		// retaining a fresh identical copy on every fixpoint pass.
+		return left
+	}
+	out := make(descriptorSet, len(left), len(left)+newCount)
+	copy(out, left)
+	for _, descriptor := range right {
+		present := false
+		for _, existing := range out {
+			if existing == descriptor {
+				present = true
+				break
+			}
+		}
+		if !present {
+			out = append(out, descriptor)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
 
 func (l *methodLowerer) validateReferenceUses() error {
-	entry := newReferenceState(int(l.method.Code.RegistersSize))
+	registerCount := int(l.method.Code.RegistersSize)
+	entry := newReferenceState(registerCount)
 	parameter := int(l.method.Code.RegistersSize - l.method.Code.InsSize)
 	if l.encoded.AccessFlags&dexStatic == 0 {
-		entry[parameter][l.class.Descriptor] = true
+		entry.setOne(uint16(parameter), l.class.Descriptor)
 		parameter++
 	}
 	for _, descriptor := range l.method.Proto.Parameters {
 		kind, _ := ir.DescriptorCategory(descriptor)
-		if kind == ir.Reference && parameter < len(entry) {
-			entry[parameter][descriptor] = true
+		if kind == ir.Reference && parameter < registerCount {
+			entry.setOne(uint16(parameter), descriptor)
 		}
 		// A category-2 parameter occupies two registers, so later parameters
 		// start after both of them.
@@ -32,8 +118,8 @@ func (l *methodLowerer) validateReferenceUses() error {
 	in := make([]referenceState, len(l.method.Blocks))
 	out := make([]referenceState, len(l.method.Blocks))
 	for index := range l.method.Blocks {
-		in[index] = newReferenceState(len(entry))
-		out[index] = newReferenceState(len(entry))
+		in[index] = newReferenceState(registerCount)
+		out[index] = newReferenceState(registerCount)
 	}
 	in[0] = copyReferenceState(entry)
 	limit := len(l.method.Blocks)*int(l.method.Code.RegistersSize+1) + 1
@@ -41,7 +127,7 @@ func (l *methodLowerer) validateReferenceUses() error {
 		changed := false
 		for blockIndex, block := range l.method.Blocks {
 			if blockIndex != 0 {
-				merged := newReferenceState(len(entry))
+				merged := newReferenceState(registerCount)
 				if block.Handler {
 					merged = l.handlerReferenceEntry(blockIndex, in, out)
 				} else {
@@ -136,7 +222,7 @@ func (l *methodLowerer) checkReferenceInstruction(index int, state referenceStat
 		// registers hold that object, not whatever an earlier lifetime left
 		// behind.
 		for _, register := range allocation.AliasRegisters {
-			state[register] = map[string]bool{allocation.Descriptor: true}
+			state.setOne(register, allocation.Descriptor)
 		}
 	}
 	check := func(register uint16, expected, role string) error {
@@ -146,7 +232,7 @@ func (l *methodLowerer) checkReferenceInstruction(index int, state referenceStat
 		if len(state[register]) == 0 {
 			return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("%s v%d has no provable reference descriptor", role, register))
 		}
-		for actual := range state[register] {
+		for _, actual := range state[register] {
 			if !l.provablyAssignable(actual, expected) {
 				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("%s v%d descriptor %q is not provably assignable to %q", role, register, actual, expected))
 			}
@@ -219,11 +305,13 @@ func (l *methodLowerer) checkReferenceInstruction(index int, state referenceStat
 
 func (l *methodLowerer) transferReferences(index int, state referenceState) {
 	instruction := l.method.Instructions[index]
-	set := func(register uint16, descriptors map[string]bool) {
-		state[register] = copyDescriptorSet(descriptors)
+	// descriptorSets are immutable, so assigning one shares it instead of
+	// copying every descriptor on every instruction.
+	set := func(register uint16, descriptors descriptorSet) {
+		state.set(register, descriptors)
 	}
 	setOne := func(register uint16, descriptor string) {
-		state[register] = map[string]bool{descriptor: true}
+		state.setOne(register, descriptor)
 	}
 	if allocation, ok := l.allocationByCtor[index]; ok {
 		for _, register := range allocation.AliasRegisters {
@@ -269,10 +357,10 @@ func (l *methodLowerer) transferReferences(index int, state referenceState) {
 	case instruction.Opcode == 0x22 || instruction.Opcode == 0x23:
 		setOne(instruction.Regs[0], l.file.Types[instruction.Index].Descriptor)
 	case instruction.Opcode == 0x46:
-		components := make(map[string]bool)
-		for array := range state[instruction.Regs[1]] {
+		var components descriptorSet
+		for _, array := range state[instruction.Regs[1]] {
 			if strings.HasPrefix(array, "[") {
-				components[array[1:]] = true
+				components = unionDescriptorSets(components, descriptorSet{array[1:]})
 			}
 		}
 		set(instruction.Regs[0], components)
@@ -285,11 +373,11 @@ func (l *methodLowerer) transferReferences(index int, state referenceState) {
 	}
 }
 
-func (l *methodLowerer) checkArrayDescriptors(instruction *ir.Instruction, descriptors map[string]bool, component string) error {
+func (l *methodLowerer) checkArrayDescriptors(instruction *ir.Instruction, descriptors descriptorSet, component string) error {
 	if len(descriptors) == 0 {
 		return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("array register has no provable descriptor"))
 	}
-	for descriptor := range descriptors {
+	for _, descriptor := range descriptors {
 		if descriptor == nullDescriptor {
 			continue
 		}
@@ -434,34 +522,29 @@ func (l *methodLowerer) provablyAssignable(actual, expected string) bool {
 }
 
 func newReferenceState(registers int) referenceState {
-	state := make(referenceState, registers)
-	for index := range state {
-		state[index] = make(map[string]bool)
+	// Only non-empty registers are stored. Cap the hint: large register files
+	// are usually sparse even when every register is allocated.
+	hint := registers / 4
+	if hint > 32 {
+		hint = 32
 	}
-	return state
+	if hint < 0 {
+		hint = 0
+	}
+	return make(referenceState, hint)
 }
 
 func copyReferenceState(source referenceState) referenceState {
-	result := newReferenceState(len(source))
-	for register := range source {
-		result[register] = copyDescriptorSet(source[register])
-	}
-	return result
-}
-
-func copyDescriptorSet(source map[string]bool) map[string]bool {
-	result := make(map[string]bool, len(source))
-	for descriptor := range source {
-		result[descriptor] = true
+	result := make(referenceState, len(source))
+	for register, descriptors := range source {
+		result[register] = descriptors
 	}
 	return result
 }
 
 func mergeReferenceState(destination, source referenceState) {
-	for register := range destination {
-		for descriptor := range source[register] {
-			destination[register][descriptor] = true
-		}
+	for register, descriptors := range source {
+		destination[register] = unionDescriptorSets(destination[register], descriptors)
 	}
 }
 
@@ -469,14 +552,9 @@ func referenceStatesEqual(left, right referenceState) bool {
 	if len(left) != len(right) {
 		return false
 	}
-	for register := range left {
-		if len(left[register]) != len(right[register]) {
+	for register, descriptors := range left {
+		if !descriptorSetsEqual(descriptors, right[register]) {
 			return false
-		}
-		for descriptor := range left[register] {
-			if !right[register][descriptor] {
-				return false
-			}
 		}
 	}
 	return true

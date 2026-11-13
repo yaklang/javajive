@@ -135,7 +135,7 @@ func (d *Decompiler) canInlineGuardedCallTemp(root []statements.Statement, produ
 	if operation.Effects&values.EffectCall == 0 || operation.Effects&values.EffectOpaque != 0 {
 		return false
 	}
-	conditionPC, ok := d.opcodeIndexToOffset[ternary.ConditionFromOp]
+	conditionPC, ok := d.opcodeOffsetByID(ternary.ConditionFromOp)
 	if !ok || call.OriginPC <= int(conditionPC) {
 		// The original branch must precede the invoke. Otherwise this may be a real
 		// eager call followed by a null test, whose exception behavior must be kept.

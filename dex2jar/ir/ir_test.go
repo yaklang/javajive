@@ -1,6 +1,7 @@
 package ir
 
 import (
+	"math"
 	"strings"
 	"testing"
 
@@ -32,6 +33,20 @@ func fixture(code []uint16, registers, ins uint16, proto model.Proto, flags uint
 		Code:        &model.Code{RegistersSize: registers, InsSize: ins, OutsSize: 8, Instructions: code},
 	}
 	return Input{File: file, Class: class, Method: method}
+}
+
+func TestBuildRejectsAmplifiedRegisterStateSpace(t *testing.T) {
+	words := make([]uint16, 65)
+	for index := range words {
+		words[index] = 0x000e
+	}
+	_, err := Build(fixture(words, math.MaxUint16, 0, model.Proto{ReturnType: "V"}, dexAccessStatic))
+	if err == nil || !strings.Contains(err.Error(), "instruction/register state space") || !strings.Contains(err.Error(), "exceeds limit") {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if report.IsUnsupported(err) {
+		t.Fatalf("resource error was marked unsupported: %v", err)
+	}
 }
 
 func TestBuildRejectsInsufficientOutsSize(t *testing.T) {
@@ -516,6 +531,35 @@ func filledArrayInput(typeDescriptor string, words []uint16) Input {
 		Code:        &model.Code{RegistersSize: 2, OutsSize: 2, Instructions: words},
 	}
 	return Input{File: file, Class: class, Method: method}
+}
+
+func TestBuildMarksOnlyKnownCapabilityFailuresUnsupported(t *testing.T) {
+	tests := []struct {
+		name string
+		in   Input
+	}{
+		{
+			name: "opcode family",
+			in:   fixture([]uint16{0x00fe, 0x0000}, 1, 0, model.Proto{ReturnType: "V"}, dexAccessStatic),
+		},
+		{
+			name: "filled new array element",
+			in:   filledArrayInput("[J", []uint16{0x1024, 0x0000, 0x0000, 0x000c, 0x0011}),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Build(test.in)
+			if err == nil || !report.IsUnsupported(err) {
+				t.Fatalf("Build() error = %v, want typed unsupported capability", err)
+			}
+		})
+	}
+
+	malformed := filledArrayInput("I", []uint16{0x1024, 0x0000, 0x0000, 0x000c, 0x0011})
+	if _, err := Build(malformed); err == nil || report.IsUnsupported(err) {
+		t.Fatalf("malformed Build() error = %v, want non-capability diagnostic", err)
+	}
 }
 
 func TestBuildRejectsMalformedFilledNewArray(t *testing.T) {

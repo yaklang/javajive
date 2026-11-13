@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	fi "github.com/yaklang/javajive/internal/filesys/filesys_interface"
+	"github.com/yaklang/javajive/internal/inputkind"
 	"github.com/yaklang/javajive/internal/memfile"
 	"github.com/yaklang/javajive/internal/utils"
 	"github.com/yaklang/javajive/internal/workbudget"
@@ -336,6 +337,10 @@ func NewZipFSFromStringWithOptions(i string, opts ...ZipFSOption) (*ZipFS, error
 
 // NewZipFSFromLocalWithOptions 从本地文件构造带密码 ZipFS
 // 关键词: ZipFS 密码构造, NewZipFSFromLocalWithOptions
+//
+// JMOD files carry a four-byte "JM\x01\x00" prefix before the embedded ZIP.
+// The prefix is stripped automatically so JMOD inputs behave like ordinary
+// archives throughout the class parser and archive exporter.
 func NewZipFSFromLocalWithOptions(i string, opts ...ZipFSOption) (*ZipFS, error) {
 	local := NewLocalFs()
 	f, err := local.Open(i)
@@ -352,7 +357,17 @@ func NewZipFSFromLocalWithOptions(i string, opts ...ZipFSOption) (*ZipFS, error)
 		f.Close()
 		return nil, err
 	}
-	return NewZipFSRawWithCloserAndOptions(ra, info.Size(), f, opts...)
+	size := info.Size()
+	var header [inputkind.JMODHeaderSize]byte
+	if n, readErr := ra.ReadAt(header[:], 0); (readErr == nil || readErr == io.EOF) && n == len(header) && inputkind.IsJMODHeader(header[:]) {
+		if size <= int64(inputkind.JMODHeaderSize) {
+			f.Close()
+			return nil, utils.Errorf("JMOD %s is truncated", i)
+		}
+		section := io.NewSectionReader(ra, int64(inputkind.JMODHeaderSize), size-int64(inputkind.JMODHeaderSize))
+		return NewZipFSRawWithCloserAndOptions(section, size-int64(inputkind.JMODHeaderSize), f, opts...)
+	}
+	return NewZipFSRawWithCloserAndOptions(ra, size, f, opts...)
 }
 
 // buildZipFS 是 ZipFS 构造的内部统一入口

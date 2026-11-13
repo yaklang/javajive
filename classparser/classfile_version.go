@@ -21,3 +21,23 @@ func ValidateSupportedClassMajor(major uint16) error {
 	}
 	return nil
 }
+
+// ValidateClassMinor reports malformed major/minor combinations while keeping
+// Parse permissive for future classfile versions. Since Java 12, 65535 marks a
+// preview class; preview semantics are a decompiler capability boundary rather
+// than malformed input.
+func ValidateClassMinor(major, minor uint16) error {
+	if major == 45 {
+		if minor <= 3 {
+			return nil
+		}
+		return fmt.Errorf("invalid_classfile_version: major 45 minor %d exceeds 3", minor)
+	}
+	if minor == 0 {
+		return nil
+	}
+	if major >= 56 && minor == 0xffff {
+		return fmt.Errorf("unsupported_classfile_preview: major %d uses preview minor 65535", major)
+	}
+	return fmt.Errorf("invalid_classfile_version: major %d requires minor 0, got %d", major, minor)
+}

@@ -76,7 +76,7 @@ func materializeHandlerLoopTails(manager *RewriteManager, region *core.Node) {
 		transfer.AddNext(p.loop)
 	}
 	if len(plans) > 0 {
-		manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
+		manager.refreshDominatorsShared()
 	}
 }
 

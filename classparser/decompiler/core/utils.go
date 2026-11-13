@@ -192,11 +192,11 @@ func WalkGraph[T comparable](node T, next func(T) ([]T, error)) error {
 }
 
 func StatementsString(statements []statements.Statement, funcCtx *class_context.ClassContext) string {
-	var res string
+	var res strings.Builder
 	for _, statement := range statements {
-		res += statement.String(funcCtx)
+		res.WriteString(statement.String(funcCtx))
 	}
-	return res
+	return res.String()
 }
 
 func VisitBody(raw statements.Statement, f func(statement statements.Statement) statements.Statement) statements.Statement {

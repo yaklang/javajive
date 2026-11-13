@@ -1,6 +1,8 @@
 package ir
 
 import (
+	"math"
+	"strings"
 	"testing"
 
 	"github.com/yaklang/javajive/dex2jar/model"
@@ -56,6 +58,63 @@ func TestDecodeSparseSwitchSortsKeys(t *testing.T) {
 	// Sorting must keep every key attached to its own target.
 	if switchInstruction.Targets[0] != 9 || switchInstruction.Targets[1] != 3 {
 		t.Fatalf("sparse targets = %v, want the pair for each key", switchInstruction.Targets)
+	}
+}
+
+func TestDecodeRejectsInvalidSignedPayloadTargets(t *testing.T) {
+	tests := []struct {
+		name  string
+		words []uint16
+		want  string
+	}{
+		{
+			name:  "negative switch",
+			words: []uint16{0x002b, 0xffff, 0xffff},
+			want:  "switch payload target -1 is outside code units [0,3)",
+		},
+		{
+			name:  "wrapped switch",
+			words: []uint16{0x002b, 0x0000, 0x8000},
+			want:  "switch payload target -2147483648 is outside code units [0,3)",
+		},
+		{
+			name:  "final word switch",
+			words: []uint16{0x002b, 0x0003, 0x0000, 0x0100},
+			want:  "switch payload at 3 has a truncated header",
+		},
+		{
+			name:  "negative fill array",
+			words: []uint16{0x0026, 0xffff, 0xffff},
+			want:  "fill-array-data payload target -1 is outside code units [0,3)",
+		},
+		{
+			name:  "final word fill array",
+			words: []uint16{0x0026, 0x0003, 0x0000, 0x0300},
+			want:  "fill-array-data payload at 3 has a truncated header",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Decode(&model.Code{Instructions: test.words}, Context{Entry: "classes.dex", Class: "LC;", Method: "m"})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Decode() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestPayloadIndexingRejectsWrappedAndTruncatedRanges(t *testing.T) {
+	if _, _, _, err := decodeSwitchPayload([]uint16{0x0100, 0}, int64(math.MaxUint32)+1, 0, false); err == nil || !strings.Contains(err.Error(), "outside code units") {
+		t.Fatalf("decodeSwitchPayload() error = %v", err)
+	}
+	if _, _, err := decodeFillArrayPayload([]uint16{0x0300, 1, 0, 0}, int64(math.MaxUint32)+1); err == nil || !strings.Contains(err.Error(), "outside code units") {
+		t.Fatalf("decodeFillArrayPayload() error = %v", err)
+	}
+	if _, _, _, err := decodeSwitchPayload([]uint16{0x0100, 1, 0, 0, 0}, 0, 0, false); err == nil || !strings.Contains(err.Error(), "truncated") {
+		t.Fatalf("decodeSwitchPayload() error = %v", err)
+	}
+	if _, _, err := decodeFillArrayPayload([]uint16{0x0300, 8, 1, 0}, 0); err == nil || !strings.Contains(err.Error(), "truncated") {
+		t.Fatalf("decodeFillArrayPayload() error = %v", err)
 	}
 }
 

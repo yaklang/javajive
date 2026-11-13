@@ -1,5 +1,277 @@
 # Changelog
 
+## Unreleased — 2026-11-10
+
+Universal input containers across the Java archive and Android pipelines, plus
+bounded failure recovery for malformed and partially unsupported inputs.
+
+- Harden adversarial Java ecosystem boundaries: reject JImage count and
+  decompression amplification before allocation, bound compact-cp reconstruction,
+  reject truncated AES ZIP metadata, verify zero-valued CRC fields, and cover the
+  cases with deterministic tests and fuzz seeds.
+- Make flat and structured archive exports honor the same request context, work
+  budget, byte/entry limits, and multi-release target. Flat export now propagates
+  per-entry path/read/write failures instead of reporting success after partial
+  output.
+- Validate classfile minor/preview policy, JVM Code length, and all constant-pool
+  links including unused version-gated constants before source recovery.
+- Keep recovered DEX interface/annotation shells JVM-valid, preserve parameter
+  annotations where representable, restore annotation-interface defaults, and
+  bound JAR diagnostics with an explicit truncation record.
+- Replace required PR JVM/compiler process matrices with sealed pure-Go algorithm,
+  race, coverage, and SHA-256-pinned corpus gates. Live compiler, verifier,
+  reflection, and behavior oracles remain in the explicit extended workflow.
+- Cut required-gate startup: validate only the requested inventory group instead
+  of listing every package in every test job, memoize `go test -list` per package,
+  list packages with bounded parallelism, precompile race/coverage suites in
+  parallel, and run up to four package test binaries concurrently. Run the
+  instrumented external-APK inspect suite as concurrent race-only and
+  coverage-only binaries so each check keeps full coverage of its own concern.
+  Warm-cache times drop from ~78 s to ~17 s for algorithm, ~81 s to ~17 s for
+  DEX, ~44 s to ~15 s for corpus, and ~26 s to ~9 s for the full inventory
+  check. Test binaries remain separate processes with the same selectors,
+  timeouts, clean environment, sealed event checks, and fail-closed coverage
+  baseline. The exhaustive 797k-case stack-diagram test no longer allocates
+  per-case frame snapshots, cutting its allocation from ~2.4 GB to ~0.6 GB.
+- Extend required stability coverage without adding Java processes: the sealed
+  inventory now lists `Fuzz*` targets and runs every seed corpus (classparser,
+  decoder audit, DEX-to-JAR, DEX input, inspect, input kind, ZIP, JImage).
+  Add a concurrent class decompilation under the race detector, pre-canceled and
+  mid-flight cancellation checks that publish no source, and cross-process
+  fingerprint comparison so source, diagnostics, records and hashes cannot
+  depend on a process-local map hash seed. Gate times remain ~26 s for
+  algorithm, ~15 s for corpus and ~16 s for DEX on a warm cache.
+- Remove avoidable quadratic and repeated work: index Java exception starts and
+  graph adjacency, render with builders, reuse nested archive filesystems, populate
+  DEX blocks in one pass, index DEX allocations/annotations/debug locals, bound
+  diagnostic collection, and propagate recovery dependencies with a reverse graph.
+- Rework class analysis throughput. Sparse reaching definitions now keep canonical
+  node-indexed immutable facts instead of converting every slot to pointer maps;
+  unchanged unions and non-wide overwrites allocate nothing, definition order no
+  longer needs sorting, and repeated queries allocate only the caller's result.
+  A 32-slot/32-round production benchmark drops from ~11.6 ms / 10.5 MB / 72.5k
+  allocations to ~2.9 ms / 1.77 MB / 1.36k.
+- Replace exception-handler coverage set comparison with exact may-throw rank
+  intervals plus a single-span sweep. Validation at 1,024 handlers drops from
+  ~10.8 ms to ~0.58 ms while preserving nested/disjoint/crossing semantics,
+  including multi-span union crossings.
+- Memoize merge-point nearest-condition discovery and reuse control-flow
+  validation for non-JSR methods, removing per-merge reverse walks and two of
+  three full opcode validation scans. Index opcode PCs and stack-operand uses for
+  array/constructor proofs, and make the nested-array fixpoint reuse one use index
+  per pass.
+- Add an exact-topology statement dominator/post-dominator cache. Unchanged
+  topology refreshes are ~4.6x faster for dominators and ~11.2x for
+  post-dominators; scalar dominance queries allocate nothing. A randomized
+  differential test checks 10,500 topologies against fresh computation.
+- Remove the remaining class-analysis allocation hot spots. The dominator tree
+  now reuses its map and child slices across topology epochs; loop exit BFS uses
+  index-based scratch storage instead of a visited map sized for the whole
+  reachable graph; reaching-definition unions share the incoming set when one
+  side is a subset; switch jump-only targets are memoized because switch tables
+  are analyzer-owned and never rewritten; protected loop bodies clone under one
+  read lock; and per-name `\bname\b` regex compiles are replaced by an exact
+  literal word scanner (randomized equivalence test against Go regexp). On the
+  7 KB `FMParserTokenManager` class decompilation drops from ~4.45 s to ~3.81 s,
+  allocations from 10.75 M to 7.92 M and allocated bytes from 1.54 GB to
+  1.07 GB; `FMParser` drops from ~0.75 s to ~0.59 s and loop structuring from
+  ~0.45 s to ~0.40 s.
+- Add an ordered, conservative Compatibility rewrite scheduler. Seventeen audited
+  rules skip only when their own required literals are absent; applicability is
+  rebuilt after every accepted rewrite, SHA-256 state is carried forward, and the
+  full rule order, diagnostics, hashes and repeated entries are locked by tests.
+  A near-miss rewrite pipeline is ~11x faster with ~1290x fewer allocated bytes.
+- Add an ambient-environment fast path. `jdecenv.Get` no longer parses the
+  goroutine stack when the queried `JDEC_*` key is absent from every active
+  snapshot and the process environment; the common lookup drops from ~4 µs to
+  ~35 ns. Keys that are actually overridden keep the full goroutine-local path.
+- Eliminate cold-start platform metadata work. `java/lang/Object` metadata is a
+  verified static table derived from the pinned catalog, and the constructor
+  archive no longer decodes the 11 MB invocation catalog at runtime; catalog
+  consistency remains a pure-Go release test. A tiny single-class decompile drops
+  from ~208 ms / 38.6 MB / 354k allocations to ~7 ms / 0.16 MB / 2.6k allocations.
+- Replace the per-opcode slice-index-to-offset map with a compact opcode-Id
+  offset slice. A large class drops from ~272 MB to ~237 MB total allocation and
+  `ParseOpcode` from ~100 MB to ~77 MB. Add shared scalar `SemanticCFG.Dominates`
+  for proof callers, and replace `circleElementSet`'s locked `utils.Set` traversal
+  with plain map/slice state.
+- Measured T32 end-to-end changes: loop 10.4 → 4.1 ms, handler-dense 7.25 →
+  3.59 ms, slot 17.3 → 6.2 ms, render 4.67 → 1.02 ms; the Fastjson large-class
+  seed drops from ~1.37 s to ~0.83 s.
+- Repack `OpCode` from 392 to 320 bytes by grouping pointer/slice fields before
+  flags and removing three never-read fields. The Fastjson seed drops from
+  ~237 MB to ~212 MB total allocation, with `ParseOpcode` from ~77 MB to ~67 MB.
+- Replace DEX reference analysis's dense `[]map[string]bool` with a sparse map of
+  immutable sorted descriptor sets. A fixpoint block-copy benchmark changes from
+  ~10.7 ms / 13.7 MB / 221k allocations to ~1.55 ms / 1.59 MB / 1.2k
+  allocations (about 6.9x faster, 8.6x less memory, 189x fewer allocations).
+- Shrink `ir.Category` from 32 to 24 bytes by using existing alignment padding,
+  reducing a maximal dense category table by 25%.
+- Pre-size DEX debug local/position tables within bounded hints; the 8192-local
+  debug parse drops from ~5.87 MB to ~5.49 MB allocation.
+- Parse each DEX once during archive inspection: the multidex hierarchy and
+  per-class verdicts now share the same immutable `model.File` instead of
+  parsing every DEX twice.
+- Precompute post-dominator set cardinalities once instead of recalculating a
+  bitset popcount for every immediate-parent candidate, changing extraction from
+  `O(n·candidates·words)` toward `O(n·words + n·candidates)`.
+- Replace the rewrite loop's repeated `slices.Contains` membership scans over
+  try/if/switch/while node lists with indexed sets, removing an avoidable
+  `O(nodes²)` component before any rewriting work.
+- Build loop reverse adjacency with one node-index map and exact-capacity
+  indexed slices. The `circleElementSet` allocation hotspot drops from ~30.6 MB
+  to ~14.0 MB in the large-class profile.
+- Replace arm64's goroutine-identity fallback with the runtime `g` register.
+  `jdecenv.Goid` previously formatted the complete goroutine stack through
+  `runtime.Stack` on every ambient lookup; `ReplaceVar` alone made that 40% of
+  class-analysis CPU on Apple Silicon. An overridden `jdecenv.Get` drops from
+  ~4 µs to ~23 ns, and the FMParser regression class decompile from 4.51 s to
+  1.47 s.
+- Restore shielded Java literals and comments in one linear marker pass instead
+  of one `strings.ReplaceAll` per span. The previous loop was O(spans × source)
+  and accounted for 445 MB of copying in the FMParser profile. A differential
+  test against the sequential implementation covers duplicated, reordered,
+  deleted and wrapper-mangled markers, with an exact fallback for overlapping
+  matches. Hoist the throw-type-variable regexes out of their per-line loop.
+- Cache loop bodies and loop-exit searches for the analysis-only window between
+  graph mutations, and let `LoopJmpRewriter` reuse the scan's answers when its
+  two pre-rewrites changed nothing. A 7 KB, 60-loop class drops from
+  7.78 s / 4.79 GB / 38.6M allocations to 1.70 s / 635 MB / 3.55M allocations.
+  The cache is disabled whenever protected retry boundaries could mutate node
+  state, and parity with the uncached rewriter is locked by a kill-switch test
+  on loop-bearing class fixtures.
+- Index statement dominance queries with child-to-parent links instead of a
+  recursive subtree walk, preserve the old walk for non-tree test maps, and
+  reuse the cached immediate-dominator analysis without a defensive deep copy.
+  Rebuild successor lists with two flat generation-stamp arrays instead of one
+  dedupe map per source node. `circleElementSet` reuses its index map, slices
+  and reverse adjacency across queries and no longer sorts every loop body.
+- Linearize switch-case jump-only detection. The loop-exit and switch-merge
+  passes asked `switchCaseHasOnlyJumpEntries` once per case target, and every
+  query rebuilt the entire ordered-map key/value snapshot: O(cases²) time and
+  allocation. One pass now derives the per-target predicate straight from the
+  prepared tables. On the 117 KB FMParserTokenManager class this alone drops
+  decompilation from 24.8 s / 21.9 GB / 45.2M allocations to
+  10.4 s / 8.7 GB / 43.0M.
+- Stop the per-load slot-reaching repair search as soon as it sees the current
+  definition or a second distinct reaching definition; the previous backwards
+  BFS always explored the whole graph to prove uniqueness. Reuse a
+  generation-stamped visited map and queue across queries, and reuse the loop
+  analysis scratch even when protected-retry boundaries keep the body memo
+  disabled. FMParserTokenManager falls to 7.9 s / 3.65 GB / 17.7M allocations
+  (3.1x faster, 6.0x less memory, 2.6x fewer allocations). Differential tests
+  compare the one-pass switch predicate with the per-target query and the
+  early-exit reaching query with the map-returning oracle.
+- Split loop bodies into a topology-only base set and the protected-retry
+  augmentation. Methods with protected ranges keep the final set uncached, but
+  the base traversal now survives rewrite steps: the statement snapshot diff
+  invalidates only loops whose dominator subtree or immediate adjacency changed,
+  added/removed nodes and irreducible CFGs invalidate conservatively, and a body
+  with no protected node shares the cached set. Bodies that do have protected
+  retry boundaries clone before augmenting, preserving every `ProtectedEnd`
+  side effect.
+- Answer the per-load reaching-store repair from the sparse reaching facts
+  instead of another backwards BFS; the structural Source walk remains only as a
+  fallback when the SemanticCFG does not know the opcode. Charge visited opcodes
+  against `CounterGraphScans` in batches so a pathological slot-reuse method
+  fails closed instead of searching without bound.
+- Reuse the mutable analysis graph, its edge storage and successor tables across
+  topology epochs, and cache the child-to-parent dominance index across rewrite
+  steps. `commonLoopExit` reuses generation-stamped distance maps and queues,
+  exclusive-terminal tests take a cached node-live predicate, and protected-body
+  augmentation no longer calls `Set.List`.
+- FMParserTokenManager now decompiles in 4.8 s / 1.79 GB / 14.2M allocations,
+  down from 24.8 s / 21.9 GB / 45.2M (5.2x faster, 12.2x less memory, 3.2x fewer
+  allocations). FMParser, JSONReaderUTF16 and the loop-structuring fixture also
+  improve to ~0.78 s, ~0.91 s and ~0.47 s. New tests cover localized loop-base
+  invalidation and compare the dataflow reaching query with the structural walk.
+
+- Harden DEX IR decoding: validate switch and fill-array payload targets with
+  signed/`uint64` arithmetic before indexing, reject negative, wrapped, and
+  final-word payloads, and cap instruction×register analysis state before
+  allocation instead of amplifying memory from an admitted DEX.
+- Add explicit DEX failure policy APIs: `DexToJarWithOptions`,
+  `DexFileToJarWithOptions`, and `DecompileDEXFileWithPolicy`. The existing
+  strict APIs remain transactional and unchanged. `--stub-methods-only` permits
+  verifier-safe stubs for recognized method-local capability gaps;
+  `--best-effort` additionally recovers class failures through fresh
+  declaration-preserving, reduced-metadata, and minimal shells. Dependency
+  recovery propagates from minimal superclasses/interfaces, and unsupported
+  static initializers fail closed through a throwing `<clinit>`.
+- Successful degradation reports `partial` with a nil error. Partial JARs carry
+  deterministic `META-INF/javajive/diagnostics.json`; recovered classes carry a
+  bounded `JavaJiveRecovery` attribute that the decompiler renders as leading
+  source comments. Malformed containers, whole-file validation failures,
+  resource limits, and internal failures still abort.
+- Add `--best-effort` and `--stub-methods-only` to `dex2jar` and Android
+  `decompile`; the default remains strict.
+- Isolate Java archive class failures: malformed and future-version class
+  entries become diagnostic fallback `.java` files while other classes continue.
+  Structured `ArchiveEntryReport` now carries `status`, `stub_methods`, and
+  `diagnostics`, distinguishing complete, partial, and fallback sources.
+  Resource/cancellation failures still terminate the request.
+- Make real external-corpus and JDK/JLink integration tests explicit local
+  evaluations (`JAVAJIVE_EXTERNAL_EVAL=1`,
+  `JAVAJIVE_JIMAGE_INTEGRATION=1`). Required PR CI keeps small synthetic
+  container, archive-containment, DEX-policy, and no-panic regressions.
+- Add `internal/inputkind`: classify inputs by content magic, then archive
+  structure, and only then the filename extension. Renamed APK/APKS/JMOD/AAR
+  files now reach the correct pipeline.
+- JMOD: strip the four-byte `JM\x01\x00` prefix when opening a local archive and
+  when recursing into nested JMOD entries, so JDK module images decompile as
+  ordinary archives.
+- AAR and PAR: accept both as Java archives. `classes.jar` and `libs/*.jar` in
+  AAR inputs are decompiled through the existing nested-archive path.
+- Fix flat archive export for nested JARs. `DumpToLocalFileSystem` now resolves
+  raw bytes through `JarFS.ReadRawFile` and recovers the physical `.class` name
+  behind UnifiedFS's virtual `.java` entries. WAR `WEB-INF/lib`, EAR `EAR/lib`,
+  AAR `classes.jar`, fat-JAR `BOOT-INF/lib`, and arbitrary JAR-in-JAR layers
+  export sources instead of logging `create child node failed`.
+- Android split bundles: `.apks` / `.xapk` / `.apkm` / `.apkx` walk nested
+  `.apk` entries, prefer `universal.apk`, skip resource-only splits, and merge
+  identical classes across splits. Conflicting definitions fail the conversion.
+- Android App Bundles: `.aab` translates every `<module>/dex/classes*.dex`
+  entry across base and feature modules.
+- Add bounded nested-container limits (`MaxTotalAPKSize`, `MaxNestedAPKs`) and
+  global DEX count/size checks across all collected sources. The default
+  nested-APK bound is 512, enough for bundletool split bundles with hundreds of
+  resource/config APKs.
+- Add a native `jimage` package for JDK 9+ runtime images (`lib/modules`,
+  `.jimage`): parse the header, redirect/offset tables, attribute streams,
+  string table, and resources on demand; inflate `zip`-compressed resources with
+  zlib. `JImageToJar` and `OpenJImageFile` expose the format.
+- `decompile` / `DecompileArchive` convert a JImage into a package-layout JAR
+  view and reuse the flat or structured exporter. The new `jimage2jar` CLI
+  subcommand exposes the conversion directly. Class resources are exported
+  at package paths; `module-info.class` and non-class resources keep their
+  module prefix. `inspect` reports `jimage` with per-resource hashes and
+  compression state.
+- Support `compact-cp` (constant-pool string sharing): reconstruct externalized
+  UTF8 and descriptor entries, including `L;` type tokens, long/double slots,
+  and the trailing class body. Reconstructed classes are byte-identical to the
+  uncompressed image. Big-endian JImages (`jlink --endian big`) are supported
+  too.
+- Add pure-Go unit tests for compressed-index decoding and compact-cp constant
+  pool reconstruction, plus opt-in `jlink --compress=1` and `--endian big`
+  integration tests.
+- Add `testdata/external` with real Tomcat WARs, bundletool APK/AAB/APKS
+  (universal and a 181-APK split bundle), an AndroidX AAR, Androguard/Apktool/
+  dex2jar fixtures, and synthetic XAPK/APKM/EAR containers. Tests classify,
+  inspect, decompile, and translate every sample; malformed truncations assert
+  no panics.
+- Add fuzz seed corpora for the input classifier, JImage and compact-cp readers,
+  `inspect`, and Android container parsing.
+- Required CI runs small synthetic container/JImage tests and focused archive
+  class-containment regressions; real external samples and JLink generation are
+  opt-in local evaluations.
+- `inspect` reports `jmod` / `jimage` / `aar` / `ear` / `par` / `apks` /
+  `xapk` / `apkm` / `aab`, and records nested APK or AAB module DEX provenance.
+- CLI `decompile` and `dex2jar` route by detected container instead of file
+  extension; `--structured` now rejects Android containers with a clear error.
+- Add classifier, container-parser, flat-export, JMOD/AAR/PAR, JImage, inspect,
+  and end-to-end JAR tests for the new inputs, including real JDK
+  `lib/modules` and `jlink --compress=2` images.
+
 ## Unreleased — 2026-11-06
 
 Complete real-application DEX translation.

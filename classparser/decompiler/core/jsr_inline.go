@@ -122,9 +122,10 @@ func (d *Decompiler) inlineJSRSubroutines() error {
 			d.opcodeCodeLength = work.opcodeCodeLength
 			d.ExceptionTable = work.ExceptionTable
 			d.offsetToOpcodeIndex = work.offsetToOpcodeIndex
-			d.opcodeIndexToOffset = work.opcodeIndexToOffset
+			d.opcodeOffsetsByID = work.opcodeOffsetsByID
 			d.CurrentId = work.CurrentId
 			d.RootOpCode = work.RootOpCode
+			d.jsrInlined = true
 			return nil
 		}
 	}
@@ -531,7 +532,6 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) bool {
 
 	// Commit (cannot fail): offsets, ids, maps, then branch operands.
 	offsetToIndex := make(map[uint16]int, len(newOps))
-	indexToOffset := make(map[int]uint16, len(newOps))
 	offset := 0
 	id := 1
 	for k, op := range newOps {
@@ -543,7 +543,6 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) bool {
 		id++
 		op.CurrentOffset = uint16(offset)
 		offsetToIndex[uint16(offset)] = k
-		indexToOffset[k] = uint16(offset)
 		offset += opByteLen(op)
 	}
 	codeLenNew := uint16(offset)
@@ -644,8 +643,8 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) bool {
 	d.opcodeCodeLength = int(codeLenNew)
 	d.ExceptionTable = newExc
 	d.offsetToOpcodeIndex = offsetToIndex
-	d.opcodeIndexToOffset = indexToOffset
 	d.CurrentId = id
+	d.rebuildOpcodeOffsetsByID()
 	if len(newOps) > 0 {
 		d.RootOpCode = newOps[0]
 	}

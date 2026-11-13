@@ -271,7 +271,7 @@ func (d *Decompiler) branchArrayOriginalPrefixPrecedes(producer, target *OpCode)
 		return false
 	}
 	a, b := d.semanticCFG.indexOfNode(producer), d.semanticCFG.indexOfNode(target)
-	return a >= 0 && b >= 0 && d.semanticCFG.GetOrCompute(AnalysisDominators, GraphAnalysisDomain{Roots: []int{0}, IncludeException: true}).Dominates(a, b)
+	return a >= 0 && b >= 0 && d.semanticCFG.Dominates(a, b)
 }
 
 // Condition callbacks have not necessarily filled the source SlotValue yet.
@@ -333,7 +333,7 @@ func (d *Decompiler) branchArraySelectedSourceArm(tern *values.TernaryExpression
 		arm, entry = tern.FalseValue, taken
 	}
 	a, b := d.semanticCFG.indexOfNode(entry), d.semanticCFG.indexOfNode(allocation)
-	if a < 0 || b < 0 || !d.semanticCFG.GetOrCompute(AnalysisDominators, GraphAnalysisDomain{Roots: []int{0}, IncludeException: true}).Dominates(a, b) {
+	if a < 0 || b < 0 || !d.semanticCFG.Dominates(a, b) {
 		return nil, nil
 	}
 	return arm, branch

@@ -46,36 +46,19 @@ def required_coverage_snapshot(repo_root: Path) -> dict[str, Any]:
     }
 
 
-# One scope decision gates the classparser matrix (ten shards when the diff
-# touches its closure), which feeds the required algorithm-regression summary
-# together with the concurrently running regression suite. Full task contracts,
-# platform builds, and historical-JAR audits remain available through the
-# explicit task-gates / extended / untrusted-oracle workflows.
-BASELINE_CI_JOBS = ("scope", "source", "regression", "gate")
+# Required PR feedback is four sealed pure-Go gates plus one summary. Full task
+# contracts, live runtime/compiler checks, platform builds, and historical-JAR
+# audits remain available through explicit manual workflows.
+BASELINE_CI_JOBS = ("contract", "corpus", "algorithm", "dex", "regression")
 
-# These are reviewed authored-fixture suites, not a promotion of the external
-# historical corpus. Keep every selector explicit: a prefix could accidentally
-# select a newly added foreign-JAR test in this mixed package.
-FAST_REBUILT_JAR_TESTS = (
-    "TestRebuiltJarRuntimeSelectionPreservesOriginalAuthority",
-    "TestRebuiltJarRejectsUnknownMetadataAndKeepsPlainPacking",
-)
-FAST_REBUILT_JAR_COMMAND = (
-    "go test -json ./test/cross -run '^("
-    + "|".join(FAST_REBUILT_JAR_TESTS)
-    + ")$' -count=1 -timeout=2m | tee artifacts/rebuilt-jar-runtime-tests.jsonl"
-)
-IRREDUCIBLE_CFG_TEST = "TestRoundTripIrreducibleCFGCorpus"
-IRREDUCIBLE_CFG_LIST_COMMAND = (
-    "test \"$(go test ./test/cross -list '^TestRoundTripIrreducibleCFGCorpus$' "
-    "| grep -xc 'TestRoundTripIrreducibleCFGCorpus')\" -eq 1"
-)
-IRREDUCIBLE_CFG_RUN_COMMAND = (
-    "go test -json ./test/cross -run '^TestRoundTripIrreducibleCFGCorpus$' "
-    "-count=1 -timeout=3m | tee artifacts/irreducible-cfg-roundtrip-tests.jsonl"
-)
+# Cross-package fixture selection is owned by the sealed Go inventory. The
+# required workflow must never invoke the mixed cross package directly.
+FAST_REBUILT_JAR_TESTS = ()
+FAST_REBUILT_JAR_COMMAND = ""
+IRREDUCIBLE_CFG_TEST = "TestFixedIrreducibleCFGCorpusPureGo"
+IRREDUCIBLE_CFG_LIST_COMMAND = "go run ./tools/requiredci -check"
+IRREDUCIBLE_CFG_RUN_COMMAND = "go run ./tools/requiredci -run corpus"
 REQUIRED_CROSS_COMMANDS = (
-    FAST_REBUILT_JAR_COMMAND,
     IRREDUCIBLE_CFG_LIST_COMMAND,
     IRREDUCIBLE_CFG_RUN_COMMAND,
 )
@@ -88,9 +71,12 @@ def validate_fast_cross_scope(workflow_text: str) -> None:
     External JAR discovery, broad package tests and extra commands still need
     their separately reviewed manual isolation workflow.
     """
-    commands = [line.strip() for line in workflow_text.splitlines() if "./test/cross" in line]
-    if commands != list(REQUIRED_CROSS_COMMANDS):
-        raise ValueError("required cross-package tests must select exactly the reviewed authored fixture roots")
+    if "./test/cross" in workflow_text:
+        raise ValueError("required workflow must delegate mixed cross-package selection to requiredci")
+    commands = [line.strip().removeprefix("- run: ") for line in workflow_text.splitlines() if "go run ./tools/requiredci" in line]
+    for command in REQUIRED_CROSS_COMMANDS:
+        if commands.count(command) != 1:
+            raise ValueError("required workflow must run the sealed corpus inventory exactly once")
 
 
 def action_pins(workflow: Path) -> list[dict[str, Any]]:

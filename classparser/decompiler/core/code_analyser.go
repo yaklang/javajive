@@ -92,6 +92,10 @@ type Decompiler struct {
 	constructorDelegationPC      int
 	constructorDelegationKnown   bool
 	unsupportedConstructorPrefix string
+	// jsrInlined records that inlineJSRSubroutines replaced the opcode stream.
+	// ParseStatement may then reuse its pre-inline control-flow validation only
+	// when this is false.
+	jsrInlined bool
 	// RecordComponents supplies the declared component order and descriptors
 	// for a record type. Pattern-switch reconstruction uses it to distinguish a
 	// deconstruction accessor prefix from an ordinary method call in the case
@@ -112,13 +116,21 @@ type Decompiler struct {
 	// This constrains source preservation, without granting a factory role.
 	LambdaReceiverCapture bool
 	opcodeToSimulateStack map[*OpCode]*StackSimulationImpl
-	FunctionContext       *class_context.ClassContext
-	varTable              map[int]*values.JavaRef
-	opcodeIdToRef         map[*OpCode][][2]any
-	branchArrayCalls      []branchArrayCall
-	branchArrayLeaves     []branchArrayLeaf
-	valueTernaryMerges    map[*values.TernaryExpression]*OpCode
-	factoredValueRoutes   map[*values.TernaryExpression]factoredValueRoute
+	// opcodeByOffset is the unique real-opcode witness per PC, built once after
+	// stack simulation. Ambiguous PCs are recorded separately and fail closed.
+	// Tests that inject opcodeToSimulateStack directly leave this nil and use
+	// the scanning fallback.
+	opcodeByOffset      map[int]*OpCode
+	ambiguousOffsets    map[int]bool
+	opcodeOffsetsSealed bool
+	FunctionContext     *class_context.ClassContext
+	varTable            map[int]*values.JavaRef
+	opcodeIdToRef       map[*OpCode][][2]any
+	reachWalk           reachWalkScratch
+	branchArrayCalls    []branchArrayCall
+	branchArrayLeaves   []branchArrayLeaf
+	valueTernaryMerges  map[*values.TernaryExpression]*OpCode
+	factoredValueRoutes map[*values.TernaryExpression]factoredValueRoute
 	// refToCreatingStore records, per *JavaRef pointer, the FIRST local-store opcode whose simulation
 	// created that ref (isFirst=true). It lets the boolean-copy merge deterministically recover the
 	// store that defined a slot's current ref without scanning opcodeIdToRef (a map whose iteration
@@ -157,9 +169,13 @@ type Decompiler struct {
 	ConstantPoolLiteralGetter     func(constantPoolGetterid int) values.JavaValue
 	ConstantPoolInvokeDynamicInfo func(id int) (uint16, string, string)
 	offsetToOpcodeIndex           map[uint16]int
-	opcodeIndexToOffset           map[int]uint16
-	ExceptionTable                []*ExceptionTableEntry
-	BootstrapMethods              []*BootstrapMethod
+	// opcodeOffsetsByID maps the stable opcode Id to its bytecode offset. This
+	// replaces a per-opcode map (about 4 MB on a large class) with a compact
+	// uint16 slice; Ids survive unreachable-code removal while slice positions
+	// do not.
+	opcodeOffsetsByID []uint16
+	ExceptionTable    []*ExceptionTableEntry
+	BootstrapMethods  []*BootstrapMethod
 	// Original declaration metadata qualifies source-body rendering. A source
 	// request or a method-name convention cannot provide that permission.
 	OriginalLambdaDeclaration        func(owner, name, descriptor string) LambdaOriginalDeclaration
@@ -288,7 +304,6 @@ func NewDecompiler(bytecodes []byte, constantPoolGetter func(id int) values.Java
 		bytecodes:            bytecodes,
 		constantPoolGetter:   constantPoolGetter,
 		offsetToOpcodeIndex:  map[uint16]int{},
-		opcodeIndexToOffset:  map[int]uint16{},
 		varTable:             map[int]*values.JavaRef{},
 		opcodeIdToRef:        map[*OpCode][][2]any{},
 		refToCreatingStore:   map[*values.JavaRef]*OpCode{},
@@ -418,12 +433,15 @@ func (d *Decompiler) ParseOpcode() (err error) {
 	if len(d.bytecodes) == 0 || len(d.bytecodes) > 65535 {
 		return fmt.Errorf("invalid Code length %d", len(d.bytecodes))
 	}
+	d.jsrInlined = false
+	d.opcodeOffsetsSealed = false
+	d.opcodeByOffset = nil
+	d.ambiguousOffsets = nil
 	d.opcodeCodeLength = len(d.bytecodes)
 	sizeHint := len(d.bytecodes)/2 + 8
 	opcodes := make([]*OpCode, 0, sizeHint)
 	opcodes = append(opcodes, &OpCode{Instr: &Instruction{OpCode: OP_START}})
 	offsetToIndex := make(map[uint16]int, sizeHint)
-	indexToOffset := make(map[int]uint16, sizeHint)
 	reader := NewJavaByteCodeReader(d.bytecodes)
 	id := 1
 	isWide := false
@@ -462,24 +480,72 @@ func (d *Decompiler) ParseOpcode() (err error) {
 		}
 		opcodes = append(opcodes, opcode)
 		offsetToIndex[opcode.CurrentOffset] = len(opcodes) - 1
-		indexToOffset[len(opcodes)-1] = opcode.CurrentOffset
 		id++
 	}
 	if isWide {
 		return fmt.Errorf("truncated wide at PC %d", wideOffset)
 	}
 	d.offsetToOpcodeIndex = offsetToIndex
-	d.opcodeIndexToOffset = indexToOffset
 	d.CurrentId = id
 	d.opCodes = opcodes
+	d.rebuildOpcodeOffsetsByID()
 	return nil
+}
+
+// rebuildOpcodeOffsetsByID indexes offsets by stable opcode Id. Slice order can
+// change when unreachable code is removed, so Id is the only safe key.
+func (d *Decompiler) rebuildOpcodeOffsetsByID() {
+	maxID := d.CurrentId
+	for _, op := range d.opCodes {
+		if op != nil && op.Id > maxID {
+			maxID = op.Id
+		}
+	}
+	if maxID < 0 {
+		maxID = 0
+	}
+	offsets := make([]uint16, maxID+1)
+	for _, op := range d.opCodes {
+		if op == nil || op.Id < 0 || op.Id >= len(offsets) {
+			continue
+		}
+		offsets[op.Id] = op.CurrentOffset
+	}
+	d.opcodeOffsetsByID = offsets
+}
+
+func (d *Decompiler) opcodeOffsetByID(id int) (uint16, bool) {
+	if d == nil || id < 0 || id >= len(d.opcodeOffsetsByID) {
+		return 0, false
+	}
+	return d.opcodeOffsetsByID[id], true
 }
 
 func (d *Decompiler) ScanJmp() error {
 	if err := d.validateControlFlow(); err != nil {
 		return err
 	}
+	return d.scanJmpUnchecked()
+}
+
+// scanJmpUnchecked builds the structuring CFG from an already validated opcode
+// stream. ParseStatement uses it only when JSR inlining left the stream intact.
+func (d *Decompiler) scanJmpUnchecked() error {
 	opcodes := d.opCodes
+	// Exception entries are keyed once by protected-region start. The walk may visit
+	// an opcode more than once, but it no longer rescans the complete exception table
+	// at every instruction. Entry order inside a start bucket remains classfile order,
+	// preserving catch traversal and source output.
+	var exceptionsByStart map[uint16][]*ExceptionTableEntry
+	var catchTypesByHandler map[int]map[uint16]struct{}
+	if len(d.ExceptionTable) > 0 {
+		exceptionsByStart = make(map[uint16][]*ExceptionTableEntry, len(d.ExceptionTable))
+		for _, entry := range d.ExceptionTable {
+			if entry != nil {
+				exceptionsByStart[entry.StartPc] = append(exceptionsByStart[entry.StartPc], entry)
+			}
+		}
+	}
 	// Plain map (single-goroutine walk) avoids the mutex + interface boxing of utils.Set.
 	visitNodeRecord := make(map[*OpCode]struct{})
 	endOp := &OpCode{Instr: InstrInfos[OP_END], Id: d.CurrentId}
@@ -506,33 +572,43 @@ func (d *Decompiler) ScanJmp() error {
 			if pre != nil {
 				LinkOpcode(pre, opcode)
 			}
-			for _, entry := range d.ExceptionTable {
-				if opcode.CurrentOffset == entry.StartPc {
-					if entry.StartPc == entry.HandlerPc {
-						continue
+			for _, entry := range exceptionsByStart[opcode.CurrentOffset] {
+				if entry.StartPc == entry.HandlerPc {
+					continue
+				}
+				gotoOp := d.offsetToOpcodeIndex[entry.HandlerPc]
+				d.opCodes[gotoOp].IsCatch = true
+				d.opCodes[gotoOp].ExceptionTypeIndex = entry.CatchType
+				// Accumulate every catch type that shares this handler PC so multi-catch
+				// (`catch (A | B)`) can be reconstructed. The per-handler set keeps
+				// dedupe O(1) while the slice retains first-seen classfile order.
+				seenTypes := catchTypesByHandler[gotoOp]
+				if seenTypes == nil {
+					if catchTypesByHandler == nil {
+						catchTypesByHandler = make(map[int]map[uint16]struct{})
 					}
-					gotoOp := d.offsetToOpcodeIndex[entry.HandlerPc]
-					d.opCodes[gotoOp].IsCatch = true
-					d.opCodes[gotoOp].ExceptionTypeIndex = entry.CatchType
-					// Accumulate every catch type that shares this handler PC so multi-catch
-					// (`catch (A | B)`) can be reconstructed. Dedupe because the exception-table
-					// scan may revisit the same start opcode while walking the graph.
-					if !slices.Contains(d.opCodes[gotoOp].ExceptionTypeIndexes, entry.CatchType) {
-						d.opCodes[gotoOp].ExceptionTypeIndexes = append(d.opCodes[gotoOp].ExceptionTypeIndexes, entry.CatchType)
+					seenTypes = make(map[uint16]struct{}, len(d.opCodes[gotoOp].ExceptionTypeIndexes)+1)
+					for _, catchType := range d.opCodes[gotoOp].ExceptionTypeIndexes {
+						seenTypes[catchType] = struct{}{}
 					}
-					deferWalkId = append(deferWalkId, gotoOp)
-					walkNode(gotoOp)
-					if pre != nil {
-						LinkOpcode(pre, d.opCodes[gotoOp])
-						pre.IsTryCatchParent = true
-						pre.TryNode = opcode
-						pre.CatchNode = append(pre.CatchNode, &CatchNode{
-							ExceptionTypeIndex: entry.CatchType,
-							StartIndex:         entry.StartPc,
-							EndIndex:           entry.EndPc,
-							OpCode:             d.opCodes[gotoOp],
-						})
-					}
+					catchTypesByHandler[gotoOp] = seenTypes
+				}
+				if _, seen := seenTypes[entry.CatchType]; !seen {
+					seenTypes[entry.CatchType] = struct{}{}
+					d.opCodes[gotoOp].ExceptionTypeIndexes = append(d.opCodes[gotoOp].ExceptionTypeIndexes, entry.CatchType)
+				}
+				deferWalkId = append(deferWalkId, gotoOp)
+				walkNode(gotoOp)
+				if pre != nil {
+					LinkOpcode(pre, d.opCodes[gotoOp])
+					pre.IsTryCatchParent = true
+					pre.TryNode = opcode
+					pre.CatchNode = append(pre.CatchNode, &CatchNode{
+						ExceptionTypeIndex: entry.CatchType,
+						StartIndex:         entry.StartPc,
+						EndIndex:           entry.EndPc,
+						OpCode:             d.opCodes[gotoOp],
+					})
 				}
 			}
 
@@ -1477,6 +1553,118 @@ func (d *Decompiler) reachingSlotStoreRefs(start *OpCode, slot int) map[string]*
 	return out
 }
 
+// reachWalkScratch reuses the visited map and work queue of consecutive
+// backward reaching-store queries. The Decompiler is method-local and the
+// query is not re-entrant, so generation stamps replace clearing the map.
+type reachWalkScratch struct {
+	visited    map[*OpCode]uint64
+	queue      []*OpCode
+	generation uint64
+}
+
+// reachingSlotStoreRefUnique answers the only question the read/store repair
+// passes ask: is there exactly one distinct reaching same-slot definition, and
+// is it different from current? It stops as soon as it encounters current (the
+// read/store already continues correctly) or a second distinct definition (a
+// real merge). The map-returning form explored the entire backward graph even
+// when the nearest store was already current; on a large token-manager method
+// that was tens of millions of visited opcodes.
+func (d *Decompiler) reachingSlotStoreRefUnique(start *OpCode, slot int, current *values.JavaRef) *values.JavaRef {
+	if start == nil {
+		return nil
+	}
+	// The sparse reaching solver already has the per-slot definition sets. Use
+	// them when the CFG knows this opcode; only an unavailable node falls back
+	// to the structural Source walk.
+	if d.semanticCFG != nil {
+		if _, ok := d.semanticCFG.indexOfNodeCached(start); ok {
+			stores, _ := d.reachingStores(start, slot)
+			var found *values.JavaRef
+			for _, store := range stores {
+				refs, ok := d.opcodeIdToRef[store]
+				if !ok || len(refs) == 0 {
+					continue
+				}
+				ref, ok := refs[len(refs)-1][0].(*values.JavaRef)
+				if !ok || ref == nil {
+					continue
+				}
+				if current != nil && ref.VarUid == current.VarUid {
+					return nil
+				}
+				if found == nil {
+					found = ref
+					continue
+				}
+				if found.VarUid != ref.VarUid {
+					return nil
+				}
+			}
+			return found
+		}
+	}
+	sc := &d.reachWalk
+	if sc.visited == nil {
+		sc.visited = make(map[*OpCode]uint64)
+	}
+	sc.generation++
+	if sc.generation == 0 {
+		clear(sc.visited)
+		sc.generation = 1
+	}
+	gen := sc.generation
+	sc.visited[start] = gen
+	queue := append(sc.queue[:0], start.Source...)
+	var found *values.JavaRef
+	visits := 0
+	for head := 0; head < len(queue); head++ {
+		cur := queue[head]
+		if cur == nil || sc.visited[cur] == gen {
+			continue
+		}
+		sc.visited[cur] = gen
+		visits++
+		if d.Work != nil && visits%128 == 0 {
+			if err := d.Work.Charge(workbudget.CounterGraphScans, 128); err != nil {
+				// The budget remains latched and fails the method at its next
+				// boundary; never continue an unbounded repair search.
+				sc.queue = queue[:0]
+				return nil
+			}
+		}
+		if isLocalStoreOpcode(cur.Instr.OpCode) && GetStoreIdx(cur) == slot {
+			refs, ok := d.opcodeIdToRef[cur]
+			if !ok || len(refs) == 0 {
+				continue
+			}
+			ref, ok := refs[len(refs)-1][0].(*values.JavaRef)
+			if !ok || ref == nil {
+				continue
+			}
+			if current != nil && ref.VarUid == current.VarUid {
+				// current is a genuine reaching definition; no repair is safe.
+				sc.queue = queue[:0]
+				return nil
+			}
+			if found == nil {
+				found = ref
+				continue
+			}
+			if found.VarUid != ref.VarUid {
+				// Distinct reaching definitions form a real merge.
+				sc.queue = queue[:0]
+				return nil
+			}
+			// Match the map form, which keeps the last ref seen for a VarUid.
+			found = ref
+			continue
+		}
+		queue = append(queue, cur.Source...)
+	}
+	sc.queue = queue[:0]
+	return found
+}
+
 // reachingSlotVersionGeneral repairs a slot read that the single global slot table resolved to a ref
 // whose defining store does NOT reach the load along the CFG — a later/disjoint-branch version that
 // leaked in through DFS traversal order, EVEN WHEN the category (reference vs primitive) agrees so
@@ -1497,24 +1685,13 @@ func (d *Decompiler) reachingSlotVersionGeneral(load *OpCode, slot int, current 
 	if load == nil || !isLocalLoadOpcode(load.Instr.OpCode) || current == nil {
 		return nil
 	}
-	reaching := d.reachingSlotStoreRefs(load, slot)
-	if len(reaching) == 0 {
+	ref := d.reachingSlotStoreRefUnique(load, slot, current)
+	if ref == nil || ref.VarUid == current.VarUid {
+		// current is a genuine reaching definition, no definition reaches, or
+		// multiple distinct definitions form a real merge.
 		return nil
 	}
-	if _, ok := reaching[current.VarUid]; ok {
-		// current is a genuine reaching definition: the read is already correct.
-		return nil
-	}
-	if len(reaching) != 1 {
-		// Multiple distinct reaching definitions = a real merge point; do not override.
-		return nil
-	}
-	for _, ref := range reaching {
-		if ref != nil && ref.VarUid != current.VarUid {
-			return ref
-		}
-	}
-	return nil
+	return ref
 }
 
 // reachingStoreVersion repairs the SAME single-global-slot-table DFS corruption as
@@ -1548,20 +1725,15 @@ func (d *Decompiler) reachingStoreVersion(store *OpCode, slot int, current *valu
 		// The current global version already continues this store correctly; leave it alone.
 		return nil
 	}
-	reaching := d.reachingSlotStoreRefs(store, slot)
-	if len(reaching) != 1 {
+	ref := d.reachingSlotStoreRefUnique(store, slot, current)
+	if ref == nil || ref.Type() == nil {
 		return nil
 	}
-	for _, ref := range reaching {
-		if ref == nil || ref.Type() == nil {
-			return nil
-		}
-		if current != nil && ref.VarUid == current.VarUid {
-			return nil
-		}
-		if ref.Type().String(ctx) == typStr {
-			return ref
-		}
+	if current != nil && ref.VarUid == current.VarUid {
+		return nil
+	}
+	if ref.Type().String(ctx) == typStr {
+		return ref
 	}
 	return nil
 }
@@ -4920,6 +5092,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 		return merged
 	}
 	ifNodeToConditionCallback := map[*OpCode]func(values.JavaValue){}
+	mergeConditions := newMergeConditionIndex()
 	varTable := map[int]*values.JavaRef{}
 	err := WalkGraph[*OpCode](d.RootOpCode, func(code *OpCode) ([]*OpCode, error) {
 		// NOTE: do not sort code.Target for switch opcodes. The previous sort.Slice used an
@@ -5041,20 +5214,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 				vscope := getVarScope(validSource)
 				runtimeStackSimulation = NewStackSimulation(validSource.StackEntry, preferConcreteMergeVars(vscope.VarTable, validSources), vscope.VarId)
 			}
-			ifNodes := []*OpCode{}
-			for _, opCode := range code.Source {
-				WalkGraph[*OpCode](opCode, func(code *OpCode) ([]*OpCode, error) {
-					switch code.Instr.OpCode {
-					case OP_IFEQ, OP_IFNE, OP_IFLE, OP_IFLT, OP_IFGT, OP_IFGE, OP_IF_ACMPEQ, OP_IF_ACMPNE, OP_IF_ICMPLT, OP_IF_ICMPGE, OP_IF_ICMPGT, OP_IF_ICMPNE, OP_IF_ICMPEQ, OP_IF_ICMPLE, OP_IFNONNULL, OP_IFNULL:
-						if !slices.Contains(ifNodes, code) {
-							ifNodes = append(ifNodes, code)
-						}
-						return nil, nil
-					default:
-					}
-					return code.Source, nil
-				})
-			}
+			ifNodes := mergeConditions.collect(code.Source)
 			ifNodes = lo.Filter(ifNodes, func(item *OpCode, index int) bool {
 				return slices.Contains(mergeNodeToIfNode[code], item)
 			})
@@ -5238,6 +5398,9 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	}
 	d.opCodes = GraphToList(d.RootOpCode)
 	d.opcodeToSimulateStack = opcodeToSim
+	d.opcodeByOffset = nil
+	d.ambiguousOffsets = nil
+	d.opcodeOffsetsSealed = true
 	d.lowerAcyclicStackMerges(acyclicStackMergeSlot)
 	ternaryExpMergeNode = utils.NewSet(ternaryExpMergeNode).List()
 	sort.Slice(ternaryExpMergeNode, func(i, j int) bool {
@@ -6414,7 +6577,14 @@ func (d *Decompiler) ParseStatement() error {
 	if err := d.inlineJSRSubroutines(); err != nil {
 		return err
 	}
-	d.semanticCFG, err = d.buildSemanticCFG()
+	// The encoded edges were validated before JSR inlining. If the inliner did
+	// not rewrite the stream, both graph builders can reuse that validation
+	// instead of rescanning every opcode, switch and exception entry twice.
+	if d.jsrInlined {
+		d.semanticCFG, err = d.buildSemanticCFG()
+	} else {
+		d.semanticCFG, err = d.buildSemanticCFGUnchecked()
+	}
 	if err != nil {
 		return err
 	}
@@ -6422,7 +6592,11 @@ func (d *Decompiler) ParseStatement() error {
 		d.captureShadowIR()
 	}
 	d.cachedSlotWebs = nil
-	err = d.ScanJmp()
+	if d.jsrInlined {
+		err = d.ScanJmp()
+	} else {
+		err = d.scanJmpUnchecked()
+	}
 	if err != nil {
 		return err
 	}
@@ -7241,7 +7415,8 @@ func (d *Decompiler) ParseStatement() error {
 		return true
 	}
 	MiscRewriter(d.RootNode, d.delRefUserAttr, allowArrayEffects)
-	for d.inlineNestedArrayInitializers(idToOpcode) {
+	arrayUses := d.arrayRefUses()
+	for d.inlineNestedArrayInitializers(idToOpcode, arrayUses) {
 		MiscRewriter(d.RootNode, d.delRefUserAttr, allowArrayEffects)
 	}
 	d.inlinePrivateArrayReceiverReads(idToOpcode)

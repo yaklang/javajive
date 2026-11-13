@@ -7,7 +7,10 @@ import (
 	"strings"
 
 	"github.com/yaklang/javajive/classparser"
+	"github.com/yaklang/javajive/internal/filesys"
+	"github.com/yaklang/javajive/internal/inputkind"
 	"github.com/yaklang/javajive/internal/utils"
+	"github.com/yaklang/javajive/jimage"
 )
 
 // ArchiveOptions controls archive decompilation. Structured keeps original
@@ -30,11 +33,14 @@ type DecompileArchiveOptions = ArchiveOptions
 // ArchiveEntryReport records one deterministic structured-export output.
 // Paths are slash-separated and relative to the destination directory.
 type ArchiveEntryReport struct {
-	Kind       string `json:"kind"`
-	SourcePath string `json:"source_path"`
-	OutputPath string `json:"output_path"`
-	Archive    string `json:"archive,omitempty"`
-	Size       int64  `json:"size"`
+	Kind        string                                `json:"kind"`
+	SourcePath  string                                `json:"source_path"`
+	OutputPath  string                                `json:"output_path"`
+	Archive     string                                `json:"archive,omitempty"`
+	Size        int64                                 `json:"size"`
+	Status      javaclassparser.ClassDecompileStatus  `json:"status,omitempty"`
+	StubMethods []string                              `json:"stub_methods,omitempty"`
+	Diagnostics []javaclassparser.DecompileDiagnostic `json:"diagnostics,omitempty"`
 }
 
 // NestedArchiveReport records the provenance and preserved bytes of a nested
@@ -84,17 +90,39 @@ func AutoDecompileWithAnalysisBudget(from, to string, maxAnalysisUpdates int) er
 	if maxAnalysisUpdates < 0 {
 		return fmt.Errorf("negative analysis budget: %d", maxAnalysisUpdates)
 	}
-	return autoDecompileFlat(from, to, maxAnalysisUpdates)
+	if isJImage(from) {
+		_, err := decompileJImageWithOptions(from, to, ArchiveOptions{MaxAnalysisUpdates: maxAnalysisUpdates})
+		return err
+	}
+	return autoDecompileFlat(from, to, ArchiveOptions{MaxAnalysisUpdates: maxAnalysisUpdates})
 }
 
 // autoDecompileFlat writes the historical flat directory layout.
-func autoDecompileFlat(from, to string, maxAnalysisUpdates int) error {
+func autoDecompileFlat(from, to string, options ArchiveOptions) error {
 	fromLower := strings.ToLower(from)
 	switch {
 	case strings.HasSuffix(fromLower, ".jar"), strings.HasSuffix(fromLower, ".war"),
-		strings.HasSuffix(fromLower, ".ear"), strings.HasSuffix(fromLower, ".zip"):
-		jar, err := NewWithAnalysisBudget(from, maxAnalysisUpdates)
+		strings.HasSuffix(fromLower, ".ear"), strings.HasSuffix(fromLower, ".aar"),
+		strings.HasSuffix(fromLower, ".par"), strings.HasSuffix(fromLower, ".jmod"),
+		strings.HasSuffix(fromLower, ".zip"):
+		archiveOptions := javaclassparser.ArchiveOptionsFrom(javaclassparser.DecompileOptions{
+			Context:       options.Context,
+			Limits:        options.Limits,
+			Work:          options.Work,
+			TargetRelease: options.TargetRelease,
+		})
+		if err := archiveOptions.Work.CheckContext(options.Context); err != nil {
+			return err
+		}
+		zipFS, err := filesys.NewZipFSFromLocalWithOptions(from, filesys.WithArchiveOptions(archiveOptions))
 		if err != nil {
+			return utils.Errorf("create archive failed: %v", err)
+		}
+		decompiler := javaclassparser.NewJarFS(zipFS)
+		decompiler.SetAnalysisBudget(options.MaxAnalysisUpdates)
+		jar, err := NewFromJarFS(decompiler)
+		if err != nil {
+			_ = zipFS.Close()
 			return utils.Errorf("create archive failed: %v", err)
 		}
 		defer jar.Close()
@@ -105,10 +133,14 @@ func autoDecompileFlat(from, to string, maxAnalysisUpdates int) error {
 			return utils.Errorf("read class file failed: %v", err)
 		}
 		var decompiled string
-		if maxAnalysisUpdates > 0 {
+		if options.Context != nil || options.Work != nil || options.Limits != (javaclassparser.Limits{}) || options.TargetRelease != 0 || options.MaxAnalysisUpdates > 0 {
 			result, derr := javaclassparser.DecompileWithOptions(raw, javaclassparser.DecompileOptions{
 				Mode:               javaclassparser.Compatibility,
-				MaxAnalysisUpdates: maxAnalysisUpdates,
+				Context:            options.Context,
+				Limits:             options.Limits,
+				Work:               options.Work,
+				TargetRelease:      options.TargetRelease,
+				MaxAnalysisUpdates: options.MaxAnalysisUpdates,
 			})
 			if derr != nil {
 				return utils.Errorf("decompile class failed: %v", derr)
@@ -148,8 +180,41 @@ func AutoDecompileWithOptions(from, to string, options ArchiveOptions) (ArchiveR
 	if options.MaxAnalysisUpdates < 0 {
 		return ArchiveReport{}, fmt.Errorf("negative analysis budget: %d", options.MaxAnalysisUpdates)
 	}
+	if isJImage(from) {
+		return decompileJImageWithOptions(from, to, options)
+	}
 	if !options.Structured {
-		return ArchiveReport{}, autoDecompileFlat(from, to, options.MaxAnalysisUpdates)
+		return ArchiveReport{}, autoDecompileFlat(from, to, options)
 	}
 	return decompileArchiveStructured(from, to, options)
+}
+
+func isJImage(path string) bool {
+	kind, err := inputkind.DetectFile(path)
+	return err == nil && kind == inputkind.JIMAGE
+}
+
+// decompileJImageWithOptions converts a JDK runtime image into a private
+// package-layout JAR and reuses the normal flat or structured archive exporter.
+func decompileJImageWithOptions(from, to string, options ArchiveOptions) (ArchiveReport, error) {
+	reader, err := jimage.OpenFile(from)
+	if err != nil {
+		return ArchiveReport{}, fmt.Errorf("open JImage %q: %w", from, err)
+	}
+	defer reader.Close()
+
+	temp, err := os.CreateTemp("", "javajive-jimage-*.jar")
+	if err != nil {
+		return ArchiveReport{}, err
+	}
+	tempName := temp.Name()
+	defer os.Remove(tempName)
+	if err := reader.WriteZIP(temp); err != nil {
+		_ = temp.Close()
+		return ArchiveReport{}, fmt.Errorf("convert JImage %q: %w", from, err)
+	}
+	if err := temp.Close(); err != nil {
+		return ArchiveReport{}, fmt.Errorf("close converted JImage %q: %w", from, err)
+	}
+	return AutoDecompileWithOptions(tempName, to, options)
 }

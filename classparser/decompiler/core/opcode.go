@@ -3,47 +3,45 @@ package core
 import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/internal/omap"
-	"github.com/yaklang/javajive/internal/utils"
 )
 
+// OpCode is kept densely packed: its layout is part of parser memory behavior.
+// All pointer/slice/interface fields come first, followed by the few 4/2-byte
+// fields and finally the boolean flags, so alignment padding does not make every
+// decoded instruction larger. Several historical fields (GetStackChange,
+// StackInfo, IfNode) were never read and were removed.
 type OpCode struct {
-	Id               int
-	Instr            *Instruction
-	CurrentOffset    uint16
-	Data             []byte
-	Jmp              int
-	BranchTarget     int
-	IsWide           bool
-	IsCatch          bool
-	GetStackChange   func()
-	IsTryCatchParent bool
-	TryNode          *OpCode
-	CatchNode        []*CatchNode
-	//StackSimulation                *StackSimulationImpl
-	StackEntry         *StackItem
-	Ref                *values.JavaRef
-	ExceptionTypeIndex uint16
-	// ExceptionTypeIndexes holds every catch type that targets this handler opcode. A
-	// multi-catch clause (`catch (A | B)`) compiles to several exception-table entries that
-	// share one handler PC but carry different catch types; collecting them here lets the
-	// decompiler reconstruct the full `A | B` clause instead of keeping only the last type.
+	Id                             int
+	Instr                          *Instruction
+	Data                           []byte
+	Jmp                            int
+	BranchTarget                   int
+	TryNode                        *OpCode
+	CatchNode                      []*CatchNode
+	StackEntry                     *StackItem
+	Ref                            *values.JavaRef
 	ExceptionTypeIndexes           []uint16
 	SwitchJmpCase                  *omap.OrderedMap[int, int32]
 	SwitchJmpCase1                 *omap.OrderedMap[int, int]
-	SwitchDefaultOffset            int32
 	SwitchDefaultIndex             int
 	stackProduced                  []values.JavaValue
 	stackConsumed                  []values.JavaValue
 	Source                         []*OpCode
 	Target                         []*OpCode
 	TrueNode, FalseNode, MergeNode *OpCode
-	Negative                       bool
-	StackInfo                      *utils.Stack[*values.JavaValue]
-	IsTernaryNode                  bool
-	IfNode                         *OpCode
 	Info                           any
-	IsCustom                       bool
 	conditionOpId                  int
+
+	SwitchDefaultOffset int32
+	CurrentOffset       uint16
+	ExceptionTypeIndex  uint16
+
+	IsWide           bool
+	IsCatch          bool
+	IsTryCatchParent bool
+	Negative         bool
+	IsTernaryNode    bool
+	IsCustom         bool
 	// TernaryChainArm marks a condition opcode that supplies its value into a DISTINCT nested
 	// ternary arm (a right-leaning chain a?:b?:c?: or a structurally-rebuilt tree), as opposed
 	// to a short-circuit &&/|| whose conditions all feed the SAME ternary condition. The

@@ -274,6 +274,107 @@ func switchCaseHasOnlyJumpEntries(node, candidate *core.Node, cases *omap.Ordere
 	return found && onlyJumps
 }
 
+// switchJumpOnlyTargets computes switchCaseHasOnlyJumpEntries for every case
+// target in one pass. Callers that test more than one candidate previously
+// rescanned the whole case map per target, which is O(cases²) and rebuilds the
+// ordered-map key/value snapshot on every test.
+func switchJumpOnlyTargets(node *core.Node, cases *omap.OrderedMap[switchLabel, *core.Node]) map[*core.Node]bool {
+	if node == nil || cases == nil {
+		return nil
+	}
+	only := make(map[*core.Node]bool, cases.Len())
+	cases.ForEachReadOnly(func(label switchLabel, target *core.Node) bool {
+		if target == nil {
+			return true
+		}
+		jumpOnly := !label.Default && node.SwitchJumpOnlyCases[int(label.Value)]
+		if previous, exists := only[target]; exists {
+			only[target] = previous && jumpOnly
+		} else {
+			only[target] = jumpOnly
+		}
+		return true
+	})
+	return only
+}
+
+// switchOnlyEntry is the memoized result of switchNodeJumpOnlyTargets. The ok
+// flag distinguishes "not derivable" from "empty target set".
+type switchOnlyEntry struct {
+	targets map[*core.Node]bool
+	ok      bool
+}
+
+// switchOnlyCache memoizes switchNodeJumpOnlyTargets for one RewriteManager.
+// The analyzer builds SwitchCases/SwitchJumpOnlyCases once and no rewrite pass
+// mutates them, so the derived map is valid for the manager's lifetime. The
+// loop-exit search consults it for every switch in a body on every query.
+type switchOnlyCache struct {
+	entries map[*core.Node]switchOnlyEntry
+}
+
+func (c *switchOnlyCache) targets(node *core.Node, middle *statements.MiddleStatement) (map[*core.Node]bool, bool) {
+	if c == nil {
+		return switchNodeJumpOnlyTargets(node, middle)
+	}
+	if entry, found := c.entries[node]; found {
+		return entry.targets, entry.ok
+	}
+	targets, ok := switchNodeJumpOnlyTargets(node, middle)
+	if c.entries == nil {
+		c.entries = make(map[*core.Node]switchOnlyEntry)
+	}
+	c.entries[node] = switchOnlyEntry{targets: targets, ok: ok}
+	return targets, ok
+}
+
+// switchNodeJumpOnlyTargets derives the same per-target property straight from
+// the prepared switch tables, avoiding a throwaway label-keyed OrderedMap for
+// every loop-exit query.
+func switchNodeJumpOnlyTargets(node *core.Node, middle *statements.MiddleStatement) (map[*core.Node]bool, bool) {
+	if node == nil {
+		return nil, false
+	}
+	only := map[*core.Node]bool{}
+	add := func(label switchLabel, target *core.Node) {
+		if target == nil {
+			return
+		}
+		jumpOnly := !label.Default && node.SwitchJumpOnlyCases[int(label.Value)]
+		if previous, exists := only[target]; exists {
+			only[target] = previous && jumpOnly
+		} else {
+			only[target] = jumpOnly
+		}
+	}
+	if node.SwitchCases != nil {
+		node.SwitchCases.ForEachReadOnly(func(value int, target *core.Node) bool {
+			add(switchLabel{Value: int32(value)}, target)
+			return true
+		})
+		if node.SwitchDefault != nil {
+			add(switchLabel{Default: true}, node.SwitchDefault)
+		}
+		return only, true
+	}
+	if middle == nil {
+		return nil, false
+	}
+	data, ok := middle.Data.([]any)
+	if !ok {
+		return nil, false
+	}
+	cases, err := switchCaseNodes(data, node)
+	if err != nil {
+		return nil, false
+	}
+	cases.ForEachReadOnly(func(label switchLabel, target *core.Node) bool {
+		add(label, target)
+		return true
+	})
+	return only, true
+}
+
 // Dominance alone cannot identify a switch continuation also reached by an
 // enclosing if arm. Prove a unique forward boundary shared by distinct case
 // bodies. A label remains a label (real fall-through); terminal returns were
@@ -426,6 +527,7 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 		// through into `default: throw` ("Impossible modulus N"). Kill-switch:
 		// JDEC_SWITCH_EMPTY_CASE_MERGE_OFF=1.
 		caseStarts := caseMap.Values()
+		jumpOnly := switchJumpOnlyTargets(node, caseMap)
 		var best *core.Node
 		bestCnt := 0
 		caseMap.ForEach(func(k switchLabel, cand *core.Node) bool {
@@ -433,7 +535,7 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 				return true
 			}
 			c := countOtherCasesExitingTo(manager, node, cand, caseStarts)
-			if (c >= 2 || (c == 1 && switchCaseHasOnlyJumpEntries(node, cand, caseMap))) && c > bestCnt {
+			if (c >= 2 || (c == 1 && jumpOnly[cand])) && c > bestCnt {
 				best = cand
 				bestCnt = c
 			}
@@ -665,7 +767,7 @@ func splitExternalSharedSwitchReturns(manager *RewriteManager, owner *core.Node)
 		replaceNextInPlace(e.source, e.target, leaf)
 	}
 	if len(edges) > 0 {
-		manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
+		manager.refreshDominatorsShared()
 	}
 }
 
@@ -932,7 +1034,7 @@ func sortSwitchLabels(labels []switchLabel) {
 func switchCaseNodes(data []any, node *core.Node) (*omap.OrderedMap[switchLabel, *core.Node], error) {
 	cases := omap.NewEmptyOrderedMap[switchLabel, *core.Node]()
 	if node.SwitchCases != nil {
-		node.SwitchCases.ForEach(func(v int, target *core.Node) bool { cases.Set(switchLabel{Value: int32(v)}, target); return true })
+		node.SwitchCases.ForEachReadOnly(func(v int, target *core.Node) bool { cases.Set(switchLabel{Value: int32(v)}, target); return true })
 		if node.SwitchDefault != nil {
 			cases.Set(switchLabel{Default: true}, node.SwitchDefault)
 		}
@@ -949,7 +1051,7 @@ func switchCaseNodes(data []any, node *core.Node) (*omap.OrderedMap[switchLabel,
 		cases.Set(label, next[index])
 		return true
 	}
-	indices.ForEach(func(v, index int) bool { return add(switchLabel{Value: int32(v)}, index) })
+	indices.ForEachReadOnly(func(v, index int) bool { return add(switchLabel{Value: int32(v)}, index) })
 	if invalid != nil {
 		return nil, invalid
 	}

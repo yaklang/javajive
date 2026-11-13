@@ -18,10 +18,87 @@ import (
 	"sync/atomic"
 )
 
-type stack []map[string]string
+type envFrame struct {
+	snap map[string]string
+	// keys are the JDEC_* entries this snapshot overrides. They are extracted
+	// once on push so Get can answer the common "no override active" case
+	// without parsing the goroutine stack.
+	keys []string
+}
+
+type stack []envFrame
 
 var byGid sync.Map // uint64 -> stack
 var liveBinds int32
+
+// activeKeys is the union of JDEC_* keys present in every live snapshot. When
+// a queried key is absent from this set and the process environment has no
+// value for it, every possible frame (closed snapshot, live sentinel, or no
+// bind) returns the empty string, so Get can skip gid()/runtime.Stack.
+//
+// Updates happen only on Run/EnterLive push/pop, not on each Get. The map is
+// published copy-on-write under activeMu and read lock-free via atomic.Value.
+var activeMu sync.Mutex
+var activeKeySet atomic.Value // map[string]struct{}
+
+func init() {
+	activeKeySet.Store(map[string]struct{}{})
+}
+
+func jdecKeys(snap map[string]string) []string {
+	if len(snap) == 0 {
+		return nil
+	}
+	var keys []string
+	for key := range snap {
+		if strings.HasPrefix(key, "JDEC_") {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+func addActiveKeys(keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	activeMu.Lock()
+	defer activeMu.Unlock()
+	set := activeKeySet.Load().(map[string]struct{})
+	next := make(map[string]struct{}, len(set)+len(keys))
+	for key := range set {
+		next[key] = struct{}{}
+	}
+	for _, key := range keys {
+		next[key] = struct{}{}
+	}
+	activeKeySet.Store(next)
+}
+
+// refreshActiveKeys recomputes the union of override keys from the live stacks
+// after a pop. Pops happen at request boundaries, and the number of frames and
+// override keys is small, so an exact rebuild is cheaper and simpler than
+// refcounting keys across nested frames.
+func refreshActiveKeys() {
+	activeMu.Lock()
+	defer activeMu.Unlock()
+	surviving := map[string]struct{}{}
+	byGid.Range(func(_, value any) bool {
+		for _, frame := range value.(stack) {
+			for _, key := range frame.keys {
+				surviving[key] = struct{}{}
+			}
+		}
+		return true
+	})
+	activeKeySet.Store(surviving)
+}
+
+func activeKey(key string) bool {
+	set := activeKeySet.Load().(map[string]struct{})
+	_, ok := set[key]
+	return ok
+}
 
 func hasBind() bool { return atomic.LoadInt32(&liveBinds) != 0 }
 
@@ -69,7 +146,7 @@ func Current() (map[string]string, bool) {
 	if len(st) == 0 {
 		return nil, false
 	}
-	return st[len(st)-1], true
+	return st[len(st)-1].snap, true
 }
 
 // Get returns the innermost snapshot value. Missing keys are unset (closed).
@@ -78,6 +155,14 @@ func Current() (map[string]string, bool) {
 func Get(key string) string {
 	if !hasBind() {
 		return os.Getenv(key)
+	}
+	// Fast path for the overwhelmingly common case: no active snapshot
+	// overrides this key and the process environment does not define it.
+	// Every possible frame (closed snapshot, live sentinel, or no binding)
+	// then yields "", so gid()/runtime.Stack parsing is unnecessary. A key
+	// that IS overridden still takes the full goroutine-local path.
+	if strings.HasPrefix(key, "JDEC_") && !activeKey(key) && os.Getenv(key) == "" {
+		return ""
 	}
 	if snap, ok := Current(); ok {
 		if snap == nil {
@@ -145,9 +230,11 @@ func push(id uint64, snap map[string]string) {
 	}
 	n := make(stack, len(st)+1)
 	copy(n, st)
-	n[len(st)] = snap
+	frame := envFrame{snap: snap, keys: jdecKeys(snap)}
+	n[len(st)] = frame
 	byGid.Store(id, n)
 	atomic.AddInt32(&liveBinds, 1)
+	addActiveKeys(frame.keys)
 }
 
 func pop(id uint64) {
@@ -156,15 +243,18 @@ func pop(id uint64) {
 		return
 	}
 	st := v.(stack)
+	frame := st[len(st)-1]
 	if len(st) <= 1 {
 		byGid.Delete(id)
-		atomic.AddInt32(&liveBinds, -1)
-		return
+	} else {
+		n := make(stack, len(st)-1)
+		copy(n, st[:len(st)-1])
+		byGid.Store(id, n)
 	}
-	n := make(stack, len(st)-1)
-	copy(n, st[:len(st)-1])
-	byGid.Store(id, n)
 	atomic.AddInt32(&liveBinds, -1)
+	if len(frame.keys) > 0 {
+		refreshActiveKeys()
+	}
 }
 
 func gidFromStack() uint64 {

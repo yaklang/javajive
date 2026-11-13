@@ -706,7 +706,7 @@ func NormalizeArchiveEntryName(name string) (string, error) {
 }
 
 func isDriveLetter(c byte) bool {
-	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'Z')
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
 }
 
 const multiReleasePrefix = "META-INF/versions/"

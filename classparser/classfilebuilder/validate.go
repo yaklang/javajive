@@ -2,10 +2,38 @@ package classfilebuilder
 
 import (
 	"fmt"
+	"math"
 	"strings"
+	"unicode/utf16"
 )
 
 const maxArrayDimensions = 255
+
+// ValidateClassInternalName reports whether name is a JVM class or interface
+// name in internal form, such as java/lang/String. Array descriptors are not
+// class internal names.
+func ValidateClassInternalName(name string) error {
+	return validateInternalName(name)
+}
+
+// ValidateObjectDescriptor reports whether descriptor is exactly one JVM
+// object type descriptor, such as Ljava/lang/String;.
+func ValidateObjectDescriptor(descriptor string) error {
+	_, err := internalNameFromDescriptor(descriptor)
+	return err
+}
+
+// ValidateFieldSymbol reports whether name and descriptor form a valid JVM
+// field symbol.
+func ValidateFieldSymbol(name, descriptor string) error {
+	return validateFieldSymbol(name, descriptor)
+}
+
+// ValidateMethodSymbol reports whether name and descriptor form a valid JVM
+// method symbol, including the special constraints for <init> and <clinit>.
+func ValidateMethodSymbol(name, descriptor string) error {
+	return validateMethodSymbol(name, descriptor)
+}
 
 func validateInternalName(name string) error {
 	if name == "" {
@@ -167,8 +195,21 @@ func parseFieldType(descriptor string, at int, array bool) (end, words int, err 
 	}
 }
 
+func validateUTF8Constant(value, kind string) error {
+	if len(modifiedUTF8(utf16.Encode([]rune(value)))) > math.MaxUint16 {
+		return fmt.Errorf("%s modified UTF-8 payload exceeds 65535 bytes", kind)
+	}
+	return nil
+}
+
 func validateFieldSymbol(name, descriptor string) error {
 	if err := validateFieldName(name); err != nil {
+		return err
+	}
+	if err := validateUTF8Constant(name, "field name"); err != nil {
+		return err
+	}
+	if err := validateUTF8Constant(descriptor, "field descriptor"); err != nil {
 		return err
 	}
 	_, err := fieldDescriptorWords(descriptor)
@@ -177,6 +218,12 @@ func validateFieldSymbol(name, descriptor string) error {
 
 func validateMethodSymbol(name, descriptor string) error {
 	if err := validateMethodName(name); err != nil {
+		return err
+	}
+	if err := validateUTF8Constant(name, "method name"); err != nil {
+		return err
+	}
+	if err := validateUTF8Constant(descriptor, "method descriptor"); err != nil {
 		return err
 	}
 	_, result, err := methodDescriptorWords(descriptor)

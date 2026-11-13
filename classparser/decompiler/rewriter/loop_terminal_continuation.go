@@ -2,6 +2,7 @@ package rewriter
 
 import (
 	"sort"
+	"sync"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
@@ -33,19 +34,41 @@ func exclusiveTerminalBranch(entry *core.Node) bool {
 func exclusiveTerminalLoopBranch(entry, owner *core.Node, dom map[*core.Node][]*core.Node) bool {
 	return exclusiveTerminalRegion(entry, owner, dom)
 }
+
+func exclusiveTerminalLoopBranchWithLive(entry, owner *core.Node, dom map[*core.Node][]*core.Node, live func(*core.Node) bool) bool {
+	return exclusiveTerminalRegionWithLive(entry, owner, dom, live)
+}
+
 func exclusiveTerminalRegion(entry, owner *core.Node, dom map[*core.Node][]*core.Node) bool {
-	live := map[*core.Node]bool{}
-	if owner != nil {
-		for parent, children := range dom {
-			live[parent] = true
-			for _, child := range children {
-				live[child] = true
-			}
+	return exclusiveTerminalRegionWithLive(entry, owner, dom, nil)
+}
+
+func domLiveSet(dom map[*core.Node][]*core.Node) map[*core.Node]struct{} {
+	live := make(map[*core.Node]struct{}, len(dom))
+	for parent, children := range dom {
+		live[parent] = struct{}{}
+		for _, child := range children {
+			live[child] = struct{}{}
+		}
+	}
+	return live
+}
+
+func exclusiveTerminalRegionWithLive(entry, owner *core.Node, dom map[*core.Node][]*core.Node, live func(*core.Node) bool) bool {
+	if owner != nil && live == nil {
+		liveSet := domLiveSet(dom)
+		live = func(n *core.Node) bool {
+			_, ok := liveSet[n]
+			return ok
 		}
 	}
 	incoming := 0
 	for _, source := range entry.Source {
-		if owner == nil || live[source] {
+		if owner == nil {
+			incoming++
+			continue
+		}
+		if live(source) {
 			incoming++
 		}
 	}
@@ -122,7 +145,13 @@ func exclusiveTerminalRegion(entry, owner *core.Node, dom map[*core.Node][]*core
 			return false
 		}
 		for _, source := range n.Source {
-			if state[source] == 0 && (owner == nil || live[source]) {
+			if state[source] != 0 {
+				continue
+			}
+			if owner == nil {
+				return false
+			}
+			if live(source) {
 				return false
 			}
 		}
@@ -191,42 +220,83 @@ func loopExitCannotResumeOwner(entry, owner *core.Node) bool {
 // branch may either return or reach it. Require reachability from every exit
 // entry, and prove every bypass path terminates the method. Unknown sinks and
 // cycles cannot justify lifting a continuation out of the loop.
+type commonExitDistance struct {
+	generation uint64
+	distance   int
+}
+
+type commonExitScratch struct {
+	distances  map[*core.Node]commonExitDistance
+	common     map[*core.Node]int
+	order      map[*core.Node]int
+	queue      []*core.Node
+	generation uint64
+}
+
+var commonExitPool = sync.Pool{New: func() any {
+	return &commonExitScratch{
+		distances: make(map[*core.Node]commonExitDistance),
+		common:    make(map[*core.Node]int),
+		order:     make(map[*core.Node]int),
+	}
+}}
+
 func commonLoopExit(exits []*core.Node) *core.Node {
 	if len(exits) == 0 {
 		return nil
 	}
-	common := map[*core.Node]int{}
-	order := map[*core.Node]int{}
+	scratch := commonExitPool.Get().(*commonExitScratch)
+	defer func() {
+		clear(scratch.distances)
+		clear(scratch.common)
+		clear(scratch.order)
+		scratch.queue = scratch.queue[:0]
+		commonExitPool.Put(scratch)
+	}()
+	clear(scratch.common)
+	clear(scratch.order)
 	for i, entry := range exits {
-		distance := map[*core.Node]int{entry: 0}
-		queue := []*core.Node{entry}
+		scratch.generation++
+		if scratch.generation == 0 {
+			clear(scratch.distances)
+			scratch.generation = 1
+		}
+		generation := scratch.generation
+		scratch.distances[entry] = commonExitDistance{generation: generation}
+		queue := append(scratch.queue[:0], entry)
 		for head := 0; head < len(queue); head++ {
 			n := queue[head]
 			if isMethodTerminal(n) || IsEndNode(n) {
 				continue
 			}
+			distance := scratch.distances[n].distance
 			for _, next := range loopAnalysisSuccessors(n) {
-				if _, seen := distance[next]; !seen {
-					distance[next] = distance[n] + 1
-					queue = append(queue, next)
+				if known, seen := scratch.distances[next]; seen && known.generation == generation {
+					continue
 				}
+				scratch.distances[next] = commonExitDistance{generation: generation, distance: distance + 1}
+				queue = append(queue, next)
 			}
 		}
 		if i == 0 {
-			common = distance
 			for rank, n := range queue {
-				order[n] = rank
+				scratch.common[n] = scratch.distances[n].distance
+				scratch.order[n] = rank
 			}
+			scratch.queue = queue[:0]
 			continue
 		}
-		for candidate := range common {
-			if d, reachable := distance[candidate]; reachable {
-				common[candidate] += d
+		for candidate := range scratch.common {
+			if d, reachable := scratch.distances[candidate]; reachable && d.generation == generation {
+				scratch.common[candidate] += d.distance
 			} else {
-				delete(common, candidate)
+				delete(scratch.common, candidate)
 			}
 		}
+		scratch.queue = queue[:0]
 	}
+	common := scratch.common
+	order := scratch.order
 	var candidates []*core.Node
 	for candidate := range common {
 		if !IsEndNode(candidate) {

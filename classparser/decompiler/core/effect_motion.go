@@ -1194,11 +1194,50 @@ func (d *Decompiler) canInlineValue(value values.JavaValue, source, target *Node
 	return true
 }
 
+func isOriginalOpcodeWitness(op *OpCode) bool {
+	return op != nil && op.Instr != nil && op.Instr.OpCode != OP_START && op.Instr.OpCode != OP_END && op.Instr.OpCode != OP_TRY_CATCH
+}
+
+// indexOpcodesByOffset indexes the unique real opcode at each PC. The stack map
+// is stable after simulation, so array/constructor proofs no longer scan every
+// opcode per query. Ambiguous PCs fail closed exactly like the old scan.
+func (d *Decompiler) indexOpcodesByOffset(ops map[*OpCode]*StackSimulationImpl) {
+	d.opcodeByOffset = nil
+	d.ambiguousOffsets = nil
+	if d == nil || len(ops) == 0 {
+		return
+	}
+	byOffset := make(map[int]*OpCode, len(ops))
+	ambiguous := map[int]bool{}
+	for op := range ops {
+		if !isOriginalOpcodeWitness(op) {
+			continue
+		}
+		offset := int(op.CurrentOffset)
+		if _, exists := byOffset[offset]; exists {
+			ambiguous[offset] = true
+			continue
+		}
+		byOffset[offset] = op
+	}
+	d.opcodeByOffset = byOffset
+	d.ambiguousOffsets = ambiguous
+}
+
 // opcodeAtOffset returns only an opcode from this method's analyzed stack map.
 // A matching integer offset from a different method or incomplete parse is not proof.
 func (d *Decompiler) opcodeAtOffset(offset int) *OpCode {
 	if d == nil {
 		return nil
+	}
+	if d.opcodeOffsetsSealed && d.opcodeByOffset == nil {
+		d.indexOpcodesByOffset(d.opcodeToSimulateStack)
+	}
+	if d.opcodeByOffset != nil {
+		if d.ambiguousOffsets[offset] {
+			return nil
+		}
+		return d.opcodeByOffset[offset]
 	}
 	// Synthetic control nodes carry a default PC zero too. They are not
 	// original bytecode witnesses, regardless of randomized map iteration.
@@ -1206,7 +1245,7 @@ func (d *Decompiler) opcodeAtOffset(offset int) *OpCode {
 	// cannot establish a unique immutable origin.
 	var original *OpCode
 	for op := range d.opcodeToSimulateStack {
-		if op == nil || op.Instr == nil || int(op.CurrentOffset) != offset || op.Instr.OpCode == OP_START || op.Instr.OpCode == OP_END || op.Instr.OpCode == OP_TRY_CATCH {
+		if !isOriginalOpcodeWitness(op) || int(op.CurrentOffset) != offset {
 			continue
 		}
 		if original != nil {

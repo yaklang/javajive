@@ -4,10 +4,13 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"strings"
 	"testing"
 
+	"github.com/yaklang/javajive/classparser/classfilebuilder"
 	"github.com/yaklang/javajive/internal/filesys"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 func t23Zip(t *testing.T, files map[string][]byte) []byte {
@@ -33,6 +36,140 @@ func t23MustResource(t *testing.T, err error) {
 	t.Helper()
 	if err == nil || !strings.Contains(err.Error(), "resource_limit") {
 		t.Fatalf("expected resource_limit, got %v", err)
+	}
+}
+
+func t23ArchiveClass(t *testing.T, name string) []byte {
+	t.Helper()
+	class := classfilebuilder.NewClass(name, "java/lang/Object", 0x0021)
+	objectInit, err := class.Pool().Methodref("java/lang/Object", "<init>", "()V")
+	if err != nil {
+		t.Fatal(err)
+	}
+	class.AddMethod(0x0001, "<init>", "()V").Code().
+		Load(classfilebuilder.RefLocal, 0).
+		CP(classfilebuilder.INVOKESPECIAL, objectInit).
+		Emit(classfilebuilder.RETURN)
+	raw, err := class.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func TestArchiveClassOutcomeContainsFailures(t *testing.T) {
+	valid := t23ArchiveClass(t, "Valid")
+	future := bytes.Clone(valid)
+	future[6], future[7] = 0, byte(MaxSupportedClassMajor+1)
+	raw := t23Zip(t, map[string][]byte{
+		"Valid.class":     valid,
+		"Malformed.class": {0xca, 0xfe, 0xba, 0xbe},
+		"Future.class":    future,
+	})
+	zipFS, err := filesys.NewZipFSFromString(string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zipFS.Close()
+	jar := NewJarFS(zipFS)
+
+	complete, err := jar.ReadClassOutcome("Valid.class")
+	if err != nil || complete.Status != ClassDecompileComplete || !bytes.Contains(complete.Source, []byte("class Valid")) {
+		t.Fatalf("valid outcome = status %q err %v source %q", complete.Status, err, complete.Source)
+	}
+	for _, test := range []struct {
+		name   string
+		code   string
+		prefix string
+	}{
+		{"Malformed.class", "class_parse_failed", "// decompile parse failed for Malformed.class:"},
+		{"Future.class", "unsupported_classfile_version", "// decompile fallback for Future.class:"},
+	} {
+		outcome, err := jar.ReadClassOutcome(test.name)
+		if err != nil || outcome.Status != ClassDecompileFallback || len(outcome.Diagnostics) != 1 || outcome.Diagnostics[0].Code != test.code {
+			t.Fatalf("%s outcome = %+v err %v", test.name, outcome, err)
+		}
+		if !bytes.HasPrefix(outcome.Source, []byte(test.prefix)) {
+			t.Fatalf("%s source marker = %q, want prefix %q", test.name, outcome.Source, test.prefix)
+		}
+	}
+}
+
+func TestClassFallbackTextIsSingleLineAndBounded(t *testing.T) {
+	outcome := classFallbackOutcome("evil\nName.class", "class_decompile_panic", strings.Repeat("x", 600)+"\nclass Injected {}")
+	if strings.Count(string(outcome.Source), "\n") != 1 || bytes.Contains(outcome.Source, []byte("class Injected")) {
+		t.Fatalf("fallback source = %q", outcome.Source)
+	}
+	if len([]rune(outcome.Diagnostics[0].Message)) != 480 {
+		t.Fatalf("diagnostic length = %d, want 480", len([]rune(outcome.Diagnostics[0].Message)))
+	}
+}
+
+func TestArchiveClassOutcomePreservesMethodStubs(t *testing.T) {
+	object, err := Parse(readValidationSeed(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var code *CodeAttribute
+	for _, method := range object.Methods {
+		if int(method.NameIndex) == 0 || int(method.NameIndex) > len(object.ConstantPool) {
+			continue
+		}
+		nameInfo, ok := object.ConstantPool[method.NameIndex-1].(*ConstantUtf8Info)
+		if !ok || nameInfo.Value != "run" {
+			continue
+		}
+		for _, attribute := range method.Attributes {
+			if candidate, ok := attribute.(*CodeAttribute); ok {
+				code = candidate
+			}
+		}
+	}
+	if code == nil {
+		t.Fatal("seed run method has no Code attribute")
+	}
+	corrupted := false
+	for i := 0; i+2 < len(code.Code); i++ {
+		if code.Code[i] == 0xb2 {
+			binary.BigEndian.PutUint16(code.Code[i+1:i+3], 0xffff)
+			corrupted = true
+			break
+		}
+	}
+	if !corrupted {
+		t.Fatal("seed run method has no getstatic operand to corrupt")
+	}
+	archive := t23Zip(t, map[string][]byte{"Partial.class": object.Bytes()})
+	zipFS, err := filesys.NewZipFSFromString(string(archive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zipFS.Close()
+	outcome, err := NewJarFS(zipFS).ReadClassOutcome("Partial.class")
+	if err != nil || outcome.Status != ClassDecompilePartial || len(outcome.StubMethods) == 0 || !bytes.Contains(outcome.Source, []byte(DecompileStubMarker)) {
+		t.Fatalf("partial outcome = %+v err %v source %q", outcome, err, outcome.Source)
+	}
+}
+
+func TestArchiveClassPanicContainmentPreservesResourceErrors(t *testing.T) {
+	jar := &JarFS{}
+	var work *workbudget.Budget
+	outcome, err := jar.containClassDecompile("Panic.class", &work, func() (ClassDecompileOutcome, error) {
+		panic("fixture panic")
+	})
+	if err != nil || outcome.Status != ClassDecompileFallback || len(outcome.Diagnostics) != 1 || outcome.Diagnostics[0].Code != "class_decompile_panic" {
+		t.Fatalf("panic outcome = %+v err %v", outcome, err)
+	}
+
+	work = workbudget.New(context.Background(), Limits{MaxRequestWork: 1})
+	if err := work.Charge(workbudget.CounterRequestWork, 2); err == nil {
+		t.Fatal("fixture did not exhaust resource budget")
+	}
+	outcome, err = jar.containClassDecompile("Resource.class", &work, func() (ClassDecompileOutcome, error) {
+		panic("after resource failure")
+	})
+	if err == nil || !workbudget.Is(err) || outcome.Status != "" {
+		t.Fatalf("resource panic outcome = %+v err %v", outcome, err)
 	}
 }
 

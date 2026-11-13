@@ -608,6 +608,23 @@ func (o *OrderedMap[T, V]) Map(f func(T, V) (T, V, error)) *OrderedMap[T, V] {
 	return r
 }
 
+// ForEachReadOnly iterates in insertion order without copying the key/value
+// snapshot. The handler must not mutate o or call a method that takes its
+// write lock. Read-only analysis loops use this to avoid a per-call allocation.
+func (o *OrderedMap[T, V]) ForEachReadOnly(handler func(i T, v V) bool) {
+	if o == nil {
+		return
+	}
+	o.init()
+	o.lock.RLock()
+	defer o.lock.RUnlock()
+	for _, key := range o.keyChain {
+		if !handler(key, o.m[key]) {
+			return
+		}
+	}
+}
+
 func (o *OrderedMap[T, V]) ForEach(handler func(i T, v V) bool) {
 	if o == nil {
 		return

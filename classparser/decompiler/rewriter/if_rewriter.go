@@ -252,7 +252,7 @@ func splitSharedFallthroughExpression(manager *RewriteManager, condition *core.N
 		edge.OriginPC, edge.HasOriginPC = target.OriginPC, target.HasOriginPC
 		edge.AddNext(target.Next[0])
 		replaceNextInPlace(condition, target, edge)
-		manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
+		manager.refreshDominatorsShared()
 		return
 	}
 }
@@ -377,7 +377,7 @@ func splitSharedTerminalLeaves(manager *RewriteManager, condition *core.Node) {
 		changed = true
 	}
 	if changed {
-		manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
+		manager.refreshDominatorsShared()
 	}
 }
 
