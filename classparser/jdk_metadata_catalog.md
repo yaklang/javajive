@@ -93,12 +93,13 @@ python3 classparser/jdk_metadata_catalog_generate.py \
 go generate ./classparser
 ```
 
-The reviewed JSON remains the source of truth. Applications embed only
-`jdk_metadata_catalog.json.zst`; the catalog is decompressed on its first
-required lookup, within the existing one-time loader. The constructor classfile
-ZIP and all exact-profile/provenance checks remain unchanged. The required
-corpus tests compare decompressed bytes with the JSON source so regeneration
-cannot silently omit a catalog update.
+The reviewed JSON and constructor classfile ZIP remain the sources of truth.
+Applications embed only `jdk_metadata_catalog.json.zst` and the deterministic
+chunked-zstd `jdk_constructor_code.bundle.zst`; the catalog and each 1 MiB
+constructor chunk are decompressed lazily on first required lookup, and every
+lookup verifies the per-class SHA-256 and returns an owned copy. The required
+corpus tests compare decompressed bytes against both reviewed sources so
+regeneration cannot silently omit an update.
 
 ## Evidence and limits
 
