@@ -89,6 +89,19 @@ go build -o javajive ./cmd/javajive
 
 需要 Go 1.22+。
 
+### 构建标签（`javajive_full_jdk`）
+
+默认构建下，JavaJive 仅内嵌精简后的 JDK 元数据目录（`classparser/jdk_metadata_catalog.json.zst`，约 132 KiB，完整保留 JDK 8/9/11/16/17/21 的核心方法表、泛型签名、异常表、Throwable 继承树与引用类型继承树），**默认不内嵌** 7.7 MiB 的完整 JDK 字节码包（`jdk_constructor_code.bundle.zst`）。这可以为 `yaklang` 等下游集成方直接节省约 8.4 MiB 的二进制与压缩包体积，同时保持反编译可读性、类型推导与 SSA 静态分析质量。
+
+如果需要在无外部 JDK 声明解析器的离线场景下启用严格的 `javac` 无损重编译构造捕获与注解保留证明，可通过 `javajive_full_jdk` 构建标签开启完整内嵌包：
+
+```bash
+go build -tags javajive_full_jdk -o javajive ./cmd/javajive
+go test -tags javajive_full_jdk ./classparser
+```
+
+运行时可通过 `javajive.HasEmbeddedJDKConstructorBundle()`（或 `javaclassparser.HasEmbeddedJDKConstructorBundle()`）检查当前二进制是否包含完整 JDK 字节码包。更多细节见 [classparser/jdk_metadata_catalog.md](classparser/jdk_metadata_catalog.md)。
+
 ## 命令行
 
 ```text

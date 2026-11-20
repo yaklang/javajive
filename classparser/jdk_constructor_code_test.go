@@ -1,3 +1,5 @@
+//go:build javajive_full_jdk
+
 package javaclassparser
 
 import (
@@ -25,9 +27,7 @@ func TestAdversarialPlatformInterfaceDeclarationsUsePinnedOriginalFlags(t *testi
 			}
 		}
 	}
-	if err := decodeJDKInvocationCatalog(&catalog); err != nil {
-		t.Fatal(err)
-	}
+	readSourceJDKInvocationCatalog(t, &catalog)
 	for _, profile := range catalog.Profiles {
 		count := 0
 		for name, decl := range profile.Classes {
@@ -72,9 +72,7 @@ func TestAdversarialPlatformConstructorCodeIdentityAndEffectProof(t *testing.T) 
 			References    map[string]struct{ Archive, SHA256 string } `json:"reference_provenance"`
 		}
 	}
-	if err := decodeJDKInvocationCatalog(&declared); err != nil {
-		t.Fatal(err)
-	}
+	readSourceJDKInvocationCatalog(t, &declared)
 	for _, profile := range declared.Profiles {
 		raw, ok := jdkConstructorClassBytes("java/util/AbstractList", profile.Release)
 		if !ok {

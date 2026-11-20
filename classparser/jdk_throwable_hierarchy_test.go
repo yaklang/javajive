@@ -17,9 +17,7 @@ func TestJDKThrowableAncestryKeepsClassificationSeparateFromMembers(t *testing.T
 			} `json:"throwable_provenance"`
 		} `json:"profiles"`
 	}
-	if err := decodeJDKInvocationCatalog(&document); err != nil {
-		t.Fatal(err)
-	}
+	readSourceJDKInvocationCatalog(t, &document)
 	for _, profile := range document.Profiles {
 		if len(profile.Parents) < 100 {
 			t.Fatal("Throwable graph was reduced to a guessed exception list", profile.Release)

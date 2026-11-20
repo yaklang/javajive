@@ -29,6 +29,7 @@ jobs:
           cache: true
       - run: go run ./tools/requiredci -check
       - run: CGO_ENABLED=0 go build ./...
+      - run: CGO_ENABLED=0 go build -tags javajive_full_jdk ./...
       - run: go run ./tools/requiredci -run contract
 
   corpus:
@@ -44,6 +45,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: go run ./tools/requiredci -run corpus
+      - run: go test -tags javajive_full_jdk ./classparser -run '^(TestJDKCompressedCatalogMatchesSource|TestJDKCompressedConstructorCodeMatchesSource|TestAdversarialPlatformConstructorCodeIdentityAndEffectProof|TestAdversarialPlatformIndexedDeclarationsRetainOriginalBytecode)$'
 
   algorithm:
     name: Go algorithm regression

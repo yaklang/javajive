@@ -1,3 +1,5 @@
+//go:build javajive_full_jdk
+
 package javaclassparser
 
 import (
@@ -16,9 +18,7 @@ func TestAdversarialPlatformIndexedDeclarationsRetainOriginalBytecode(t *testing
 			Provenance    map[string]struct{ Archive, SHA256 string }
 		}
 	}
-	if err := decodeJDKInvocationCatalog(&catalog); err != nil {
-		t.Fatal(err)
-	}
+	readSourceJDKInvocationCatalog(t, &catalog)
 	for _, profile := range catalog.Profiles {
 		t.Run(fmt.Sprint(profile.Release), func(t *testing.T) {
 			classes, interfaces := 0, 0

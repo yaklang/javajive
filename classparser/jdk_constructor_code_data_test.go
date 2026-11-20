@@ -1,3 +1,5 @@
+//go:build javajive_full_jdk
+
 package javaclassparser
 
 import (

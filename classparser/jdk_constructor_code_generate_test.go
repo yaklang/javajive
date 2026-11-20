@@ -50,9 +50,7 @@ func TestGenerateJDKConstructorCodeArchive(t *testing.T) {
 			Classes       map[string]json.RawMessage
 		}
 	}
-	if err = decodeJDKInvocationCatalog(&declared); err != nil {
-		t.Fatal(err)
-	}
+	readSourceJDKInvocationCatalog(t, &declared)
 	expected := map[int]string{}
 	declarationRoots := map[int]map[string]json.RawMessage{}
 	for _, p := range declared.Profiles {

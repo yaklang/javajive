@@ -38,7 +38,15 @@ import (
 )
 
 // Version is the javajive library/CLI version.
-const Version = "0.8.1"
+const Version = "0.8.2"
+
+// HasEmbeddedJDKConstructorBundle reports whether this binary was compiled with
+// `-tags javajive_full_jdk` (embedding the 7.7 MiB JDK constructor classfile
+// bundle). Default builds omit it and embed only the compact (~132 KiB) JDK
+// invocation/hierarchy metadata catalog.
+func HasEmbeddedJDKConstructorBundle() bool {
+	return classparser.HasEmbeddedJDKConstructorBundle()
+}
 
 // ---------------------------------------------------------------------------
 // Re-exported types

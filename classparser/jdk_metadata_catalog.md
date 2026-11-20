@@ -94,11 +94,27 @@ go generate ./classparser
 ```
 
 The reviewed JSON and constructor classfile ZIP remain the sources of truth.
-Applications embed only `jdk_metadata_catalog.json.zst` and the deterministic
-chunked-zstd `jdk_constructor_code.bundle.zst`; the catalog and each 1 MiB
-constructor chunk are decompressed lazily on first required lookup, and every
-lookup verifies the per-class SHA-256 and returns an owned copy. The required
-corpus tests compare decompressed bytes against both reviewed sources so
+Embedded assets are split into two tiers to keep downstream binaries slim:
+
+1. **Default build (no build tag)**: embeds only the compact runtime projection
+   of `jdk_metadata_catalog.json.zst` (~132 KiB, with offline provenance hashes
+   stripped while preserving all 6 JDK profiles' complete method tables,
+   signatures, exception lists, throwable hierarchy, and reference hierarchy).
+   The 7.7 MiB `jdk_constructor_code.bundle.zst` is **not** embedded;
+   `HasEmbeddedJDKConstructorBundle()` returns `false`, and callers that only
+   need readable/analyzable Java source or `.class` parsing avoid 7.7 MiB of
+   embedded binary bloat while retaining full catalog metadata and any explicit
+   declaration resolvers.
+2. **Full JDK bytecode build (`-tags javajive_full_jdk`)**: additionally embeds
+   the deterministic chunked-zstd `jdk_constructor_code.bundle.zst` (~7.7 MiB)
+   for strict offline `javac` round-trip constructor-capture and
+   annotation-retention proofs. Each 1 MiB chunk is decompressed lazily on first
+   required lookup, and every lookup verifies the per-class SHA-256 and returns
+   an owned copy. `HasEmbeddedJDKConstructorBundle()` returns `true`.
+
+The required corpus tests verify the compact catalog projection against
+`jdk_metadata_catalog.json` in default builds and verify the full constructor
+bundle against `jdk_constructor_code.zip` under `-tags javajive_full_jdk`, so
 regeneration cannot silently omit an update.
 
 ## Evidence and limits
