@@ -108,6 +108,31 @@ go build -o javajive ./cmd/javajive
 
 Requires Go 1.22+.
 
+### Build tags (`javajive_full_jdk`)
+
+By default, JavaJive embeds only the compact JDK invocation/hierarchy metadata
+catalog (`classparser/jdk_metadata_catalog.json.zst`, ~132 KiB, covering JDK
+8/9/11/16/17/21 method tables, generic signatures, exceptions, throwable
+hierarchy, and reference supertypes) and **omits** the 7.7 MiB full JDK
+constructor bytecode bundle (`jdk_constructor_code.bundle.zst`). This saves
+~8.4 MiB of embedded binary/zip size in downstream consumers such as `yaklang`
+while preserving full readability, type inference, and SSA/static-analysis
+quality.
+
+If you need strict offline `javac` round-trip constructor-capture and
+annotation-retention proofs without supplying an external JDK declaration
+resolver, opt in with the `javajive_full_jdk` build tag:
+
+```bash
+go build -tags javajive_full_jdk -o javajive ./cmd/javajive
+go test -tags javajive_full_jdk ./classparser
+```
+
+Callers can inspect `javajive.HasEmbeddedJDKConstructorBundle()` (or
+`javaclassparser.HasEmbeddedJDKConstructorBundle()`) at runtime. See
+[classparser/jdk_metadata_catalog.md](classparser/jdk_metadata_catalog.md) for
+details.
+
 ## CLI
 
 ```text

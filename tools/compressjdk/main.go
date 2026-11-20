@@ -73,10 +73,33 @@ func main() {
 	}
 }
 
+type runtimeCatalogProfile struct {
+	Release          int                        `json:"release"`
+	Classes          map[string]json.RawMessage `json:"classes"`
+	ThrowableParents map[string][]string        `json:"throwable_hierarchy"`
+	ReferenceParents map[string][]string        `json:"reference_hierarchy"`
+}
+
+type runtimeCatalogDocument struct {
+	Schema   int                     `json:"schema"`
+	Profiles []runtimeCatalogProfile `json:"profiles"`
+}
+
 func compress(input string) error {
 	raw, err := os.ReadFile(input)
 	if err != nil {
 		return err
+	}
+	var doc runtimeCatalogDocument
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return fmt.Errorf("unmarshal catalog: %w", err)
+	}
+	if doc.Schema != 3 || len(doc.Profiles) == 0 {
+		return fmt.Errorf("invalid catalog schema=%d profiles=%d", doc.Schema, len(doc.Profiles))
+	}
+	compact, err := json.Marshal(doc)
+	if err != nil {
+		return fmt.Errorf("marshal compact catalog: %w", err)
 	}
 	encoder, err := zstd.NewWriter(nil,
 		zstd.WithEncoderLevel(zstd.SpeedBestCompression),
@@ -88,7 +111,7 @@ func compress(input string) error {
 		return err
 	}
 	defer encoder.Close()
-	compressed := encoder.EncodeAll(raw, nil)
+	compressed := encoder.EncodeAll(compact, nil)
 	return os.WriteFile(input+".zst", compressed, 0644)
 }
 

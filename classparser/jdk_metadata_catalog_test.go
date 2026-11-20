@@ -39,9 +39,7 @@ func TestJDKInvocationCatalogCompleteProfiles(t *testing.T) {
 			} `json:"provenance"`
 		} `json:"profiles"`
 	}
-	if err := decodeJDKInvocationCatalog(&document); err != nil {
-		t.Fatal(err)
-	}
+	readSourceJDKInvocationCatalog(t, &document)
 	if len(document.Profiles) != 6 {
 		t.Fatal("expected exact profiles 8/9/11/16/17/21")
 	}
@@ -176,9 +174,7 @@ func TestJDKCatalogModularNamespaceAndCheckedDeclarations(t *testing.T) {
 			} `json:"provenance"`
 		} `json:"profiles"`
 	}
-	if err := decodeJDKInvocationCatalog(&document); err != nil {
-		t.Fatal(err)
-	}
+	readSourceJDKInvocationCatalog(t, &document)
 	for _, profile := range document.Profiles {
 		for _, tc := range []struct{ name, module string }{{"org/xml/sax/helpers/DefaultHandler", "java.xml.jmod"}, {"java/beans/PropertyEditorSupport", "java.desktop.jmod"}, {"javax/naming/spi/ObjectFactory", "java.naming.jmod"}, {"javax/sql/DataSource", "java.sql.jmod"}} {
 			module := tc.module
@@ -406,9 +402,7 @@ func TestInvocationMetadataReferenceCatalogRequiresOriginalClosedProfilesAndNeve
 			} `json:"reference_provenance"`
 		} `json:"profiles"`
 	}
-	if e := decodeJDKInvocationCatalog(&document); e != nil {
-		t.Fatal(e)
-	}
+	readSourceJDKInvocationCatalog(t, &document)
 	if document.Schema != 3 || len(document.Profiles) != 6 {
 		t.Fatal("exact hierarchy profiles required")
 	}
