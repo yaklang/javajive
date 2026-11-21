@@ -19,9 +19,25 @@ const (
 	cpMethodref          = 10
 	cpInterfaceMethodref = 11
 	cpNameAndType        = 12
+	cpMethodHandle       = 15
+	cpMethodType         = 16
+	cpInvokeDynamic      = 18
 	// cpPadding marks the unusable second slot a long or double constant
 	// occupies. It is never written to the class file.
 	cpPadding = 0
+)
+
+// JVM CONSTANT_MethodHandle reference_kind values (JVMS §4.4.8).
+const (
+	RefGetField         byte = 1
+	RefGetStatic        byte = 2
+	RefPutField         byte = 3
+	RefPutStatic        byte = 4
+	RefInvokeVirtual    byte = 5
+	RefInvokeStatic     byte = 6
+	RefInvokeSpecial    byte = 7
+	RefNewInvokeSpecial byte = 8
+	RefInvokeInterface  byte = 9
 )
 
 type cpEntry struct {
@@ -212,6 +228,68 @@ func (p *ConstantPool) InterfaceMethodref(owner, name, descriptor string) (uint1
 	return p.member(cpInterfaceMethodref, "im", owner, name, descriptor)
 }
 
+// MethodHandle adds a CONSTANT_MethodHandle (JVMS §4.4.8).
+func (p *ConstantPool) MethodHandle(kind byte, refIndex uint16) (uint16, error) {
+	entry, err := p.entry(refIndex)
+	if err != nil {
+		return 0, fmt.Errorf("method handle reference: %w", err)
+	}
+	valid := false
+	switch kind {
+	case RefGetField, RefGetStatic, RefPutField, RefPutStatic:
+		valid = entry.tag == cpFieldref
+	case RefInvokeVirtual, RefNewInvokeSpecial:
+		valid = entry.tag == cpMethodref
+	case RefInvokeStatic, RefInvokeSpecial:
+		valid = entry.tag == cpMethodref || entry.tag == cpInterfaceMethodref
+	case RefInvokeInterface:
+		valid = entry.tag == cpInterfaceMethodref
+	default:
+		return 0, fmt.Errorf("unsupported method handle reference_kind %d", kind)
+	}
+	if !valid {
+		return 0, fmt.Errorf("method handle kind %d does not accept constant pool index %d (tag %d)", kind, refIndex, entry.tag)
+	}
+	return p.add(cpEntry{tag: cpMethodHandle, a: uint16(kind), b: refIndex, key: fmt.Sprintf("mh:%d:%d", kind, refIndex)})
+}
+
+// MethodType adds a CONSTANT_MethodType.
+func (p *ConstantPool) MethodType(descriptor string) (uint16, error) {
+	if err := validateUTF8Constant(descriptor, "method type descriptor"); err != nil {
+		return 0, err
+	}
+	if _, _, err := methodDescriptorWords(descriptor); err != nil {
+		return 0, err
+	}
+	descIndex, err := p.UTF8(descriptor)
+	if err != nil {
+		return 0, err
+	}
+	return p.add(cpEntry{tag: cpMethodType, a: descIndex, key: "mt:" + descriptor, text: descriptor})
+}
+
+// InvokeDynamic adds a CONSTANT_InvokeDynamic referencing an entry in the
+// class's BootstrapMethods attribute.
+func (p *ConstantPool) InvokeDynamic(bootstrapMethodAttrIndex uint16, name, descriptor string) (uint16, error) {
+	if name == "<init>" || name == "<clinit>" {
+		return 0, fmt.Errorf("invokedynamic method name must not be %q", name)
+	}
+	if _, _, err := methodDescriptorWords(descriptor); err != nil {
+		return 0, err
+	}
+	natIndex, err := p.NameAndType(name, descriptor)
+	if err != nil {
+		return 0, err
+	}
+	return p.add(cpEntry{
+		tag:  cpInvokeDynamic,
+		a:    bootstrapMethodAttrIndex,
+		b:    natIndex,
+		key:  fmt.Sprintf("idy:%d:%s\x00%s", bootstrapMethodAttrIndex, name, descriptor),
+		text: descriptor,
+	})
+}
+
 func (p *ConstantPool) entry(index uint16) (cpEntry, error) {
 	if index == 0 || int(index) > len(p.entries) {
 		return cpEntry{}, fmt.Errorf("constant pool index %d is out of range", index)
@@ -242,10 +320,13 @@ func (p *ConstantPool) write(dst *byteWriter) error {
 		case cpLong, cpDouble:
 			dst.u4(uint32(uint64(e.i64) >> 32))
 			dst.u4(uint32(e.i64))
-		case cpClass, cpString:
+		case cpClass, cpString, cpMethodType:
 			dst.u2(e.a)
-		case cpFieldref, cpMethodref, cpInterfaceMethodref, cpNameAndType:
+		case cpFieldref, cpMethodref, cpInterfaceMethodref, cpNameAndType, cpInvokeDynamic:
 			dst.u2(e.a)
+			dst.u2(e.b)
+		case cpMethodHandle:
+			dst.u1(byte(e.a))
 			dst.u2(e.b)
 		default:
 			return fmt.Errorf("unsupported internal constant pool tag %d", e.tag)

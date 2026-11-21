@@ -28,8 +28,8 @@ const (
 	ACC_ENUM         uint16 = 0x4000
 )
 
-// JVM opcodes supported by the assembler. JSR, JSR_W, RET, MULTIANEWARRAY,
-// and invokedynamic intentionally have no helpers.
+// JVM opcodes supported by the assembler. JSR, JSR_W, RET, and MULTIANEWARRAY
+// intentionally have no helpers.
 const (
 	NOP             Opcode = 0x00
 	ACONST_NULL     Opcode = 0x01
@@ -175,6 +175,7 @@ const (
 	INVOKESPECIAL   Opcode = 0xb7
 	INVOKESTATIC    Opcode = 0xb8
 	INVOKEINTERFACE Opcode = 0xb9
+	INVOKEDYNAMIC   Opcode = 0xba
 	NEW             Opcode = 0xbb
 	NEWARRAY        Opcode = 0xbc
 	ANEWARRAY       Opcode = 0xbd

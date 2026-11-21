@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"flag"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -30,10 +31,28 @@ func TestCmdInspectAcceptedFixtureJSON(t *testing.T) {
 	}
 }
 
-func TestCmdInspectExternalRejectedFixtureStillEmitsJSON(t *testing.T) {
-	// DEX 038 with call-site sections is still rejected, but the report must
-	// remain machine-readable on stdout.
+func TestCmdInspectExternalAcceptedDEX038EmitsCompleteJSON(t *testing.T) {
 	fixture := filepath.Join("..", "..", "dex2jar", "testdata", "external", "pxb1988-dex2jar-dex038.dex")
+	var stdout bytes.Buffer
+	if err := cmdInspectTo([]string{"--format=json", fixture}, &stdout); err != nil {
+		t.Fatalf("cmdInspectTo: %v", err)
+	}
+	var report artifactinspect.Report
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("decode stdout JSON: %v", err)
+	}
+	if report.Status != artifactinspect.StatusComplete || len(report.Diagnostics) != 0 {
+		t.Fatalf("report = %#v", report)
+	}
+}
+
+func TestCmdInspectRejectedDEX041StillEmitsPartialJSON(t *testing.T) {
+	data := make([]byte, 0x70)
+	copy(data, []byte("dex\n041\x00"))
+	fixture := filepath.Join(t.TempDir(), "v041.dex")
+	if err := os.WriteFile(fixture, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	var stdout bytes.Buffer
 	if err := cmdInspectTo([]string{"--format=json", fixture}, &stdout); err != nil {
 		t.Fatalf("cmdInspectTo: %v", err)
@@ -46,7 +65,7 @@ func TestCmdInspectExternalRejectedFixtureStillEmitsJSON(t *testing.T) {
 		t.Fatalf("report = %#v", report)
 	}
 	for _, diagnostic := range report.Diagnostics {
-		if !strings.Contains(diagnostic.Message, "call_site_id") {
+		if !strings.Contains(diagnostic.Message, `unsupported DEX version "041"`) {
 			t.Fatalf("unexpected diagnostic = %#v", diagnostic)
 		}
 	}

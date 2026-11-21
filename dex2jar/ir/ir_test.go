@@ -391,7 +391,7 @@ func TestBuildValidatesTargetsMoveResultRegistersAndUnsupported(t *testing.T) {
 		{
 			name: "method handle",
 			in:   fixture([]uint16{0x00fe, 0x0000}, 1, 0, model.Proto{ReturnType: "V"}, dexAccessStatic),
-			want: "outside the supported",
+			want: "out of range",
 		},
 		{
 			name: "try catch",
@@ -539,12 +539,12 @@ func TestBuildMarksOnlyKnownCapabilityFailuresUnsupported(t *testing.T) {
 		in   Input
 	}{
 		{
-			name: "opcode family",
-			in:   fixture([]uint16{0x00fe, 0x0000}, 1, 0, model.Proto{ReturnType: "V"}, dexAccessStatic),
+			name: "filled new array long",
+			in:   filledArrayInput("[J", []uint16{0x1024, 0x0000, 0x0000, 0x000c, 0x0011}),
 		},
 		{
-			name: "filled new array element",
-			in:   filledArrayInput("[J", []uint16{0x1024, 0x0000, 0x0000, 0x000c, 0x0011}),
+			name: "filled new array double",
+			in:   filledArrayInput("[D", []uint16{0x1024, 0x0000, 0x0000, 0x000c, 0x0011}),
 		},
 	}
 	for _, test := range tests {

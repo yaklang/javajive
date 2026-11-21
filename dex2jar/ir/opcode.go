@@ -137,12 +137,12 @@ func init() {
 		opcodeTable[byte(0xd8+index)] = opcodeInfo{name, "22b", 2, true}
 	}
 	for opcode, info := range map[byte]opcodeInfo{
-		0xfa: {"invoke-polymorphic", "45cc", 4, false},
-		0xfb: {"invoke-polymorphic/range", "4rcc", 4, false},
-		0xfc: {"invoke-custom", "35c", 3, false},
-		0xfd: {"invoke-custom/range", "3rc", 3, false},
-		0xfe: {"const-method-handle", "21c", 2, false},
-		0xff: {"const-method-type", "21c", 2, false},
+		0xfa: {"invoke-polymorphic", "45cc", 4, true},
+		0xfb: {"invoke-polymorphic/range", "4rcc", 4, true},
+		0xfc: {"invoke-custom", "35c", 3, true},
+		0xfd: {"invoke-custom/range", "3rc", 3, true},
+		0xfe: {"const-method-handle", "21c", 2, true},
+		0xff: {"const-method-type", "21c", 2, true},
 	} {
 		opcodeTable[opcode] = info
 	}

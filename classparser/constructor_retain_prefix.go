@@ -170,6 +170,11 @@ func countStmtVarRefs(sts []statements.Statement, targetID *coreutils.VariableId
 		switch s := st.(type) {
 		case *statements.AssignStatement:
 			if s != nil {
+				if s.LeftValue != nil {
+					if ref, ok := values.UnpackSoltValue(s.LeftValue).(*values.JavaRef); !ok || ref == nil || ref.IsThis || ref.CustomValue != nil || ref.StackVar != nil {
+						total += countValueVarRefs(s.LeftValue, targetID, targetName, ctx, 0)
+					}
+				}
 				total += countValueVarRefs(s.ArrayMember, targetID, targetName, ctx, 0)
 				total += countValueVarRefs(s.JavaValue, targetID, targetName, ctx, 0)
 			}
@@ -186,6 +191,59 @@ func countStmtVarRefs(sts []statements.Statement, targetID *coreutils.VariableId
 		case *statements.ReturnStatement:
 			if s != nil {
 				total += countValueVarRefs(s.JavaValue, targetID, targetName, ctx, 0)
+			}
+		case *statements.CustomStatement:
+			if s != nil {
+				if v, ok := s.SourceThrowOperand(); ok && v != nil {
+					total += countValueVarRefs(v, targetID, targetName, ctx, 0)
+				}
+				if assign, ok := s.SourceAssignmentForward(); ok && assign != nil {
+					total += countStmtVarRefs([]statements.Statement{assign}, targetID, targetName, ctx, depth+1)
+				}
+			}
+		case *statements.WhileStatement:
+			if s != nil {
+				total += countValueVarRefs(s.ConditionValue, targetID, targetName, ctx, 0)
+				total += countStmtVarRefs(s.Body, targetID, targetName, ctx, depth+1)
+			}
+		case *statements.DoWhileStatement:
+			if s != nil {
+				total += countValueVarRefs(s.ConditionValue, targetID, targetName, ctx, 0)
+				total += countStmtVarRefs(s.Body, targetID, targetName, ctx, depth+1)
+			}
+		case *statements.ForStatement:
+			if s != nil {
+				if s.InitVar != nil {
+					total += countStmtVarRefs([]statements.Statement{s.InitVar}, targetID, targetName, ctx, depth+1)
+				}
+				if s.Condition != nil {
+					total += countValueVarRefs(s.Condition.Condition, targetID, targetName, ctx, 0)
+				}
+				if s.EndExp != nil {
+					total += countStmtVarRefs([]statements.Statement{s.EndExp}, targetID, targetName, ctx, depth+1)
+				}
+				total += countStmtVarRefs(s.SubStatements, targetID, targetName, ctx, depth+1)
+			}
+		case *statements.SwitchStatement:
+			if s != nil {
+				total += countValueVarRefs(s.Value, targetID, targetName, ctx, 0)
+				for _, item := range s.Cases {
+					if item != nil {
+						total += countStmtVarRefs(item.Body, targetID, targetName, ctx, depth+1)
+					}
+				}
+			}
+		case *statements.SynchronizedStatement:
+			if s != nil {
+				total += countValueVarRefs(s.Argument, targetID, targetName, ctx, 0)
+				total += countStmtVarRefs(s.Body, targetID, targetName, ctx, depth+1)
+			}
+		case *statements.TryCatchStatement:
+			if s != nil {
+				total += countStmtVarRefs(s.TryBody, targetID, targetName, ctx, depth+1)
+				for _, body := range s.CatchBodies {
+					total += countStmtVarRefs(body, targetID, targetName, ctx, depth+1)
+				}
 			}
 		}
 	}
@@ -473,6 +531,42 @@ func substCtorValue(v values.JavaValue, env map[*coreutils.VariableId]values.Jav
 		cp := *x
 		cp.Value = sub
 		return &cp, true
+	case *values.CustomValue:
+		if x == nil {
+			return v, true
+		}
+		if op, target, pc, ok := x.SourcePrimitiveConversion(); ok {
+			sub, sok := substCtorValue(op, env, ctx, depth+1)
+			if !sok {
+				return nil, false
+			}
+			if sub == op {
+				return v, true
+			}
+			rebuilt := values.NewOriginalPrimitiveConversion(sub, types.NewJavaPrimer(target), pc)
+			if rebuilt == nil {
+				return nil, false
+			}
+			return rebuilt, true
+		}
+		if op, desc, pc, ok := x.OriginalInstanceOfSource(); ok {
+			sub, sok := substCtorValue(op, env, ctx, depth+1)
+			if !sok {
+				return nil, false
+			}
+			if sub == op {
+				return v, true
+			}
+			targetType, err := types.ParseDescriptor(desc)
+			if err != nil || targetType == nil {
+				return nil, false
+			}
+			rebuilt := values.NewOriginalInstanceOf(sub, targetType, pc)
+			if rebuilt == nil {
+				return nil, false
+			}
+			return rebuilt, true
+		}
 	}
 	// Unknown / custom leaf (including javaNull): safe only if it references no replaced variable.
 	for id := range env {
@@ -484,8 +578,16 @@ func substCtorValue(v values.JavaValue, env map[*coreutils.VariableId]values.Jav
 }
 
 func ctorRefLHS(st statements.Statement) (*values.JavaRef, values.JavaValue, bool) {
-	assign, ok := st.(*statements.AssignStatement)
-	if !ok || assign == nil || assign.ArrayMember != nil {
+	var assign *statements.AssignStatement
+	switch s := st.(type) {
+	case *statements.AssignStatement:
+		assign = s
+	case *statements.CustomStatement:
+		if s != nil {
+			assign, _ = s.SourceAssignmentForward()
+		}
+	}
+	if assign == nil || assign.ArrayMember != nil {
 		return nil, nil, false
 	}
 	ref, ok := values.UnpackSoltValue(assign.LeftValue).(*values.JavaRef)
@@ -495,12 +597,411 @@ func ctorRefLHS(st statements.Statement) (*values.JavaRef, values.JavaValue, boo
 	return ref, assign.JavaValue, true
 }
 
+func ctorAssignStmt(st statements.Statement) *statements.AssignStatement {
+	switch s := st.(type) {
+	case *statements.AssignStatement:
+		return s
+	case *statements.CustomStatement:
+		if s != nil {
+			if assign, ok := s.SourceAssignmentForward(); ok {
+				return assign
+			}
+		}
+	}
+	return nil
+}
+
+func ctorDelegateEvalOrder(args []values.JavaValue) (useRank map[*coreutils.VariableId]int, useCount map[*coreutils.VariableId]int, condUsed map[*coreutils.VariableId]bool, firstOriginalBarrierRank int) {
+	useRank = map[*coreutils.VariableId]int{}
+	useCount = map[*coreutils.VariableId]int{}
+	condUsed = map[*coreutils.VariableId]bool{}
+	firstOriginalBarrierRank = -1
+	nextRank := 0
+	recordBarrier := func() {
+		if firstOriginalBarrierRank < 0 {
+			firstOriginalBarrierRank = nextRank
+		}
+		nextRank++
+	}
+	var walk func(v values.JavaValue, inCond bool, depth int)
+	walk = func(v values.JavaValue, inCond bool, depth int) {
+		if v == nil || depth > 256 {
+			if depth > 256 {
+				recordBarrier()
+			}
+			return
+		}
+		switch x := v.(type) {
+		case *values.SlotValue:
+			if x != nil && x.GetValue() != nil {
+				walk(x.GetValue(), inCond, depth+1)
+			}
+		case *values.JavaRef:
+			if x == nil || x.IsThis {
+				if x != nil && x.IsThis {
+					recordBarrier()
+				}
+				return
+			}
+			if x.CustomValue != nil {
+				walk(x.CustomValue, inCond, depth+1)
+				return
+			}
+			if x.StackVar != nil {
+				walk(x.StackVar, inCond, depth+1)
+				return
+			}
+			if x.Id != nil {
+				useCount[x.Id]++
+				useRank[x.Id] = nextRank
+				nextRank++
+				if inCond {
+					condUsed[x.Id] = true
+				}
+			}
+		case *values.JavaLiteral, *types.JavaClass:
+		case *values.JavaClassValue:
+			if eff, _ := values.InspectValue(x); eff&values.BarrierEffects != 0 {
+				recordBarrier()
+			}
+		case *values.JavaClassMember:
+			recordBarrier()
+		case *values.CastExpression:
+			if x != nil {
+				walk(x.Value, inCond, depth+1)
+				recordBarrier()
+			}
+		case *values.RefMember:
+			if x != nil {
+				walk(x.Object, inCond, depth+1)
+				recordBarrier()
+			}
+		case *values.ArrayLengthExpression:
+			if x != nil {
+				walk(x.Array, inCond, depth+1)
+				recordBarrier()
+			}
+		case *values.JavaArrayMember:
+			if x != nil {
+				walk(x.Object, inCond, depth+1)
+				walk(x.Index, inCond, depth+1)
+				recordBarrier()
+			}
+		case *values.JavaArray:
+			if x != nil {
+				walk(x.Length, inCond, depth+1)
+				recordBarrier()
+			}
+		case *values.JavaCompare:
+			if x != nil {
+				walk(x.JavaValue1, inCond, depth+1)
+				walk(x.JavaValue2, inCond, depth+1)
+			}
+		case *values.JavaExpression:
+			if x != nil {
+				if (x.Op == "&&" || x.Op == "||") && len(x.Values) > 0 {
+					walk(x.Values[0], inCond, depth+1)
+					for _, item := range x.Values[1:] {
+						walk(item, true, depth+1)
+					}
+				} else {
+					for _, item := range x.Values {
+						walk(item, inCond, depth+1)
+					}
+				}
+				if eff, _ := values.InspectValue(x); eff&values.BarrierEffects != 0 {
+					recordBarrier()
+				}
+			}
+		case *values.TernaryExpression:
+			if x != nil {
+				walk(x.Condition, inCond, depth+1)
+				walk(x.TrueValue, true, depth+1)
+				walk(x.FalseValue, true, depth+1)
+			}
+		case *values.FunctionCallExpression:
+			if x != nil {
+				if !x.IsStatic && x.Object != nil {
+					walk(x.Object, inCond, depth+1)
+				}
+				for _, arg := range x.Arguments {
+					walk(arg, inCond, depth+1)
+				}
+				recordBarrier()
+			}
+		case *values.NewExpression:
+			if x != nil {
+				for _, l := range x.Length {
+					walk(l, inCond, depth+1)
+				}
+				for _, initVal := range x.Initializer {
+					walk(initVal, inCond, depth+1)
+				}
+				if x.ConstructorCall != nil {
+					for _, arg := range x.ConstructorCall.Arguments {
+						walk(arg, inCond, depth+1)
+					}
+				}
+				recordBarrier()
+			}
+		case *values.AssignmentExpression:
+			if x != nil {
+				walk(x.Target, inCond, depth+1)
+				walk(x.Value, inCond, depth+1)
+				recordBarrier()
+			}
+		case *values.EffectTag:
+			if x != nil {
+				walk(x.Inner, inCond, depth+1)
+				if eff, _ := values.InspectValue(x); eff&values.BarrierEffects != 0 {
+					recordBarrier()
+				}
+			}
+		case *values.LambdaIntersection:
+			if x != nil {
+				walk(x.Value, inCond, depth+1)
+			}
+		case *values.CustomValue:
+			if x != nil {
+				if op, _, _, ok := x.SourcePrimitiveConversion(); ok {
+					walk(op, inCond, depth+1)
+				} else if op, _, _, ok := x.OriginalInstanceOfSource(); ok {
+					walk(op, inCond, depth+1)
+					recordBarrier()
+				} else {
+					if children, known := values.Children(x); known {
+						for _, ch := range children {
+							walk(ch, inCond, depth+1)
+						}
+					}
+					recordBarrier()
+				}
+			}
+		default:
+			children, known := values.Children(v)
+			if known {
+				for _, ch := range children {
+					walk(ch, inCond, depth+1)
+				}
+			}
+			if eff, _ := values.InspectValue(v); !known || eff&values.BarrierEffects != 0 {
+				recordBarrier()
+			}
+		}
+	}
+	for _, arg := range args {
+		walk(arg, false, 0)
+	}
+	return useRank, useCount, condUsed, firstOriginalBarrierRank
+}
+
+func ctorDelegateWritesVar(args []values.JavaValue, id *coreutils.VariableId) bool {
+	if id == nil {
+		return false
+	}
+	seen := map[values.JavaValue]bool{}
+	var check func(v values.JavaValue, depth int) bool
+	check = func(v values.JavaValue, depth int) bool {
+		if v == nil || depth > 256 || seen[v] {
+			return false
+		}
+		seen[v] = true
+		if ae, ok := v.(*values.AssignmentExpression); ok && ae != nil {
+			if ref, ok := values.UnpackSoltValue(ae.Target).(*values.JavaRef); ok && ref != nil && ref.Id == id {
+				return true
+			}
+		}
+		children, known := values.Children(v)
+		if !known {
+			return false
+		}
+		for _, ch := range children {
+			if check(ch, depth+1) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, arg := range args {
+		if check(arg, 0) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPureDeferrableCtorRHS(rhs values.JavaValue, paramByID map[*coreutils.VariableId]*values.JavaRef, prefixWritten map[*coreutils.VariableId]bool, delegateArgs []values.JavaValue) bool {
+	if rhs == nil {
+		return false
+	}
+	unpacked := values.UnpackSoltValue(rhs)
+	switch v := unpacked.(type) {
+	case *values.JavaLiteral, *values.JavaClassValue:
+		return v != nil
+	case *values.JavaRef:
+		if v == nil || v.IsThis || v.CustomValue != nil || v.StackVar != nil || v.Id == nil || paramByID[v.Id] == nil {
+			return false
+		}
+		return !prefixWritten[v.Id] && !ctorDelegateWritesVar(delegateArgs, v.Id)
+	default:
+		return unpacked == values.JavaNull
+	}
+}
+
+func ctorIntLiteral(v values.JavaValue) (int, bool) {
+	lit, ok := values.UnpackSoltValue(v).(*values.JavaLiteral)
+	if !ok || lit == nil {
+		return 0, false
+	}
+	switch n := lit.Data.(type) {
+	case int:
+		return n, true
+	case int32:
+		return int(n), true
+	case int64:
+		return int(n), true
+	default:
+		return 0, false
+	}
+}
+
+func tryFoldCtorArrayInit(prefix []statements.Statement, idx int, arrID *coreutils.VariableId, ne *values.NewExpression, env map[*coreutils.VariableId]values.JavaValue, postIDs map[*coreutils.VariableId]bool, paramByID map[*coreutils.VariableId]*values.JavaRef, useCount map[*coreutils.VariableId]int, ctx *class_context.ClassContext) (*values.NewExpression, []int, int, bool) {
+	if arrID == nil || ne == nil || !ne.IsArray() || ne.JavaType == nil || ne.JavaType.ArrayDim() != 1 || len(ne.Length) != 1 || len(ne.Initializer) != 0 {
+		return nil, nil, 0, false
+	}
+	lenVal, ok := substCtorValue(ne.Length[0], env, ctx, 0)
+	if !ok {
+		return nil, nil, 0, false
+	}
+	n, ok := ctorIntLiteral(lenVal)
+	if !ok || n < 1 || n > 32 {
+		return nil, nil, 0, false
+	}
+	localEnv := make(map[*coreutils.VariableId]values.JavaValue, len(env)+4)
+	for k, v := range env {
+		localEnv[k] = v
+	}
+	elems := make([]values.JavaValue, n)
+	consumed := []int{idx}
+	tempIDs := map[*coreutils.VariableId]bool{}
+	var pendingTempID *coreutils.VariableId
+	var pendingTempVal values.JavaValue
+	nextK := 0
+	endIdx := idx
+	for j := idx + 1; j < len(prefix) && nextK < n; j++ {
+		st := prefix[j]
+		switch st.(type) {
+		case *statements.MiddleStatement, *statements.StackAssignStatement:
+			continue
+		}
+		assign := ctorAssignStmt(st)
+		if assign == nil {
+			return nil, nil, 0, false
+		}
+		if assign.ArrayMember != nil {
+			objRef, ok := values.UnpackSoltValue(assign.ArrayMember.Object).(*values.JavaRef)
+			if !ok || objRef == nil || objRef.Id != arrID || assign.JavaValue == nil {
+				return nil, nil, 0, false
+			}
+			if pendingTempID != nil && countValueVarRefs(assign.ArrayMember.Index, pendingTempID, "", ctx, 0) > 0 {
+				return nil, nil, 0, false
+			}
+			subIndex, ok := substCtorValue(assign.ArrayMember.Index, localEnv, ctx, 0)
+			if !ok {
+				return nil, nil, 0, false
+			}
+			kVal, ok := ctorIntLiteral(subIndex)
+			if !ok || kVal != nextK {
+				return nil, nil, 0, false
+			}
+			var elemVal values.JavaValue
+			if pendingTempID != nil {
+				rhsRef, ok := values.UnpackSoltValue(assign.JavaValue).(*values.JavaRef)
+				if !ok || rhsRef == nil || rhsRef.IsThis || rhsRef.CustomValue != nil || rhsRef.StackVar != nil || rhsRef.Id != pendingTempID {
+					return nil, nil, 0, false
+				}
+				elemVal = pendingTempVal
+				pendingTempID = nil
+				pendingTempVal = nil
+			} else {
+				var errOK bool
+				elemVal, errOK = substCtorValue(assign.JavaValue, localEnv, ctx, 0)
+				if !errOK {
+					return nil, nil, 0, false
+				}
+			}
+			var elemThis bool
+			collectValueVarReads(elemVal, ctx, nil, nil, &elemThis, 0)
+			if elemThis || countValueVarRefs(elemVal, arrID, "", ctx, 0) > 0 {
+				return nil, nil, 0, false
+			}
+			elems[nextK] = elemVal
+			consumed = append(consumed, j)
+			nextK++
+			endIdx = j
+			continue
+		}
+		lhs, rhs, isRefAssign := ctorRefLHS(st)
+		if !isRefAssign || rhs == nil || lhs.Id == arrID || postIDs[lhs.Id] || paramByID[lhs.Id] != nil || tempIDs[lhs.Id] || lhs.Id == pendingTempID {
+			return nil, nil, 0, false
+		}
+		if _, shadows := env[lhs.Id]; shadows {
+			return nil, nil, 0, false
+		}
+		if pendingTempID != nil && countValueVarRefs(rhs, pendingTempID, "", ctx, 0) > 0 {
+			return nil, nil, 0, false
+		}
+		subRHS, ok := substCtorValue(rhs, localEnv, ctx, 0)
+		if !ok {
+			return nil, nil, 0, false
+		}
+		var rhsThis bool
+		collectValueVarReads(subRHS, ctx, nil, nil, &rhsThis, 0)
+		if rhsThis || countValueVarRefs(subRHS, arrID, "", ctx, 0) > 0 {
+			return nil, nil, 0, false
+		}
+		eff, _ := values.InspectValue(subRHS)
+		if eff&values.BarrierEffects == 0 {
+			localEnv[lhs.Id] = subRHS
+		} else {
+			if pendingTempID != nil {
+				return nil, nil, 0, false
+			}
+			pendingTempID = lhs.Id
+			pendingTempVal = subRHS
+		}
+		tempIDs[lhs.Id] = true
+		consumed = append(consumed, j)
+		endIdx = j
+	}
+	if nextK != n || pendingTempID != nil {
+		return nil, nil, 0, false
+	}
+	tailAll := map[*coreutils.VariableId]bool{}
+	collectStmtVars(prefix[endIdx+1:], ctx, tailAll, nil, nil, nil, 0)
+	if tailAll[arrID] {
+		return nil, nil, 0, false
+	}
+	for tid := range tempIDs {
+		if postIDs[tid] || tailAll[tid] || useCount[tid] > 0 {
+			return nil, nil, 0, false
+		}
+	}
+	cp := *ne
+	cp.Length = nil
+	cp.Initializer = elems
+	return &cp, consumed, endIdx, true
+}
+
 func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBoundary, postSuper []statements.Statement) {
 	if c == nil || p == nil || len(p.prefix) == 0 || p.delegate == nil {
 		return
 	}
 	postIDs := map[*coreutils.VariableId]bool{}
 	collectStmtVars(postSuper, c.FuncCtx, postIDs, nil, nil, nil, 0)
+
+	prefixWritten := map[*coreutils.VariableId]bool{}
+	collectStmtVars(p.prefix, c.FuncCtx, nil, prefixWritten, nil, nil, 0)
 
 	paramByID := map[*coreutils.VariableId]*values.JavaRef{}
 	for _, param := range p.params {
@@ -515,6 +1016,30 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 	mutatedDelegate := false
 	delegateArgs := append([]values.JavaValue(nil), p.delegate.Arguments...)
 
+	useRank, useCount, condUsed, firstOrigBarrier := ctorDelegateEvalOrder(delegateArgs)
+	lastInlinedBarrierRank := -1
+	hasRemainingBarrier := false
+	inlinedAnyBarrier := false
+
+	type deferredEntry struct {
+		prefixIdx int
+		st        statements.Statement
+		lhsID     *coreutils.VariableId
+		assign    *statements.AssignStatement
+		newRHS    values.JavaValue
+	}
+	var deferred []deferredEntry
+	type remainingPos struct {
+		prefixIdx int
+		st        statements.Statement
+	}
+	var remWithPos []remainingPos
+	appendRemaining := func(idx int, st statements.Statement) {
+		remaining = append(remaining, st)
+		remWithPos = append(remWithPos, remainingPos{prefixIdx: idx, st: st})
+		hasRemainingBarrier = true
+	}
+
 	canInlineExpr := func(idx int, targetID *coreutils.VariableId, rhs values.JavaValue) bool {
 		if targetID == nil || rhs == nil || postIDs[targetID] {
 			return false
@@ -528,26 +1053,19 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 		if effects&values.BarrierEffects == 0 {
 			return true
 		}
-		remUses := countStmtVarRefs(p.prefix[idx+1:], targetID, "", c.FuncCtx, 0)
-		argUses := 0
-		firstArgWithVar := -1
-		for ai, arg := range delegateArgs {
-			u := countValueVarRefs(arg, targetID, "", c.FuncCtx, 0)
-			if u > 0 {
-				if firstArgWithVar < 0 {
-					firstArgWithVar = ai
-				}
-				argUses += u
-			}
-		}
-		if remUses+argUses != 1 || remUses != 0 || firstArgWithVar < 0 {
+		if hasRemainingBarrier {
 			return false
 		}
-		for prev := 0; prev < firstArgWithVar; prev++ {
-			ae, _ := values.InspectValue(delegateArgs[prev])
-			if ae&values.BarrierEffects != 0 {
-				return false
-			}
+		remUses := countStmtVarRefs(p.prefix[idx+1:], targetID, "", c.FuncCtx, 0)
+		r, hasRank := useRank[targetID]
+		if remUses != 0 || useCount[targetID] != 1 || condUsed[targetID] || !hasRank {
+			return false
+		}
+		if r <= lastInlinedBarrierRank {
+			return false
+		}
+		if firstOrigBarrier >= 0 && r >= firstOrigBarrier {
+			return false
 		}
 		return true
 	}
@@ -585,6 +1103,14 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 				return false
 			}
 		}
+		if effects, _ := values.InspectValue(subRHS); effects&values.BarrierEffects != 0 {
+			if hasRemainingBarrier {
+				return false
+			}
+			if r, hasRank := useRank[lhs.Id]; !hasRank || condUsed[lhs.Id] || r <= lastInlinedBarrierRank || (firstOrigBarrier >= 0 && r >= firstOrigBarrier) {
+				return false
+			}
+		}
 		assignExpr := values.NewAssignmentExpression(lhs, subRHS, -1, func(ctx *class_context.ClassContext) string {
 			return "(" + lhs.String(ctx) + " = (" + subRHS.String(ctx) + "))"
 		})
@@ -592,40 +1118,75 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 		if !ok {
 			return false
 		}
+		prevRank, prevHasRank := useRank[lhs.Id]
 		delegateArgs[firstArg] = replacedArg
 		delete(env, lhs.Id)
 		folded[p.prefix[idx]] = true
 		mutatedDelegate = true
+		useRank, useCount, condUsed, firstOrigBarrier = ctorDelegateEvalOrder(delegateArgs)
+		if prevHasRank && prevRank > lastInlinedBarrierRank {
+			lastInlinedBarrierRank = prevRank
+		}
+		if effects, _ := values.InspectValue(subRHS); effects&values.BarrierEffects != 0 {
+			inlinedAnyBarrier = true
+		}
 		return true
 	}
 
-	for idx, st := range p.prefix {
+	for idx := 0; idx < len(p.prefix); idx++ {
+		st := p.prefix[idx]
 		switch s := st.(type) {
 		case *statements.MiddleStatement, *statements.StackAssignStatement:
 			continue
-		case *statements.AssignStatement:
-			lhs, rhs, ok := ctorRefLHS(s)
+		case *statements.AssignStatement, *statements.CustomStatement:
+			assignStmt := ctorAssignStmt(st)
+			lhs, rhs, ok := ctorRefLHS(st)
 			if !ok {
-				remaining = append(remaining, st)
+				written := map[*coreutils.VariableId]bool{}
+				collectStmtVars([]statements.Statement{st}, c.FuncCtx, nil, written, nil, nil, 0)
+				for id := range written {
+					delete(env, id)
+				}
+				appendRemaining(idx, st)
 				continue
 			}
 			if rhs == nil {
 				// Pure declaration `T varN;` without initializer for a variable unused after prefix.
-				if s.IsDeclare && !postIDs[lhs.Id] {
+				if assignStmt != nil && assignStmt.IsDeclare && !postIDs[lhs.Id] {
 					folded[st] = true
 					continue
 				}
 				delete(env, lhs.Id)
-				remaining = append(remaining, st)
+				appendRemaining(idx, st)
 				continue
 			}
 			subRHS, ok := substCtorValue(rhs, env, c.FuncCtx, 0)
 			if !ok {
 				delete(env, lhs.Id)
-				remaining = append(remaining, st)
+				appendRemaining(idx, st)
 				continue
 			}
+			if !hasRemainingBarrier && !postIDs[lhs.Id] && paramByID[lhs.Id] == nil && useCount[lhs.Id] == 1 && !condUsed[lhs.Id] {
+				if r, hasRank := useRank[lhs.Id]; hasRank && r > lastInlinedBarrierRank && (firstOrigBarrier < 0 || r < firstOrigBarrier) {
+					if ne, isNew := values.UnpackSoltValue(subRHS).(*values.NewExpression); isNew && ne != nil && ne.IsArray() {
+						if initArr, consumed, endIdx, foldedOK := tryFoldCtorArrayInit(p.prefix, idx, lhs.Id, ne, env, postIDs, paramByID, useCount, c.FuncCtx); foldedOK {
+							env[lhs.Id] = initArr
+							for _, cIdx := range consumed {
+								folded[p.prefix[cIdx]] = true
+							}
+							lastInlinedBarrierRank = r
+							inlinedAnyBarrier = true
+							idx = endIdx
+							continue
+						}
+					}
+				}
+			}
 			if canInlineExpr(idx, lhs.Id, subRHS) {
+				if eff, _ := values.InspectValue(subRHS); eff&values.BarrierEffects != 0 {
+					lastInlinedBarrierRank = useRank[lhs.Id]
+					inlinedAnyBarrier = true
+				}
 				env[lhs.Id] = subRHS
 				folded[st] = true
 				continue
@@ -633,8 +1194,27 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 			if postIDs[lhs.Id] && tryFoldEscapingParamIntoDelegate(idx, lhs, subRHS) {
 				continue
 			}
+			if postIDs[lhs.Id] && paramByID[lhs.Id] == nil && assignStmt != nil {
+				remWritten := map[*coreutils.VariableId]bool{}
+				collectStmtVars(p.prefix[idx+1:], c.FuncCtx, nil, remWritten, nil, nil, 0)
+				if !remWritten[lhs.Id] && isPureDeferrableCtorRHS(subRHS, paramByID, prefixWritten, delegateArgs) {
+					env[lhs.Id] = subRHS
+					var rewriteRHS values.JavaValue
+					if subRHS != rhs {
+						rewriteRHS = subRHS
+					}
+					deferred = append(deferred, deferredEntry{
+						prefixIdx: idx,
+						st:        st,
+						lhsID:     lhs.Id,
+						assign:    assignStmt,
+						newRHS:    rewriteRHS,
+					})
+					continue
+				}
+			}
 			delete(env, lhs.Id)
-			remaining = append(remaining, st)
+			appendRemaining(idx, st)
 			continue
 
 		case *statements.IfStatement:
@@ -648,7 +1228,7 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 				for id := range written {
 					delete(env, id)
 				}
-				remaining = append(remaining, st)
+				appendRemaining(idx, st)
 				continue
 			}
 			if len(s.IfBody) == 1 && len(s.ElseBody) == 0 {
@@ -665,6 +1245,9 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 						ternary := values.NewTernaryExpression(subCond, subThen, prevVal)
 						if okThen {
 							if canInlineExpr(idx, lhs.Id, ternary) {
+								if eff, _ := values.InspectValue(ternary); eff&values.BarrierEffects != 0 {
+									lastInlinedBarrierRank = useRank[lhs.Id]
+								}
 								env[lhs.Id] = ternary
 								folded[st] = true
 								continue
@@ -685,6 +1268,10 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 					if okT && okE {
 						ternary := values.NewTernaryExpression(subCond, subThen, subElse)
 						if canInlineExpr(idx, lhs1.Id, ternary) {
+							if eff, _ := values.InspectValue(ternary); eff&values.BarrierEffects != 0 {
+								lastInlinedBarrierRank = useRank[lhs1.Id]
+								inlinedAnyBarrier = true
+							}
 							env[lhs1.Id] = ternary
 							folded[st] = true
 							continue
@@ -700,7 +1287,7 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 			for id := range written {
 				delete(env, id)
 			}
-			remaining = append(remaining, st)
+			appendRemaining(idx, st)
 			continue
 
 		case *statements.ExpressionStatement:
@@ -713,7 +1300,7 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 					for id := range written {
 						delete(env, id)
 					}
-					remaining = append(remaining, st)
+					appendRemaining(idx, st)
 					continue
 				}
 			}
@@ -722,7 +1309,7 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 			for id := range written {
 				delete(env, id)
 			}
-			remaining = append(remaining, st)
+			appendRemaining(idx, st)
 			continue
 		default:
 			written := map[*coreutils.VariableId]bool{}
@@ -730,12 +1317,47 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 			for id := range written {
 				delete(env, id)
 			}
-			remaining = append(remaining, st)
+			appendRemaining(idx, st)
 			continue
 		}
 	}
 
-	if len(folded) == 0 && !mutatedDelegate {
+	// Never leave half-deferred state if un-folded statements remain and touch a
+	// deferred variable or could run in a carrier: keep everything atomic.
+	if len(remaining) > 0 && len(deferred) > 0 {
+		remAll := map[*coreutils.VariableId]bool{}
+		collectStmtVars(remaining, c.FuncCtx, remAll, nil, nil, nil, 0)
+		conflict := false
+		for _, d := range deferred {
+			if remAll[d.lhsID] {
+				conflict = true
+				break
+			}
+		}
+		if conflict {
+			combined := make([]remainingPos, 0, len(remWithPos)+len(deferred))
+			combined = append(combined, remWithPos...)
+			for _, d := range deferred {
+				combined = append(combined, remainingPos{prefixIdx: d.prefixIdx, st: d.st})
+				delete(env, d.lhsID)
+			}
+			for i := 1; i < len(combined); i++ {
+				for j := i; j > 0 && combined[j].prefixIdx < combined[j-1].prefixIdx; j-- {
+					combined[j], combined[j-1] = combined[j-1], combined[j]
+				}
+			}
+			remaining = remaining[:0]
+			for _, item := range combined {
+				remaining = append(remaining, item.st)
+			}
+			deferred = nil
+		}
+	}
+
+	if hasRemainingBarrier && inlinedAnyBarrier {
+		return
+	}
+	if len(folded) == 0 && !mutatedDelegate && len(deferred) == 0 {
 		return
 	}
 	newArgs := make([]values.JavaValue, len(delegateArgs))
@@ -746,6 +1368,11 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 		}
 		newArgs[i] = sub
 	}
+	for _, d := range deferred {
+		if d.newRHS != nil && d.assign != nil {
+			d.assign.JavaValue = d.newRHS
+		}
+	}
 	p.delegate.Arguments = newArgs
 	p.prefix = remaining
 	p.foldedStatements = folded
@@ -753,6 +1380,27 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 
 func renderRetainedPrefixStatements(sts []statements.Statement, ctx *class_context.ClassContext, declared map[string]bool) (string, bool) {
 	var b strings.Builder
+	writeAssign := func(s *statements.AssignStatement) {
+		prefix := ""
+		if s.ArrayMember == nil && (s.IsFirst || s.IsDeclare) {
+			if ref, ok := values.UnpackSoltValue(s.LeftValue).(*values.JavaRef); ok && ref != nil && ctx != nil {
+				if name := ref.String(ctx); name != "" {
+					declared[name] = true
+				}
+			}
+		} else if s.ArrayMember == nil {
+			if ref, ok := values.UnpackSoltValue(s.LeftValue).(*values.JavaRef); ok && ref != nil && !ref.IsThis && ref.CustomValue == nil && ref.StackVar == nil && ctx != nil {
+				name := ref.String(ctx)
+				if name != "" && !declared[name] && ref.Type() != nil {
+					declared[name] = true
+					prefix = ref.Type().String(ctx) + " "
+				}
+			}
+		}
+		b.WriteString(prefix)
+		b.WriteString(s.String(ctx))
+		b.WriteString(";\n")
+	}
 	for _, st := range sts {
 		if st == nil {
 			continue
@@ -761,23 +1409,13 @@ func renderRetainedPrefixStatements(sts []statements.Statement, ctx *class_conte
 		case *statements.MiddleStatement, *statements.StackAssignStatement:
 			continue
 		case *statements.AssignStatement:
-			prefix := ""
-			if s.ArrayMember == nil && !s.IsDeclare {
-				if ref, ok := values.UnpackSoltValue(s.LeftValue).(*values.JavaRef); ok && ref != nil && !ref.IsThis && ref.CustomValue == nil && ref.StackVar == nil && ctx != nil {
-					name := ref.String(ctx)
-					if name != "" && !declared[name] && ref.Type() != nil {
-						declared[name] = true
-						prefix = ref.Type().String(ctx) + " "
-					}
-				}
-			} else if s.IsDeclare && s.ArrayMember == nil {
-				if ref, ok := values.UnpackSoltValue(s.LeftValue).(*values.JavaRef); ok && ref != nil && ctx != nil {
-					declared[ref.String(ctx)] = true
-				}
+			writeAssign(s)
+		case *statements.CustomStatement:
+			if assign, ok := s.SourceAssignmentForward(); ok && assign != nil {
+				writeAssign(assign)
+			} else {
+				return "", false
 			}
-			b.WriteString(prefix)
-			b.WriteString(s.String(ctx))
-			b.WriteString(";\n")
 		case *statements.ExpressionStatement, *statements.ReturnStatement:
 			b.WriteString(st.String(ctx))
 			b.WriteString(";\n")
@@ -881,6 +1519,11 @@ func (c *ClassObjectDumper) planRetainedConstructorPrefixFallback(p *constructor
 	}
 	if targetArgIdx < 0 {
 		return false
+	}
+	for prev := 0; prev < targetArgIdx; prev++ {
+		if eff, _ := values.InspectValue(p.delegate.Arguments[prev]); eff&values.BarrierEffects != 0 {
+			return false
+		}
 	}
 
 	desc, _ := c.obj.getUtf8(method.DescriptorIndex)

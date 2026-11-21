@@ -127,15 +127,16 @@ type Category struct {
 
 // Instruction is one decoded DEX instruction.
 type Instruction struct {
-	Offset  uint32
-	Opcode  byte
-	Name    string
-	Format  string
-	Width   uint16
-	Regs    []uint16
-	Index   uint32
-	Literal int64
-	Target  int64
+	Offset     uint32
+	Opcode     byte
+	Name       string
+	Format     string
+	Width      uint16
+	Regs       []uint16
+	Index      uint32
+	ProtoIndex uint32
+	Literal    int64
+	Target     int64
 	// Targets holds the absolute case addresses of a switch; the instruction
 	// that follows the switch is its default case.
 	Targets []int64

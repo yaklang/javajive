@@ -77,8 +77,10 @@ func instructionEffects(instruction Instruction) (uses, defs []uint16) {
 		defs = []uint16{registers[0]}
 	case instruction.Opcode >= 0x67 && instruction.Opcode <= 0x6d:
 		uses = []uint16{registers[0]}
-	case isInvoke(instruction.Opcode):
+	case isInvoke(instruction.Opcode) || instruction.Opcode >= 0xfa && instruction.Opcode <= 0xfd:
 		uses = append([]uint16(nil), registers...)
+	case instruction.Opcode == 0xfe || instruction.Opcode == 0xff:
+		defs = []uint16{registers[0]}
 	case instruction.Opcode >= 0x7b && instruction.Opcode <= 0x8f:
 		uses, defs = []uint16{registers[1]}, []uint16{registers[0]}
 	case instruction.Opcode >= 0x90 && instruction.Opcode <= 0xaf:

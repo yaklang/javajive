@@ -22,14 +22,20 @@ const (
 	maxVariableBytes = 5
 )
 
-var supportedDEXVersions = map[string]bool{"035": true, "037": true, "038": true, "039": true}
+var supportedDEXVersions = map[string]bool{"035": true, "037": true, "038": true, "039": true, "040": true}
 
 type parser struct {
-	data   []byte
-	entry  string
-	file   *model.File
-	class  string
-	method string
+	data             []byte
+	entry            string
+	file             *model.File
+	class            string
+	method           string
+	hasCallSites     bool
+	callSiteOff      uint32
+	callSiteSize     uint32
+	hasMethodHandles bool
+	methodHandleOff  uint32
+	methodHandleSize uint32
 }
 
 func Parse(data []byte, entry string) (*model.File, error) {
@@ -50,7 +56,7 @@ func (p *parser) parse() (*model.File, error) {
 	}
 	version := string(p.data[4:7])
 	if !supportedDEXVersions[version] {
-		return nil, p.fail(4, "header", "unsupported DEX version %q; supported versions are 035, 037, 038, and 039", version)
+		return nil, p.fail(4, "header", "unsupported DEX version %q; supported versions are 035, 037, 038, 039, and 040", version)
 	}
 	h := model.Header{
 		Version:       version,
@@ -111,6 +117,12 @@ func (p *parser) parse() (*model.File, error) {
 	if err := p.parseMethods(); err != nil {
 		return nil, err
 	}
+	if err := p.parseMethodHandles(); err != nil {
+		return nil, err
+	}
+	if err := p.parseCallSites(); err != nil {
+		return nil, err
+	}
 	if err := p.parseClasses(); err != nil {
 		return nil, err
 	}
@@ -143,30 +155,34 @@ func (p *parser) validateMapList(off uint32, version string) error {
 	for i := uint32(0); i < count; i++ {
 		itemOff := int(off + 4 + i*12)
 		itemType := binary.LittleEndian.Uint16(p.data[itemOff : itemOff+2])
-		if name, unsupported := unsupportedMapItem(itemType); unsupported {
-			return p.fail(itemOff, "map_list", "unsupported %s section (type=%#04x) in DEX version %q", name, itemType, version)
-		}
 		if !knownMapItem(itemType) {
 			return p.fail(itemOff, "map_list", "unsupported section type=%#04x in DEX version %q", itemType, version)
+		}
+		itemSize := binary.LittleEndian.Uint32(p.data[itemOff+4 : itemOff+8])
+		itemDataOff := binary.LittleEndian.Uint32(p.data[itemOff+8 : itemOff+12])
+		switch itemType {
+		case 0x0007:
+			if p.hasCallSites {
+				return p.fail(itemOff, "map_list", "duplicate call_site_id section (type=0x0007)")
+			}
+			p.hasCallSites = true
+			p.callSiteSize = itemSize
+			p.callSiteOff = itemDataOff
+		case 0x0008:
+			if p.hasMethodHandles {
+				return p.fail(itemOff, "map_list", "duplicate method_handle section (type=0x0008)")
+			}
+			p.hasMethodHandles = true
+			p.methodHandleSize = itemSize
+			p.methodHandleOff = itemDataOff
 		}
 	}
 	return nil
 }
 
-func unsupportedMapItem(itemType uint16) (string, bool) {
-	switch itemType {
-	case 0x0007:
-		return "call_site_id", true
-	case 0x0008:
-		return "method_handle", true
-	default:
-		return "", false
-	}
-}
-
 func knownMapItem(itemType uint16) bool {
 	switch itemType {
-	case 0x0000, 0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006,
+	case 0x0000, 0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007, 0x0008,
 		0x1000, 0x1001, 0x1002, 0x1003,
 		0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006,
 		0xf000:
@@ -174,6 +190,98 @@ func knownMapItem(itemType uint16) bool {
 	default:
 		return false
 	}
+}
+
+func (p *parser) parseMethodHandles() error {
+	if !p.hasMethodHandles || p.methodHandleSize == 0 {
+		return nil
+	}
+	if err := p.tableRange(p.methodHandleOff, p.methodHandleSize, 8, "method_handles"); err != nil {
+		return err
+	}
+	p.file.MethodHandles = make([]model.MethodHandle, p.methodHandleSize)
+	for i := range p.file.MethodHandles {
+		off := int(p.methodHandleOff) + i*8
+		kind := binary.LittleEndian.Uint16(p.data[off : off+2])
+		unused1 := binary.LittleEndian.Uint16(p.data[off+2 : off+4])
+		targetIdx := binary.LittleEndian.Uint16(p.data[off+4 : off+6])
+		unused2 := binary.LittleEndian.Uint16(p.data[off+6 : off+8])
+		if unused1 != 0 || unused2 != 0 {
+			return p.fail(off, "method_handles", "nonzero unused padding (%#x, %#x)", unused1, unused2)
+		}
+		if kind > uint16(model.MethodHandleInvokeInterface) {
+			return p.fail(off, "method_handles", "unsupported method_handle_type %#x", kind)
+		}
+		mhKind := model.MethodHandleKind(kind)
+		if mhKind <= model.MethodHandleInstanceGet {
+			if int(targetIdx) >= len(p.file.Fields) {
+				return p.fail(off+4, "method_handles", "field_id=%d out of range", targetIdx)
+			}
+		} else {
+			if int(targetIdx) >= len(p.file.Methods) {
+				return p.fail(off+4, "method_handles", "method_id=%d out of range", targetIdx)
+			}
+			methodName := p.file.Methods[targetIdx].Name
+			if methodName == "<clinit>" {
+				return p.fail(off+4, "method_handles", "method_handle cannot reference <clinit>")
+			}
+			if mhKind == model.MethodHandleInvokeConstructor && methodName != "<init>" {
+				return p.fail(off+4, "method_handles", "constructor method_handle must target <init>, got %q", methodName)
+			}
+		}
+		p.file.MethodHandles[i] = model.MethodHandle{
+			Kind:        mhKind,
+			TargetIndex: targetIdx,
+		}
+	}
+	return nil
+}
+
+func (p *parser) parseCallSites() error {
+	if !p.hasCallSites || p.callSiteSize == 0 {
+		return nil
+	}
+	if err := p.tableRange(p.callSiteOff, p.callSiteSize, 4, "call_site_ids"); err != nil {
+		return err
+	}
+	p.file.CallSites = make([]model.CallSite, p.callSiteSize)
+	for i := range p.file.CallSites {
+		idOff := int(p.callSiteOff) + i*4
+		csOff := binary.LittleEndian.Uint32(p.data[idOff : idOff+4])
+		if err := p.rangeCheck(csOff, 1, "call_site"); err != nil {
+			return p.fail(idOff, "call_site_ids", "%v", err)
+		}
+		cur := int(csOff)
+		arr, err := p.encodedArray(&cur, 0)
+		if err != nil {
+			return err
+		}
+		if len(arr) < 3 {
+			return p.fail(int(csOff), "call_site", "call site array has %d entries; need at least 3", len(arr))
+		}
+		if arr[0].Type != model.ValueMethodHandle || arr[0].Unsigned >= uint64(len(p.file.MethodHandles)) {
+			return p.fail(int(csOff), "call_site", "invalid bootstrap method handle element type=%#x index=%d", arr[0].Type, arr[0].Unsigned)
+		}
+		if arr[1].Type != model.ValueString || arr[1].Unsigned >= uint64(len(p.file.Strings)) {
+			return p.fail(int(csOff), "call_site", "invalid call site method name element type=%#x index=%d", arr[1].Type, arr[1].Unsigned)
+		}
+		if arr[2].Type != model.ValueMethodType || arr[2].Unsigned >= uint64(len(p.file.Protos)) {
+			return p.fail(int(csOff), "call_site", "invalid call site method type element type=%#x index=%d", arr[2].Type, arr[2].Unsigned)
+		}
+		nameIdx := uint32(arr[1].Unsigned)
+		var extraArgs []model.EncodedValue
+		if len(arr) > 3 {
+			extraArgs = append([]model.EncodedValue(nil), arr[3:]...)
+		}
+		p.file.CallSites[i] = model.CallSite{
+			BootstrapMethodHandle: uint32(arr[0].Unsigned),
+			MethodNameIndex:       nameIdx,
+			MethodName:            p.file.Strings[nameIdx],
+			MethodTypeIndex:       uint32(arr[2].Unsigned),
+			Arguments:             extraArgs,
+		}
+	}
+	return nil
 }
 
 func (p *parser) rangeCheck(off, size uint32, what string) error {

@@ -160,13 +160,15 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 		define(instruction.Regs[0], intCategory)
 	case instruction.Opcode >= 0x32 && instruction.Opcode <= 0x37:
 		left, right := current[instruction.Regs[0]], current[instruction.Regs[1]]
-		if instruction.Opcode >= 0x34 || left.Kind == IntLike || right.Kind == IntLike {
+		if instruction.Opcode >= 0x34 || left.Kind == IntLike || right.Kind == IntLike || left.Kind == Bits32 || right.Kind == Bits32 {
 			use(instruction.Regs[0], intCategory)
 			use(instruction.Regs[1], intCategory)
 		} else if left.Kind != Unknown && !left.Kind.isUntyped() {
+			use(instruction.Regs[0], left)
 			use(instruction.Regs[1], left)
 		} else if right.Kind != Unknown && !right.Kind.isUntyped() {
 			use(instruction.Regs[0], right)
+			use(instruction.Regs[1], right)
 		} else if left.Kind != Unknown {
 			use(instruction.Regs[1], left)
 		} else if right.Kind != Unknown {
@@ -175,6 +177,13 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 	case instruction.Opcode >= 0x38 && instruction.Opcode <= 0x3d:
 		if instruction.Opcode >= 0x3a {
 			use(instruction.Regs[0], intCategory)
+		} else {
+			cur := current[instruction.Regs[0]]
+			if cur.Kind == Int || cur.Kind == Bits32 {
+				use(instruction.Regs[0], intCategory)
+			} else if cur.Kind == Reference || cur.Kind == Uninitialized {
+				use(instruction.Regs[0], cur)
+			}
 		}
 	case instruction.Opcode >= 0x44 && instruction.Opcode <= 0x51:
 		// The element type is not encoded in the instruction: DEX tracks it in
@@ -237,6 +246,40 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 			use(instruction.Regs[position], Category{Kind: kind, Descriptor: descriptor})
 			position += kind.Words()
 		}
+	case isPolymorphicInvoke(instruction.Opcode):
+		callee := file.Methods[instruction.Index]
+		proto := file.Protos[instruction.ProtoIndex]
+		use(instruction.Regs[0], Category{Kind: Reference, Descriptor: callee.Class})
+		position := 1
+		for _, descriptor := range proto.Parameters {
+			if position >= len(instruction.Regs) {
+				break
+			}
+			kind, err := DescriptorCategory(descriptor)
+			if err != nil {
+				return nil, nil, err
+			}
+			use(instruction.Regs[position], Category{Kind: kind, Descriptor: descriptor})
+			position += kind.Words()
+		}
+	case isCustomInvoke(instruction.Opcode):
+		proto := file.Protos[file.CallSites[instruction.Index].MethodTypeIndex]
+		position := 0
+		for _, descriptor := range proto.Parameters {
+			if position >= len(instruction.Regs) {
+				break
+			}
+			kind, err := DescriptorCategory(descriptor)
+			if err != nil {
+				return nil, nil, err
+			}
+			use(instruction.Regs[position], Category{Kind: kind, Descriptor: descriptor})
+			position += kind.Words()
+		}
+	case instruction.Opcode == 0xfe:
+		define(instruction.Regs[0], Category{Kind: Reference, Descriptor: "Ljava/lang/invoke/MethodHandle;"})
+	case instruction.Opcode == 0xff:
+		define(instruction.Regs[0], Category{Kind: Reference, Descriptor: "Ljava/lang/invoke/MethodType;"})
 	case instruction.Opcode >= 0x7b && instruction.Opcode <= 0x8f:
 		source, destination := unaryCategories(instruction.Opcode)
 		use(instruction.Regs[1], Category{Kind: source})
@@ -286,6 +329,23 @@ func moveResultCategory(method *Method, file *model.File, index int, fallback Ca
 				return Category{Kind: Reference, Descriptor: file.Types[previous.Index].Descriptor}
 			}
 			return fallback
+		}
+		if isPolymorphicInvoke(previous.Opcode) && int(previous.ProtoIndex) < len(file.Protos) {
+			proto := file.Protos[previous.ProtoIndex]
+			kind, err := DescriptorCategory(proto.ReturnType)
+			if err == nil {
+				return Category{Kind: kind, Descriptor: proto.ReturnType}
+			}
+		}
+		if isCustomInvoke(previous.Opcode) && int(previous.Index) < len(file.CallSites) {
+			cs := file.CallSites[previous.Index]
+			if int(cs.MethodTypeIndex) < len(file.Protos) {
+				proto := file.Protos[cs.MethodTypeIndex]
+				kind, err := DescriptorCategory(proto.ReturnType)
+				if err == nil {
+					return Category{Kind: kind, Descriptor: proto.ReturnType}
+				}
+			}
 		}
 		if isInvoke(previous.Opcode) && int(previous.Index) < len(file.Methods) {
 			callee := file.Methods[previous.Index]

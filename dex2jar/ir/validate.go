@@ -310,7 +310,78 @@ func validateFileMetadata(file *model.File) error {
 			}
 		}
 	}
+	for index, mh := range file.MethodHandles {
+		if mh.Kind > model.MethodHandleInvokeInterface {
+			return fmt.Errorf("method handle %d has unsupported kind %#x", index, mh.Kind)
+		}
+		if mh.Kind <= model.MethodHandleInstanceGet {
+			if int(mh.TargetIndex) >= len(file.Fields) {
+				return fmt.Errorf("method handle %d field index %d is out of range", index, mh.TargetIndex)
+			}
+		} else {
+			if int(mh.TargetIndex) >= len(file.Methods) {
+				return fmt.Errorf("method handle %d method index %d is out of range", index, mh.TargetIndex)
+			}
+			targetName := file.Methods[mh.TargetIndex].Name
+			if targetName == "<clinit>" {
+				return fmt.Errorf("method handle %d references forbidden <clinit>", index)
+			}
+			if mh.Kind == model.MethodHandleInvokeConstructor && targetName != "<init>" {
+				return fmt.Errorf("constructor method handle %d must target <init>, got %q", index, targetName)
+			}
+		}
+	}
+	for index, cs := range file.CallSites {
+		if int(cs.BootstrapMethodHandle) >= len(file.MethodHandles) {
+			return fmt.Errorf("call site %d bootstrap method handle %d is out of range", index, cs.BootstrapMethodHandle)
+		}
+		if int(cs.MethodTypeIndex) >= len(file.Protos) {
+			return fmt.Errorf("call site %d method type %d is out of range", index, cs.MethodTypeIndex)
+		}
+		if err := validateMethodName(cs.MethodName); err != nil {
+			return fmt.Errorf("call site %d method name: %w", index, err)
+		}
+		if cs.MethodName == "<init>" || cs.MethodName == "<clinit>" {
+			return fmt.Errorf("call site %d method name must not be %q", index, cs.MethodName)
+		}
+		for argIdx, arg := range cs.Arguments {
+			if err := validateBootstrapEncodedValue(file, arg); err != nil {
+				return fmt.Errorf("call site %d bootstrap arg %d: %w", index, argIdx, err)
+			}
+		}
+	}
 	return nil
+}
+
+func validateBootstrapEncodedValue(file *model.File, value model.EncodedValue) error {
+	switch value.Type {
+	case model.ValueByte, model.ValueShort, model.ValueChar, model.ValueInt,
+		model.ValueLong, model.ValueFloat, model.ValueDouble,
+		model.ValueNull, model.ValueBoolean:
+		return nil
+	case model.ValueString:
+		if value.Unsigned >= uint64(len(file.Strings)) {
+			return fmt.Errorf("string index %d out of range", value.Unsigned)
+		}
+		return nil
+	case model.ValueTypeRef:
+		if value.Unsigned >= uint64(len(file.Types)) {
+			return fmt.Errorf("type index %d out of range", value.Unsigned)
+		}
+		return nil
+	case model.ValueMethodType:
+		if value.Unsigned >= uint64(len(file.Protos)) {
+			return fmt.Errorf("proto index %d out of range", value.Unsigned)
+		}
+		return nil
+	case model.ValueMethodHandle:
+		if value.Unsigned >= uint64(len(file.MethodHandles)) {
+			return fmt.Errorf("method handle index %d out of range", value.Unsigned)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported bootstrap argument encoded value type %#x", value.Type)
+	}
 }
 
 func validateInputMetadata(in Input) error {

@@ -54,18 +54,12 @@ func TestExternalCorpusVerdicts(t *testing.T) {
 			reason:         `descriptor already defined in "classes.dex"`,
 		},
 		{
-			// DEX 038 is admitted by version only when map_list proves the file
-			// carries no dynamic-linking sections. This fixture does, so the
-			// rejection must name the exact section instead of the version.
-			name:           "pxb1988 dex2jar DEX 038 call sites",
-			file:           "pxb1988-dex2jar-dex038.dex",
-			sha256:         "368dd6e8ea8aaee26ad46438ccbef42d28295a4f4957379e34843472b2f13ea4",
-			size:           1376,
-			reasonCategory: "call_site",
-			entry:          "classes.dex",
-			offset:         1280,
-			op:             "map_list",
-			reason:         `unsupported call_site_id section (type=0x0007) in DEX version "038"`,
+			name:     "pxb1988 dex2jar DEX 038 call sites",
+			file:     "pxb1988-dex2jar-dex038.dex",
+			sha256:   "368dd6e8ea8aaee26ad46438ccbef42d28295a4f4957379e34843472b2f13ea4",
+			size:     1376,
+			accepted: true,
+			classes:  1,
 		},
 	}
 

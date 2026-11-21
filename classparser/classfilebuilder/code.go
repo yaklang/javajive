@@ -1,8 +1,10 @@
 package classfilebuilder
 
 import (
+	"bytes"
 	"fmt"
 	"math"
+	"sort"
 )
 
 // Label is an opaque symbolic bytecode position. Labels belong to one Code.
@@ -23,6 +25,7 @@ const (
 	kindLDC
 	kindBranch
 	kindInvokeInterface
+	kindInvokeDynamic
 	kindTableSwitch
 	kindLookupSwitch
 )
@@ -60,20 +63,58 @@ type localVariable struct {
 	index            uint16
 }
 
+// VerifyTag identifies a StackMapTable verification_type_info item (JVMS §4.7.4).
+type VerifyTag uint8
+
+const (
+	VerifyTop               VerifyTag = 0
+	VerifyInt               VerifyTag = 1
+	VerifyFloat             VerifyTag = 2
+	VerifyDouble            VerifyTag = 3
+	VerifyLong              VerifyTag = 4
+	VerifyNull              VerifyTag = 5
+	VerifyUninitializedThis VerifyTag = 6
+	VerifyObject            VerifyTag = 7
+	VerifyUninitialized     VerifyTag = 8
+)
+
+// VerificationType describes one local-variable or operand-stack slot in a
+// StackMapTable frame. Class is used with VerifyObject (JVM internal name or
+// array descriptor) and NewAt with VerifyUninitialized (label before NEW).
+type VerificationType struct {
+	Tag   VerifyTag
+	Class string
+	NewAt *Label
+}
+
+type encodedVerifyItem struct {
+	tag     VerifyTag
+	cpIndex uint16
+	newAt   *Label
+}
+
+type stackFrameEntry struct {
+	at     *Label
+	locals []encodedVerifyItem
+	stack  []encodedVerifyItem
+}
+
 // Code is a symbolic Code attribute assembler. It is not safe for concurrent
 // mutation. Errors are sticky and returned by Class.Bytes.
 type Code struct {
-	pool      *ConstantPool
-	nodes     []codeNode
-	nextLabel int
-	handlers  []exceptionHandler
-	lines     []lineNumber
-	locals    []localVariable
-	lineName  uint16
-	localName uint16
-	err       error
-	maxStack  *uint16
-	maxLocals *uint16
+	pool         *ConstantPool
+	nodes        []codeNode
+	nextLabel    int
+	handlers     []exceptionHandler
+	lines        []lineNumber
+	locals       []localVariable
+	frames       []stackFrameEntry
+	lineName     uint16
+	localName    uint16
+	stackMapName uint16
+	err          error
+	maxStack     *uint16
+	maxLocals    *uint16
 }
 
 func newCode(pool *ConstantPool) *Code { return &Code{pool: pool} }
@@ -175,9 +216,9 @@ func (c *Code) CP(op Opcode, index uint16) *Code {
 	switch op {
 	case GETSTATIC, PUTSTATIC, GETFIELD, PUTFIELD:
 		valid = entry.tag == cpFieldref
-	case INVOKEVIRTUAL, INVOKESPECIAL, INVOKESTATIC:
-		// Major version 49 predates interface static/default methods; these
-		// opcodes therefore require CONSTANT_Methodref.
+	case INVOKESPECIAL, INVOKESTATIC:
+		valid = entry.tag == cpMethodref || entry.tag == cpInterfaceMethodref
+	case INVOKEVIRTUAL:
 		valid = entry.tag == cpMethodref
 	case NEW, ANEWARRAY, CHECKCAST, INSTANCEOF:
 		valid = entry.tag == cpClass
@@ -212,6 +253,25 @@ func (c *Code) InvokeInterface(index uint16) *Code {
 		return c
 	}
 	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindInvokeInterface, op: INVOKEINTERFACE, arg: int(index), arg2: args + 1}})
+	return c
+}
+
+// InvokeDynamic appends invokedynamic referencing a CONSTANT_InvokeDynamic CP entry.
+func (c *Code) InvokeDynamic(index uint16) *Code {
+	entry, err := c.pool.entry(index)
+	if err != nil {
+		c.fail("invokedynamic: %v", err)
+		return c
+	}
+	if entry.tag != cpInvokeDynamic {
+		c.fail("invokedynamic requires InvokeDynamic, got tag %d at index %d", entry.tag, index)
+		return c
+	}
+	if _, _, err := methodDescriptorWords(entry.text); err != nil {
+		c.fail("invokedynamic descriptor %q: %v", entry.text, err)
+		return c
+	}
+	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindInvokeDynamic, op: INVOKEDYNAMIC, arg: int(index)}})
 	return c
 }
 
@@ -250,7 +310,7 @@ func (c *Code) LDC(index uint16) *Code {
 		c.fail("ldc: %v", err)
 		return c
 	}
-	if entry.tag != cpInteger && entry.tag != cpFloat && entry.tag != cpString && entry.tag != cpClass {
+	if entry.tag != cpInteger && entry.tag != cpFloat && entry.tag != cpString && entry.tag != cpClass && entry.tag != cpMethodHandle && entry.tag != cpMethodType {
 		c.fail("ldc does not support constant pool tag %d at index %d", entry.tag, index)
 		return c
 	}
@@ -436,6 +496,62 @@ func (c *Code) Local(start, end *Label, name, descriptor string, index uint16) *
 	return c
 }
 
+// AddFrame records a full StackMapTable verification frame at label at (required
+// for bytecode version >= 50 with branches or exception handlers). Callers omit
+// the implicit frame at offset 0 unless a branch/handler explicitly targets it.
+func (c *Code) AddFrame(at *Label, locals, stack []VerificationType) *Code {
+	if !c.validLabel(at) {
+		return c
+	}
+	encodeItems := func(items []VerificationType, role string) ([]encodedVerifyItem, bool) {
+		if len(items) > math.MaxUint16 {
+			c.fail("stack map %s count %d exceeds 65535", role, len(items))
+			return nil, false
+		}
+		out := make([]encodedVerifyItem, len(items))
+		for i, item := range items {
+			switch item.Tag {
+			case VerifyTop, VerifyInt, VerifyFloat, VerifyDouble, VerifyLong, VerifyNull, VerifyUninitializedThis:
+				out[i] = encodedVerifyItem{tag: item.Tag}
+			case VerifyObject:
+				cpIdx, err := c.pool.Class(item.Class)
+				if err != nil {
+					c.fail("stack map %s[%d] class %q: %v", role, i, item.Class, err)
+					return nil, false
+				}
+				out[i] = encodedVerifyItem{tag: item.Tag, cpIndex: cpIdx}
+			case VerifyUninitialized:
+				if !c.validLabel(item.NewAt) {
+					return nil, false
+				}
+				out[i] = encodedVerifyItem{tag: item.Tag, newAt: item.NewAt}
+			default:
+				c.fail("stack map %s[%d] has invalid verification tag %d", role, i, item.Tag)
+				return nil, false
+			}
+		}
+		return out, true
+	}
+	encLocals, ok := encodeItems(locals, "locals")
+	if !ok {
+		return c
+	}
+	encStack, ok := encodeItems(stack, "stack")
+	if !ok {
+		return c
+	}
+	if c.stackMapName == 0 {
+		var err error
+		c.stackMapName, err = c.pool.UTF8("StackMapTable")
+		if err != nil {
+			c.fail("StackMapTable attribute name: %v", err)
+			return c
+		}
+	}
+	c.frames = append(c.frames, stackFrameEntry{at: at, locals: encLocals, stack: encStack})
+	return c
+}
+
 // SetMaxStack requires the calculated maximum stack to equal value.
 func (c *Code) SetMaxStack(value uint16) *Code { c.maxStack = &value; return c }
 
@@ -513,7 +629,7 @@ func (i *instruction) size(pc int) int {
 			return 5
 		}
 		return 3
-	case kindInvokeInterface:
+	case kindInvokeInterface, kindInvokeDynamic:
 		return 5
 	case kindTableSwitch:
 		padding := (4 - (pc+1)%4) % 4
@@ -532,8 +648,10 @@ type assembledCode struct {
 	handlers            []assembledHandler
 	lines               []assembledLine
 	locals              []assembledLocal
+	stackMapPayload     []byte
 	lineName            uint16
 	localName           uint16
+	stackMapName        uint16
 }
 
 type assembledHandler struct {
@@ -636,10 +754,82 @@ func (c *Code) assemble(descriptor string, access uint16) (*assembledCode, error
 		}
 		locals[i] = assembledLocal{start: uint16(start), length: uint16(end - start), name: local.name, descriptor: local.descriptor, index: local.index}
 	}
+	var stackMapPayload []byte
+	if len(c.frames) > 0 {
+		type resolvedStackFrame struct {
+			pc   int
+			body []byte
+		}
+		writeVerifyItems := func(dst *byteWriter, items []encodedVerifyItem, frameIndex int) error {
+			dst.u2(uint16(len(items)))
+			for _, item := range items {
+				dst.u1(byte(item.tag))
+				switch item.tag {
+				case VerifyObject:
+					dst.u2(item.cpIndex)
+				case VerifyUninitialized:
+					newPC, ok := labelPC[item.newAt]
+					if !ok {
+						return fmt.Errorf("stack map frame %d has unbound uninitialized label", frameIndex)
+					}
+					if newPC < 0 || newPC >= codeLength {
+						return fmt.Errorf("stack map frame %d uninitialized offset %d outside code_length %d", frameIndex, newPC, codeLength)
+					}
+					dst.u2(uint16(newPC))
+				}
+			}
+			return nil
+		}
+		resolvedFrames := make([]resolvedStackFrame, 0, len(c.frames))
+		for i, frame := range c.frames {
+			pc, ok := labelPC[frame.at]
+			if !ok {
+				return nil, fmt.Errorf("stack map frame %d contains an unbound target label", i)
+			}
+			if pc < 0 || pc >= codeLength {
+				return nil, fmt.Errorf("stack map frame %d offset %d outside code_length %d", i, pc, codeLength)
+			}
+			var bw byteWriter
+			if err := writeVerifyItems(&bw, frame.locals, i); err != nil {
+				return nil, err
+			}
+			if err := writeVerifyItems(&bw, frame.stack, i); err != nil {
+				return nil, err
+			}
+			resolvedFrames = append(resolvedFrames, resolvedStackFrame{pc: pc, body: bw.data})
+		}
+		sort.SliceStable(resolvedFrames, func(i, j int) bool {
+			return resolvedFrames[i].pc < resolvedFrames[j].pc
+		})
+		dedup := make([]resolvedStackFrame, 0, len(resolvedFrames))
+		for _, rf := range resolvedFrames {
+			if len(dedup) > 0 && dedup[len(dedup)-1].pc == rf.pc {
+				if !bytes.Equal(dedup[len(dedup)-1].body, rf.body) {
+					return nil, fmt.Errorf("conflicting stack map frames at bytecode offset %d", rf.pc)
+				}
+				continue
+			}
+			dedup = append(dedup, rf)
+		}
+		if len(dedup) > math.MaxUint16 {
+			return nil, fmt.Errorf("stack_map_table_length %d exceeds 65535", len(dedup))
+		}
+		var sm byteWriter
+		sm.u2(uint16(len(dedup)))
+		prevPC := -1
+		for _, rf := range dedup {
+			offsetDelta := rf.pc - prevPC - 1
+			sm.u1(255)
+			sm.u2(uint16(offsetDelta))
+			sm.bytes(rf.body)
+			prevPC = rf.pc
+		}
+		stackMapPayload = sm.data
+	}
 	return &assembledCode{
 		bytes: out.data, maxStack: maxStack, maxLocals: maxLocals,
-		handlers: handlers, lines: lines, locals: locals,
-		lineName: c.lineName, localName: c.localName,
+		handlers: handlers, lines: lines, locals: locals, stackMapPayload: stackMapPayload,
+		lineName: c.lineName, localName: c.localName, stackMapName: c.stackMapName,
 	}, nil
 }
 
@@ -810,6 +1000,11 @@ func (c *Code) writeInstruction(out *byteWriter, i *instruction, pc int, labels 
 		out.u1(byte(INVOKEINTERFACE))
 		out.u2(uint16(i.arg))
 		out.u1(byte(i.arg2))
+		out.u1(0)
+	case kindInvokeDynamic:
+		out.u1(byte(INVOKEDYNAMIC))
+		out.u2(uint16(i.arg))
+		out.u1(0)
 		out.u1(0)
 	case kindTableSwitch:
 		out.u1(byte(TABLESWITCH))

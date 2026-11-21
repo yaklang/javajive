@@ -70,12 +70,12 @@ func TestOpcodeTableExhaustiveContract(t *testing.T) {
 	defineRange(0xd0, lit16, "22s", 2, func(byte) bool { return true })
 	lit8 := []string{"add-int/lit8", "rsub-int/lit8", "mul-int/lit8", "div-int/lit8", "rem-int/lit8", "and-int/lit8", "or-int/lit8", "xor-int/lit8", "shl-int/lit8", "shr-int/lit8", "ushr-int/lit8"}
 	defineRange(0xd8, lit8, "22b", 2, func(byte) bool { return true })
-	define(0xfa, "invoke-polymorphic", "45cc", 4, false)
-	define(0xfb, "invoke-polymorphic/range", "4rcc", 4, false)
-	define(0xfc, "invoke-custom", "35c", 3, false)
-	define(0xfd, "invoke-custom/range", "3rc", 3, false)
-	define(0xfe, "const-method-handle", "21c", 2, false)
-	define(0xff, "const-method-type", "21c", 2, false)
+	define(0xfa, "invoke-polymorphic", "45cc", 4, true)
+	define(0xfb, "invoke-polymorphic/range", "4rcc", 4, true)
+	define(0xfc, "invoke-custom", "35c", 3, true)
+	define(0xfd, "invoke-custom/range", "3rc", 3, true)
+	define(0xfe, "const-method-handle", "21c", 2, true)
+	define(0xff, "const-method-type", "21c", 2, true)
 
 	known, supported, reserved := 0, 0, 0
 	for slot := 0; slot < 256; slot++ {
@@ -100,7 +100,7 @@ func TestOpcodeTableExhaustiveContract(t *testing.T) {
 			}
 		}
 	}
-	if known != 224 || supported != 218 || reserved != 32 {
+	if known != 224 || supported != 224 || reserved != 32 {
 		t.Fatalf("opcode classification known=%d supported=%d reserved=%d", known, supported, reserved)
 	}
 }

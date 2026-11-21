@@ -16,6 +16,7 @@ import (
 func policyFixture() *model.Application {
 	file := &model.File{
 		Entry:  "classes.dex",
+		Types:  []model.Type{{Descriptor: "[J"}},
 		Protos: []model.Proto{{ReturnType: "V"}},
 		Classes: []model.Class{{
 			Descriptor:  "Lexample/Policy;",
@@ -30,7 +31,7 @@ func policyFixture() *model.Application {
 				{
 					AccessFlags: 0x0009,
 					Method:      model.MethodID{Class: "Lexample/Policy;", Name: "unsupported", ProtoIndex: 0},
-					Code:        &model.Code{Instructions: []uint16{0x00fa, 0, 0, 0}},
+					Code:        &model.Code{RegistersSize: 1, InsSize: 0, OutsSize: 0, Instructions: []uint16{0x0024, 0x0000, 0x0000, 0x000c, 0x000e}},
 				},
 			},
 		}},
@@ -103,9 +104,9 @@ func TestConversionPolicyRejectsUnknownPolicyAndMissingFile(t *testing.T) {
 
 func TestBestEffortRejectsUnsupportedDEXVersion(t *testing.T) {
 	data := make([]byte, 0x70)
-	copy(data, []byte("dex\n040\x00"))
+	copy(data, []byte("dex\n041\x00"))
 	jar, detailed, err := DexToJarWithOptions(data, ConvertOptions{Policy: FailureStubUnsupportedMethods})
-	if err == nil || !strings.Contains(err.Error(), `unsupported DEX version "040"`) {
+	if err == nil || !strings.Contains(err.Error(), `unsupported DEX version "041"`) {
 		t.Fatalf("DexToJarWithOptions error = %v", err)
 	}
 	if jar != nil || detailed.Status != "failed" {

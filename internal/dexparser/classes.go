@@ -463,8 +463,7 @@ func (p *parser) validateEncodedReference(kind model.ValueType, index uint64, of
 	case model.ValueMethodType:
 		limit = len(p.file.Protos)
 	case model.ValueMethodHandle:
-		// DEX 038+ method_handle_ids are intentionally not modeled yet.
-		return nil
+		limit = len(p.file.MethodHandles)
 	default:
 		return nil
 	}
