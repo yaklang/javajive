@@ -163,7 +163,7 @@ func TestParseDEXRejectsUnsupportedFirstSliceData(t *testing.T) {
 			},
 			offset:  4,
 			op:      "header",
-			message: `unsupported DEX version "036"; supported versions are 035, 037, 038, and 039`,
+			message: `unsupported DEX version "036"; supported versions are 035, 037, 038, 039, and 040`,
 		},
 		{
 			name: "version 039 without map evidence",
@@ -181,7 +181,7 @@ func TestParseDEXRejectsUnsupportedFirstSliceData(t *testing.T) {
 			},
 			offset:  4,
 			op:      "header",
-			message: `unsupported DEX version "034"; supported versions are 035, 037, 038, and 039`,
+			message: `unsupported DEX version "034"; supported versions are 035, 037, 038, 039, and 040`,
 		},
 	}
 	for _, test := range tests {

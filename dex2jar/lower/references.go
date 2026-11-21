@@ -171,6 +171,7 @@ func (l *methodLowerer) validateReferenceUses() error {
 			l.transferReferences(instructionIndex, state)
 		}
 	}
+	l.refIn = in
 	return nil
 }
 
@@ -239,6 +240,22 @@ func (l *methodLowerer) checkReferenceInstruction(index int, state referenceStat
 		}
 		return nil
 	}
+	checkInvokeArgs := func(proto model.Proto, start int) error {
+		argument := start
+		for _, descriptor := range proto.Parameters {
+			kind, _ := ir.DescriptorCategory(descriptor)
+			if argument >= len(instruction.Regs) {
+				break
+			}
+			if kind == ir.Reference {
+				if err := check(instruction.Regs[argument], descriptor, "invoke argument"); err != nil {
+					return err
+				}
+			}
+			argument += kind.Words()
+		}
+		return nil
+	}
 	switch {
 	case instruction.Opcode == 0x11:
 		return check(instruction.Regs[0], l.method.Proto.ReturnType, "return value")
@@ -277,6 +294,15 @@ func (l *methodLowerer) checkReferenceInstruction(index int, state referenceStat
 		if kind == ir.Reference {
 			return check(instruction.Regs[0], field.Type, "field value")
 		}
+	case instruction.Opcode == 0xfa || instruction.Opcode == 0xfb:
+		callee := l.file.Methods[instruction.Index]
+		if err := check(instruction.Regs[0], callee.Class, "invoke-polymorphic receiver"); err != nil {
+			return err
+		}
+		return checkInvokeArgs(l.file.Protos[instruction.ProtoIndex], 1)
+	case instruction.Opcode == 0xfc || instruction.Opcode == 0xfd:
+		cs := l.file.CallSites[instruction.Index]
+		return checkInvokeArgs(l.file.Protos[cs.MethodTypeIndex], 0)
 	case isInvoke(instruction.Opcode):
 		callee := l.file.Methods[instruction.Index]
 		proto := l.file.Protos[callee.ProtoIndex]
@@ -287,18 +313,7 @@ func (l *methodLowerer) checkReferenceInstruction(index int, state referenceStat
 			}
 			argument++
 		}
-		for _, descriptor := range proto.Parameters {
-			kind, _ := ir.DescriptorCategory(descriptor)
-			if argument >= len(instruction.Regs) {
-				break
-			}
-			if kind == ir.Reference {
-				if err := check(instruction.Regs[argument], descriptor, "invoke argument"); err != nil {
-					return err
-				}
-			}
-			argument += kind.Words()
-		}
+		return checkInvokeArgs(proto, argument)
 	}
 	return nil
 }
@@ -331,14 +346,20 @@ func (l *methodLowerer) transferReferences(index int, state referenceState) {
 	case instruction.Opcode == 0x0c:
 		if index > 0 {
 			previous := l.method.Instructions[index-1]
-			if previous.Opcode == 0x24 || previous.Opcode == 0x25 {
+			switch {
+			case previous.Opcode == 0x24 || previous.Opcode == 0x25:
 				// filled-new-array yields the array type itself; its Index names
 				// a type, not a method.
 				setOne(instruction.Regs[0], l.file.Types[previous.Index].Descriptor)
-				break
+			case previous.Opcode == 0xfa || previous.Opcode == 0xfb:
+				setOne(instruction.Regs[0], l.file.Protos[previous.ProtoIndex].ReturnType)
+			case previous.Opcode == 0xfc || previous.Opcode == 0xfd:
+				cs := l.file.CallSites[previous.Index]
+				setOne(instruction.Regs[0], l.file.Protos[cs.MethodTypeIndex].ReturnType)
+			default:
+				callee := l.file.Methods[previous.Index]
+				setOne(instruction.Regs[0], l.file.Protos[callee.ProtoIndex].ReturnType)
 			}
-			callee := l.file.Methods[previous.Index]
-			setOne(instruction.Regs[0], l.file.Protos[callee.ProtoIndex].ReturnType)
 		}
 	case instruction.Opcode >= 0x12 && instruction.Opcode <= 0x15 && instruction.Literal == 0:
 		// The null constant types the register it defines, not its previous
@@ -352,6 +373,10 @@ func (l *methodLowerer) transferReferences(index int, state referenceState) {
 		setOne(instruction.Regs[0], "Ljava/lang/String;")
 	case instruction.Opcode == 0x1c:
 		setOne(instruction.Regs[0], "Ljava/lang/Class;")
+	case instruction.Opcode == 0xfe:
+		setOne(instruction.Regs[0], "Ljava/lang/invoke/MethodHandle;")
+	case instruction.Opcode == 0xff:
+		setOne(instruction.Regs[0], "Ljava/lang/invoke/MethodType;")
 	case instruction.Opcode == 0x1f:
 		setOne(instruction.Regs[0], l.file.Types[instruction.Index].Descriptor)
 	case instruction.Opcode == 0x22 || instruction.Opcode == 0x23:

@@ -148,9 +148,31 @@ func Decode(code *model.Code, ctx Context) ([]Instruction, error) {
 				}
 				instruction.Data, instruction.DataWidth = data, width
 			}
-		case "45cc", "4rcc":
-			// These are decoded only far enough to issue a precise unsupported
-			// diagnostic; their operands are deliberately not exposed in this IR.
+		case "45cc":
+			count := int(word >> 12)
+			if count < 1 || count > 5 {
+				return nil, diagnostic(ctx, &instruction, "", fmt.Errorf("register count %d is outside 45cc limit 1..5", count))
+			}
+			instruction.Index = uint32(word1())
+			packed := word2()
+			registers := []uint16{uint16(packed & 0xf), uint16((packed >> 4) & 0xf), uint16((packed >> 8) & 0xf), uint16(packed >> 12), uint16((word >> 8) & 0xf)}
+			instruction.Regs = append([]uint16(nil), registers[:count]...)
+			instruction.ProtoIndex = uint32(words[offset+3])
+		case "4rcc":
+			count := uint32(word >> 8)
+			if count < 1 {
+				return nil, diagnostic(ctx, &instruction, "", fmt.Errorf("register count %d is below 4rcc minimum 1", count))
+			}
+			first := uint32(word2())
+			if first+count > math.MaxUint16+1 {
+				return nil, diagnostic(ctx, &instruction, "", fmt.Errorf("register range v%d..v%d overflows v65535", first, first+count-1))
+			}
+			instruction.Index = uint32(word1())
+			instruction.ProtoIndex = uint32(words[offset+3])
+			instruction.Regs = make([]uint16, count)
+			for index := range instruction.Regs {
+				instruction.Regs[index] = uint16(first + uint32(index))
+			}
 		default:
 			return nil, diagnostic(ctx, &instruction, "", fmt.Errorf("decoder has no implementation for format %s", info.format))
 		}

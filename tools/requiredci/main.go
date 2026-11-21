@@ -34,7 +34,7 @@ var requiredSuites = []suite{
 	{Group: "corpus", Package: "./ci/requiredci", Tests: 6, TestHash: "38ec9ce7d0cf47aef55f2facb53299862361febe6b1e06075e1cdd3d6a4554f6", Include: []string{"TestFixedDEXCorpusStructure", "TestSyntheticJImageStructure", "TestDecompileCancellationFailsClosed", "TestDecompileDeterministicAcrossProcesses"}},
 	{Group: "algorithm", Package: "./ci/requiredci", Tests: 6, TestHash: "38ec9ce7d0cf47aef55f2facb53299862361febe6b1e06075e1cdd3d6a4554f6", Include: []string{"TestConcurrentDecompileDeterministic"}},
 	{Group: "corpus", Package: "./test/cross", Tests: 104, TestHash: "17c48c808ac80dbb2055c86a65896b22997f04f8ad72643a76cb91025eb2ff43", Include: []string{"TestFixedIrreducibleCFGCorpusPureGo"}},
-	{Group: "corpus", Package: "./classparser/classfilebuilder", Tests: 26, TestHash: "d26b13298f017bd8077df6e8910e78f6542e5ffcfd2dae7a36260ab17e61847f", Exclude: []string{"TestJava8InterfaceStaticMethodVerifies", "TestJavaVerifyAll", "TestLongDoubleAndFloatConstantsExecute"}},
+	{Group: "corpus", Package: "./classparser/classfilebuilder", Tests: 28, TestHash: "c01fe6d24ffc6f7f36459039cb8d2cf02fa8e6a080759b390bbb7102354d4609", Exclude: []string{"TestJava8InterfaceStaticMethodVerifies", "TestJavaVerifyAll", "TestLongDoubleAndFloatConstantsExecute"}},
 	{Group: "corpus", Package: "./classparser/jarwar", Tests: 18, TestHash: "b1195066bc29f6a35391695fb815b4eef9eb42a55ef53f7ba9786375a27afc25"},
 	{Group: "corpus", Package: "./classparser/decompiler/jar", Tests: 1, TestHash: "e84c19ac824483c172a763d735732079fb808d6dd0153c53e573b18513d23553"},
 	{Group: "corpus", Package: "./jimage", Tests: 16, TestHash: "f68b01a6c2a476c2a5921fc30f5ab3a6c0b700fe04748ac1e1d5d9573e283df8", Exclude: []string{"TestJLinkBigEndianImage", "TestJLinkCompactCPImage", "TestOpenJDKImage"}},
@@ -56,7 +56,7 @@ var requiredSuites = []suite{
 	{Group: "algorithm", Package: "./internal/jdecenv", Tests: 13, TestHash: "51ee508a5994d7763fb87e1d2d9cf78a345237af650479b650dbf055625082ad"},
 	{Group: "algorithm", Package: "./internal/filesys", Tests: 9, TestHash: "f6485392fe079ab59aafa635aca0d9bbe00b7af50334a7c1362396d883d82e31"},
 
-	{Group: "dex", Package: "./dex2jar", Tests: 40, TestHash: "317aab824869172ee7341450da50f405ed239a7cd16f5d05ffa664f26cd68e2d", Exclude: []string{"TestAcceptedCorpusJVMOracle", "TestCoverageBaselineContract", "TestStrictAcceptedDEXRoundtripGate"}},
+	{Group: "dex", Package: "./dex2jar", Tests: 47, TestHash: "2573b532db94d5c0d503424f83f4bcadf190acbecaf0980eab9361cffaf35f96", Exclude: []string{"TestAcceptedCorpusJVMOracle", "TestCoverageBaselineContract", "TestStrictAcceptedDEXRoundtripGate"}},
 	{Group: "dex", Package: "./dex2jar/input", Tests: 25, TestHash: "6c3d9f03eab44176f1ad0e882252f2ef4f9593ef71f6d6cb71e61ef7c57cbe92"},
 	{Group: "dex", Package: "./dex2jar/ir", Tests: 43, TestHash: "1a8c256ed990bb96db287b1be2fa7f11786bbc5d30eadafd8db2376e3878a508"},
 	{Group: "dex", Package: "./dex2jar/lower", Tests: 54, TestHash: "ddc42bcad210f675f5b8ea1e15a38908ea834b7628d364dc13f2ac028b750e45", Exclude: []string{
@@ -67,7 +67,7 @@ var requiredSuites = []suite{
 	}},
 	{Group: "dex", Package: "./dex2jar/report", Tests: 7, TestHash: "6121738f00eca84495e4795ebdd9887db39a8ff30f761bd307bfb7bf0eed2081"},
 	{Group: "dex", Package: "./inspect", Tests: 14, TestHash: "cd4f7f82cabeb7f10478e2b345c28aa2352d1e08396d8ade41e1c581d267e263"},
-	{Group: "dex", Package: "./internal/dexparser", Tests: 5, TestHash: "677b878f538ec9575d63ed096d28254a7bab0294b6076341c125015f068247c3"},
+	{Group: "dex", Package: "./internal/dexparser", Tests: 7, TestHash: "68b75deab796dfe9f97a72cbf851c969b7700f7ee856371e93fef5be76d9354d"},
 	{Group: "dex", Package: "./internal/inputkind", Tests: 6, TestHash: "b1aeb5061859deadc6a597d2b2feb84cd8ebeb199b08006adbfc86e63838a6fa"},
 	{Group: "dex", Package: "./internal/mutf8", Tests: 6, TestHash: "f176fe43927c9dff4e9f378419d80c0d889d67e93aa568f3250e7edc8dd3ad72"},
 	{Group: "dex", Package: "./internal/zipx", Tests: 3, TestHash: "773ae48e36e49359aa27baf6364ba5c4712e6586e7235db6d628c14e568714a7"},

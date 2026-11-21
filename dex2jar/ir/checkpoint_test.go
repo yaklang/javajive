@@ -215,9 +215,9 @@ func TestUnsupportedFamiliesHavePreciseDiagnostics(t *testing.T) {
 		words []uint16
 		part  string
 	}{
-		{"method-handle", []uint16{0x00fe, 0}, "post-DEX-035"},
+		{"method-handle-oob", []uint16{0x00fe, 0}, "out of range"},
 		{"wide-array", []uint16{0x0045, 0, 0x000e}, "has no array type"},
-		{"polymorphic", []uint16{0x00fa, 0, 0, 0}, "polymorphic/custom"},
+		{"polymorphic-empty-regs", []uint16{0x00fa, 0, 0, 0}, "outside 45cc limit"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

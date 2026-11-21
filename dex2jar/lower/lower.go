@@ -147,21 +147,81 @@ func classWithPolicyOnce(file *model.File, class *model.Class, options ClassOpti
 	if class.AccessFlags&dexInterface != 0 && class.Superclass != "Ljava/lang/Object;" {
 		return ClassResult{}, classDiagnostic(file, class, "class", fmt.Errorf("interface superclass must be java/lang/Object"))
 	}
+	builder := classfilebuilder.NewClass(className, superName, access)
+	if version := classMinVersion(file, class, options.Hierarchy); version > classfilebuilder.VersionJava5 {
+		builder.SetVersion(version)
+	}
+	return lowerClassBody(file, class, builder, options, policy)
+}
+
+// classMinVersion returns the minimum classfile major version required for
+// class while preserving Java 5 for ordinary DEX 035/037 classes.
+func classMinVersion(file *model.File, class *model.Class, hierarchy map[string]*model.Class) uint16 {
 	if interfaceNeedsJava8(class) {
-		// Static and default interface methods require a Java 8 class file. The
-		// translator does not emit StackMapTable, so ordinary translated methods
-		// may not have control flow or handlers. Throwing stubs are straight-line.
-		if policy == Strict {
-			if err := validateNoControlFlow(file, class); err != nil {
-				return ClassResult{}, err
+		return classfilebuilder.VersionJava8
+	}
+	version := classfilebuilder.VersionJava5
+	raise := func(candidate uint16) {
+		if candidate > version {
+			version = candidate
+		}
+	}
+	index := hierarchy
+	isInterfaceTarget := func(descriptor string) bool {
+		if index == nil {
+			index = classHierarchy(file)
+		}
+		target, ok := index[descriptor]
+		return ok && target.AccessFlags&dexInterface != 0
+	}
+	needsJava8Handle := func(mhIndex uint64) bool {
+		if mhIndex >= uint64(len(file.MethodHandles)) {
+			return false
+		}
+		mh := file.MethodHandles[mhIndex]
+		if mh.Kind != model.MethodHandleInvokeStatic && mh.Kind != model.MethodHandleInvokeDirect {
+			return false
+		}
+		if int(mh.TargetIndex) >= len(file.Methods) {
+			return false
+		}
+		return isInterfaceTarget(file.Methods[mh.TargetIndex].Class)
+	}
+	for _, method := range appendMethods(class.DirectMethods, class.VirtualMethods) {
+		if method.Code == nil {
+			continue
+		}
+		instructions, err := ir.Decode(method.Code, methodContext(file, class, &method))
+		if err != nil {
+			// Let lowerMethod surface malformed code under the active FailurePolicy.
+			continue
+		}
+		for _, instruction := range instructions {
+			if instruction.Opcode < 0xfa {
+				continue
+			}
+			raise(classfilebuilder.VersionJava7)
+			switch instruction.Opcode {
+			case 0xfe:
+				if needsJava8Handle(uint64(instruction.Index)) {
+					return classfilebuilder.VersionJava8
+				}
+			case 0xfc, 0xfd:
+				if int(instruction.Index) < len(file.CallSites) {
+					cs := file.CallSites[instruction.Index]
+					if needsJava8Handle(uint64(cs.BootstrapMethodHandle)) {
+						return classfilebuilder.VersionJava8
+					}
+					for _, arg := range cs.Arguments {
+						if arg.Type == model.ValueMethodHandle && needsJava8Handle(arg.Unsigned) {
+							return classfilebuilder.VersionJava8
+						}
+					}
+				}
 			}
 		}
-		builder := classfilebuilder.NewClass(className, superName, access)
-		builder.SetVersion(classfilebuilder.VersionJava8)
-		return lowerClassBody(file, class, builder, options, policy)
 	}
-	builder := classfilebuilder.NewClass(className, superName, access)
-	return lowerClassBody(file, class, builder, options, policy)
+	return version
 }
 
 // interfaceNeedsJava8 reports whether an interface carries a static or default
@@ -179,29 +239,6 @@ func interfaceNeedsJava8(class *model.Class) bool {
 		}
 	}
 	return false
-}
-
-// validateNoControlFlow rejects interface methods whose code would need a
-// StackMapTable, which the translator does not emit.
-func validateNoControlFlow(file *model.File, class *model.Class) error {
-	for _, method := range appendMethods(class.DirectMethods, class.VirtualMethods) {
-		if method.Code == nil {
-			continue
-		}
-		if len(method.Code.Tries) > 0 {
-			return classDiagnostic(file, class, "interface", fmt.Errorf("method %s has exception handlers, which need Java 8 stack maps", method.Method.Name))
-		}
-		instructions, err := ir.Decode(method.Code, methodContext(file, class, &method))
-		if err != nil {
-			return err
-		}
-		for _, instruction := range instructions {
-			if isBranchOpcode(instruction.Opcode) || instruction.Opcode == 0x2b || instruction.Opcode == 0x2c {
-				return classDiagnostic(file, class, "interface", fmt.Errorf("method %s has control flow, which needs Java 8 stack maps", method.Method.Name))
-			}
-		}
-	}
-	return nil
 }
 
 // lowerClassBody emits members and attributes into an already configured
@@ -542,19 +579,6 @@ func addMethod(file *model.File, class *model.Class, method *model.EncodedMethod
 				Feature:    capability.Feature,
 				Message:    capability.Error(),
 			}
-		} else if builder.Version() >= classfilebuilder.VersionJava8 && class.AccessFlags&dexInterface != 0 {
-			if len(method.Code.Tries) > 0 || hasControlFlow(built.Instructions) {
-				message := fmt.Sprintf("method %s has control flow, which needs Java 8 stack maps", method.Method.Name)
-				if policy != StubUnsupportedMethods {
-					return nil, classDiagnostic(file, class, "interface", errors.New(message))
-				}
-				stub = &StubbedMethod{
-					Method:     method.Method.Name,
-					Descriptor: descriptor,
-					Feature:    "java8-interface-control-flow",
-					Message:    message,
-				}
-			}
 		}
 	}
 
@@ -633,15 +657,6 @@ func translateParameterAnnotations(file *model.File, parameters [][]model.Annota
 		}
 	}
 	return converted, visible, nil
-}
-
-func hasControlFlow(instructions []ir.Instruction) bool {
-	for _, instruction := range instructions {
-		if isBranchOpcode(instruction.Opcode) || instruction.Opcode == 0x2b || instruction.Opcode == 0x2c {
-			return true
-		}
-	}
-	return false
 }
 
 func emitUnsupportedStub(builder *classfilebuilder.Class, member *classfilebuilder.Method, reason string) error {

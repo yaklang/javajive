@@ -106,12 +106,19 @@ func TestIntArrayPathVerifiesAndExecutes(t *testing.T) {
 }
 
 func TestUnsupportedMethodStubsWithExplicitPolicy(t *testing.T) {
-	file := &model.File{Entry: "classes.dex", Protos: []model.Proto{{ReturnType: "V"}}}
+	file := &model.File{
+		Entry:  "classes.dex",
+		Types:  []model.Type{{Descriptor: "[J"}},
+		Protos: []model.Proto{{ReturnType: "V"}},
+	}
 	unsupported := func(name string, access uint32, registers, incoming uint16) model.EncodedMethod {
+		if registers == 0 {
+			registers = 1
+		}
 		return model.EncodedMethod{
 			AccessFlags: access,
 			Method:      model.MethodID{Class: "Ldex/Stubbed;", Name: name, ProtoIndex: 0},
-			Code:        &model.Code{RegistersSize: registers, InsSize: incoming, Instructions: []uint16{0x00fa, 0, 0, 0}},
+			Code:        &model.Code{RegistersSize: registers, InsSize: incoming, Instructions: []uint16{0x0024, 0x0000, 0x0000, 0x000c, 0x000e}},
 		}
 	}
 	class := &model.Class{
@@ -120,8 +127,8 @@ func TestUnsupportedMethodStubsWithExplicitPolicy(t *testing.T) {
 		AccessFlags: dexPublic,
 		DirectMethods: []model.EncodedMethod{
 			unsupported("<init>", dexPublic|dexConstructor, 1, 1),
-			unsupported("<clinit>", dexStatic|dexConstructor, 0, 0),
-			unsupported("bad", dexPublic|dexStatic, 0, 0),
+			unsupported("<clinit>", dexStatic|dexConstructor, 1, 0),
+			unsupported("bad", dexPublic|dexStatic, 1, 0),
 		},
 	}
 	result, err := ClassWithPolicy(file, class, ClassOptions{}, StubUnsupportedMethods)
@@ -146,7 +153,11 @@ func TestUnsupportedMethodStubsWithExplicitPolicy(t *testing.T) {
 }
 
 func TestUnsupportedInterfaceMethodStubsWithExplicitPolicy(t *testing.T) {
-	file := &model.File{Entry: "classes.dex", Protos: []model.Proto{{ReturnType: "V"}}}
+	file := &model.File{
+		Entry:  "classes.dex",
+		Types:  []model.Type{{Descriptor: "[J"}},
+		Protos: []model.Proto{{ReturnType: "V"}},
+	}
 	class := &model.Class{
 		Descriptor:  "Ldex/StubbedInterface;",
 		Superclass:  "Ljava/lang/Object;",
@@ -154,7 +165,7 @@ func TestUnsupportedInterfaceMethodStubsWithExplicitPolicy(t *testing.T) {
 		DirectMethods: []model.EncodedMethod{{
 			AccessFlags: dexPublic | dexStatic,
 			Method:      model.MethodID{Class: "Ldex/StubbedInterface;", Name: "bad", ProtoIndex: 0},
-			Code:        &model.Code{Instructions: []uint16{0x00fa, 0, 0, 0}},
+			Code:        &model.Code{RegistersSize: 1, Instructions: []uint16{0x0024, 0x0000, 0x0000, 0x000c, 0x000e}},
 		}},
 	}
 	result, err := ClassWithPolicy(file, class, ClassOptions{}, StubUnsupportedMethods)
@@ -242,7 +253,15 @@ func TestUnsupportedStubsVerifyAndThrow(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			file := &model.File{Entry: "classes.dex", Protos: []model.Proto{{ReturnType: "V"}}}
+			regs := test.registers
+			if regs == 0 {
+				regs = 1
+			}
+			file := &model.File{
+				Entry:  "classes.dex",
+				Types:  []model.Type{{Descriptor: "[J"}},
+				Protos: []model.Proto{{ReturnType: "V"}},
+			}
 			class := &model.Class{
 				Descriptor:  test.descriptor,
 				Superclass:  "Ljava/lang/Object;",
@@ -250,7 +269,7 @@ func TestUnsupportedStubsVerifyAndThrow(t *testing.T) {
 				DirectMethods: []model.EncodedMethod{{
 					AccessFlags: test.access,
 					Method:      model.MethodID{Class: test.descriptor, Name: test.methodName, ProtoIndex: 0},
-					Code:        &model.Code{RegistersSize: test.registers, InsSize: test.incoming, Instructions: []uint16{0x00fa, 0, 0, 0}},
+					Code:        &model.Code{RegistersSize: regs, InsSize: test.incoming, Instructions: []uint16{0x0024, 0x0000, 0x0000, 0x000c, 0x000e}},
 				}},
 			}
 			result, err := ClassWithPolicy(file, class, ClassOptions{}, StubUnsupportedMethods)
@@ -292,22 +311,34 @@ func TestJava8InterfaceControlFlowStubsWithExplicitPolicy(t *testing.T) {
 			Code:        &model.Code{Instructions: []uint16{0x0128, 0x000e}},
 		}},
 	}
-	if _, err := ClassWithPolicy(file, class, ClassOptions{}, Strict); err == nil {
-		t.Fatal("strict conversion accepted Java 8 interface control flow")
-	}
-	result, err := ClassWithPolicy(file, class, ClassOptions{}, StubUnsupportedMethods)
+	result, err := ClassWithPolicy(file, class, ClassOptions{}, Strict)
 	if err != nil {
-		t.Fatalf("ClassWithPolicy: %v", err)
+		t.Fatalf("strict Java 8 interface conversion failed: %v", err)
 	}
-	if len(result.StubbedMethods) != 1 || result.StubbedMethods[0].Feature != "java8-interface-control-flow" {
-		t.Fatalf("stubbed methods = %#v", result.StubbedMethods)
+	if len(result.StubbedMethods) != 0 {
+		t.Fatalf("stubbed methods = %#v, want none", result.StubbedMethods)
 	}
 	parsed, err := javaclassparser.Parse(result.Bytes)
 	if err != nil {
-		t.Fatalf("parse stubbed interface: %v", err)
+		t.Fatalf("parse interface: %v", err)
 	}
 	if parsed.MajorVersion != 52 || len(parsed.Methods) != 1 {
 		t.Fatalf("interface = version %d, %d methods", parsed.MajorVersion, len(parsed.Methods))
+	}
+	hasStackMap := false
+	for _, attr := range parsed.Methods[0].Attributes {
+		codeAttr, ok := attr.(*javaclassparser.CodeAttribute)
+		if !ok {
+			continue
+		}
+		for _, sub := range codeAttr.Attributes {
+			if unparsed, ok := sub.(*javaclassparser.UnparsedAttribute); ok && unparsed.Name == "StackMapTable" {
+				hasStackMap = true
+			}
+		}
+	}
+	if !hasStackMap {
+		t.Fatal("Java 8 interface control-flow method is missing StackMapTable")
 	}
 }
 

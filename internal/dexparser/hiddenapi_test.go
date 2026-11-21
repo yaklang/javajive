@@ -54,7 +54,12 @@ func TestParseAllowsHiddenAPIMapItemAndRejectsCallSite(t *testing.T) {
 	}
 
 	callSite := testDEXWithMapItem(0x0007)
-	if _, err := Parse(callSite, "classes.dex"); err == nil || !strings.Contains(err.Error(), "unsupported call_site_id") {
-		t.Fatalf("Parse(call_site_id 0x0007) error = %v, want unsupported call_site_id", err)
+	if _, err := Parse(callSite, "classes.dex"); err == nil || strings.Contains(err.Error(), "unsupported call_site_id") {
+		t.Fatalf("Parse(call_site_id 0x0007 truncated) error = %v, want table parse error", err)
+	}
+
+	unknown := testDEXWithMapItem(0x9999)
+	if _, err := Parse(unknown, "classes.dex"); err == nil || !strings.Contains(err.Error(), "unsupported section type=0x9999") {
+		t.Fatalf("Parse(unknown 0x9999) error = %v, want unsupported section type=0x9999", err)
 	}
 }

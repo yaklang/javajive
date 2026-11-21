@@ -980,3 +980,263 @@ func TestJava8InterfaceStaticMethodVerifies(t *testing.T) {
 		t.Fatalf("java verification: %v\n%s", err, output)
 	}
 }
+
+func TestMethodHandleTypeInvokeDynamicAndBootstrapMethods(t *testing.T) {
+	class := NewClass("IndySample", "java/lang/Object", ACC_PUBLIC|ACC_SUPER)
+	class.SetVersion(VersionJava7)
+	if class.Version() != VersionJava7 {
+		t.Fatalf("version = %d, want %d", class.Version(), VersionJava7)
+	}
+	pool := class.Pool()
+
+	fRef, err := pool.Fieldref("IndySample", "f", "I")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mRef, err := pool.Methodref("IndySample", "m", "(Ljava/lang/String;)Ljava/lang/String;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	initRef, err := pool.Methodref("IndySample", "<init>", "()V")
+	if err != nil {
+		t.Fatal(err)
+	}
+	imRef, err := pool.InterfaceMethodref("java/lang/Runnable", "run", "()V")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bsmRef, err := pool.Methodref(
+		"java/lang/invoke/LambdaMetafactory",
+		"metafactory",
+		"(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify valid MethodHandle kinds and rejection of mismatched target tags.
+	validHandles := []struct {
+		kind byte
+		ref  uint16
+	}{
+		{RefGetField, fRef},
+		{RefGetStatic, fRef},
+		{RefPutField, fRef},
+		{RefPutStatic, fRef},
+		{RefInvokeVirtual, mRef},
+		{RefInvokeStatic, mRef},
+		{RefInvokeSpecial, mRef},
+		{RefNewInvokeSpecial, initRef},
+		{RefInvokeInterface, imRef},
+	}
+	for _, tc := range validHandles {
+		if _, err := pool.MethodHandle(tc.kind, tc.ref); err != nil {
+			t.Fatalf("MethodHandle(kind=%d, ref=%d) unexpected error: %v", tc.kind, tc.ref, err)
+		}
+	}
+	// Verify Java 8 (52) allows RefInvokeStatic/RefInvokeSpecial with CONSTANT_InterfaceMethodref per JVMS §4.4.8.
+	java8Class := NewClass("IndyIfaceMH", "java/lang/Object", ACC_PUBLIC|ACC_SUPER)
+	java8Class.SetVersion(VersionJava8)
+	j8Pool := java8Class.Pool()
+	j8IMRef, err := j8Pool.InterfaceMethodref("java/lang/Runnable", "run", "()V")
+	if err != nil {
+		t.Fatal(err)
+	}
+	j8StaticMH, err := j8Pool.MethodHandle(RefInvokeStatic, j8IMRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := j8Pool.MethodHandle(RefInvokeSpecial, j8IMRef); err != nil {
+		t.Fatal(err)
+	}
+	java8Class.AddMethod(ACC_PUBLIC|ACC_STATIC, "load", "()Ljava/lang/Object;").Code().LDC(j8StaticMH).Emit(ARETURN)
+	j8Raw, err := java8Class.Bytes()
+	if err != nil {
+		t.Fatalf("java8Class.Bytes(): %v", err)
+	}
+	if j8Parsed, err := javaclassparser.Parse(j8Raw); err != nil || j8Parsed.MajorVersion != VersionJava8 {
+		t.Fatalf("java8 interface MethodHandle parse failed: parsed=%v err=%v", j8Parsed, err)
+	}
+	if _, err := pool.MethodHandle(RefInvokeVirtual, imRef); err == nil {
+		t.Fatal("MethodHandle(RefInvokeVirtual, InterfaceMethodref) accepted invalid tag")
+	}
+	if _, err := pool.MethodHandle(RefInvokeInterface, mRef); err == nil {
+		t.Fatal("MethodHandle(RefInvokeInterface, Methodref) accepted invalid tag")
+	}
+	if _, err := pool.MethodHandle(RefGetField, mRef); err == nil {
+		t.Fatal("MethodHandle(RefGetField, Methodref) accepted invalid tag")
+	}
+
+	bsmMH, err := pool.MethodHandle(RefInvokeStatic, bsmRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetMH, err := pool.MethodHandle(RefInvokeStatic, mRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	samMT, err := pool.MethodType("()Ljava/lang/Object;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	strArg, err := pool.String("arg")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bsm0, err := class.AddBootstrapMethod(bsmMH, samMT, targetMH, samMT, strArg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bsm0Dup, err := class.AddBootstrapMethod(bsmMH, samMT, targetMH, samMT, strArg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bsm0 != 0 || bsm0Dup != 0 {
+		t.Fatalf("BootstrapMethods deduplication failed: bsm0=%d dup=%d", bsm0, bsm0Dup)
+	}
+
+	indyCP, err := pool.InvokeDynamic(bsm0, "get", "()Ljava/util/function/Supplier;")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	code := class.AddMethod(ACC_PUBLIC|ACC_STATIC, "make", "()Ljava/lang/Object;").Code()
+	code.LDC(targetMH).Emit(POP)
+	code.LDC(samMT).Emit(POP)
+	code.InvokeDynamic(indyCP).Emit(ARETURN)
+
+	raw, err := class.Bytes()
+	if err != nil {
+		t.Fatalf("Bytes(): %v", err)
+	}
+	parsed, err := javaclassparser.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse(): %v", err)
+	}
+	if parsed.MajorVersion != VersionJava7 {
+		t.Fatalf("MajorVersion = %d, want %d", parsed.MajorVersion, VersionJava7)
+	}
+	var bsmAttr *javaclassparser.BootstrapMethodsAttribute
+	for _, attr := range parsed.Attributes {
+		if b, ok := attr.(*javaclassparser.BootstrapMethodsAttribute); ok {
+			bsmAttr = b
+		}
+	}
+	if bsmAttr == nil || len(bsmAttr.BootstrapMethods) != 1 || len(bsmAttr.BootstrapMethods[0].BootstrapArguments) != 4 {
+		t.Fatalf("BootstrapMethods attribute = %#v", bsmAttr)
+	}
+}
+
+func TestStackMapTableSortingDedupAndUninitialized(t *testing.T) {
+	class := NewClass("SMTTest", "java/lang/Object", ACC_PUBLIC|ACC_SUPER)
+	class.SetVersion(VersionJava7)
+	initRef, err := class.Pool().Methodref("java/lang/String", "<init>", "()V")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	code := class.AddMethod(ACC_PUBLIC|ACC_STATIC, "build", "(IJ)Ljava/lang/String;").Code()
+	newLbl := code.NewLabel()
+	branchLbl := code.NewLabel()
+	doneLbl := code.NewLabel()
+
+	code.Load(IntLocal, 0).Branch(IFEQ, branchLbl)
+	code.Mark(newLbl).CP(NEW, mustClassCP(t, class.Pool(), "java/lang/String")).Emit(DUP)
+	code.CP(INVOKESPECIAL, initRef).Store(RefLocal, 3).Branch(GOTO, doneLbl)
+
+	code.Mark(branchLbl)
+	code.Emit(ACONST_NULL).Store(RefLocal, 3)
+
+	code.Mark(doneLbl).Load(RefLocal, 3).Emit(ARETURN)
+
+	// Insert out-of-order and duplicate identical frames at doneLbl to verify sorting + dedup.
+	doneLocals := []VerificationType{
+		{Tag: VerifyInt},
+		{Tag: VerifyLong},
+		{Tag: VerifyTop},
+		{Tag: VerifyObject, Class: "java/lang/String"},
+	}
+	code.AddFrame(doneLbl, doneLocals, nil)
+	code.AddFrame(branchLbl, []VerificationType{{Tag: VerifyInt}, {Tag: VerifyLong}}, nil)
+	code.AddFrame(doneLbl, doneLocals, nil)
+	// Reference Uninitialized offset before init runs at a synthetic target.
+	uninitChk := code.NewLabel()
+	code.Branch(GOTO, uninitChk).Mark(uninitChk)
+	_ = newLbl
+	code.AddFrame(uninitChk, []VerificationType{{Tag: VerifyInt}, {Tag: VerifyLong}, {Tag: VerifyTop}, {Tag: VerifyUninitialized, NewAt: newLbl}}, nil)
+	code.Emit(POP).Emit(ACONST_NULL).Emit(ARETURN) // unreachable? No, pop would underflow if stack empty; just return null from local 3:
+
+	// Reset method clean on second class to test conflicting frame rejection without mixing invalid stack.
+	rawBad := func() error {
+		badClass := NewClass("ConflictSMT", "java/lang/Object", ACC_PUBLIC|ACC_SUPER)
+		badClass.SetVersion(VersionJava7)
+		c := badClass.AddMethod(ACC_PUBLIC|ACC_STATIC, "f", "(I)V").Code()
+		lbl := c.NewLabel()
+		c.Load(IntLocal, 0).Branch(IFEQ, lbl).Mark(lbl).Emit(RETURN)
+		c.AddFrame(lbl, []VerificationType{{Tag: VerifyInt}}, nil)
+		c.AddFrame(lbl, []VerificationType{{Tag: VerifyFloat}}, nil)
+		_, err := badClass.Bytes()
+		return err
+	}()
+	if rawBad == nil || !strings.Contains(rawBad.Error(), "conflicting stack map frames") {
+		t.Fatalf("conflicting frames error = %v", rawBad)
+	}
+
+	// Verify clean class with VerifyUninitialized NewAt and out-of-order AddFrame compiles & parses cleanly.
+	okClass := NewClass("ValidUninitSMT", "java/lang/Object", ACC_PUBLIC|ACC_SUPER)
+	okClass.SetVersion(VersionJava7)
+	strInit, err := okClass.Pool().Methodref("java/lang/Object", "<init>", "()V")
+	if err != nil {
+		t.Fatal(err)
+	}
+	objCP := mustClassCP(t, okClass.Pool(), "java/lang/Object")
+	c := okClass.AddMethod(ACC_PUBLIC|ACC_STATIC, "f", "(I)Ljava/lang/Object;").Code()
+	lNew := c.NewLabel()
+	lUse := c.NewLabel()
+	lElse := c.NewLabel()
+	lJoin := c.NewLabel()
+	c.Mark(lNew).CP(NEW, objCP).Store(RefLocal, 1)
+	c.Load(IntLocal, 0).Branch(IFEQ, lElse)
+	c.Branch(GOTO, lUse)
+	c.Mark(lElse).Branch(GOTO, lUse)
+	c.Mark(lUse).Load(RefLocal, 1).CP(INVOKESPECIAL, strInit).Branch(GOTO, lJoin)
+	c.Mark(lJoin).Load(RefLocal, 1).Emit(ARETURN)
+
+	c.AddFrame(lJoin, []VerificationType{{Tag: VerifyInt}, {Tag: VerifyObject, Class: "java/lang/Object"}}, nil)
+	c.AddFrame(lUse, []VerificationType{{Tag: VerifyInt}, {Tag: VerifyUninitialized, NewAt: lNew}}, nil)
+	c.AddFrame(lElse, []VerificationType{{Tag: VerifyInt}, {Tag: VerifyUninitialized, NewAt: lNew}}, nil)
+	c.AddFrame(lUse, []VerificationType{{Tag: VerifyInt}, {Tag: VerifyUninitialized, NewAt: lNew}}, nil)
+
+	raw, err := okClass.Bytes()
+	if err != nil {
+		t.Fatalf("okClass.Bytes(): %v", err)
+	}
+	parsed, err := javaclassparser.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse(): %v", err)
+	}
+	codeAttr := parsed.Methods[0].Attributes[0].(*javaclassparser.CodeAttribute)
+	var smt []byte
+	for _, sub := range codeAttr.Attributes {
+		if u, ok := sub.(*javaclassparser.UnparsedAttribute); ok && u.Name == "StackMapTable" {
+			smt = u.Info
+		}
+	}
+	if len(smt) == 0 || binary.BigEndian.Uint16(smt[:2]) != 3 {
+		t.Fatalf("StackMapTable entries = %v, want 3 deduplicated sorted frames", smt)
+	}
+	// First entry must be full_frame (255) pointing at lElse with VerifyUninitialized NewAt=0.
+	if smt[2] != 255 {
+		t.Fatalf("frame[0] tag = %d, want 255", smt[2])
+	}
+}
+
+func mustClassCP(t *testing.T, pool *ConstantPool, name string) uint16 {
+	t.Helper()
+	idx, err := pool.Class(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return idx
+}

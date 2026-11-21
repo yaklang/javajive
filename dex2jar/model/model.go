@@ -5,14 +5,16 @@ const NoIndex = ^uint32(0)
 
 // File is one DEX file, either standalone or embedded in an archive.
 type File struct {
-	Entry   string
-	Header  Header
-	Strings []string
-	Types   []Type
-	Protos  []Proto
-	Fields  []FieldID
-	Methods []MethodID
-	Classes []Class
+	Entry         string
+	Header        Header
+	Strings       []string
+	Types         []Type
+	Protos        []Proto
+	Fields        []FieldID
+	Methods       []MethodID
+	MethodHandles []MethodHandle
+	CallSites     []CallSite
+	Classes       []Class
 }
 
 // Application is an ordered collection of DEX files.
@@ -73,6 +75,33 @@ type MethodID struct {
 	NameIndex  uint32
 	Class      string
 	Name       string
+}
+
+type MethodHandleKind uint16
+
+const (
+	MethodHandleStaticPut         MethodHandleKind = 0x00
+	MethodHandleStaticGet         MethodHandleKind = 0x01
+	MethodHandleInstancePut       MethodHandleKind = 0x02
+	MethodHandleInstanceGet       MethodHandleKind = 0x03
+	MethodHandleInvokeStatic      MethodHandleKind = 0x04
+	MethodHandleInvokeInstance    MethodHandleKind = 0x05
+	MethodHandleInvokeConstructor MethodHandleKind = 0x06
+	MethodHandleInvokeDirect      MethodHandleKind = 0x07
+	MethodHandleInvokeInterface   MethodHandleKind = 0x08
+)
+
+type MethodHandle struct {
+	Kind        MethodHandleKind
+	TargetIndex uint16
+}
+
+type CallSite struct {
+	BootstrapMethodHandle uint32
+	MethodNameIndex       uint32
+	MethodName            string
+	MethodTypeIndex       uint32
+	Arguments             []EncodedValue
 }
 
 type Class struct {

@@ -96,8 +96,7 @@ func validateInstructions(method *Method, file *model.File) error {
 		instruction := &method.Instructions[index]
 		info := opcodeTable[instruction.Opcode]
 		if !info.supported {
-			family := unsupportedFamily(instruction.Opcode)
-			return diagnostic(method.Context, instruction, "", report.Unsupported(family, fmt.Errorf("construct is outside the supported DEX 035 subset; unsupported opcode family: %s", family)))
+			return diagnostic(method.Context, instruction, "", report.Unsupported("unimplemented opcode", fmt.Errorf("construct is outside the supported DEX subset; unsupported opcode 0x%02x", instruction.Opcode)))
 		}
 		for _, register := range instruction.Regs {
 			if uint32(register) >= registerCount {
@@ -169,39 +168,60 @@ func validateInstructions(method *Method, file *model.File) error {
 			if err != nil {
 				return diagnostic(method.Context, instruction, "", err)
 			}
+			startPos := 0
 			if !isStaticInvoke(instruction.Opcode) {
 				wordCount++
+				startPos = 1
 			}
-			if len(instruction.Regs) != wordCount {
-				return diagnostic(method.Context, instruction, "", fmt.Errorf("invoke has %d register words; descriptor requires %d", len(instruction.Regs), wordCount))
+			if err := validateInvokeShape(method, instruction, proto, wordCount, startPos); err != nil {
+				return err
 			}
-			if wordCount > int(method.Code.OutsSize) {
-				return diagnostic(method.Context, instruction, "", fmt.Errorf("invoke requires %d outgoing register words; outs_size is %d", wordCount, method.Code.OutsSize))
+		}
+		if isPolymorphicInvoke(instruction.Opcode) {
+			if instruction.Index >= uint32(len(file.Methods)) {
+				return diagnostic(method.Context, instruction, "", fmt.Errorf("method index %d is out of range", instruction.Index))
 			}
-			if _, err := DescriptorCategory(proto.ReturnType); err != nil {
+			if instruction.ProtoIndex >= uint32(len(file.Protos)) {
+				return diagnostic(method.Context, instruction, "", fmt.Errorf("call-site proto index %d is out of range", instruction.ProtoIndex))
+			}
+			callee := file.Methods[instruction.Index]
+			if callee.Name == "<init>" || callee.Name == "<clinit>" {
+				return diagnostic(method.Context, instruction, "", fmt.Errorf("polymorphic invoke target %q is invalid", callee.Name))
+			}
+			proto := file.Protos[instruction.ProtoIndex]
+			wordCount, err := supportedParameterWords(proto)
+			if err != nil {
 				return diagnostic(method.Context, instruction, "", err)
 			}
-			if isRangeInvoke(instruction.Opcode) && !contiguous(instruction.Regs) {
-				return diagnostic(method.Context, instruction, "", fmt.Errorf("range registers are not contiguous"))
+			if err := validateInvokeShape(method, instruction, proto, wordCount+1, 1); err != nil {
+				return err
 			}
-			// A category-2 argument lists both of its registers; they must be
-			// the register and its successor.
-			position := 0
-			if !isStaticInvoke(instruction.Opcode) {
-				position++
+		}
+		if isCustomInvoke(instruction.Opcode) {
+			if instruction.Index >= uint32(len(file.CallSites)) {
+				return diagnostic(method.Context, instruction, "", fmt.Errorf("call site index %d is out of range", instruction.Index))
 			}
-			for _, descriptor := range proto.Parameters {
-				kind, err := DescriptorCategory(descriptor)
-				if err != nil {
-					return diagnostic(method.Context, instruction, "", err)
-				}
-				if position+kind.Words() > len(instruction.Regs) {
-					break
-				}
-				if kind.Words() == 2 && instruction.Regs[position+1] != instruction.Regs[position]+1 {
-					return diagnostic(method.Context, instruction, "", fmt.Errorf("wide argument v%d must be followed by v%d", instruction.Regs[position], instruction.Regs[position]+1))
-				}
-				position += kind.Words()
+			cs := file.CallSites[instruction.Index]
+			if int(cs.MethodTypeIndex) >= len(file.Protos) {
+				return diagnostic(method.Context, instruction, "", fmt.Errorf("call site proto index %d is out of range", cs.MethodTypeIndex))
+			}
+			proto := file.Protos[cs.MethodTypeIndex]
+			wordCount, err := supportedParameterWords(proto)
+			if err != nil {
+				return diagnostic(method.Context, instruction, "", err)
+			}
+			if err := validateInvokeShape(method, instruction, proto, wordCount, 0); err != nil {
+				return err
+			}
+		}
+		if instruction.Opcode == 0xfe {
+			if instruction.Index >= uint32(len(file.MethodHandles)) {
+				return diagnostic(method.Context, instruction, "", fmt.Errorf("method handle index %d is out of range", instruction.Index))
+			}
+		}
+		if instruction.Opcode == 0xff {
+			if instruction.Index >= uint32(len(file.Protos)) {
+				return diagnostic(method.Context, instruction, "", fmt.Errorf("method type proto index %d is out of range", instruction.Index))
 			}
 		}
 		if isMoveResult(instruction.Opcode) {
@@ -209,7 +229,7 @@ func validateInstructions(method *Method, file *model.File) error {
 				return diagnostic(method.Context, instruction, "", fmt.Errorf("move-result must immediately follow an invoke or filled-new-array"))
 			}
 			previous := method.Instructions[index-1]
-			if !isInvoke(previous.Opcode) && previous.Opcode != 0x24 && previous.Opcode != 0x25 {
+			if !isAnyInvoke(previous.Opcode) && previous.Opcode != 0x24 && previous.Opcode != 0x25 {
 				return diagnostic(method.Context, instruction, "", fmt.Errorf("move-result must immediately follow an invoke or filled-new-array"))
 			}
 			if previous.Opcode == 0x24 || previous.Opcode == 0x25 {
@@ -246,24 +266,41 @@ func validateInstructions(method *Method, file *model.File) error {
 				return diagnostic(method.Context, instruction, "", err)
 			}
 		}
-		if isInvoke(instruction.Opcode) && index+1 < len(method.Instructions) && isMoveResult(method.Instructions[index+1].Opcode) {
+		if isAnyInvoke(instruction.Opcode) && index+1 < len(method.Instructions) && isMoveResult(method.Instructions[index+1].Opcode) {
 			continue
 		}
 	}
 	return validateMethodShape(method)
 }
 
-func unsupportedFamily(opcode byte) string {
-	switch {
-	case opcode >= 0x2b && opcode <= 0x2c:
-		return "switch"
-	case opcode >= 0xfa && opcode <= 0xfd:
-		return "polymorphic/custom invocation"
-	case opcode >= 0xfe:
-		return "post-DEX-035 method constant"
-	default:
-		return "unimplemented opcode"
+func validateInvokeShape(method *Method, instruction *Instruction, proto model.Proto, wordCount, firstParamPos int) error {
+	if len(instruction.Regs) != wordCount {
+		return diagnostic(method.Context, instruction, "", fmt.Errorf("invoke has %d register words; descriptor requires %d", len(instruction.Regs), wordCount))
 	}
+	if wordCount > int(method.Code.OutsSize) {
+		return diagnostic(method.Context, instruction, "", fmt.Errorf("invoke requires %d outgoing register words; outs_size is %d", wordCount, method.Code.OutsSize))
+	}
+	if _, err := DescriptorCategory(proto.ReturnType); err != nil {
+		return diagnostic(method.Context, instruction, "", err)
+	}
+	if isRangeInvoke(instruction.Opcode) && !contiguous(instruction.Regs) {
+		return diagnostic(method.Context, instruction, "", fmt.Errorf("range registers are not contiguous"))
+	}
+	position := firstParamPos
+	for _, descriptor := range proto.Parameters {
+		kind, err := DescriptorCategory(descriptor)
+		if err != nil {
+			return diagnostic(method.Context, instruction, "", err)
+		}
+		if position+kind.Words() > len(instruction.Regs) {
+			break
+		}
+		if kind.Words() == 2 && instruction.Regs[position+1] != instruction.Regs[position]+1 {
+			return diagnostic(method.Context, instruction, "", fmt.Errorf("wide argument v%d must be followed by v%d", instruction.Regs[position], instruction.Regs[position]+1))
+		}
+		position += kind.Words()
+	}
+	return nil
 }
 
 func validateReturnOpcode(descriptor string, opcode byte) error {
@@ -328,7 +365,14 @@ func supportedParameterWords(proto model.Proto) (int, error) {
 func isInvoke(opcode byte) bool {
 	return opcode >= 0x6e && opcode <= 0x72 || opcode >= 0x74 && opcode <= 0x78
 }
-func isRangeInvoke(opcode byte) bool  { return opcode >= 0x74 && opcode <= 0x78 }
+func isPolymorphicInvoke(opcode byte) bool { return opcode == 0xfa || opcode == 0xfb }
+func isCustomInvoke(opcode byte) bool      { return opcode == 0xfc || opcode == 0xfd }
+func isAnyInvoke(opcode byte) bool {
+	return isInvoke(opcode) || isPolymorphicInvoke(opcode) || isCustomInvoke(opcode)
+}
+func isRangeInvoke(opcode byte) bool {
+	return opcode >= 0x74 && opcode <= 0x78 || opcode == 0xfb || opcode == 0xfd
+}
 func isStaticInvoke(opcode byte) bool { return opcode == 0x71 || opcode == 0x77 }
 func isDirectInvoke(opcode byte) bool { return opcode == 0x70 || opcode == 0x76 }
 func isMoveResult(opcode byte) bool   { return opcode == 0x0a || opcode == 0x0b || opcode == 0x0c }
@@ -343,6 +387,13 @@ func contiguous(registers []uint16) bool {
 }
 
 func invokeResultCategory(instruction Instruction, file *model.File) (CategoryKind, error) {
+	if isPolymorphicInvoke(instruction.Opcode) {
+		return DescriptorCategory(file.Protos[instruction.ProtoIndex].ReturnType)
+	}
+	if isCustomInvoke(instruction.Opcode) {
+		cs := file.CallSites[instruction.Index]
+		return DescriptorCategory(file.Protos[cs.MethodTypeIndex].ReturnType)
+	}
 	callee := file.Methods[instruction.Index]
 	return DescriptorCategory(file.Protos[callee.ProtoIndex].ReturnType)
 }

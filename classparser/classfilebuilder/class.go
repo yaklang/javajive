@@ -3,6 +3,7 @@ package classfilebuilder
 import (
 	"fmt"
 	"math"
+	"strings"
 )
 
 const (
@@ -10,10 +11,17 @@ const (
 	// VersionJava5 is the default class file version: the verifier still uses
 	// inference, so generated methods need no StackMapTable.
 	VersionJava5 uint16 = 49
+	// VersionJava7 supports invokedynamic, method handles/types, and StackMapTable.
+	VersionJava7 uint16 = 51
 	// VersionJava8 is required for static and default interface methods.
 	VersionJava8   uint16 = 52
 	highestVersion uint16 = 65
 )
+
+type bootstrapMethodEntry struct {
+	handle uint16
+	args   []uint16
+}
 
 type member struct {
 	access                uint16
@@ -51,6 +59,8 @@ type Class struct {
 	methodAttrs           [][]pendingAttribute
 	classAttrs            []pendingAttribute
 	rawClassAttrs         []pendingAttribute
+	bootstrapMethods      []bootstrapMethodEntry
+	bootstrapIndex        map[string]uint16
 	err                   error
 }
 
@@ -265,6 +275,49 @@ func (c *Class) SetVersion(major uint16) *Class {
 
 // Version returns the class file major version.
 func (c *Class) Version() uint16 { return c.major }
+
+// AddBootstrapMethod registers a deduplicated entry in the class's
+// BootstrapMethods attribute and returns its 0-based index for InvokeDynamic.
+func (c *Class) AddBootstrapMethod(handleIndex uint16, args ...uint16) (uint16, error) {
+	handleEntry, err := c.pool.entry(handleIndex)
+	if err != nil {
+		return 0, fmt.Errorf("bootstrap method handle: %w", err)
+	}
+	if handleEntry.tag != cpMethodHandle {
+		return 0, fmt.Errorf("bootstrap method ref %d has tag %d, want MethodHandle", handleIndex, handleEntry.tag)
+	}
+	var key strings.Builder
+	fmt.Fprintf(&key, "%d", handleIndex)
+	for i, arg := range args {
+		argEntry, err := c.pool.entry(arg)
+		if err != nil {
+			return 0, fmt.Errorf("bootstrap argument %d: %w", i, err)
+		}
+		switch argEntry.tag {
+		case cpInteger, cpFloat, cpLong, cpDouble, cpClass, cpString, cpMethodHandle, cpMethodType:
+		default:
+			return 0, fmt.Errorf("bootstrap argument %d (cp #%d) has unsupported tag %d", i, arg, argEntry.tag)
+		}
+		fmt.Fprintf(&key, ":%d", arg)
+	}
+	if c.bootstrapIndex == nil {
+		c.bootstrapIndex = make(map[string]uint16)
+	}
+	k := key.String()
+	if existing, ok := c.bootstrapIndex[k]; ok {
+		return existing, nil
+	}
+	if len(c.bootstrapMethods) >= math.MaxUint16 {
+		return 0, fmt.Errorf("bootstrap_methods_count exceeds 65535")
+	}
+	index := uint16(len(c.bootstrapMethods))
+	c.bootstrapMethods = append(c.bootstrapMethods, bootstrapMethodEntry{
+		handle: handleIndex,
+		args:   append([]uint16(nil), args...),
+	})
+	c.bootstrapIndex[k] = index
+	return index, nil
+}
 
 // AddInterface appends an implemented interface in declaration order.
 func (c *Class) AddInterface(name string) *Class {
@@ -770,6 +823,27 @@ func (c *Class) encodeClassAttributes() error {
 	if err := c.encodeAnnotationAttributes(&c.meta, &c.classAttrs); err != nil {
 		return err
 	}
+	if len(c.bootstrapMethods) > 0 {
+		methods := c.bootstrapMethods
+		c.classAttrs = append(c.classAttrs, pendingAttribute{
+			name: "BootstrapMethods",
+			encode: func(_ *ConstantPool) ([]byte, error) {
+				out := &byteWriter{}
+				out.u2(uint16(len(methods)))
+				for _, entry := range methods {
+					if len(entry.args) > math.MaxUint16 {
+						return nil, fmt.Errorf("bootstrap arguments %d exceed 65535", len(entry.args))
+					}
+					out.u2(entry.handle)
+					out.u2(uint16(len(entry.args)))
+					for _, arg := range entry.args {
+						out.u2(arg)
+					}
+				}
+				return out.data, nil
+			},
+		})
+	}
 	c.classAttrs = append(c.classAttrs, c.rawClassAttrs...)
 	return nil
 }
@@ -805,6 +879,9 @@ func writeCodeAttribute(out *byteWriter, nameIndex uint16, code *assembledCode) 
 	if len(code.locals) > 0 {
 		nestedLength += 8 + 10*uint64(len(code.locals))
 	}
+	if len(code.stackMapPayload) > 0 {
+		nestedLength += 6 + uint64(len(code.stackMapPayload))
+	}
 	attributeLength := uint64(12) + uint64(len(code.bytes)) + 8*uint64(len(code.handlers)) + nestedLength
 	if err := validateAttributePayloadLength(attributeLength); err != nil {
 		return fmt.Errorf("Code %w", err)
@@ -829,6 +906,9 @@ func writeCodeAttribute(out *byteWriter, nameIndex uint16, code *assembledCode) 
 	if len(code.locals) > 0 {
 		nestedCount++
 	}
+	if len(code.stackMapPayload) > 0 {
+		nestedCount++
+	}
 	out.u2(nestedCount)
 	if len(code.lines) > 0 {
 		out.u2(code.lineName)
@@ -850,6 +930,11 @@ func writeCodeAttribute(out *byteWriter, nameIndex uint16, code *assembledCode) 
 			out.u2(local.descriptor)
 			out.u2(local.index)
 		}
+	}
+	if len(code.stackMapPayload) > 0 {
+		out.u2(code.stackMapName)
+		out.u4(uint32(len(code.stackMapPayload)))
+		out.bytes(code.stackMapPayload)
 	}
 	return nil
 }

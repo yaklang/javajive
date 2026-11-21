@@ -2,7 +2,10 @@ package external_test
 
 import (
 	"bytes"
+	"crypto/sha1"
+	"encoding/binary"
 	"fmt"
+	"hash/adler32"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,8 +38,8 @@ var externalSamples = []sampleCase{
 	{"androguard-invalid.apk", inputkind.APK, inspect.StatusComplete},
 	{"androguard-test-debug.apk", inputkind.APK, inspect.StatusComplete},
 	{"androguard-tc-debug.apk", inputkind.APK, inspect.StatusComplete},
-	{"dex2jar-dex038.dex", inputkind.DEX, inspect.StatusPartial},
-	{"dex2jar-dex039.dex", inputkind.DEX, inspect.StatusPartial},
+	{"dex2jar-dex038.dex", inputkind.DEX, inspect.StatusComplete},
+	{"dex2jar-dex039.dex", inputkind.DEX, inspect.StatusComplete},
 	{"apktool-dynamic-dex.apk", inputkind.APK, inspect.StatusPartial},
 	{"apktool-issue2543.dex", inputkind.DEX, inspect.StatusComplete},
 	{"androidx-tracing-1.2.0.aar", inputkind.AAR, inspect.StatusComplete},
@@ -170,6 +173,8 @@ func TestExternalAndroidTranslation(t *testing.T) {
 		{"androguard-test-debug.apk", 1, 7},
 		{"androguard-tc-debug.apk", 1, 13},
 		{"androguard-invalid.apk", 1, 286},
+		{"dex2jar-dex038.dex", 1, 1},
+		{"dex2jar-dex039.dex", 1, 1},
 		{"apktool-issue2543.dex", 1, 1},
 		{"sample.xapk", 1, 10},
 		{"sample.apkm", 1, 10},
@@ -198,8 +203,6 @@ func TestExternalAndroidRejections(t *testing.T) {
 		name     string
 		contains string
 	}{
-		{"dex2jar-dex038.dex", "call_site_id"},
-		{"dex2jar-dex039.dex", "method_handle"},
 		{"apktool-dynamic-dex.apk", "SHA-1"},
 	}
 	for _, test := range cases {
@@ -315,11 +318,24 @@ func TestExternalUnsupportedDEXVersion040(t *testing.T) {
 	if len(data) < 8 {
 		t.Fatal("DEX fixture is too short")
 	}
-	data[4], data[5], data[6], data[7] = '0', '4', '0', 0
-	if _, _, err := dex2jar.DexToJar(data, dex2jar.Options{}); err == nil || !strings.Contains(err.Error(), `unsupported DEX version "040"`) {
+	v040 := append([]byte(nil), data...)
+	v040[4], v040[5], v040[6], v040[7] = '0', '4', '0', 0
+	sig := sha1.Sum(v040[32:])
+	copy(v040[12:32], sig[:])
+	binary.LittleEndian.PutUint32(v040[8:12], adler32.Checksum(v040[12:]))
+	if _, rep, err := dex2jar.DexToJar(v040, dex2jar.Options{}); err != nil || rep.Classes != 1 {
+		t.Fatalf("DEX 040 DexToJar error=%v report=%#v", err, rep)
+	}
+	report040 := inspect.AnalyzeWithOptions(v040, "version-040.dex", inspect.Options{Disassembly: false})
+	if report040.Status != inspect.StatusComplete {
+		t.Fatalf("inspect 040 status = %q, want complete", report040.Status)
+	}
+
+	data[4], data[5], data[6], data[7] = '0', '4', '1', 0
+	if _, _, err := dex2jar.DexToJar(data, dex2jar.Options{}); err == nil || !strings.Contains(err.Error(), `unsupported DEX version "041"`) {
 		t.Fatalf("DexToJar error = %v", err)
 	}
-	report := inspect.AnalyzeWithOptions(data, "version-040.dex", inspect.Options{Disassembly: false})
+	report := inspect.AnalyzeWithOptions(data, "version-041.dex", inspect.Options{Disassembly: false})
 	if report.Status != inspect.StatusPartial {
 		t.Fatalf("inspect status = %q, want partial", report.Status)
 	}

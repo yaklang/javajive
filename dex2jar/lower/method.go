@@ -54,6 +54,11 @@ type methodLowerer struct {
 	instDefID         map[regUseKey]int
 	useWebDef         map[regUseKey]int
 	entryDefByReg     []int
+	webReachIn        []defState
+	refIn             []referenceState
+	// allocationNewLabels maps an Allocation.ID to the JVM bytecode label right
+	// before NEW so StackMapTable frames can emit ITEM_Uninitialized offsets.
+	allocationNewLabels map[uint32]*classfilebuilder.Label
 	// polySlots maps (register, LocalKind) to companion JVM locals when a
 	// polymorphic zero constant (const 0) is used across multiple categories.
 	polySlots      map[polySlotKey]uint16
@@ -86,6 +91,7 @@ func (l *methodLowerer) lower() error {
 	for _, block := range l.method.Blocks {
 		l.labels[block.Start] = l.code.NewLabel()
 	}
+	l.allocationNewLabels = make(map[uint32]*classfilebuilder.Label)
 	l.registerDescriptor = make([]string, len(l.method.RegisterTypes))
 	for register, category := range l.method.RegisterTypes {
 		l.registerDescriptor[register] = category.Descriptor
@@ -160,6 +166,11 @@ func (l *methodLowerer) lower() error {
 	l.emitHandlerTrampolines()
 	if err := l.emitExceptionTable(); err != nil {
 		return err
+	}
+	if l.builder.Version() >= classfilebuilder.VersionJava7 {
+		if err := l.emitStackMapTable(); err != nil {
+			return err
+		}
 	}
 	if err := l.emitDebug(); err != nil {
 		return err
@@ -720,6 +731,14 @@ func (l *methodLowerer) emitInstruction(index int) error {
 		return l.emitField(instruction)
 	case isInvoke(instruction.Opcode):
 		return l.emitInvoke(index, instruction)
+	case instruction.Opcode == 0xfa || instruction.Opcode == 0xfb:
+		return l.emitInvokePolymorphic(index, instruction)
+	case instruction.Opcode == 0xfc || instruction.Opcode == 0xfd:
+		return l.emitInvokeCustom(index, instruction)
+	case instruction.Opcode == 0xfe:
+		return l.emitConstMethodHandle(instruction)
+	case instruction.Opcode == 0xff:
+		return l.emitConstMethodType(instruction)
 	case instruction.Opcode >= 0x7b && instruction.Opcode <= 0x8f:
 		return l.emitUnary(instruction)
 	case instruction.Opcode >= 0x90 && instruction.Opcode <= 0xaf || instruction.Opcode >= 0xb0 && instruction.Opcode <= 0xcf || instruction.Opcode >= 0xd0 && instruction.Opcode <= 0xe2:
@@ -1151,6 +1170,11 @@ func (l *methodLowerer) emitAllocationNew(instruction *ir.Instruction, allocatio
 	classIndex, err := l.builder.Pool().Class(name)
 	if err != nil {
 		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	newLabel := l.code.NewLabel()
+	l.code.Mark(newLabel)
+	if l.allocationNewLabels != nil {
+		l.allocationNewLabels[allocation.ID] = newLabel
 	}
 	l.code.CP(classfilebuilder.NEW, classIndex)
 	l.store(instruction.Regs[0])
@@ -1643,7 +1667,11 @@ func (l *methodLowerer) emitInvoke(index int, instruction *ir.Instruction) error
 		}
 		l.code.CP(opcode, constant)
 	}
-	result, err := ir.DescriptorCategory(proto.ReturnType)
+	return l.emitInvokeResult(index, instruction, proto.ReturnType)
+}
+
+func (l *methodLowerer) emitInvokeResult(index int, instruction *ir.Instruction, returnType string) error {
+	result, err := ir.DescriptorCategory(returnType)
 	if err != nil {
 		return methodDiagnostic(l.method.Context, instruction, "", err)
 	}
@@ -1658,7 +1686,7 @@ func (l *methodLowerer) emitInvoke(index int, instruction *ir.Instruction) error
 			// register is unrelated to the returned value.
 			l.storeAt(next.Regs[0], index+1)
 			if result == ir.Reference {
-				l.registerDescriptor[next.Regs[0]] = proto.ReturnType
+				l.registerDescriptor[next.Regs[0]] = returnType
 			}
 			return nil
 		}
@@ -1669,6 +1697,207 @@ func (l *methodLowerer) emitInvoke(index int, instruction *ir.Instruction) error
 		l.code.Emit(classfilebuilder.POP)
 	}
 	return nil
+}
+
+func (l *methodLowerer) emitInvokePolymorphic(index int, instruction *ir.Instruction) error {
+	callee := l.file.Methods[instruction.Index]
+	proto := l.file.Protos[instruction.ProtoIndex]
+	descriptor, err := methodDescriptor(proto)
+	if err != nil {
+		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	owner, err := memberOwnerName(callee.Class)
+	if err != nil {
+		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	l.load(instruction.Regs[0])
+	if err := l.loadArguments(instruction.Regs, proto, 1); err != nil {
+		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	constant, err := l.builder.Pool().Methodref(owner, callee.Name, descriptor)
+	if err != nil {
+		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	l.code.CP(classfilebuilder.INVOKEVIRTUAL, constant)
+	return l.emitInvokeResult(index, instruction, proto.ReturnType)
+}
+
+func (l *methodLowerer) emitInvokeCustom(index int, instruction *ir.Instruction) error {
+	cs := l.file.CallSites[instruction.Index]
+	proto := l.file.Protos[cs.MethodTypeIndex]
+	descriptor, err := methodDescriptor(proto)
+	if err != nil {
+		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	bsmHandle, err := l.lowerMethodHandle(cs.BootstrapMethodHandle)
+	if err != nil {
+		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	bsmArgs := make([]uint16, 0, len(cs.Arguments))
+	for _, arg := range cs.Arguments {
+		cpArg, err := l.lowerBootstrapArg(arg)
+		if err != nil {
+			return methodDiagnostic(l.method.Context, instruction, "", err)
+		}
+		bsmArgs = append(bsmArgs, cpArg)
+	}
+	bsmIndex, err := l.builder.AddBootstrapMethod(bsmHandle, bsmArgs...)
+	if err != nil {
+		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	indyCP, err := l.builder.Pool().InvokeDynamic(bsmIndex, cs.MethodName, descriptor)
+	if err != nil {
+		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	if err := l.loadArguments(instruction.Regs, proto, 0); err != nil {
+		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	l.code.InvokeDynamic(indyCP)
+	return l.emitInvokeResult(index, instruction, proto.ReturnType)
+}
+
+func (l *methodLowerer) emitConstMethodHandle(instruction *ir.Instruction) error {
+	cpIndex, err := l.lowerMethodHandle(instruction.Index)
+	if err != nil {
+		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	l.code.LDC(cpIndex)
+	l.store(instruction.Regs[0])
+	l.registerDescriptor[instruction.Regs[0]] = "Ljava/lang/invoke/MethodHandle;"
+	return nil
+}
+
+func (l *methodLowerer) emitConstMethodType(instruction *ir.Instruction) error {
+	descriptor, err := methodDescriptor(l.file.Protos[instruction.Index])
+	if err != nil {
+		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	cpIndex, err := l.builder.Pool().MethodType(descriptor)
+	if err != nil {
+		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	l.code.LDC(cpIndex)
+	l.store(instruction.Regs[0])
+	l.registerDescriptor[instruction.Regs[0]] = "Ljava/lang/invoke/MethodType;"
+	return nil
+}
+
+func (l *methodLowerer) lowerMethodHandle(mhIndex uint32) (uint16, error) {
+	if int(mhIndex) >= len(l.file.MethodHandles) {
+		return 0, fmt.Errorf("method handle index %d out of range", mhIndex)
+	}
+	mh := l.file.MethodHandles[mhIndex]
+	pool := l.builder.Pool()
+	switch mh.Kind {
+	case model.MethodHandleStaticPut, model.MethodHandleStaticGet,
+		model.MethodHandleInstancePut, model.MethodHandleInstanceGet:
+		if int(mh.TargetIndex) >= len(l.file.Fields) {
+			return 0, fmt.Errorf("method handle %d field index %d out of range", mhIndex, mh.TargetIndex)
+		}
+		field := l.file.Fields[mh.TargetIndex]
+		owner, err := objectInternalName(field.Class)
+		if err != nil {
+			return 0, err
+		}
+		fieldRef, err := pool.Fieldref(owner, field.Name, field.Type)
+		if err != nil {
+			return 0, err
+		}
+		kindMap := [...]byte{
+			model.MethodHandleStaticPut:   classfilebuilder.RefPutStatic,
+			model.MethodHandleStaticGet:   classfilebuilder.RefGetStatic,
+			model.MethodHandleInstancePut: classfilebuilder.RefPutField,
+			model.MethodHandleInstanceGet: classfilebuilder.RefGetField,
+		}
+		return pool.MethodHandle(kindMap[mh.Kind], fieldRef)
+
+	case model.MethodHandleInvokeStatic, model.MethodHandleInvokeInstance,
+		model.MethodHandleInvokeConstructor, model.MethodHandleInvokeDirect,
+		model.MethodHandleInvokeInterface:
+		if int(mh.TargetIndex) >= len(l.file.Methods) {
+			return 0, fmt.Errorf("method handle %d method index %d out of range", mhIndex, mh.TargetIndex)
+		}
+		callee := l.file.Methods[mh.TargetIndex]
+		proto := l.file.Protos[callee.ProtoIndex]
+		owner, err := memberOwnerName(callee.Class)
+		if err != nil {
+			return 0, err
+		}
+		desc, err := methodDescriptor(proto)
+		if err != nil {
+			return 0, err
+		}
+		idx := l.classIndex()
+		targetClass, ok := idx[callee.Class]
+		isIface := mh.Kind == model.MethodHandleInvokeInterface ||
+			((mh.Kind == model.MethodHandleInvokeStatic || mh.Kind == model.MethodHandleInvokeDirect) && ok && targetClass.AccessFlags&dexInterface != 0)
+		var memberRef uint16
+		if isIface {
+			memberRef, err = pool.InterfaceMethodref(owner, callee.Name, desc)
+		} else {
+			memberRef, err = pool.Methodref(owner, callee.Name, desc)
+		}
+		if err != nil {
+			return 0, err
+		}
+		var refKind byte
+		switch mh.Kind {
+		case model.MethodHandleInvokeStatic:
+			refKind = classfilebuilder.RefInvokeStatic
+		case model.MethodHandleInvokeInstance:
+			refKind = classfilebuilder.RefInvokeVirtual
+		case model.MethodHandleInvokeConstructor:
+			refKind = classfilebuilder.RefNewInvokeSpecial
+		case model.MethodHandleInvokeDirect:
+			refKind = classfilebuilder.RefInvokeSpecial
+		case model.MethodHandleInvokeInterface:
+			refKind = classfilebuilder.RefInvokeInterface
+		}
+		return pool.MethodHandle(refKind, memberRef)
+
+	default:
+		return 0, fmt.Errorf("unsupported method handle kind %#x", mh.Kind)
+	}
+}
+
+func (l *methodLowerer) lowerBootstrapArg(value model.EncodedValue) (uint16, error) {
+	pool := l.builder.Pool()
+	switch value.Type {
+	case model.ValueByte, model.ValueShort, model.ValueInt:
+		return pool.Integer(int32(value.Signed))
+	case model.ValueChar:
+		return pool.Integer(int32(value.Unsigned))
+	case model.ValueBoolean:
+		v := int32(0)
+		if value.Boolean {
+			v = 1
+		}
+		return pool.Integer(v)
+	case model.ValueLong:
+		return pool.Long(value.Signed)
+	case model.ValueFloat:
+		return pool.Float(uint32(value.Unsigned))
+	case model.ValueDouble:
+		return pool.Double(value.Unsigned)
+	case model.ValueString:
+		return pool.String(l.file.Strings[value.Unsigned])
+	case model.ValueTypeRef:
+		name, err := ir.InternalName(l.file.Types[value.Unsigned].Descriptor)
+		if err != nil {
+			return 0, err
+		}
+		return pool.Class(name)
+	case model.ValueMethodType:
+		desc, err := methodDescriptor(l.file.Protos[value.Unsigned])
+		if err != nil {
+			return 0, err
+		}
+		return pool.MethodType(desc)
+	case model.ValueMethodHandle:
+		return l.lowerMethodHandle(uint32(value.Unsigned))
+	default:
+		return 0, fmt.Errorf("unsupported bootstrap argument type %#x", value.Type)
+	}
 }
 
 // definitionCategory returns the category an instruction writes into the

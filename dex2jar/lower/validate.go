@@ -16,6 +16,13 @@ func (l *methodLowerer) validateInvokes() error {
 	}
 	for index := range l.method.Instructions {
 		instruction := &l.method.Instructions[index]
+		if instruction.Opcode == 0xfa || instruction.Opcode == 0xfb {
+			callee := l.file.Methods[instruction.Index]
+			if callee.Name == "<clinit>" || callee.Name == "<init>" {
+				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("invoke-polymorphic target %q is invalid", callee.Name))
+			}
+			continue
+		}
 		if !isInvoke(instruction.Opcode) {
 			continue
 		}

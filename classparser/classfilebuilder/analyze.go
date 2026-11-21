@@ -217,6 +217,16 @@ func (c *Code) instructionEffect(i *instruction) (stackEffect, error) {
 			return stackEffect{}, err
 		}
 		return stackEffect{pop: args + 1, push: result}, nil
+	case kindInvokeDynamic:
+		entry, err := c.pool.entry(uint16(i.arg))
+		if err != nil {
+			return stackEffect{}, err
+		}
+		args, result, err := methodDescriptorWords(entry.text)
+		if err != nil {
+			return stackEffect{}, err
+		}
+		return stackEffect{pop: args, push: result}, nil
 	case kindTableSwitch, kindLookupSwitch:
 		return stackEffect{pop: 1}, nil
 	case kindSimple:

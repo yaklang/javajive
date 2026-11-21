@@ -105,11 +105,8 @@ func (l *methodLowerer) instructionDefWidth(idx int, reg uint16, defs []uint16) 
 	if len(defs) == 2 && defs[0] == reg && defs[1] == reg+1 {
 		return 2
 	}
-	if def, ok := l.method.DefinitionAt(idx); ok && def.Register == int32(reg) && def.Category.Kind.Words() == 2 {
-		return 2
-	}
-	if isWideKind(l.method.CategoryAt(idx, reg).Kind) {
-		return 2
+	if def, ok := l.method.DefinitionAt(idx); ok && def.Register == int32(reg) {
+		return def.Category.Kind.Words()
 	}
 	return 1
 }
@@ -397,7 +394,10 @@ func (l *methodLowerer) assignWebs() bool {
 			byBlock[b][insnIdx] = true
 		}
 		for _, pred := range l.method.Blocks[blockIdx].Predecessors {
-			if byBlock[pred] == nil && l.method.Blocks[pred].Reachable {
+			if !l.method.Blocks[pred].Reachable {
+				continue
+			}
+			if byBlock[pred] == nil || l.blockHasNormalEdgeTo(pred, blockIdx) {
 				mergeDefState(merged, reachOut[pred])
 			}
 		}
@@ -413,6 +413,32 @@ func (l *methodLowerer) assignWebs() bool {
 		return merged
 	}
 
+	protectedHandlersByBlock := make([][]int, numBlocks)
+	protectedSeen := make([]map[int]bool, numBlocks)
+	for blockIdx, block := range l.method.Blocks {
+		if !block.Handler || !block.Reachable {
+			continue
+		}
+		addHandlerTarget := func(b int) {
+			if b < 0 || b >= numBlocks || !l.method.Blocks[b].Reachable {
+				return
+			}
+			if protectedSeen[b] == nil {
+				protectedSeen[b] = make(map[int]bool)
+			}
+			if !protectedSeen[b][blockIdx] {
+				protectedSeen[b][blockIdx] = true
+				protectedHandlersByBlock[b] = append(protectedHandlersByBlock[b], blockIdx)
+			}
+		}
+		for _, pred := range block.Predecessors {
+			addHandlerTarget(pred)
+		}
+		for _, insnIdx := range block.Protected {
+			addHandlerTarget(l.blockOfInstruction(insnIdx))
+		}
+	}
+
 	inQueue := make([]bool, numBlocks)
 	worklist := make([]int, 0, numBlocks)
 	for i := range l.method.Blocks {
@@ -421,7 +447,7 @@ func (l *methodLowerer) assignWebs() bool {
 			worklist = append(worklist, i)
 		}
 	}
-	maxSteps := numBlocks*8 + 128
+	maxSteps := numBlocks*16 + 256
 	steps := 0
 	for len(worklist) > 0 {
 		steps++
@@ -445,12 +471,14 @@ func (l *methodLowerer) assignWebs() bool {
 		if b == 0 {
 			mergeDefState(merged, entryState)
 		}
+		inChanged := !defStatesEqual(reachIn[b], merged)
 		reachIn[b] = merged
 		st := copyDefState(reachIn[b])
 		for _, insnIdx := range l.method.Blocks[b].Instructions {
 			transferDefs(insnIdx, st)
 		}
-		if !defStatesEqual(reachOut[b], st) {
+		outChanged := !defStatesEqual(reachOut[b], st)
+		if outChanged {
 			reachOut[b] = st
 			for _, succ := range l.method.Blocks[b].Successors {
 				if l.method.Blocks[succ].Reachable && !inQueue[succ] {
@@ -458,28 +486,12 @@ func (l *methodLowerer) assignWebs() bool {
 					worklist = append(worklist, succ)
 				}
 			}
-			// A protected instruction's change can affect handler entry states.
-			for blockIdx, block := range l.method.Blocks {
-				if block.Handler && block.Reachable && !inQueue[blockIdx] {
-					requeue := false
-					for _, pred := range block.Predecessors {
-						if pred == b {
-							requeue = true
-							break
-						}
-					}
-					if !requeue {
-						for _, insnIdx := range block.Protected {
-							if l.blockOfInstruction(insnIdx) == b {
-								requeue = true
-								break
-							}
-						}
-					}
-					if requeue {
-						inQueue[blockIdx] = true
-						worklist = append(worklist, blockIdx)
-					}
+		}
+		if inChanged || outChanged {
+			for _, h := range protectedHandlersByBlock[b] {
+				if !inQueue[h] {
+					inQueue[h] = true
+					worklist = append(worklist, h)
 				}
 			}
 		}
@@ -719,6 +731,7 @@ func (l *methodLowerer) assignWebs() bool {
 	l.instDefID = instDefID
 	l.useWebDef = useWebDef
 	l.entryDefByReg = entryDefByReg
+	l.webReachIn = reachIn
 	l.homeLimit = uint16(next)
 	return true
 }
@@ -803,4 +816,33 @@ func (l *methodLowerer) debugWebSlot(register uint16, start, end uint32, kind ir
 		}
 	}
 	return 0, false
+}
+
+func (l *methodLowerer) blockHasNormalEdgeTo(pred, target int) bool {
+	insns := l.method.Blocks[pred].Instructions
+	if len(insns) == 0 {
+		return false
+	}
+	last := l.method.Instructions[insns[len(insns)-1]]
+	targetStart := l.method.Blocks[target].Start
+	switch {
+	case last.Opcode >= 0x28 && last.Opcode <= 0x2a:
+		return last.Target >= 0 && uint32(last.Target) == targetStart
+	case last.Opcode >= 0x32 && last.Opcode <= 0x3d:
+		if last.Target >= 0 && uint32(last.Target) == targetStart {
+			return true
+		}
+		return pred+1 == target
+	case last.Opcode == 0x2b || last.Opcode == 0x2c:
+		for _, caseTarget := range last.Targets {
+			if caseTarget >= 0 && uint32(caseTarget) == targetStart {
+				return true
+			}
+		}
+		return pred+1 == target
+	case last.Opcode >= 0x0e && last.Opcode <= 0x11 || last.Opcode == 0x27:
+		return false
+	default:
+		return pred+1 == target
+	}
 }
