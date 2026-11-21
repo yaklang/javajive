@@ -107,7 +107,13 @@ func (s *StackSimulationImpl) SetVar(slot int, ref *values.JavaRef) {
 
 func (s *StackSimulationImpl) NewVar(val values.JavaValue) *values.JavaRef {
 	s.currentVarId = s.currentVarId.Next()
-	newRef := values.NewJavaRef(s.currentVarId, val, slotDeclType(val))
+	typ := slotDeclType(val)
+	if typ != nil {
+		if _, isLocal := values.UnpackSoltValue(val).(*values.JavaRef); isLocal {
+			typ = typ.Copy()
+		}
+	}
+	newRef := values.NewJavaRef(s.currentVarId, val, typ)
 	//d.idToValue[d.currentVarId] = val
 	return newRef
 }

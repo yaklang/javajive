@@ -2890,7 +2890,7 @@ func (f *FunctionCallExpression) thisCtorOverloadArgCast(i int, funcCtx *class_c
 		return ""
 	}
 	receiver, ok := UnpackSoltValue(f.Object).(*JavaRef)
-	isThisDelegation := ok && receiver != nil && receiver.IsThis && funcCtx.FunctionName == "<init>"
+	isThisDelegation := ok && receiver != nil && (receiver.IsThis || (funcCtx.Getenv("JDEC_THIS_ALIAS_SUPER_OFF") == "" && receiver.IsThisAlias)) && funcCtx.FunctionName == "<init>"
 	// A same-class allocation has its own generic instantiation. Its overload
 	// cannot be inferred by comparing against the surrounding factory method's
 	// descriptor, and the current class's T is not that allocation's argument.
@@ -5101,6 +5101,10 @@ func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext)
 	paramStrs := f.ArgumentStrings(funcCtx)
 	if f.FunctionName == "<init>" {
 		if f.ClassName == funcCtx.ClassName {
+			if ref, ok := UnpackSoltValue(f.Object).(*JavaRef); ok && ref != nil &&
+				(ref.IsThis || (funcCtx.Getenv("JDEC_THIS_ALIAS_SUPER_OFF") == "" && ref.IsThisAlias)) {
+				return fmt.Sprintf("this(%s)", strings.Join(paramStrs, ","))
+			}
 			return fmt.Sprintf("%s(%s)", f.Object.String(funcCtx), strings.Join(paramStrs, ","))
 		} else if f.ClassName == funcCtx.SupperClassName {
 			return fmt.Sprintf("super(%s)", strings.Join(paramStrs, ","))

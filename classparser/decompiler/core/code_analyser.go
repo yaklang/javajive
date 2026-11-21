@@ -1933,6 +1933,9 @@ func (d *Decompiler) reachingBoolDefaultMerge(store *OpCode, slot int, current *
 		if !d.slotDefPhiReachesLoad(store, slot, uid) {
 			return nil
 		}
+		if d.storeWebHasNumericConsumer(defOp) || d.storeWebHasNumericConsumer(store) {
+			return nil
+		}
 		boolType := types.NewJavaPrimer(types.JavaBoolean)
 		defRef.ResetVarType(boolType)
 		lit.JavaType = boolType
@@ -1999,6 +2002,7 @@ func (d *Decompiler) reachingBoolVarCopyMerge(store *OpCode, slot int, current *
 	copyVal := d.slotStoreValue[copyStore]
 	boolType := types.NewJavaPrimer(types.JavaBoolean)
 	var litToRetype *values.JavaLiteral
+	var srcStore *OpCode
 	// Shape (a): the sibling arm's own RHS is an int-0/1 literal.
 	if lit, ok := intLiteral01(copyVal); ok {
 		litToRetype = lit
@@ -2009,7 +2013,7 @@ func (d *Decompiler) reachingBoolVarCopyMerge(store *OpCode, slot int, current *
 		if !ok || srcRef == nil {
 			return nil
 		}
-		srcStore := d.findStoreDefiningRef(srcRef)
+		srcStore = d.findStoreDefiningRef(srcRef)
 		if srcStore == nil {
 			return nil
 		}
@@ -2025,11 +2029,19 @@ func (d *Decompiler) reachingBoolVarCopyMerge(store *OpCode, slot int, current *
 	if !d.slotDefPhiReachesLoad(store, slot, current.VarUid) {
 		return nil
 	}
+	if d.storeWebHasNumericConsumer(copyStore) || d.storeWebHasNumericConsumer(store) {
+		return nil
+	}
+	if srcStore != nil && d.storeWebHasNumericConsumer(srcStore) {
+		litToRetype = nil
+	}
 	// Re-type the copy arm's ref (and the proven-boolean default's int-0/1 literal) to boolean, so both
 	// arms denote one boolean variable. This mirrors reachingBoolDefaultMerge's lossless re-typing of an
 	// int-0/1 default to false/true.
 	current.ResetVarType(boolType)
-	litToRetype.JavaType = boolType
+	if litToRetype != nil {
+		litToRetype.JavaType = boolType
+	}
 	return current
 }
 
@@ -2100,6 +2112,9 @@ func (d *Decompiler) reachingBoolSiblingArmMerge(store *OpCode, slot int, curren
 		return nil
 	}
 	if !d.slotDefPhiReachesLoad(store, slot, current.VarUid) {
+		return nil
+	}
+	if d.storeWebHasNumericConsumer(store) {
 		return nil
 	}
 	lit.JavaType = types.NewJavaPrimer(types.JavaBoolean)
@@ -2232,6 +2247,9 @@ func (d *Decompiler) reachingBoolReturnSlotSplit(store *OpCode, slot int, curren
 	if !d.slotStoreDisjointFromCurrentWeb(store, slot, current) {
 		return
 	}
+	if d.storeWebHasNumericConsumer(store) {
+		return
+	}
 	// Coerce false/true so AssignVarGuarded sees a boolean value (not int-category) and mints a fresh
 	// boolean variable, splitting the return range off the int range.
 	lit.JavaType = types.NewJavaPrimer(types.JavaBoolean)
@@ -2296,6 +2314,9 @@ func (d *Decompiler) reachingBoolFieldSlotSplit(store *OpCode, slot int, current
 	if !d.slotStoreDisjointFromCurrentWeb(store, slot, current) {
 		return
 	}
+	if d.storeWebHasNumericConsumer(store) {
+		return
+	}
 	lit.JavaType = types.NewJavaPrimer(types.JavaBoolean)
 }
 
@@ -2341,6 +2362,9 @@ func (d *Decompiler) reachingBoolAccumulatorSlotSplit(store *OpCode, slot int, c
 	if !d.slotStoreDisjointFromCurrentWeb(store, slot, current) {
 		return
 	}
+	if d.storeWebHasNumericConsumer(store) {
+		return
+	}
 	lit.JavaType = types.NewJavaPrimer(types.JavaBoolean)
 }
 
@@ -2381,6 +2405,9 @@ func (d *Decompiler) reachingBoolZStoreSlotSplit(store *OpCode, slot int, curren
 		return
 	}
 	if !d.slotStoreDisjointFromCurrentWeb(store, slot, current) {
+		return
+	}
+	if d.storeWebHasNumericConsumer(store) {
 		return
 	}
 	lit.JavaType = types.NewJavaPrimer(types.JavaBoolean)
@@ -2533,14 +2560,16 @@ func (d *Decompiler) opcodeInvokeReturnsBoolean(op *OpCode) bool {
 }
 
 // slotStoreFeedsBooleanField reports whether `store`'s value flows forward (no intervening redefinition
-// of the slot) to a load of the slot that is immediately stored into a `boolean` field (putfield /
-// putstatic of a Z-descriptor field). This proves the stored value is a boolean flag.
+// of the slot) to a load of the slot that is stored into a `boolean` field (putfield / putstatic of a
+// Z-descriptor field), with no intervening iinc or numeric consumer on any reachable path.
 func (d *Decompiler) slotStoreFeedsBooleanField(store *OpCode, slot int) bool {
 	if store == nil {
 		return false
 	}
+	webs := d.slotWebs()
 	visited := map[*OpCode]bool{store: true}
 	queue := append([]*OpCode{}, store.Target...)
+	sawBoolField := false
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
@@ -2548,21 +2577,28 @@ func (d *Decompiler) slotStoreFeedsBooleanField(store *OpCode, slot int) bool {
 			continue
 		}
 		visited[cur] = true
-		if isLocalStoreOpcode(cur.Instr.OpCode) && GetStoreIdx(cur) == slot {
+		op := cur.Instr.OpCode
+		if op == OP_IINC && GetStoreIdx(cur) == slot {
+			return false
+		}
+		if isLocalStoreOpcode(op) && GetStoreIdx(cur) == slot {
 			continue // a redefinition kills this value; do not look past it on this path
 		}
-		if isLocalLoadOpcode(cur.Instr.OpCode) && GetRetrieveIdx(cur) == slot {
+		if isLocalLoadOpcode(op) && GetRetrieveIdx(cur) == slot {
 			for _, t := range cur.Target {
 				if t != nil && t.Instr != nil &&
 					(t.Instr.OpCode == OP_PUTFIELD || t.Instr.OpCode == OP_PUTSTATIC) &&
 					d.opcodeStoresBooleanField(t) {
-					return true
+					sawBoolField = true
 				}
+			}
+			if d.loadOrCopyHasNumericConsumer(cur, webs) {
+				return false
 			}
 		}
 		queue = append(queue, cur.Target...)
 	}
-	return false
+	return sawBoolField
 }
 
 // opcodeStoresBooleanField reports whether a putfield/putstatic opcode targets a field whose declared
@@ -2593,14 +2629,16 @@ func (d *Decompiler) functionReturnsBoolean() bool {
 }
 
 // slotStoreFeedsReturn reports whether `store`'s value flows forward (no intervening redefinition of
-// the slot) to a load of the slot that is immediately returned (ireturn). This proves the stored value
-// is the method's boolean result rather than an int used by some other consumer.
+// the slot) to a load of the slot that is immediately returned (ireturn), with no intervening iinc or
+// numeric consumer on any reachable path.
 func (d *Decompiler) slotStoreFeedsReturn(store *OpCode, slot int) bool {
 	if store == nil {
 		return false
 	}
+	webs := d.slotWebs()
 	visited := map[*OpCode]bool{store: true}
 	queue := append([]*OpCode{}, store.Target...)
+	sawReturn := false
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
@@ -2608,19 +2646,26 @@ func (d *Decompiler) slotStoreFeedsReturn(store *OpCode, slot int) bool {
 			continue
 		}
 		visited[cur] = true
-		if isLocalStoreOpcode(cur.Instr.OpCode) && GetStoreIdx(cur) == slot {
+		op := cur.Instr.OpCode
+		if op == OP_IINC && GetStoreIdx(cur) == slot {
+			return false
+		}
+		if isLocalStoreOpcode(op) && GetStoreIdx(cur) == slot {
 			continue // a redefinition kills this value; do not look past it on this path
 		}
-		if isLocalLoadOpcode(cur.Instr.OpCode) && GetRetrieveIdx(cur) == slot {
+		if isLocalLoadOpcode(op) && GetRetrieveIdx(cur) == slot {
 			for _, t := range cur.Target {
 				if t != nil && t.Instr != nil && t.Instr.OpCode == OP_IRETURN {
-					return true
+					sawReturn = true
 				}
+			}
+			if d.loadOrCopyHasNumericConsumer(cur, webs) {
+				return false
 			}
 		}
 		queue = append(queue, cur.Target...)
 	}
-	return false
+	return sawReturn
 }
 
 // slotStoreDisjointFromCurrentWeb reports whether `current` (the slot's current ref) is defined in a
@@ -4075,7 +4120,9 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			}
 		}
 		d.slotStoreTrace[slot] = slotStoreTraceInfo{offset: opcode.CurrentOffset, ref: ref}
-		statements.NewAssignStatement(ref, value, isFirst)
+		if !(values.IsBooleanStackNarrowing(ref.Type(), value) && d.localWebHasNumericConsumer(opcode, value)) {
+			statements.NewAssignStatement(ref, value, isFirst)
+		}
 		d.opcodeIdToRef[opcode] = append(d.opcodeIdToRef[opcode], [2]any{ref, isFirst})
 		if !isFirst && runtimeStackSimulation.Size() > 0 {
 			if op, proved := d.immediateLocalPostUpdate(opcode, ref, runtimeStackSimulation.Peek()); proved {
@@ -4617,7 +4664,13 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			runtimeStackSimulation.Push(selfOp)
 			opcode.SelfOpFolded = true
 		} else {
-			statements.NewAssignStatement(staticVal, value, false)
+			var targetType types.JavaType
+			if staticVal != nil {
+				targetType = staticVal.Type()
+			}
+			if !(values.IsBooleanStackNarrowing(targetType, value) && d.localWebHasNumericConsumer(opcode, value)) {
+				statements.NewAssignStatement(staticVal, value, false)
+			}
 		}
 	case OP_PUTFIELD:
 		index := Convert2bytesToInt(opcode.Data)
@@ -4631,7 +4684,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			runtimeStackSimulation.Pop()
 			runtimeStackSimulation.Push(selfOp)
 			opcode.SelfOpFolded = true
-		} else {
+		} else if !(values.IsBooleanStackNarrowing(field.Type(), value) && d.localWebHasNumericConsumer(opcode, value)) {
 			statements.NewAssignStatement(field, value, false)
 		}
 	case OP_SWAP:
@@ -4878,6 +4931,10 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 				switch p.Name {
 				case types.JavaByte, types.JavaShort, types.JavaChar:
 					ref.ResetVarType(types.NewJavaPrimer(types.JavaInteger))
+				case types.JavaBoolean:
+					if !ref.IsParam {
+						ref.ResetVarType(types.NewJavaPrimer(types.JavaInteger))
+					}
 				}
 			}
 		}
@@ -6637,6 +6694,7 @@ func (d *Decompiler) ParseStatement() error {
 	statementsIndex := 0
 	var tryCatchOpcode *OpCode
 	refToNewExpressionAssignNode := map[*utils2.VariableId]*Node{}
+	storeOpToAssignNode := map[*OpCode]*Node{}
 	conditionOpToAssignNode := map[int]int{}
 	appendNodeWithOpcode := func(statement statements.Statement, opcode *OpCode) *Node {
 		if opcode.conditionOpId != 0 {
@@ -6671,6 +6729,11 @@ func (d *Decompiler) ParseStatement() error {
 		if v, ok := statement.(*statements.AssignStatement); ok {
 			v.OriginPC = int(opcode.CurrentOffset)
 			v.HasOriginPC = true
+			if opcode != nil && opcode.Instr != nil && isLocalStoreOpcode(opcode.Instr.OpCode) {
+				if _, seen := storeOpToAssignNode[opcode]; !seen {
+					storeOpToAssignNode[opcode] = node
+				}
+			}
 			if node.HasOriginPC && opcode.Instr.OpCode == OP_PUTFIELD && len(opcode.Data) == 2 {
 				if member, known := d.constantPoolGetter(int(Convert2bytesToInt(opcode.Data))).(*values.JavaClassMember); known {
 					v.MarkOriginalInstanceFieldStore(member, node.OriginPC)
@@ -6725,12 +6788,24 @@ func (d *Decompiler) ParseStatement() error {
 	d.unifyNumericExitWebs()
 	d.restoreNumericConditionalWebs()
 	d.restoreNormalizedBooleanWebs()
+	d.unifySplitIntCategoryWebs()
 	d.restoreExceptionDeclarationSeeds()
 	d.restoreOptionalSupplierDefinitionViews()
 	d.restoreStandaloneIncrementBindings()
 	protectedStores, protectedEdges, err := d.lowerProtectedStackStores()
 	if err != nil {
 		return err
+	}
+	allocPlan := d.planConstructorAllocations(protectedStores)
+	retireForwardedAssignNode := func(n *Node) {
+		if n == nil {
+			return
+		}
+		if n.IsTryCatch {
+			n.Statement = statements.NewSourceAnchorStatement()
+			return
+		}
+		n.IsDel = true
 	}
 	if d.semanticCFG != nil && d.semanticCFG.Err != nil {
 		return d.semanticCFG.Err
@@ -6833,7 +6908,12 @@ func (d *Decompiler) ParseStatement() error {
 				// branch ref whose type matches the LHS (fastjson2 JSON:82, ObjectReaderImplList:782).
 				if value = d.rebindIncompatibleLoadForSink(opcode, value, ref.Type()); false {
 				}
-				assignSt := statements.NewAssignStatement(ref, value, isFirst)
+				var assignSt *statements.AssignStatement
+				if values.IsBooleanStackNarrowing(ref.Type(), value) && d.localWebHasNumericConsumer(opcode, value) {
+					assignSt = statements.NewAssignStatementPreserveSourceType(ref, value, isFirst)
+				} else {
+					assignSt = statements.NewAssignStatement(ref, value, isFirst)
+				}
 				appendNode(assignSt)
 			}
 		case OP_CHECKCAST:
@@ -6878,6 +6958,93 @@ func (d *Decompiler) ParseStatement() error {
 				}
 				funcCallValue.Arguments = funk.Reverse(funcCallValue.Arguments).([]values.JavaValue)
 				funcCallValue.Object = opcode.stackConsumed[n]
+				handled := false
+				if methodName == "<init>" {
+					if entry := allocPlan.entryFor(opcode); entry != nil {
+						ready := len(entry.closure) > 0
+						if entry.multiInit && entry.retired {
+							ready = ready && len(entry.origAssigns) == len(entry.closure)
+						} else {
+							for _, defOp := range entry.closure {
+								n := storeOpToAssignNode[defOp]
+								if n == nil || n.IsDel {
+									ready = false
+									break
+								}
+								if _, ok := n.Statement.(*statements.AssignStatement); !ok {
+									ready = false
+									break
+								}
+							}
+						}
+						if ready {
+							if val, ok := UnpackSoltValue(funcCallValue.Object).(*values.JavaRef); ok && val != nil {
+								attr := d.delRefUserAttr[val.VarUid]
+								attr[0]++
+								d.delRefUserAttr[val.VarUid] = attr
+							}
+							if !entry.multiInit {
+								entry.ne.ArgumentsGetter = func() string { return funcCallValue.ArgumentString(funcCtx) }
+								entry.ne.ConstructorCall = funcCallValue
+								for _, defOp := range entry.closure {
+									assignNode := storeOpToAssignNode[defOp]
+									assignSt := assignNode.Statement.(*statements.AssignStatement)
+									retireForwardedAssignNode(assignNode)
+									if lhsRef, ok := UnpackSoltValue(assignSt.LeftValue).(*values.JavaRef); ok && lhsRef != nil {
+										users := d.varUserMap.GetMust(lhsRef)
+										for _, user := range users {
+											if user == nil {
+												continue
+											}
+											user.CurrentOpcode = opcode
+										}
+									}
+									appendNode(statements.NewSourceAssignmentForward(assignSt))
+								}
+							} else {
+								if !entry.retired {
+									entry.origAssigns = make([]*statements.AssignStatement, len(entry.closure))
+									for i, defOp := range entry.closure {
+										assignNode := storeOpToAssignNode[defOp]
+										origAssign := assignNode.Statement.(*statements.AssignStatement)
+										entry.origAssigns[i] = origAssign
+										if origAssign.IsFirst {
+											assignNode.Statement = statements.NewDeclareStatement(origAssign.LeftValue)
+										} else {
+											retireForwardedAssignNode(assignNode)
+										}
+									}
+									entry.retired = true
+								}
+								neClone := values.NewNewExpression(entry.ne.Type())
+								neClone.OriginPC, neClone.HasOriginPC = entry.ne.OriginPC, entry.ne.HasOriginPC
+								neClone.ArgumentsGetter = func() string { return funcCallValue.ArgumentString(funcCtx) }
+								neClone.ConstructorCall = funcCallValue
+								for i, origAssign := range entry.origAssigns {
+									rhsVal := origAssign.JavaValue
+									if i == 0 {
+										rhsVal = neClone
+									}
+									cloned := &statements.AssignStatement{
+										LeftValue:   origAssign.LeftValue,
+										JavaValue:   rhsVal,
+										IsFirst:     false,
+										OriginPC:    origAssign.OriginPC,
+										HasOriginPC: origAssign.HasOriginPC,
+									}
+									if lhsRef, ok := UnpackSoltValue(origAssign.LeftValue).(*values.JavaRef); ok && lhsRef != nil {
+										d.disFoldRef = append(d.disFoldRef, lhsRef)
+									}
+									appendNode(statements.NewSourceAssignmentForward(cloned))
+								}
+							}
+							handled = true
+						}
+					}
+				}
+				if handled {
+					break
+				}
 				var skip bool
 				func() {
 					if methodName != "<init>" {
@@ -7055,10 +7222,18 @@ func (d *Decompiler) ParseStatement() error {
 				index := Convert2bytesToInt(opcode.Data)
 				staticVal := d.constantPoolGetter(int(index))
 				value := opcode.stackConsumed[0]
+				var targetType types.JavaType
 				if cm, ok := staticVal.(*values.JavaClassMember); ok && cm != nil {
+					targetType = cm.JavaType
 					value = d.rebindIncompatibleLoadForSink(opcode, value, cm.JavaType)
+				} else if staticVal != nil {
+					targetType = staticVal.Type()
 				}
-				appendNode(statements.NewAssignStatement(staticVal, value, false))
+				if values.IsBooleanStackNarrowing(targetType, value) && d.localWebHasNumericConsumer(opcode, value) {
+					appendNode(statements.NewAssignStatementPreserveSourceType(staticVal, value, false))
+				} else {
+					appendNode(statements.NewAssignStatement(staticVal, value, false))
+				}
 			}
 		case OP_PUTFIELD:
 			if !opcode.SelfOpFolded {
@@ -7069,7 +7244,12 @@ func (d *Decompiler) ParseStatement() error {
 				if cm, ok := staticVal.(*values.JavaClassMember); ok && cm != nil {
 					value = d.rebindIncompatibleLoadForSink(opcode, value, cm.JavaType)
 				}
-				assignSt := statements.NewAssignStatement(field, value, false)
+				var assignSt *statements.AssignStatement
+				if values.IsBooleanStackNarrowing(field.Type(), value) && d.localWebHasNumericConsumer(opcode, value) {
+					assignSt = statements.NewAssignStatementPreserveSourceType(field, value, false)
+				} else {
+					assignSt = statements.NewAssignStatement(field, value, false)
+				}
 				appendNode(assignSt)
 			}
 		case OP_DUP, OP_DUP_X1, OP_DUP_X2, OP_DUP2, OP_DUP2_X1, OP_DUP2_X2:
@@ -7355,7 +7535,7 @@ func (d *Decompiler) ParseStatement() error {
 				continue
 			}
 			switch op.Instr.OpCode {
-			case OP_DUP, OP_DUP_X1, OP_DUP_X2, OP_DUP2, OP_DUP2_X1, OP_DUP2_X2, OP_INVOKEDYNAMIC, OP_LCMP, OP_FCMPL, OP_FCMPG, OP_DCMPL, OP_DCMPG:
+			case OP_DUP, OP_DUP_X1, OP_DUP_X2, OP_DUP2, OP_DUP2_X1, OP_DUP2_X2, OP_INVOKEDYNAMIC, OP_LCMP, OP_FCMPL, OP_FCMPG, OP_DCMPL, OP_DCMPG, OP_INVOKESPECIAL:
 			default:
 				// An edge-materialized phi is emitted after this opcode's
 				// own statement. Preserve both in their original order, e.g.
@@ -7376,14 +7556,23 @@ func (d *Decompiler) ParseStatement() error {
 				}
 			}
 			chain = append(chain, primary)
-			// Only splice plain temp assignments; bail on anything else to avoid reshaping
+			// Only splice plain temp assignments (plus forwarded assignments at
+			// OP_INVOKESPECIAL); bail on anything else to avoid reshaping
 			// control-flow nodes.
 			allAssign := true
 			for _, n := range chain {
-				if _, ok := n.Statement.(*statements.AssignStatement); !ok {
-					allAssign = false
-					break
+				if _, ok := n.Statement.(*statements.AssignStatement); ok {
+					continue
 				}
+				if op.Instr.OpCode == OP_INVOKESPECIAL {
+					if cs, ok := n.Statement.(*statements.CustomStatement); ok {
+						if _, isFwd := cs.SourceAssignmentForward(); isFwd {
+							continue
+						}
+					}
+				}
+				allAssign = false
+				break
 			}
 			if !allAssign && !d.carriedPrimitiveSourceChain(chain, primary, op) && !originalMonitorSnapshotChain(chain, primary, idToOpcode[primary.Id], monitorOwners, monitorSnapshots) {
 				continue

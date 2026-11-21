@@ -3097,6 +3097,9 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) (source st
 		// `return x` would then mismatch the method's return type. Prefer the variable type
 		// for a null initializer; for every other case this is identical to the value type.
 		declType := a.JavaValue.Type()
+		if rhsVal != a.JavaValue && a.LeftValue != nil && a.LeftValue.Type() != nil {
+			declType = a.LeftValue.Type()
+		}
 		if lit, ok := a.JavaValue.(*values.JavaLiteral); ok && fmt.Sprint(lit.Data) == "null" {
 			declType = a.LeftValue.Type()
 		}
@@ -3922,6 +3925,18 @@ func NewAssignStatement(leftVal, value values.JavaValue, isFirst bool) *AssignSt
 	if !shared && value.Type() != nil && leftVal.Type() != nil {
 		value.Type().ResetType(leftVal.Type())
 	}
+	return &AssignStatement{
+		LeftValue: leftVal,
+		JavaValue: value,
+		IsFirst:   isFirst,
+	}
+}
+
+// NewAssignStatementPreserveSourceType constructs a field/static assignment
+// without mutating value's source type to leftVal's type. Used when a shared
+// int-category local is narrowed into a boolean field without poisoning its
+// remaining integer consumers.
+func NewAssignStatementPreserveSourceType(leftVal, value values.JavaValue, isFirst bool) *AssignStatement {
 	return &AssignStatement{
 		LeftValue: leftVal,
 		JavaValue: value,

@@ -332,8 +332,37 @@ func (d *Decompiler) restoreNormalizedBooleanWebs() {
 					owner, known := webs.webOf[op]
 					valid = valid && known && component[owner]
 				case OP_PUTFIELD, OP_PUTSTATIC:
+					if d.constantPoolGetter == nil || len(op.Data) < 2 {
+						valid = false
+						break
+					}
 					valid = valid && i == 0 && isExactPrimer(d.GetMethodFromPool(int(Convert2bytesToInt(op.Data))).JavaType, types.JavaBoolean)
 					booleanConsumer = booleanConsumer || valid
+				case OP_INVOKEVIRTUAL, OP_INVOKESTATIC, OP_INVOKESPECIAL, OP_INVOKEINTERFACE:
+					if params, _, ok := d.invokeMethodDescriptor(op); ok {
+						if i < len(params) && params[len(params)-1-i] == "Z" {
+							booleanConsumer = true
+						} else {
+							valid = false
+						}
+					} else if call := d.invokeFuncCall[op]; call != nil && call.FuncType != nil && call.FuncType.ParamTypes != nil {
+						pt := call.FuncType.ParamTypes
+						if i < len(pt) && isExactPrimer(pt[len(pt)-1-i], types.JavaBoolean) {
+							booleanConsumer = true
+						} else {
+							valid = false
+						}
+					} else {
+						valid = false
+					}
+				case OP_BASTORE:
+					if i == 0 && len(op.stackConsumed) == 3 && op.stackConsumed[2] != nil && op.stackConsumed[2].Type() != nil &&
+						op.stackConsumed[2].Type().IsArray() && op.stackConsumed[2].Type().ArrayDim() == 1 &&
+						isExactPrimer(op.stackConsumed[2].Type().ElementType(), types.JavaBoolean) {
+						booleanConsumer = true
+					} else {
+						valid = false
+					}
 				default:
 					valid = false
 				}

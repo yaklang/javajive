@@ -46,6 +46,8 @@ func TestBoolSiblingArmMergeIsLoadBearing(t *testing.T) {
 	// Holding it OFF here pins the sibling-arm merge in isolation, exactly as it was authored. (With
 	// everything default ON the real decompile is correct -- both fixes cover this shape.)
 	t.Setenv("JDEC_ORPHAN_GLOBAL_REBIND_OFF", "1")
+	// Isolate the split int-category web solver's defense-in-depth during the negative kill-switch measurement.
+	t.Setenv("JDEC_SPLIT_INTCAT_WEB_OFF", "1")
 
 	// Fix ON (default): the two try/catch arms continue ONE boolean slot, so the merge read is in scope.
 	os.Unsetenv("JDEC_BOOL_SIBLING_ARM_MERGE_OFF")
