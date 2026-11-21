@@ -18,7 +18,7 @@ func materializeProtectedNormalExit(manager *RewriteManager, condition *core.Nod
 		return
 	}
 	for _, owner := range manager.TryNodes {
-		if owner == nil || !owner.HasProtectedRange || manager.forwardRegions[owner] != nil ||
+		if owner == nil || !owner.HasProtectedRange || len(manager.forwardRegions[owner]) != 0 ||
 			owner.HideNext != nil || len(owner.EncodedJumps) != 0 || !protectedExitOwnerHandlerKnown(manager, owner) ||
 			owner.ProtectedStartPC < 0 || owner.ProtectedStartPC >= owner.ProtectedEndPC ||
 			condition.OriginPC < owner.ProtectedStartPC || condition.OriginPC >= owner.ProtectedEndPC ||
@@ -110,9 +110,9 @@ func materializeProtectedNormalExit(manager *RewriteManager, condition *core.Nod
 		}
 		region := &forwardRegion{exit: alternate, protectedEnd: end, label: manager.NewLoopLabel()}
 		if manager.forwardRegions == nil {
-			manager.forwardRegions = map[*core.Node]*forwardRegion{}
+			manager.forwardRegions = map[*core.Node][]*forwardRegion{}
 		}
-		manager.forwardRegions[owner] = region
+		manager.forwardRegions[owner] = []*forwardRegion{region}
 		for _, edge := range edges {
 			if edge.to != alternate {
 				continue

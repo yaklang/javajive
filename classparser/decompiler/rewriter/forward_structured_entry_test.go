@@ -62,7 +62,7 @@ func TestForwardRegionStructuredExitKeepsOriginalIncomingBoundary(t *testing.T) 
 				t.Fatal("synthetic wrapper acquired a physical opcode witness")
 			}
 			materializeForwardRegionExits(m, inner)
-			if got := m.forwardRegions[owner]; (got != nil) != want {
+			if got := m.primaryForwardRegion(owner); (got != nil) != want {
 				t.Fatalf("bypass proof=%v want=%v", got, want)
 			} else if got != nil && got.exit != replacement {
 				t.Fatal("changed bypass destination")

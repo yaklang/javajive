@@ -57,7 +57,7 @@ func TestForwardRegionAllowsOriginalAbruptPathsWithoutInteriorReentry(t *testing
 				t.Fatal("normal exit reenters the proposed interior")
 			}
 			materializeForwardRegionExits(m, inner)
-			region := m.forwardRegions[owner]
+			region := m.primaryForwardRegion(owner)
 			if region == nil || region.exit != exit {
 				t.Fatal("bypass lost its enclosing continuation")
 			}
@@ -108,7 +108,7 @@ func TestForwardRegionFinalAbruptBoundaryNeedsNoNormalFallthrough(t *testing.T) 
 			m, n := forwardRegionFixture()
 			owner, exit := n[1], n[6]
 			region := &forwardRegion{exit: exit, label: "retained_region"}
-			m.forwardRegions = map[*core.Node]*forwardRegion{owner: region}
+			m.forwardRegions = map[*core.Node][]*forwardRegion{owner: {region}}
 			ret := statements.NewReturnStatement(values.NewJavaLiteral(29, types.NewJavaPrimer(types.JavaInteger)))
 			branch := statements.NewIfStatement(values.NewJavaLiteral(true, types.NewJavaPrimer(types.JavaBoolean)), []statements.Statement{ret}, []statements.Statement{statements.NewSourceTransferStatement("break", region.label)})
 			start := m.NewNode(branch)
@@ -145,7 +145,7 @@ func TestForwardRegionStopsAtOriginalMethodExitBeforeSentinel(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			m, n := forwardRegionFixture()
 			owner, exit := n[1], n[6]
-			m.forwardRegions = map[*core.Node]*forwardRegion{owner: {exit: exit, label: "retained_region"}}
+			m.forwardRegions = map[*core.Node][]*forwardRegion{owner: {{exit: exit, label: "retained_region"}}}
 			ret := statements.NewReturnStatement(values.NewJavaLiteral(29, types.NewJavaPrimer(types.JavaInteger)))
 			ret.HasOriginPC, ret.OriginPC = true, 54
 			terminal := m.NewNode(ret)

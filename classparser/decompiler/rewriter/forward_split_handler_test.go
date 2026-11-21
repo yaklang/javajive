@@ -84,7 +84,7 @@ func TestForwardSplitHandlerRequiresExactDispatchAndOutsideBoundary(t *testing.T
 				t.Fatal("raw protected region has no closed outside boundary")
 			}
 			materializeForwardRegionExits(m, inner)
-			got := m.forwardRegions[owner]
+			got := m.primaryForwardRegion(owner)
 			if (got != nil) != want {
 				t.Fatalf("accepted=%v want=%v", got != nil, want)
 			}

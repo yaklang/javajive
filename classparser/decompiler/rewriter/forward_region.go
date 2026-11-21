@@ -9,6 +9,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	utils2 "github.com/yaklang/javajive/classparser/decompiler/utils"
+	"github.com/yaklang/javajive/internal/jdecenv"
 )
 
 type forwardRegion struct {
@@ -20,6 +21,192 @@ type forwardRegion struct {
 
 type forwardEdge struct{ from, to *core.Node }
 
+func (manager *RewriteManager) primaryForwardRegion(owner *core.Node) *forwardRegion {
+	if manager == nil || owner == nil {
+		return nil
+	}
+	regions := manager.forwardRegions[owner]
+	if len(regions) == 0 {
+		return nil
+	}
+	return regions[0]
+}
+
+func (manager *RewriteManager) protectedForwardRegion(owner *core.Node) *forwardRegion {
+	if manager == nil || owner == nil {
+		return nil
+	}
+	for _, r := range manager.forwardRegions[owner] {
+		if r != nil && (r.protectedEnd != nil || len(r.protectedRanges) != 0) {
+			return r
+		}
+	}
+	return nil
+}
+
+// forwardExitReachesWithoutOwner reports whether goal is reachable from from
+// along normal CFG edges without passing through owner or crossing END.
+func forwardExitReachesWithoutOwner(from, goal, owner *core.Node) bool {
+	if from == nil || goal == nil || from == owner {
+		return false
+	}
+	if from == goal {
+		return true
+	}
+	seen := map[*core.Node]bool{}
+	queue := []*core.Node{from}
+	for len(queue) > 0 && len(seen) < 2048 {
+		n := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		if n == nil || seen[n] || IsEndNode(n) || n == owner {
+			continue
+		}
+		if n == goal {
+			return true
+		}
+		seen[n] = true
+		for _, next := range n.Next {
+			if next == goal {
+				return true
+			}
+			if !seen[next] && next != owner && !IsEndNode(next) {
+				queue = append(queue, next)
+			}
+		}
+	}
+	return false
+}
+
+// forwardTerminalChainWithoutReaching reports whether every path starting from
+// from terminates at an original method exit without reaching avoided or owner,
+// within a small dominator-safe DAG bound.
+func forwardTerminalChainWithoutReaching(from, avoided, owner *core.Node) bool {
+	if from == nil || from == avoided || from == owner {
+		return false
+	}
+	seen := map[*core.Node]bool{}
+	queue := []*core.Node{from}
+	for len(queue) > 0 && len(seen) < 512 {
+		n := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		if n == nil || seen[n] {
+			continue
+		}
+		if n == avoided || n == owner || IsEndNode(n) || len(n.Next) == 0 {
+			return false
+		}
+		seen[n] = true
+		if forwardOriginalMethodExit(n) {
+			continue
+		}
+		for _, next := range n.Next {
+			if next == nil || next == avoided || next == owner {
+				return false
+			}
+			if !seen[next] {
+				queue = append(queue, next)
+			}
+		}
+	}
+	return len(seen) > 0 && len(queue) == 0
+}
+
+// forwardExitNestedBefore reports whether innerExit must be wrapped before outerExit
+// for regions owned by owner.
+func forwardExitNestedBefore(owner, innerExit, outerExit *core.Node) (nested bool, ordered bool) {
+	if innerExit == nil || outerExit == nil || innerExit == outerExit {
+		return false, false
+	}
+	innerToOuter := forwardExitReachesWithoutOwner(innerExit, outerExit, owner)
+	outerToInner := forwardExitReachesWithoutOwner(outerExit, innerExit, owner)
+	if innerToOuter && outerToInner {
+		return false, false
+	}
+	if innerToOuter {
+		return true, true
+	}
+	if outerToInner {
+		return false, true
+	}
+	// An inner branch whose tail terminates in return/throw sits strictly inside an
+	// enclosing region targeting a post-if continuation that never returns to it.
+	if forwardTerminalChainWithoutReaching(innerExit, outerExit, owner) && !forwardExitReachesWithoutOwner(outerExit, innerExit, owner) {
+		return true, true
+	}
+	if forwardTerminalChainWithoutReaching(outerExit, innerExit, owner) && !forwardExitReachesWithoutOwner(innerExit, outerExit, owner) {
+		return false, true
+	}
+	return false, false
+}
+
+func (manager *RewriteManager) insertForwardRegion(owner *core.Node, region *forwardRegion) {
+	if manager.forwardRegions == nil {
+		manager.forwardRegions = map[*core.Node][]*forwardRegion{}
+	}
+	for _, existing := range manager.forwardRegions[owner] {
+		if existing != nil && existing.exit == region.exit {
+			return
+		}
+	}
+	list := append(manager.forwardRegions[owner], region)
+	for i := len(list) - 1; i > 0; i-- {
+		nested, ordered := forwardExitNestedBefore(owner, list[i].exit, list[i-1].exit)
+		if ordered && nested {
+			list[i], list[i-1] = list[i-1], list[i]
+		}
+	}
+	manager.forwardRegions[owner] = list
+}
+
+func findCommonForwardJoin(candidates []*core.Node, condition *core.Node, excluded map[*core.Node]bool) *core.Node {
+	if len(candidates) < 2 {
+		return nil
+	}
+	candSet := make(map[*core.Node]bool, len(candidates))
+	for _, c := range candidates {
+		candSet[c] = true
+	}
+	reachCount := map[*core.Node]int{}
+	dist0 := map[*core.Node]int{}
+	for idx, start := range candidates {
+		seen := map[*core.Node]int{start: 0}
+		queue := []*core.Node{start}
+		for len(queue) > 0 && len(seen) < 128 {
+			n := queue[0]
+			queue = queue[1:]
+			d := seen[n]
+			if d > 0 {
+				reachCount[n]++
+				if idx == 0 {
+					dist0[n] = d
+				}
+			}
+			for _, next := range n.Next {
+				if next == nil || next == condition || IsEndNode(next) {
+					continue
+				}
+				if _, ok := seen[next]; !ok {
+					seen[next] = d + 1
+					queue = append(queue, next)
+				}
+			}
+		}
+	}
+	var best *core.Node
+	bestDist := 1 << 30
+	for node, cnt := range reachCount {
+		if cnt != len(candidates) || candSet[node] || excluded[node] {
+			continue
+		}
+		d := dist0[node]
+		if best == nil || d < bestDist || (d == bestDist && node.Id < best.Id) {
+			best = node
+			bestDist = d
+		}
+	}
+	return best
+}
+
 // An inner decision can reach a shared computation or bypass it and leave
 // an enclosing region. Dominance alone cannot turn both outcomes into normal
 // fall-through. Seal the bypass as a region break before collecting the arm;
@@ -28,116 +215,210 @@ func materializeForwardRegionExits(manager *RewriteManager, condition *core.Node
 	if manager == nil || condition == nil {
 		return
 	}
-	var frontier []forwardEdge
-	seen := map[*core.Node]bool{}
-	queue := []*core.Node{condition}
-	remaining := 4096
-	for len(queue) > 0 {
-		n := queue[len(queue)-1]
-		queue = queue[:len(queue)-1]
-		if n == nil || len(seen) >= 1024 {
+	maxSteps := 16
+	if jdecenv.Get("JDEC_NESTED_FORWARD_REGION_OFF") == "1" {
+		maxSteps = 1
+	}
+	registeredJoins := map[*core.Node]bool{}
+	type pendingJoin struct {
+		owner  *core.Node
+		region *forwardRegion
+	}
+	var pending *pendingJoin
+	rollbackPending := func() {
+		if pending == nil {
 			return
 		}
-		if seen[n] {
-			continue
+		list := manager.forwardRegions[pending.owner]
+		kept := list[:0]
+		for _, r := range list {
+			if r != pending.region {
+				kept = append(kept, r)
+			}
 		}
-		seen[n] = true
-		// Method exits have no normal frontier. Counting their synthetic END
-		// edge would turn a simple return-or-continue into a region bypass.
-		if forwardOriginalMethodExit(n) {
-			continue
+		if len(kept) == 0 {
+			delete(manager.forwardRegions, pending.owner)
+		} else {
+			manager.forwardRegions[pending.owner] = kept
 		}
-		for _, next := range n.Next {
-			remaining--
-			if remaining < 0 {
+		pending = nil
+	}
+	for step := 0; step < maxSteps; step++ {
+		var frontier []forwardEdge
+		seen := map[*core.Node]bool{}
+		queue := []*core.Node{condition}
+		remaining := 4096
+		for len(queue) > 0 {
+			n := queue[len(queue)-1]
+			queue = queue[:len(queue)-1]
+			if n == nil || len(seen) >= 1024 {
+				rollbackPending()
 				return
 			}
-			if encodedJumpTo(n, next) {
+			if seen[n] {
 				continue
 			}
-			if next == condition {
-				return
-			}
-			if utils2.IsDominate(manager.DominatorMap, condition, next) {
-				queue = append(queue, next)
-			} else {
-				frontier = append(frontier, forwardEdge{n, next})
-			}
-		}
-	}
-	if len(frontier) < 2 {
-		return
-	}
-	// The continuation may also have predecessors outside this decision
-	// (for example an enclosing guard's false arm). Its immediate dominator
-	// is then too broad. Find the smallest ancestor containing this decision
-	// and every non-exit frontier, and prove that region independently.
-	parent := map[*core.Node]*core.Node{}
-	work := 65536
-	for ancestor, children := range manager.DominatorMap {
-		for _, child := range children {
-			work--
-			if work < 0 || child == nil || parent[child] != nil {
-				return
-			}
-			parent[child] = ancestor
-		}
-	}
-	tried := map[*core.Node]bool{}
-	for _, edge := range frontier {
-		exit := edge.to
-		if tried[exit] {
-			continue
-		}
-		tried[exit] = true
-		var owner *core.Node
-		for candidate, depth := parent[condition], 0; candidate != nil && depth < 1024; candidate, depth = parent[candidate], depth+1 {
-			if _, raw := candidate.Statement.(*statements.ConditionStatement); !raw {
+			seen[n] = true
+			// Method exits have no normal frontier. Counting their synthetic END
+			// edge would turn a simple return-or-continue into a region bypass.
+			if forwardOriginalMethodExit(n) {
 				continue
 			}
-			other, contains := false, true
-			for _, e := range frontier {
-				work--
-				if work < 0 {
+			for _, next := range n.Next {
+				remaining--
+				if remaining < 0 {
+					rollbackPending()
 					return
 				}
-				if e.to != exit {
-					other = true
-					contains = contains && utils2.IsDominate(manager.DominatorMap, candidate, e.to)
+				if encodedJumpTo(n, next) {
+					continue
+				}
+				if next == condition {
+					rollbackPending()
+					return
+				}
+				if utils2.IsDominate(manager.DominatorMap, condition, next) {
+					queue = append(queue, next)
+				} else {
+					frontier = append(frontier, forwardEdge{n, next})
 				}
 			}
-			if other && contains {
-				owner = candidate
-				break
+		}
+		if len(frontier) < 2 {
+			return
+		}
+		// The continuation may also have predecessors outside this decision
+		// (for example an enclosing guard's false arm). Its immediate dominator
+		// is then too broad. Find the smallest ancestor containing this decision
+		// and every non-exit frontier, and prove that region independently.
+		parent := map[*core.Node]*core.Node{}
+		work := 65536
+		for ancestor, children := range manager.DominatorMap {
+			for _, child := range children {
+				work--
+				if work < 0 || child == nil || parent[child] != nil {
+					rollbackPending()
+					return
+				}
+				parent[child] = ancestor
 			}
 		}
-		if owner == nil || !closedForwardRegion(manager, owner, exit) {
-			continue
-		}
-
-		region := manager.forwardRegions[owner]
-		if region != nil && region.exit != exit {
-			continue
-		}
-		if region == nil {
-			region = &forwardRegion{exit: exit, label: manager.NewLoopLabel()}
-			if manager.forwardRegions == nil {
-				manager.forwardRegions = map[*core.Node]*forwardRegion{}
+		var candidates []*core.Node
+		tried := map[*core.Node]bool{}
+		for _, edge := range frontier {
+			if !tried[edge.to] {
+				tried[edge.to] = true
+				candidates = append(candidates, edge.to)
 			}
-			manager.forwardRegions[owner] = region
 		}
-		for _, e := range frontier {
-			if e.to != exit || !slices.Contains(e.from.Next, exit) || encodedJumpTo(e.from, exit) {
+		// Prefer outermost exits first when multiple exits coexist so inner
+		// branches cleanly break to the enclosing boundary first.
+		if maxSteps > 1 && len(candidates) > 1 {
+			for i := 1; i < len(candidates); i++ {
+				for j := i; j > 0; j-- {
+					nested, ordered := forwardExitNestedBefore(condition, candidates[j-1], candidates[j])
+					if ordered && nested {
+						candidates[j-1], candidates[j] = candidates[j], candidates[j-1]
+					}
+				}
+			}
+		}
+		findOwnerForExit := func(targetExit *core.Node) *core.Node {
+			for candidate, depth := parent[condition], 0; candidate != nil && depth < 1024; candidate, depth = parent[candidate], depth+1 {
+				if _, raw := candidate.Statement.(*statements.ConditionStatement); !raw {
+					continue
+				}
+				other, contains := false, true
+				for _, e := range frontier {
+					work--
+					if work < 0 {
+						return nil
+					}
+					if e.to != targetExit {
+						other = true
+						contains = contains && utils2.IsDominate(manager.DominatorMap, candidate, e.to)
+					}
+				}
+				if other && contains {
+					return candidate
+				}
+			}
+			return nil
+		}
+		sealed := false
+		for _, exit := range candidates {
+			owner := findOwnerForExit(exit)
+			if owner == nil {
 				continue
 			}
-			jump := manager.NewNode(statements.NewSourceTransferStatement("break", region.label))
-			jump.AddNext(exit)
-			jump.EncodedJumps = map[*core.Node]bool{exit: true}
-			replaceNextInPlace(e.from, exit, jump)
+			ok, siblingBreaks, outerLabels := closedForwardRegionWithSiblingExits(manager, owner, exit)
+			if !ok {
+				continue
+			}
+			var region *forwardRegion
+			for _, existing := range manager.forwardRegions[owner] {
+				if existing != nil && existing.exit == exit {
+					region = existing
+					break
+				}
+			}
+			if maxSteps == 1 && len(manager.forwardRegions[owner]) > 0 && region == nil {
+				continue
+			}
+			if region == nil {
+				region = &forwardRegion{exit: exit, label: manager.NewLoopLabel()}
+				manager.insertForwardRegion(owner, region)
+			}
+			for _, sb := range siblingBreaks {
+				if !slices.Contains(sb.from.Next, sb.to) || encodedJumpTo(sb.from, sb.to) {
+					continue
+				}
+				jump := manager.NewNode(statements.NewSourceTransferStatement("break", outerLabels[sb.to]))
+				jump.AddNext(sb.to)
+				jump.EncodedJumps = map[*core.Node]bool{sb.to: true}
+				replaceNextInPlace(sb.from, sb.to, jump)
+			}
+			for _, e := range frontier {
+				if e.to != exit || !slices.Contains(e.from.Next, exit) || encodedJumpTo(e.from, exit) {
+					continue
+				}
+				jump := manager.NewNode(statements.NewSourceTransferStatement("break", region.label))
+				jump.AddNext(exit)
+				jump.EncodedJumps = map[*core.Node]bool{exit: true}
+				replaceNextInPlace(e.from, exit, jump)
+			}
+			manager.refreshDominatorsShared()
+			pending = nil
+			sealed = true
+			break
 		}
-		manager.refreshDominatorsShared()
+		if sealed {
+			continue
+		}
+		rollbackPending()
+		if maxSteps > 1 && len(candidates) >= 2 {
+			if join := findCommonForwardJoin(candidates, condition, registeredJoins); join != nil {
+				if owner := findOwnerForExit(join); owner != nil && closedForwardRegion(manager, owner, join) {
+					registeredJoins[join] = true
+					already := false
+					for _, existing := range manager.forwardRegions[owner] {
+						if existing != nil && existing.exit == join {
+							already = true
+							break
+						}
+					}
+					if !already {
+						joinRegion := &forwardRegion{exit: join, label: manager.NewLoopLabel()}
+						manager.insertForwardRegion(owner, joinRegion)
+						pending = &pendingJoin{owner: owner, region: joinRegion}
+						continue
+					}
+				}
+			}
+		}
 		return
 	}
+	rollbackPending()
 }
 
 // Prove single entry and a closed acyclic normal-flow region. Structured
@@ -145,11 +426,71 @@ func materializeForwardRegionExits(manager *RewriteManager, condition *core.Node
 // transfers cannot be swallowed by this new lexical scope. The proof makes
 // no assumptions about local names, values, branch polarity or arm effects.
 func closedForwardRegion(manager *RewriteManager, owner, exit *core.Node) bool {
+	ok, _, _ := closedForwardRegionWithSiblingExits(manager, owner, exit)
+	return ok
+}
+
+func closedForwardRegionWithSiblingExits(manager *RewriteManager, owner, exit *core.Node) (bool, []forwardEdge, map[*core.Node]string) {
 	if manager == nil || !manager.originalHandlersKnown || owner == nil || exit == nil || !owner.HasOriginPC || exit.IsCatchStart || IsEndNode(exit) {
-		return false
+		return false, nil, nil
 	}
 	if _, ok := forwardEntryPC(manager, exit); !ok {
-		return false
+		return false, nil, nil
+	}
+	singleOnly := jdecenv.Get("JDEC_NESTED_FORWARD_REGION_OFF") == "1"
+	type regionKind uint8
+	const (
+		regionInvalid regionKind = iota
+		regionSame
+		regionInner
+		regionOuter
+	)
+	allowedExit := map[*core.Node]regionKind{}
+	allowedLabel := map[*core.Node]string{}
+	ownerOuterLabel := map[*core.Node]string{}
+	for _, r := range manager.forwardRegions[owner] {
+		if r == nil || r.exit == nil {
+			continue
+		}
+		if r.exit == exit {
+			allowedExit[r.exit] = regionSame
+			allowedLabel[r.exit] = r.label
+			continue
+		}
+		if singleOnly {
+			return false, nil, nil
+		}
+		nestedInner, ordered := forwardExitNestedBefore(owner, r.exit, exit)
+		if !ordered {
+			return false, nil, nil
+		}
+		if nestedInner {
+			allowedExit[r.exit] = regionInner
+		} else {
+			allowedExit[r.exit] = regionOuter
+			ownerOuterLabel[r.exit] = r.label
+		}
+		allowedLabel[r.exit] = r.label
+	}
+	if !singleOnly {
+		for anc, regions := range manager.forwardRegions {
+			if anc == nil || anc == owner || !utils2.IsDominate(manager.DominatorMap, anc, owner) {
+				continue
+			}
+			for _, r := range regions {
+				if r == nil || r.exit == nil || r.exit == owner || r.exit == exit {
+					continue
+				}
+				if _, already := allowedExit[r.exit]; already {
+					continue
+				}
+				if forwardExitReachesWithoutOwner(r.exit, exit, anc) {
+					continue
+				}
+				allowedExit[r.exit] = regionOuter
+				allowedLabel[r.exit] = r.label
+			}
+		}
 	}
 	remaining := 65536
 	sameDomain := func(n *core.Node) bool {
@@ -184,7 +525,24 @@ func closedForwardRegion(manager *RewriteManager, owner, exit *core.Node) bool {
 	// collector must also stop there. Every included node still needs the
 	// owner's complete dispatch domain and the closed-region proof below.
 	if !sameDomain(exit) && !typedProtectedIfCollectionStops(manager, owner)[exit] {
-		return false
+		return false, nil, nil
+	}
+	var siblingBreaks []forwardEdge
+	siblingSeen := map[forwardEdge]bool{}
+	canSealSiblingEdge := func(n, target *core.Node) bool {
+		if singleOnly || ownerOuterLabel[target] == "" || n == exit || forwardExitReachesWithoutOwner(exit, n, owner) {
+			return false
+		}
+		if _, isCond := n.Statement.(*statements.ConditionStatement); isCond {
+			return true
+		}
+		nonEncoded := 0
+		for _, nx := range n.Next {
+			if !encodedJumpTo(n, nx) {
+				nonEncoded++
+			}
+		}
+		return nonEncoded == 1
 	}
 	state := map[*core.Node]uint8{}
 	statementBudget := 4096
@@ -218,9 +576,13 @@ func closedForwardRegion(manager *RewriteManager, owner, exit *core.Node) bool {
 				return false
 			}
 		case *statements.CustomStatement:
-			r := manager.forwardRegions[owner]
 			kind, label, ok := n.Statement.(*statements.CustomStatement).SourceTransferProtocol()
-			if r == nil || r.exit != exit || !ok || kind != "break" || label != r.label || len(n.Next) != 1 || n.Next[0] != exit || !n.EncodedJumps[exit] {
+			if !ok || kind != "break" || len(n.Next) != 1 {
+				return false
+			}
+			target := n.Next[0]
+			rk := allowedExit[target]
+			if rk == regionInvalid || label != allowedLabel[target] || !n.EncodedJumps[target] {
 				return false
 			}
 		default:
@@ -235,8 +597,22 @@ func closedForwardRegion(manager *RewriteManager, owner, exit *core.Node) bool {
 			if remaining < 0 {
 				return false
 			}
-			if encodedJumpTo(n, next) && (next != exit || manager.forwardRegions[owner] == nil) {
-				return false
+			if encodedJumpTo(n, next) {
+				rk := allowedExit[next]
+				if rk == regionInvalid {
+					return false
+				}
+				if rk == regionOuter {
+					// Escapes cleanly to an enclosing forward-region boundary.
+					continue
+				}
+			} else if canSealSiblingEdge(n, next) {
+				edge := forwardEdge{from: n, to: next}
+				if !siblingSeen[edge] {
+					siblingSeen[edge] = true
+					siblingBreaks = append(siblingBreaks, edge)
+				}
+				continue
 			}
 			if !visit(next) {
 				return false
@@ -246,7 +622,7 @@ func closedForwardRegion(manager *RewriteManager, owner, exit *core.Node) bool {
 		return true
 	}
 	if !visit(owner) {
-		return false
+		return false, nil, nil
 	}
 	// Dominance alone does not prove single entry after choosing an exit:
 	// the proposed exit might lead back into the collected interior. Check
@@ -260,7 +636,7 @@ func closedForwardRegion(manager *RewriteManager, owner, exit *core.Node) bool {
 		pending = pending[:len(pending)-1]
 		remaining--
 		if n == nil || remaining < 0 || len(seen) >= 4096 || len(pending) > 4096 {
-			return false
+			return false, nil, nil
 		}
 		if seen[n] {
 			continue
@@ -269,12 +645,12 @@ func closedForwardRegion(manager *RewriteManager, owner, exit *core.Node) bool {
 		for _, next := range n.Next {
 			remaining--
 			if remaining < 0 || next != owner && state[next] != 0 && state[n] == 0 {
-				return false
+				return false, nil, nil
 			}
 			pending = append(pending, next)
 		}
 	}
-	return true
+	return true, siblingBreaks, ownerOuterLabel
 }
 
 // A typed original method terminal completes abruptly. Its synthetic END
@@ -371,60 +747,94 @@ func forwardBlockKeepsTransferBindings(st statements.Statement, loops, depth int
 }
 
 func finishForwardRegion(manager *RewriteManager, original, start *core.Node) error {
-	region := manager.forwardRegions[original]
-	if region == nil {
+	regions := manager.forwardRegions[original]
+	if len(regions) == 0 {
 		return nil
 	}
-	var body []*core.Node
-	seen := map[*core.Node]bool{}
-	for n := start; n != region.exit; {
-		if n == nil || seen[n] || len(seen) >= 1024 {
-			return fmt.Errorf("forward region did not close")
+	for idx, region := range regions {
+		if region == nil {
+			continue
 		}
-		if _, raw := n.Statement.(*statements.ConditionStatement); raw {
-			return fmt.Errorf("forward region contains an unstructured decision")
-		}
-		seen[n] = true
-		body = append(body, n)
-		// The remaining linear arm can itself end the method. Its END
-		// sentinel is bookkeeping, never a statement or region fall-through.
-		if forwardOriginalMethodExit(n) {
-			break
-		}
-		var normal []*core.Node
-		for _, next := range n.Next {
-			if encodedJumpTo(n, next) {
-				if next != region.exit {
-					return fmt.Errorf("forward region has a foreign transfer")
+		allowedOuter := map[*core.Node]bool{}
+		for owner, list := range manager.forwardRegions {
+			for j, r := range list {
+				if r == nil || r.exit == nil || r.exit == region.exit {
+					continue
 				}
-			} else {
-				normal = append(normal, next)
+				if owner == original && j < idx {
+					continue
+				}
+				allowedOuter[r.exit] = true
 			}
 		}
-		// The last statement may complete only by the already encoded
-		// region break (other arms may return/throw). It has no ordinary
-		// fall-through edge, but still reaches this exact region boundary.
-		if len(normal) == 0 && len(n.Next) == 1 && n.Next[0] == region.exit && encodedJumpTo(n, region.exit) {
-			break
+		var body []*core.Node
+		seen := map[*core.Node]bool{}
+		var outerTargets []*core.Node
+		outerSeen := map[*core.Node]bool{}
+		for n := start; n != region.exit; {
+			if n == nil || seen[n] || len(seen) >= 1024 {
+				return fmt.Errorf("forward region did not close")
+			}
+			if _, raw := n.Statement.(*statements.ConditionStatement); raw {
+				return fmt.Errorf("forward region contains an unstructured decision")
+			}
+			seen[n] = true
+			body = append(body, n)
+			// The remaining linear arm can itself end the method. Its END
+			// sentinel is bookkeeping, never a statement or region fall-through.
+			if forwardOriginalMethodExit(n) {
+				break
+			}
+			var normal []*core.Node
+			for _, next := range n.Next {
+				if encodedJumpTo(n, next) {
+					if next == region.exit {
+						continue
+					}
+					if allowedOuter[next] {
+						if !outerSeen[next] {
+							outerSeen[next] = true
+							outerTargets = append(outerTargets, next)
+						}
+						continue
+					}
+					return fmt.Errorf("forward region has a foreign transfer")
+				}
+				normal = append(normal, next)
+			}
+			// The last statement may complete only by already encoded
+			// region breaks (other arms may return/throw). It has no ordinary
+			// fall-through edge, but reaches exact region boundaries.
+			if len(normal) == 0 && len(n.Next) > 0 {
+				break
+			}
+			if len(normal) != 1 {
+				return fmt.Errorf("forward region has %d normal continuations", len(normal))
+			}
+			n = normal[0]
 		}
-		if len(normal) != 1 {
-			return fmt.Errorf("forward region has %d normal continuations", len(normal))
+		block := statements.NewDoWhileStatement(values.NewJavaLiteral(false, types.NewJavaPrimer(types.JavaBoolean)), core.NodesToStatements(body))
+		block.Label = region.label
+		wrapper := manager.NewNode(block)
+		manager.replaceStructuredNode(start, wrapper)
+		if manager.RootNode == start {
+			manager.RootNode = wrapper
 		}
-		n = normal[0]
+		wrapper.RemoveAllNext()
+		for _, n := range body {
+			n.RemoveAllNext()
+		}
+		wrapper.AddNext(region.exit)
+		for _, outerTarget := range outerTargets {
+			wrapper.AddNext(outerTarget)
+			if wrapper.EncodedJumps == nil {
+				wrapper.EncodedJumps = map[*core.Node]bool{}
+			}
+			wrapper.EncodedJumps[outerTarget] = true
+		}
+		retargetProtectedIfBoundary(manager.TryNodes, start, wrapper)
+		start = wrapper
 	}
-	block := statements.NewDoWhileStatement(values.NewJavaLiteral(false, types.NewJavaPrimer(types.JavaBoolean)), core.NodesToStatements(body))
-	block.Label = region.label
-	wrapper := manager.NewNode(block)
-	manager.replaceStructuredNode(start, wrapper)
-	if manager.RootNode == start {
-		manager.RootNode = wrapper
-	}
-	wrapper.RemoveAllNext()
-	for _, n := range body {
-		n.RemoveAllNext()
-	}
-	wrapper.AddNext(region.exit)
-	retargetProtectedIfBoundary(manager.TryNodes, start, wrapper)
 	delete(manager.forwardRegions, original)
 	return nil
 }
@@ -434,12 +844,17 @@ func finishForwardRegion(manager *RewriteManager, original, start *core.Node) er
 // source break label still names the same lexical region and is unchanged.
 func (manager *RewriteManager) replaceStructuredNode(old, replacement *core.Node) {
 	old.Replace(replacement)
-	for _, region := range manager.forwardRegions {
-		if region.exit == old {
-			region.exit = replacement
-		}
-		if region.protectedEnd == old {
-			region.protectedEnd = replacement
+	for _, list := range manager.forwardRegions {
+		for _, region := range list {
+			if region == nil {
+				continue
+			}
+			if region.exit == old {
+				region.exit = replacement
+			}
+			if region.protectedEnd == old {
+				region.protectedEnd = replacement
+			}
 		}
 	}
 }

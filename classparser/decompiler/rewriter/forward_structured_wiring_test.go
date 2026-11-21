@@ -37,7 +37,7 @@ func TestForwardRegionRetainsBypassAfterFallbackStructuring(t *testing.T) {
 		t.Fatal("original independent exit lost after structuring")
 	}
 	materializeForwardRegionExits(m, inner)
-	region := m.forwardRegions[owner]
+	region := m.primaryForwardRegion(owner)
 	if region == nil || region.exit != replacement {
 		t.Fatal("lost original bypass")
 	}

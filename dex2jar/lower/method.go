@@ -9,6 +9,7 @@ import (
 	"github.com/yaklang/javajive/classparser/classfilebuilder"
 	"github.com/yaklang/javajive/dex2jar/ir"
 	"github.com/yaklang/javajive/dex2jar/model"
+	"github.com/yaklang/javajive/internal/jdecenv"
 )
 
 type polySlotKey struct {
@@ -40,6 +41,19 @@ type methodLowerer struct {
 	// to its incoming JVM argument local (< homeBase), avoiding prologue copies.
 	// Entries >= 0 bypass homeSlots and emitPrologue stores.
 	directParamSlots []int
+	// paramPrologueSlot maps a non-direct web-split incoming parameter register to
+	// its allocated entry-web JVM local slot.
+	paramPrologueSlot []int
+	webSplitting      bool
+	webPinned         []bool
+	hasLegacyHome     []bool
+	webDefs           []defKindInfo
+	ufParent          []int
+	webSlots          []uint16
+	webAssigned       []bool
+	instDefID         map[regUseKey]int
+	useWebDef         map[regUseKey]int
+	entryDefByReg     []int
 	// polySlots maps (register, LocalKind) to companion JVM locals when a
 	// polymorphic zero constant (const 0) is used across multiple categories.
 	polySlots      map[polySlotKey]uint16
@@ -156,10 +170,13 @@ func (l *methodLowerer) lower() error {
 
 // prepareAddressLabels binds a JVM label to every DEX address that debug data
 // refers to, so line numbers and local ranges survive branch widening.
-// assignHomes gives every DEX register a JVM local. A register that ever holds
+// assignHomesLegacy gives every DEX register a JVM local. A register that ever holds
 // a category-2 value reserves two consecutive slots so no other register can
 // occupy the second half of a long or double.
-func (l *methodLowerer) assignHomes() error {
+func (l *methodLowerer) assignHomesLegacy() error {
+	l.webSplitting = false
+	l.polySlots = nil
+	l.paramPrologueSlot = nil
 	registerCount := int(l.method.Code.RegistersSize)
 	widths := make([]int, registerCount)
 	for register := range widths {
@@ -437,7 +454,7 @@ func (l *methodLowerer) emitDebug() error {
 	// The JVM rejects duplicate LocalVariableTable entries for the same slot and
 	// range, so an explicitly described range keeps only that entry.
 	type localRange struct {
-		register   uint16
+		slot       uint16
 		start, end *classfilebuilder.Label
 	}
 	described := make(map[localRange]bool)
@@ -456,8 +473,16 @@ func (l *methodLowerer) emitDebug() error {
 		if start == nil || end == nil {
 			continue
 		}
-		l.code.Local(start, end, local.Name, local.Type, l.slotFor(local.Register, localKind(kind)))
-		described[localRange{register: local.Register, start: start, end: end}] = true
+		slot, ok := l.debugWebSlot(local.Register, local.Start, local.End, kind)
+		if !ok {
+			continue
+		}
+		key := localRange{slot: slot, start: start, end: end}
+		if described[key] {
+			continue
+		}
+		l.code.Local(start, end, local.Name, local.Type, slot)
+		described[key] = true
 	}
 	parameterRegisters := debugParameterRegisters(l.method.Code, l.method.Proto, l.encoded.AccessFlags)
 	if l.endLabel == nil || startLabel == nil {
@@ -472,12 +497,18 @@ func (l *methodLowerer) emitDebug() error {
 		if name == "" || register >= l.method.Code.RegistersSize {
 			continue
 		}
-		key := localRange{register: register, start: startLabel, end: l.endLabel}
+		slot := l.prologueStoreSlot(register)
+		if l.directParamSlots[register] >= 0 {
+			slot = uint16(l.directParamSlots[register])
+		} else if l.webSplitting && !l.webPinned[register] && l.paramPrologueSlot[register] < 0 {
+			continue
+		}
+		key := localRange{slot: slot, start: startLabel, end: l.endLabel}
 		if described[key] {
 			continue
 		}
 		described[key] = true
-		l.code.Local(startLabel, l.endLabel, name, descriptor, l.home(register))
+		l.code.Local(startLabel, l.endLabel, name, descriptor, slot)
 	}
 	return nil
 }
@@ -538,12 +569,19 @@ func (l *methodLowerer) validateMoveResults() error {
 	return nil
 }
 
+func (l *methodLowerer) prologueStoreSlot(register uint16) uint16 {
+	if l.webSplitting && int(register) < len(l.paramPrologueSlot) && l.paramPrologueSlot[register] >= 0 {
+		return uint16(l.paramPrologueSlot[register])
+	}
+	return l.home(register)
+}
+
 func (l *methodLowerer) emitPrologue() error {
 	parameterRegister := l.method.Code.RegistersSize - l.method.Code.InsSize
 	jvmLocal := uint16(0)
 	if l.encoded.AccessFlags&dexStatic == 0 {
 		if int(parameterRegister) >= len(l.directParamSlots) || l.directParamSlots[parameterRegister] < 0 {
-			l.code.Load(classfilebuilder.RefLocal, jvmLocal).Store(classfilebuilder.RefLocal, l.home(parameterRegister))
+			l.code.Load(classfilebuilder.RefLocal, jvmLocal).Store(classfilebuilder.RefLocal, l.prologueStoreSlot(parameterRegister))
 		}
 		parameterRegister++
 		jvmLocal++
@@ -556,7 +594,7 @@ func (l *methodLowerer) emitPrologue() error {
 		words := uint16(kind.Words())
 		if int(parameterRegister) >= len(l.directParamSlots) || l.directParamSlots[parameterRegister] < 0 {
 			local := localKind(kind)
-			l.code.Load(local, jvmLocal).Store(local, l.home(parameterRegister))
+			l.code.Load(local, jvmLocal).Store(local, l.prologueStoreSlot(parameterRegister))
 		}
 		parameterRegister += words
 		jvmLocal += words
@@ -1444,8 +1482,12 @@ func (l *methodLowerer) emitLiteralArithmetic(instruction *ir.Instruction) error
 	}
 	if opIndex == 0 && instruction.Regs[0] == instruction.Regs[1] &&
 		instruction.Literal >= math.MinInt16 && instruction.Literal <= math.MaxInt16 {
-		l.code.IInc(l.slotFor(instruction.Regs[0], classfilebuilder.IntLocal), int16(instruction.Literal))
-		return nil
+		readSlot := l.loadSlotAt(l.index, instruction.Regs[0], classfilebuilder.IntLocal)
+		writeSlot := l.storeSlotAt(l.index, instruction.Regs[0], classfilebuilder.IntLocal)
+		if readSlot == writeSlot {
+			l.code.IInc(writeSlot, int16(instruction.Literal))
+			return nil
+		}
 	}
 	opcodes := []classfilebuilder.Opcode{
 		classfilebuilder.IADD, classfilebuilder.ISUB, classfilebuilder.IMUL, classfilebuilder.IDIV, classfilebuilder.IREM,
@@ -1740,7 +1782,7 @@ func (l *methodLowerer) loadAs(register uint16, expected classfilebuilder.LocalK
 	if kind != ir.Null {
 		expected = localKind(kind)
 	}
-	return l.code.Load(expected, l.slotFor(register, expected))
+	return l.code.Load(expected, l.loadSlotAt(l.index, register, expected))
 }
 
 func (l *methodLowerer) load(register uint16) *classfilebuilder.Code {
@@ -1759,7 +1801,7 @@ func (l *methodLowerer) storeAt(register uint16, index int) *classfilebuilder.Co
 		category = definition.Category
 	}
 	lk := localKind(category.Kind)
-	return l.code.Store(lk, l.slotFor(register, lk))
+	return l.code.Store(lk, l.storeSlotAt(index, register, lk))
 }
 
 func localKind(kind ir.CategoryKind) classfilebuilder.LocalKind {
@@ -1814,14 +1856,107 @@ type deferredStore struct {
 	register uint16
 	temp     uint16
 	category ir.Category
+	direct   bool
 }
 
 func isBranchOpcode(opcode byte) bool {
 	return opcode >= 0x28 && opcode <= 0x2a || opcode >= 0x32 && opcode <= 0x3d
 }
 
+// canDirectDeferredStore reports whether the stored value register and its
+// receiver remain unmodified between store.index and l.delegationIndex, so the
+// pre-delegation temporary copy can be elided safely.
+func (l *methodLowerer) canDirectDeferredStore(store *deferredStore) bool {
+	if jdecenv.Get("JDEC_DEX_DIRECT_DEFERRED_OFF") == "1" || l.delegationIndex < 0 || store.index < 0 || store.index >= l.delegationIndex {
+		return false
+	}
+	startBlock := l.blockOfInstruction(store.index)
+	if startBlock < 0 {
+		return false
+	}
+	thisReg := l.method.Instructions[store.index].Regs[1]
+	valWords := store.category.Kind.Words()
+	conflicts := func(idx int) bool {
+		_, defs := l.method.EffectsAt(idx)
+		defWidth := 1
+		if len(defs) > 0 {
+			defWidth = l.instructionDefWidth(idx, defs[0], defs)
+		}
+		if def, ok := l.method.DefinitionAt(idx); ok && def.Register >= 0 {
+			r := uint16(def.Register)
+			if r == thisReg || r == store.register || (valWords == 2 && r == store.register+1) {
+				return true
+			}
+			if def.Category.Kind.Words() == 2 && r+1 == store.register {
+				return true
+			}
+		}
+		for _, r := range defs {
+			if r == thisReg || r == store.register || (valWords == 2 && r == store.register+1) {
+				return true
+			}
+			if defWidth == 2 && r+1 == store.register {
+				return true
+			}
+		}
+		return false
+	}
+
+	seen := map[int]bool{}
+	var queue []int
+	started := false
+	for _, idx := range l.method.Blocks[startBlock].Instructions {
+		if idx == store.index {
+			started = true
+			continue
+		}
+		if !started {
+			continue
+		}
+		if idx == l.delegationIndex {
+			return true
+		}
+		if conflicts(idx) {
+			return false
+		}
+	}
+	seen[startBlock] = true
+	for _, succ := range l.method.Blocks[startBlock].Successors {
+		if l.method.Blocks[succ].Reachable {
+			queue = append(queue, succ)
+		}
+	}
+	for len(queue) > 0 {
+		b := queue[0]
+		queue = queue[1:]
+		if seen[b] {
+			continue
+		}
+		seen[b] = true
+		reachedDelegation := false
+		for _, idx := range l.method.Blocks[b].Instructions {
+			if idx == l.delegationIndex {
+				reachedDelegation = true
+				break
+			}
+			if conflicts(idx) {
+				return false
+			}
+		}
+		if reachedDelegation {
+			continue
+		}
+		for _, succ := range l.method.Blocks[b].Successors {
+			if l.method.Blocks[succ].Reachable && !seen[succ] {
+				queue = append(queue, succ)
+			}
+		}
+	}
+	return true
+}
+
 // assignDeferredTemps gives every deferred store a fresh local wide enough for
-// its value, after the DEX register homes.
+// its value, after the DEX register homes, unless direct loading is safe.
 func (l *methodLowerer) assignDeferredTemps() error {
 	next := int(l.homeBase) + int(l.homeLimit)
 	for index := range l.deferredStores {
@@ -1836,10 +1971,14 @@ func (l *methodLowerer) assignDeferredTemps() error {
 		if category.Kind == ir.Unknown {
 			return methodDiagnostic(l.method.Context, &l.method.Instructions[store.index], "", fmt.Errorf("deferred field store value v%d has no category", store.register))
 		}
+		store.category = category
+		if l.canDirectDeferredStore(store) {
+			store.direct = true
+			continue
+		}
 		if next > math.MaxUint16 {
 			return methodDiagnostic(l.method.Context, &l.method.Instructions[store.index], "", fmt.Errorf("deferred field store values require too many locals"))
 		}
-		store.category = category
 		store.temp = uint16(next)
 		next += category.Kind.Words()
 	}
@@ -1850,6 +1989,9 @@ func (l *methodLowerer) assignDeferredTemps() error {
 // captureDeferredValue evaluates the stored value at its original DEX position
 // and keeps it in a local that survives until the constructor call.
 func (l *methodLowerer) captureDeferredValue(store *deferredStore) {
+	if store.direct {
+		return
+	}
 	previous := l.index
 	l.index = store.index
 	lk := localKind(store.category.Kind)
@@ -1876,8 +2018,12 @@ func (l *methodLowerer) emitDeferredStore(store *deferredStore) error {
 	previous := l.index
 	l.index = store.index
 	l.load(instruction.Regs[1])
+	if store.direct {
+		l.loadAs(store.register, localKind(store.category.Kind))
+	} else {
+		l.code.Load(localKind(store.category.Kind), store.temp)
+	}
 	l.index = previous
-	l.code.Load(localKind(store.category.Kind), store.temp)
 	l.code.CP(classfilebuilder.PUTFIELD, constant)
 	return nil
 }

@@ -27,7 +27,7 @@ func typedProtectedIfCollectionStops(manager *RewriteManager, condition *core.No
 			continue
 		}
 		ranges := [][2]int{{region.ProtectedStartPC, region.ProtectedEndPC}}
-		pending := manager.forwardRegions[region]
+		pending := manager.protectedForwardRegion(region)
 		if pending != nil && len(pending.protectedRanges) != 0 {
 			ranges = pending.protectedRanges
 		}
