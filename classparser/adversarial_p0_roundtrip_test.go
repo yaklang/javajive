@@ -349,3 +349,125 @@ func TestAdversarialR8RetainUnprovedSourceFallbacks(t *testing.T) {
 		}
 	})
 }
+
+func TestAdversarialLoopConstPrefixRejectsCondAndBodyMutationBytecode(t *testing.T) {
+	c := classfilebuilder.NewClass("adv/LoopConstPrefixMutation", "java/lang/Object", 0x0021)
+
+	// Method 1: while (true) { int x = 0; if (!(x++ < 1 && i++ < 2)) break; rounds++; }
+	// Returns 2 originally; hoisting `int x = 0` outside would change rounds to 1.
+	m1 := c.AddMethod(0x0009, "condPostIncReset", "()I")
+	lHead1 := m1.Code().NewLabel()
+	lExit1 := m1.Code().NewLabel()
+	m1.Code().
+		Emit(classfilebuilder.ICONST_0).Store(classfilebuilder.IntLocal, 0).
+		Emit(classfilebuilder.ICONST_0).Store(classfilebuilder.IntLocal, 1).
+		Mark(lHead1).
+		Emit(classfilebuilder.ICONST_0).Store(classfilebuilder.IntLocal, 2).
+		Load(classfilebuilder.IntLocal, 2).
+		IInc(2, 1).
+		Emit(classfilebuilder.ICONST_1).
+		Branch(classfilebuilder.IF_ICMPGE, lExit1).
+		Load(classfilebuilder.IntLocal, 0).
+		IInc(0, 1).
+		Emit(classfilebuilder.ICONST_2).
+		Branch(classfilebuilder.IF_ICMPGE, lExit1).
+		IInc(1, 1).
+		Branch(classfilebuilder.GOTO, lHead1).
+		Mark(lExit1).
+		Load(classfilebuilder.IntLocal, 1).
+		Emit(classfilebuilder.IRETURN)
+
+	// Method 2: while (true) { int x = 0; if (i >= 3) break; x++; total += x; i++; }
+	// Returns 3 originally; hoisting `int x = 0` outside would change total to 6.
+	m2 := c.AddMethod(0x0009, "bodyIncReset", "()I")
+	lHead2 := m2.Code().NewLabel()
+	lExit2 := m2.Code().NewLabel()
+	m2.Code().
+		Emit(classfilebuilder.ICONST_0).Store(classfilebuilder.IntLocal, 0).
+		Emit(classfilebuilder.ICONST_0).Store(classfilebuilder.IntLocal, 1).
+		Mark(lHead2).
+		Emit(classfilebuilder.ICONST_0).Store(classfilebuilder.IntLocal, 2).
+		Load(classfilebuilder.IntLocal, 0).
+		Emit(classfilebuilder.ICONST_3).
+		Branch(classfilebuilder.IF_ICMPGE, lExit2).
+		IInc(2, 1).
+		Load(classfilebuilder.IntLocal, 1).
+		Load(classfilebuilder.IntLocal, 2).
+		Emit(classfilebuilder.IADD).
+		Store(classfilebuilder.IntLocal, 1).
+		IInc(0, 1).
+		Branch(classfilebuilder.GOTO, lHead2).
+		Mark(lExit2).
+		Load(classfilebuilder.IntLocal, 1).
+		Emit(classfilebuilder.IRETURN)
+
+	// Method 3: while (true) { int x = 0; if (i >= 3) break; x--; total += x; i++; }
+	// Returns -3 originally; hoisting `int x = 0` outside would change total to -6.
+	m3 := c.AddMethod(0x0009, "bodyDecReset", "()I")
+	lHead3 := m3.Code().NewLabel()
+	lExit3 := m3.Code().NewLabel()
+	m3.Code().
+		Emit(classfilebuilder.ICONST_0).Store(classfilebuilder.IntLocal, 0).
+		Emit(classfilebuilder.ICONST_0).Store(classfilebuilder.IntLocal, 1).
+		Mark(lHead3).
+		Emit(classfilebuilder.ICONST_0).Store(classfilebuilder.IntLocal, 2).
+		Load(classfilebuilder.IntLocal, 0).
+		Emit(classfilebuilder.ICONST_3).
+		Branch(classfilebuilder.IF_ICMPGE, lExit3).
+		IInc(2, -1).
+		Load(classfilebuilder.IntLocal, 1).
+		Load(classfilebuilder.IntLocal, 2).
+		Emit(classfilebuilder.IADD).
+		Store(classfilebuilder.IntLocal, 1).
+		IInc(0, 1).
+		Branch(classfilebuilder.GOTO, lHead3).
+		Mark(lExit3).
+		Load(classfilebuilder.IntLocal, 1).
+		Emit(classfilebuilder.IRETURN)
+
+	raw := mustBuildClass(t, c)
+	for _, tc := range []struct {
+		name string
+		run  func() (string, error)
+	}{
+		{
+			name: "precision",
+			run:  func() (string, error) { return Decompile(raw) },
+		},
+		{
+			name: "compat_shadow",
+			run: func() (string, error) {
+				res, err := DecompileWithOptions(raw, DecompileOptions{Mode: Compatibility, EnableShadowIR: true})
+				return res.Source, err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src, err := tc.run()
+			if err != nil {
+				t.Fatalf("decompile error: %v", err)
+			}
+			if strings.Contains(src, DecompileStubMarker) {
+				t.Fatalf("unexpected stub method:\n%s", src)
+			}
+			for _, methodSig := range []string{"condPostIncReset()", "bodyIncReset()", "bodyDecReset()"} {
+				idx := strings.Index(src, methodSig)
+				if idx < 0 {
+					t.Fatalf("missing method %s in:\n%s", methodSig, src)
+				}
+				tail := src[idx:]
+				if next := strings.Index(tail[len(methodSig):], "public static int "); next >= 0 {
+					tail = tail[:len(methodSig)+next]
+				}
+				doIdx := strings.Index(tail, "do{")
+				if doIdx < 0 {
+					doIdx = strings.Index(tail, "do {")
+				}
+				initIdx := strings.Index(tail, "int var2 = 0;")
+				if doIdx < 0 || initIdx < 0 || initIdx < doIdx {
+					t.Errorf("%s hoisted per-iteration `int var2 = 0;` out of loop:\n%s", methodSig, tail)
+				}
+			}
+		})
+	}
+}

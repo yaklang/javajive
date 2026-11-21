@@ -31,17 +31,20 @@ func NormalizeLoopForms(sts []statements.Statement) []statements.Statement {
 		if dw, ok := normalizedSt.(*statements.DoWhileStatement); ok && jdecenv.Get("JDEC_LOOP_NORM_EXT_OFF") == "" {
 			if prefix, whileSt := doWhileWithConstPrefixAsWhile(dw, sts[i+1:]); whileSt != nil {
 				if len(normalized) > 0 {
-					if prevAssign, ok := normalized[len(normalized)-1].(*statements.AssignStatement); ok && prevAssign != nil {
-						var usedInPrev bool
+					if prevAssign, ok := normalized[len(normalized)-1].(*statements.AssignStatement); ok && prevAssign != nil &&
+						prevAssign.ArrayMember == nil && plainLoopRef(prevAssign.LeftValue) != nil &&
+						makeForLoop(prevAssign, whileSt, sts[i+1:]) != nil {
+						var conflict bool
 						for _, p := range prefix {
 							if pa, ok := p.(*statements.AssignStatement); ok {
-								if pr := plainLoopRef(pa.LeftValue); pr != nil && varUsedInStatements([]statements.Statement{prevAssign}, pr.VarUid) {
-									usedInPrev = true
+								pr := plainLoopRef(pa.LeftValue)
+								if pr == nil || localConflictsInStatements([]statements.Statement{prevAssign}, pr) {
+									conflict = true
 									break
 								}
 							}
 						}
-						if !usedInPrev {
+						if !conflict {
 							prevIdx := len(normalized) - 1
 							normalized = append(normalized, prefix...)
 							copy(normalized[prevIdx+len(prefix):], normalized[prevIdx:prevIdx+1])
@@ -180,22 +183,34 @@ func doWhileWithConstPrefixAsWhile(loop *statements.DoWhileStatement, remaining 
 		return nil, nil
 	}
 	prefix := loop.Body[:last]
-	seenUids := make(map[string]bool, len(prefix))
+	seenRefs := make([]*values.JavaRef, 0, len(prefix))
 	for _, st := range prefix {
 		as, ok := st.(*statements.AssignStatement)
-		if !ok || as == nil || as.ArrayMember != nil || (!as.IsFirst && !as.IsDeclare) || as.JavaValue == nil {
+		if !ok || as == nil || as.ArrayMember != nil || !as.IsFirst || as.IsDeclare || as.JavaValue == nil {
 			return nil, nil
 		}
 		ref := plainLoopRef(as.LeftValue)
-		if ref == nil || ref.VarUid == "" || ref.IsThis || ref.IsParam || seenUids[ref.VarUid] {
+		if ref == nil || ref.VarUid == "" || ref.IsThis || ref.IsParam || ref.CustomValue != nil || ref.StackVar != nil {
 			return nil, nil
+		}
+		for _, prevRef := range seenRefs {
+			if sameOrAliasedLocal(prevRef, ref) {
+				return nil, nil
+			}
 		}
 		lit, ok := values.UnpackSoltValue(as.JavaValue).(*values.JavaLiteral)
-		if !ok || lit == nil {
+		if !ok || lit == nil || !values.IsPure(as.JavaValue) {
 			return nil, nil
 		}
-		seenUids[ref.VarUid] = true
-		if varUsedInStatements(remaining, ref.VarUid) || varAssignedInStatements(body, ref.VarUid) {
+		seenRefs = append(seenRefs, ref)
+		// Only hoist a per-iteration constant declaration when both the loop guard
+		// (raw + normalized condition) and the loop body are proved free of writes
+		// and opaque leaves, and extending the local's scope cannot collide with or
+		// become observable in statements following the loop.
+		if valueMayWriteOrOpaqueLocal(guard.Condition, ref) ||
+			valueMayWriteOrOpaqueLocal(cond, ref) ||
+			statementsMayWriteOrOpaqueLocal(body, ref) ||
+			localConflictsInStatements(remaining, ref) {
 			return nil, nil
 		}
 	}
@@ -203,57 +218,306 @@ func doWhileWithConstPrefixAsWhile(loop *statements.DoWhileStatement, remaining 
 	return hoisted, &statements.WhileStatement{ConditionValue: cond, Body: trimTrailingContinue(body)}
 }
 
-func varAssignedInStatements(sts []statements.Statement, uid string) bool {
-	if len(sts) == 0 || uid == "" {
+func localRefSpelling(r *values.JavaRef) string {
+	if r == nil || r.IsThis || r.CustomValue != nil || r.StackVar != nil || r.Id == nil {
+		return ""
+	}
+	return r.String(nil)
+}
+
+func sameOrAliasedLocal(a, b *values.JavaRef) bool {
+	if a == nil || b == nil {
 		return false
 	}
-	for _, st := range sts {
-		switch s := st.(type) {
-		case *statements.AssignStatement:
-			if s != nil && s.ArrayMember == nil {
-				if ref := plainLoopRef(s.LeftValue); ref != nil && ref.VarUid == uid {
+	if values.SameLocal(a, b) {
+		return true
+	}
+	if a.Id != nil && b.Id != nil && a.Id == b.Id {
+		return true
+	}
+	sa := localRefSpelling(a)
+	return sa != "" && sa == localRefSpelling(b)
+}
+
+func isLocalWriteOperator(op string) bool {
+	switch op {
+	case values.INC, values.DEC, "++", "--", "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", ">>>=":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSupportedWriteTargetNode(lhs values.JavaValue) (*values.JavaRef, bool) {
+	switch t := lhs.(type) {
+	case *values.JavaRef:
+		return t, true
+	case *values.RefMember, *values.JavaClassMember, *values.JavaArrayMember:
+		return nil, true
+	default:
+		return nil, false
+	}
+}
+
+func valueMayWriteOrOpaqueLocal(v values.JavaValue, target *values.JavaRef) bool {
+	if v == nil {
+		return false
+	}
+	if target == nil {
+		return true
+	}
+	access := values.InspectAccess(v)
+	if access.Effects&values.EffectOpaque != 0 {
+		return true
+	}
+	for w := range access.Writes {
+		if sameOrAliasedLocal(w, target) {
+			return true
+		}
+	}
+	seen := map[values.JavaValue]bool{}
+	var walk func(values.JavaValue) bool
+	walk = func(cur values.JavaValue) bool {
+		if cur == nil || seen[cur] {
+			return false
+		}
+		seen[cur] = true
+		switch x := cur.(type) {
+		case *values.JavaExpression:
+			if x == nil {
+				return false
+			}
+			if isLocalWriteOperator(x.Op) {
+				if len(x.Values) == 0 {
+					return true
+				}
+				ref, ok := isSupportedWriteTargetNode(values.UnpackSoltValue(x.Values[0]))
+				if !ok || (ref != nil && sameOrAliasedLocal(ref, target)) {
 					return true
 				}
 			}
+		case *values.AssignmentExpression:
+			if x == nil {
+				return false
+			}
+			ref, ok := isSupportedWriteTargetNode(values.UnpackSoltValue(x.Target))
+			if !ok || (ref != nil && sameOrAliasedLocal(ref, target)) {
+				return true
+			}
+		}
+		children, known := values.Children(cur)
+		if !known {
+			return true
+		}
+		for _, ch := range children {
+			if walk(ch) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(v)
+}
+
+func valueConflictsWithLocal(v values.JavaValue, target *values.JavaRef) bool {
+	if v == nil {
+		return false
+	}
+	if target == nil {
+		return true
+	}
+	effects, refs := values.InspectValue(v)
+	if effects&values.EffectOpaque != 0 {
+		return true
+	}
+	for r := range refs {
+		if sameOrAliasedLocal(r, target) {
+			return true
+		}
+	}
+	return false
+}
+
+func statementsMayWriteOrOpaqueLocal(sts []statements.Statement, target *values.JavaRef) bool {
+	return statementTreeCheckFailClosed(sts, target, valueMayWriteOrOpaqueLocal)
+}
+
+func localConflictsInStatements(sts []statements.Statement, target *values.JavaRef) bool {
+	return statementTreeCheckFailClosed(sts, target, valueConflictsWithLocal)
+}
+
+// statementTreeCheckFailClosed traverses statements over the closed Statement union.
+// Any unrecognized or opaque statement (e.g. uncertified CustomStatement,
+// StackAssignStatement, MiddleStatement, GOTOStatement, invalid SourceAssertionStatement)
+// causes the check to fail closed by returning true.
+func statementTreeCheckFailClosed(sts []statements.Statement, target *values.JavaRef, checkVal func(values.JavaValue, *values.JavaRef) bool) bool {
+	if len(sts) == 0 {
+		return false
+	}
+	if target == nil {
+		return true
+	}
+	for _, st := range sts {
+		if st == nil {
+			continue
+		}
+		switch s := st.(type) {
+		case *statements.AssignStatement:
+			if s == nil {
+				continue
+			}
+			if s.ArrayMember == nil {
+				if lhs := plainLoopRef(s.LeftValue); lhs != nil {
+					if sameOrAliasedLocal(lhs, target) {
+						return true
+					}
+				} else {
+					if _, ok := isSupportedWriteTargetNode(values.UnpackSoltValue(s.LeftValue)); !ok {
+						return true
+					}
+					if checkVal(s.LeftValue, target) {
+						return true
+					}
+				}
+			} else if checkVal(s.ArrayMember.Object, target) || checkVal(s.ArrayMember.Index, target) {
+				return true
+			}
+			if checkVal(s.JavaValue, target) {
+				return true
+			}
+		case *statements.ExpressionStatement:
+			if s == nil {
+				continue
+			}
+			if checkVal(s.Expression, target) {
+				return true
+			}
+		case *statements.ConditionStatement:
+			if s == nil {
+				continue
+			}
+			if checkVal(s.Condition, target) {
+				return true
+			}
 		case *statements.IfStatement:
-			if s != nil && (varAssignedInStatements(s.IfBody, uid) || varAssignedInStatements(s.ElseBody, uid)) {
+			if s == nil {
+				continue
+			}
+			if checkVal(s.Condition, target) ||
+				statementTreeCheckFailClosed(s.IfBody, target, checkVal) ||
+				statementTreeCheckFailClosed(s.ElseBody, target, checkVal) {
 				return true
 			}
 		case *statements.WhileStatement:
-			if s != nil && varAssignedInStatements(s.Body, uid) {
+			if s == nil {
+				continue
+			}
+			if checkVal(s.ConditionValue, target) || statementTreeCheckFailClosed(s.Body, target, checkVal) {
 				return true
 			}
 		case *statements.DoWhileStatement:
-			if s != nil && varAssignedInStatements(s.Body, uid) {
+			if s == nil {
+				continue
+			}
+			if checkVal(s.ConditionValue, target) || statementTreeCheckFailClosed(s.Body, target, checkVal) {
 				return true
 			}
 		case *statements.ForStatement:
-			if s != nil && (varAssignedInStatements([]statements.Statement{s.InitVar, s.EndExp}, uid) || varAssignedInStatements(s.SubStatements, uid)) {
+			if s == nil {
+				continue
+			}
+			if s.InitVar != nil && statementTreeCheckFailClosed([]statements.Statement{s.InitVar}, target, checkVal) {
+				return true
+			}
+			if s.Condition != nil && checkVal(s.Condition.Condition, target) {
+				return true
+			}
+			if s.EndExp != nil && statementTreeCheckFailClosed([]statements.Statement{s.EndExp}, target, checkVal) {
+				return true
+			}
+			if statementTreeCheckFailClosed(s.SubStatements, target, checkVal) {
 				return true
 			}
 		case *statements.SwitchStatement:
-			if s != nil {
-				for _, c := range s.Cases {
-					if c != nil && varAssignedInStatements(c.Body, uid) {
-						return true
-					}
+			if s == nil {
+				continue
+			}
+			if checkVal(s.Value, target) {
+				return true
+			}
+			for _, c := range s.Cases {
+				if c != nil && statementTreeCheckFailClosed(c.Body, target, checkVal) {
+					return true
 				}
 			}
 		case *statements.TryCatchStatement:
-			if s != nil {
-				if varAssignedInStatements(s.TryBody, uid) {
+			if s == nil {
+				continue
+			}
+			for _, ex := range s.Exception {
+				if ex != nil && sameOrAliasedLocal(ex, target) {
 					return true
 				}
-				for _, b := range s.CatchBodies {
-					if varAssignedInStatements(b, uid) {
-						return true
-					}
+			}
+			for _, init := range s.EntryInitializers {
+				if init != nil && statementTreeCheckFailClosed([]statements.Statement{init}, target, checkVal) {
+					return true
+				}
+			}
+			if statementTreeCheckFailClosed(s.TryBody, target, checkVal) {
+				return true
+			}
+			for _, cb := range s.CatchBodies {
+				if statementTreeCheckFailClosed(cb, target, checkVal) {
+					return true
 				}
 			}
 		case *statements.SynchronizedStatement:
-			if s != nil && varAssignedInStatements(s.Body, uid) {
+			if s == nil {
+				continue
+			}
+			if checkVal(s.Argument, target) || statementTreeCheckFailClosed(s.Body, target, checkVal) {
 				return true
 			}
+		case *statements.ReturnStatement:
+			if s == nil {
+				continue
+			}
+			if checkVal(s.JavaValue, target) {
+				return true
+			}
+		case *statements.SourceAssertionStatement:
+			if s == nil {
+				return true
+			}
+			cond, call, _, valid := s.SourceAssertionProtocol()
+			if !valid || checkVal(cond, target) || checkVal(call, target) {
+				return true
+			}
+		case *statements.SourceAnchorStatement, *statements.NewStatement:
+			continue
+		case *statements.CustomStatement:
+			if s == nil {
+				continue
+			}
+			if as, ok := s.SourceAssignmentForward(); ok && as != nil {
+				if statementTreeCheckFailClosed([]statements.Statement{as}, target, checkVal) {
+					return true
+				}
+				continue
+			}
+			if op, ok := s.SourceThrowOperand(); ok {
+				if checkVal(op, target) {
+					return true
+				}
+				continue
+			}
+			if _, _, known := s.SourceTransferProtocol(); known {
+				continue
+			}
+			return true
+		default:
+			return true
 		}
 	}
 	return false
