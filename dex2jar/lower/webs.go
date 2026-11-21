@@ -587,9 +587,11 @@ func (l *methodLowerer) assignWebs() bool {
 
 	webSlots := make([]uint16, len(defs))
 	webAssigned := make([]bool, len(defs))
+	directWideParam := make([]bool, registerCount)
 	next := 0
 
-	// First assign parameter entry webs (direct incoming local if read-only in its web,
+	// First assign parameter entry webs (direct incoming local if it matches the
+	// incoming parameter width and does not alias an <init> receiver slot,
 	// otherwise prologue copy into a dedicated home >= homeBase).
 	for _, p := range params {
 		if pinned[p.reg] {
@@ -603,10 +605,14 @@ func (l *methodLowerer) assignWebs() bool {
 		if webAssigned[root] {
 			continue
 		}
-		if !webHasInstDef[root] && webWidth[root] == p.words {
+		isInitThis := l.encoded.AccessFlags&dexStatic == 0 && p.jvmLocal == 0 && l.encoded.Method.Name == "<init>"
+		if webWidth[root] == p.words && !(isInitThis && webHasInstDef[root]) && (!unreachableTouched[p.reg] || widths[p.reg] == p.words) && (p.words == 1 || !unreachableTouched[p.reg+1]) {
 			webSlots[root] = p.jvmLocal
 			webAssigned[root] = true
 			l.directParamSlots[p.reg] = int(p.jvmLocal)
+			if p.words == 2 {
+				directWideParam[p.reg] = true
+			}
 		} else {
 			if int(l.homeBase)+next+webWidth[root] > math.MaxUint16 {
 				return false
@@ -653,6 +659,9 @@ func (l *methodLowerer) assignWebs() bool {
 		}
 		if widths[p.reg] == p.words && !writtenPinned[p.reg] && (p.words == 1 || (!writtenPinned[p.reg+1] && widths[p.reg+1] == 1)) {
 			l.directParamSlots[p.reg] = int(p.jvmLocal)
+			if p.words == 2 {
+				directWideParam[p.reg] = true
+			}
 		}
 	}
 
@@ -663,8 +672,9 @@ func (l *methodLowerer) assignWebs() bool {
 		if (!pinned[r] && !unreachableTouched[r]) || l.directParamSlots[r] >= 0 {
 			continue
 		}
-		// Keep upper half free when already covered as direct wide param.
-		if r > 0 && l.directParamSlots[r-1] >= 0 && widths[r-1] == 2 {
+		// Keep upper half free when already covered as a genuine 2-word direct
+		// wide param that is never independently written or polymorphic-zero.
+		if r > 0 && directWideParam[r-1] && !writtenPinned[r] && (r >= len(l.method.PolyZeroRegisters) || l.method.PolyZeroRegisters[r] == 0) {
 			continue
 		}
 		if int(l.homeBase)+next+widths[r] > math.MaxUint16 {

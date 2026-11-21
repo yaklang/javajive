@@ -40,6 +40,7 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	// Normalize shared edge blocks first. A shared terminal store can look
 	// like a second region exit until its selected edge has its own owner.
 	materializeForwardRegionExits(manager, ifNode)
+	sealOwnerForwardRegionArmExits(manager, ifNode)
 	err := CalcEnd(manager.DominatorMap, ifNode)
 	if err != nil {
 		return err
@@ -47,6 +48,7 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	// A dominated successor can already be outside an enclosing try. Keep
 	// its original boundary live before either arm consumes that successor.
 	protectedStops := typedProtectedIfCollectionStops(manager, ifNode)
+	forwardStops := pendingForwardRegionExits(manager, ifNode)
 	trueNode, falseNode := ifBranchNodes(ifNode)
 	//ifNode.RemoveAllNext()
 	if trueNode == falseNode {
@@ -65,14 +67,14 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	ifStatementNode := manager.NewNode(ifStatement)
 	manager.replaceStructuredNode(ifNode, ifStatementNode)
 	checkIsEndNode := func(node1, node2 *core.Node) bool {
-		if node1 == nil || node2 == nil {
+		if node1 == nil || node2 == nil || forwardStops[node1] {
 			return false
 		}
 		endNodes := []*core.Node{}
 		core.WalkGraph[*core.Node](node1, func(node *core.Node) ([]*core.Node, error) {
 			var next []*core.Node
 			for _, n := range node.Next {
-				if encodedJumpTo(node, n) {
+				if encodedJumpTo(node, n) || forwardStops[n] {
 					continue
 				}
 				if slices.Contains(manager.DominatorMap[node], n) {
@@ -124,6 +126,10 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 			return sts, nil
 		}
 		err := core.WalkGraph[*core.Node](bodyStartNode, func(node *core.Node) ([]*core.Node, error) {
+			if forwardStops[node] {
+				endNodes = append(endNodes, node)
+				return nil, nil
+			}
 			if protectedStops[node] && !protectedArmCanOwnReturn(node) {
 				endNodes = append(endNodes, node)
 				return nil, nil
@@ -137,7 +143,7 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 			sts = append(sts, node)
 			var next []*core.Node
 			for _, n := range node.Next {
-				if !encodedJumpTo(node, n) && slices.Contains(manager.DominatorMap[node], n) {
+				if !encodedJumpTo(node, n) && !forwardStops[n] && slices.Contains(manager.DominatorMap[node], n) {
 					next = append(next, n)
 				} else {
 					endNodes = append(endNodes, n)
@@ -156,7 +162,7 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	copyIfBody := false
 	// Normal-join extraction above can remove either arm: that path is now a
 	// shared continuation, not a second body eligible for shared-body copying.
-	if trueNode != nil && falseNode != nil && IsEndNode(ifNode.MergeNode) && len(trueNode.Source) > 1 && len(falseNode.Source) > 1 {
+	if trueNode != nil && falseNode != nil && IsEndNode(ifNode.MergeNode) && len(trueNode.Source) > 1 && len(falseNode.Source) > 1 && !forwardStops[trueNode] && !forwardStops[falseNode] {
 		copyIfBody = true
 		trueNode.RemoveSource(ifStatementNode)
 	}

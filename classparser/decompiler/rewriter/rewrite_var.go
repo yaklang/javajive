@@ -886,6 +886,9 @@ func rewriteVar(scope *Scope, className, methodName string) int {
 			core.TraceRewriteVar(className, methodName, "enter while depth=%d body=%d", subScope.deep, len(statement.Body))
 			rewriteVar(subScope, className, methodName)
 		case *statements.DoWhileStatement:
+			if jdecenv.Get("JDEC_DOWHILE_PREBIND_OFF") == "" {
+				prebindEscapingDoWhileSlots(scope, statement, stsSnapshot[stmtIdx+1:], idReplaceMap, className, methodName)
+			}
 			subScope := scope.SubScope(&statement.Body)
 			core.TraceRewriteVar(className, methodName, "enter do-while depth=%d body=%d", subScope.deep, len(statement.Body))
 			rewriteVar(subScope, className, methodName)
@@ -1394,6 +1397,137 @@ func prebindEscapingSwitchSlots(scope *Scope, sw *statements.SwitchStatement, af
 		scope.reused[newId] = struct{}{}
 		idReplaceMap[origId] = newId
 		core.TraceRewriteVar(className, methodName, "prebind switch escaping slot uid=%s old=%s new=%s", uid, origId.String(), newId.String())
+	}
+}
+
+func isLiteralFalse(v values.JavaValue) bool {
+	lit, ok := v.(*values.JavaLiteral)
+	if !ok {
+		return false
+	}
+	return fmt.Sprint(lit.Data) == "false"
+}
+
+// prebindEscapingDoWhileSlots pre-binds any local assigned inside a one-shot
+// forward-region `do { ... } while (false)` block whose variable is referenced
+// after the block, unifying nested branch/label-break definitions onto a single
+// parent-scope VariableId instead of letting disjoint sub-scopes split them.
+func prebindEscapingDoWhileSlots(scope *Scope, dw *statements.DoWhileStatement, afterSts []statements.Statement, idReplaceMap map[*utils.VariableId]*utils.VariableId, className, methodName string) {
+	if dw == nil || !isLiteralFalse(dw.ConditionValue) || len(dw.Body) == 0 || len(afterSts) == 0 {
+		return
+	}
+	writesByUid := map[string][]*values.JavaRef{}
+	var walk func([]statements.Statement)
+	walk = func(sts []statements.Statement) {
+		for _, st := range sts {
+			if forward, ok := st.(*statements.CustomStatement); ok {
+				if assignment, known := forward.SourceAssignmentForward(); known {
+					st = assignment
+				}
+			}
+			switch s := st.(type) {
+			case *statements.AssignStatement:
+				if s.ArrayMember != nil {
+					continue
+				}
+				ref, ok := core.UnpackSoltValue(s.LeftValue).(*values.JavaRef)
+				if !ok || ref == nil || ref.Id == nil || ref.IsThis || ref.IsParam {
+					continue
+				}
+				writesByUid[ref.VarUid] = append(writesByUid[ref.VarUid], ref)
+			case *statements.IfStatement:
+				walk(s.IfBody)
+				walk(s.ElseBody)
+			case *statements.ForStatement:
+				walk(s.SubStatements)
+			case *statements.WhileStatement:
+				walk(s.Body)
+			case *statements.DoWhileStatement:
+				walk(s.Body)
+			case *statements.SynchronizedStatement:
+				walk(s.Body)
+			case *statements.SwitchStatement:
+				for _, c := range s.Cases {
+					if c != nil {
+						walk(c.Body)
+					}
+				}
+			case *statements.TryCatchStatement:
+				walk(s.TryBody)
+				for i := range s.CatchBodies {
+					walk(s.CatchBodies[i])
+				}
+			}
+		}
+	}
+	walk(dw.Body)
+	if len(writesByUid) == 0 {
+		return
+	}
+	uids := make([]string, 0, len(writesByUid))
+	for uid := range writesByUid {
+		uids = append(uids, uid)
+	}
+	sort.SliceStable(uids, func(i, j int) bool { return varUidLess(uids[i], uids[j]) })
+	for _, uid := range uids {
+		if _, already := scope.assignedMap[uid]; already {
+			continue
+		}
+		refs := writesByUid[uid]
+		first := refs[0]
+		if first.Type() == nil {
+			continue
+		}
+		minted := false
+		for _, r := range refs {
+			if _, ok := scope.minted[r.Id]; ok {
+				minted = true
+				break
+			}
+		}
+		if minted {
+			core.TraceRewriteVar(className, methodName, "prebind do-while skip already-minted uid=%s id=%s", uid, first.Id.String())
+			continue
+		}
+		baseType := first.Type().String(&class_context.ClassContext{})
+		seenIds := map[*utils.VariableId]bool{first.Id: true}
+		origIds := []*utils.VariableId{first.Id}
+		for _, r := range refs[1:] {
+			if r.Id == nil || seenIds[r.Id] {
+				continue
+			}
+			rt := r.Type()
+			if rt == nil || rt.String(&class_context.ClassContext{}) != baseType {
+				continue
+			}
+			seenIds[r.Id] = true
+			origIds = append(origIds, r.Id)
+		}
+		const probe = "__jdec_dowhile_prebind_probe__"
+		escapes := false
+		for _, origId := range origIds {
+			saved := origId.Name
+			origId.SetName(probe)
+			if statementsReferenceName(afterSts, probe) {
+				escapes = true
+			}
+			origId.SetName(saved)
+			if escapes {
+				break
+			}
+		}
+		if !escapes {
+			continue
+		}
+		newId := utils.NewRootVariableId()
+		newId.SetName(fmt.Sprintf("var%d", scope.nowId))
+		scope.nowId++
+		scope.assignedMap[uid] = newId
+		scope.reused[newId] = struct{}{}
+		for _, origId := range origIds {
+			idReplaceMap[origId] = newId
+		}
+		core.TraceRewriteVar(className, methodName, "prebind do-while escaping slot uid=%s old=%s new=%s", uid, first.Id.String(), newId.String())
 	}
 }
 

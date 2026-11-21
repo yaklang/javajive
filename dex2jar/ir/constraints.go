@@ -160,13 +160,15 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 		define(instruction.Regs[0], intCategory)
 	case instruction.Opcode >= 0x32 && instruction.Opcode <= 0x37:
 		left, right := current[instruction.Regs[0]], current[instruction.Regs[1]]
-		if instruction.Opcode >= 0x34 || left.Kind == IntLike || right.Kind == IntLike {
+		if instruction.Opcode >= 0x34 || left.Kind == IntLike || right.Kind == IntLike || left.Kind == Bits32 || right.Kind == Bits32 {
 			use(instruction.Regs[0], intCategory)
 			use(instruction.Regs[1], intCategory)
 		} else if left.Kind != Unknown && !left.Kind.isUntyped() {
+			use(instruction.Regs[0], left)
 			use(instruction.Regs[1], left)
 		} else if right.Kind != Unknown && !right.Kind.isUntyped() {
 			use(instruction.Regs[0], right)
+			use(instruction.Regs[1], right)
 		} else if left.Kind != Unknown {
 			use(instruction.Regs[1], left)
 		} else if right.Kind != Unknown {
@@ -175,6 +177,13 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 	case instruction.Opcode >= 0x38 && instruction.Opcode <= 0x3d:
 		if instruction.Opcode >= 0x3a {
 			use(instruction.Regs[0], intCategory)
+		} else {
+			cur := current[instruction.Regs[0]]
+			if cur.Kind == Int || cur.Kind == Bits32 {
+				use(instruction.Regs[0], intCategory)
+			} else if cur.Kind == Reference || cur.Kind == Uninitialized {
+				use(instruction.Regs[0], cur)
+			}
 		}
 	case instruction.Opcode >= 0x44 && instruction.Opcode <= 0x51:
 		// The element type is not encoded in the instruction: DEX tracks it in
