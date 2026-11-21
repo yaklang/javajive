@@ -20,8 +20,8 @@ func topLevelDeclDominatesAllUses(list []statements.Statement, id *utils.Variabl
 }
 
 func declaresIdentity(st statements.Statement, id *utils.VariableId) bool {
-	as, ok := st.(*statements.AssignStatement)
-	if !ok || as == nil || as.ArrayMember != nil || !(as.IsFirst || as.IsDeclare) {
+	as, _ := unwrapAssignStatement(st)
+	if as == nil || as.ArrayMember != nil || !(as.IsFirst || as.IsDeclare) {
 		return false
 	}
 	ref, ok := values.UnpackSoltValue(as.LeftValue).(*values.JavaRef)
@@ -36,7 +36,7 @@ func blockHasUncoveredRef(list []statements.Statement, id *utils.VariableId, dec
 		if declaresIdentity(st, id) {
 			// The definition is not a use, but its initializer is evaluated before
 			// the new local is available (int x = x is not a dominating definition).
-			if !declared && valueReferencesIdentity(st.(*statements.AssignStatement).JavaValue, id) {
+			if as, _ := unwrapAssignStatement(st); as != nil && !declared && valueReferencesIdentity(as.JavaValue, id) {
 				return true
 			}
 			declared = true
@@ -78,6 +78,9 @@ func blockHasUncoveredRef(list []statements.Statement, id *utils.VariableId, dec
 // blocks are visited with their own lexical bindings, not rendered as head uses.
 func statementHeadReferencesIdentity(st statements.Statement, id *utils.VariableId) bool {
 	var operands []values.JavaValue
+	if as, _ := unwrapAssignStatement(st); as != nil {
+		st = as
+	}
 	switch s := st.(type) {
 	case nil:
 		return false

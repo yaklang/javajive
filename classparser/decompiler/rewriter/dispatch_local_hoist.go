@@ -48,7 +48,7 @@ func hoistDispatchCrossCaseDeclarations(sts *[]statements.Statement) {
 	var collect func([]statements.Statement)
 	collect = func(list []statements.Statement) {
 		for _, st := range list {
-			if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil {
+			if as, _ := unwrapAssignStatement(st); as != nil && as.ArrayMember == nil {
 				ref, _ := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef)
 				if ref != nil && ref.Id != nil && !ref.IsParam && !ref.IsThis && ref.Type() != nil &&
 					defaultInitializerForType(ref.Type()) != nil && !isSyntheticDispatchRef(ref) &&
@@ -154,8 +154,8 @@ func dispatchLoopsReference(loops []*statements.DoWhileStatement, id *utils.Vari
 
 func hasInitializedRootDeclaration(list []statements.Statement, id *utils.VariableId) bool {
 	for _, st := range list {
-		as, ok := st.(*statements.AssignStatement)
-		if !ok || as.ArrayMember != nil || !as.IsFirst || as.IsDeclare || as.JavaValue == nil {
+		as, _ := unwrapAssignStatement(st)
+		if as == nil || as.ArrayMember != nil || !as.IsFirst || as.IsDeclare || as.JavaValue == nil {
 			continue
 		}
 		ref, _ := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef)
@@ -168,7 +168,7 @@ func hasInitializedRootDeclaration(list []statements.Statement, id *utils.Variab
 
 func clearFinalForIdentity(list []statements.Statement, id *utils.VariableId) {
 	for _, st := range list {
-		if as, ok := st.(*statements.AssignStatement); ok {
+		if as, _ := unwrapAssignStatement(st); as != nil {
 			if ref, _ := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ref != nil && ref.Id == id {
 				as.Final = false
 			}

@@ -21,7 +21,7 @@ func restoreExplicitLocalDeclarations(root *[]statements.Statement) {
 	var visit func([]statements.Statement)
 	visit = func(list []statements.Statement) {
 		for _, st := range list {
-			if as, ok := st.(*statements.AssignStatement); ok && as != nil && as.ArrayMember == nil {
+			if as, _ := unwrapAssignStatement(st); as != nil && as.ArrayMember == nil {
 				if ref, ok := values.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok && ref != nil && ref.Id != nil {
 					if as.IsFirst || as.IsDeclare || ref.IsParam || ref.IsThis {
 						declared[ref.Id] = true

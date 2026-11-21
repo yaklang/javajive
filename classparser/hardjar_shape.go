@@ -6394,6 +6394,13 @@ func retargetAssignToTypedSibling(body string) string {
 			from = i + 1
 			continue
 		}
+		// Never retarget a local declaration (`Type ident = this.field;`):
+		// rewriting it turns `Object var20_1 = this.g;` into a duplicate decl of sib.
+		lineStart := strings.LastIndexByte(body[:identStart], '\n') + 1
+		if strings.TrimSpace(body[lineStart:identStart]) != "" {
+			from = i + 1
+			continue
+		}
 		field, ok, after := readJavaIdent(body[i+len(" = this."):])
 		if !ok || field == "" {
 			from = i + 1
@@ -6407,12 +6414,13 @@ func retargetAssignToTypedSibling(body string) string {
 		start := prevMemberStart(body, identStart)
 		end := nextMemberStart(body, identStart)
 		member := body[start:end]
+		relIdent := identStart - start
 		sib := ident + "_1"
 		if !strings.Contains(member, " "+sib+" ") && !strings.Contains(member, " "+sib+"=") && !strings.Contains(member, " "+sib+";") {
 			from = i + 1
 			continue
 		}
-		sibType := identDeclaredClassType(member, sib)
+		sibType := identDeclaredClassType(member[:relIdent], sib)
 		identType := identDeclaredClassType(member, ident)
 		if sibType == "" || identType == sibType {
 			from = i + 1
@@ -6425,11 +6433,11 @@ func retargetAssignToTypedSibling(body string) string {
 		}
 		old := ident + " = this." + field + ";"
 		neu := sib + " = this." + field + ";"
-		if !strings.Contains(member, old) {
+		if !strings.HasPrefix(member[relIdent:], old) {
 			from = i + 1
 			continue
 		}
-		member = strings.Replace(member, old, neu, 1)
+		member = member[:relIdent] + neu + member[relIdent+len(old):]
 		member = strings.ReplaceAll(member, "("+ident+") != (this."+field+")", "("+sib+") != (this."+field+")")
 		member = strings.ReplaceAll(member, "("+ident+") == (this."+field+")", "("+sib+") == (this."+field+")")
 		member = strings.ReplaceAll(member, ident+".close()", sib+".close()")

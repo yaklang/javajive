@@ -103,7 +103,8 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 			continue
 		}
 		ref, ok := values.UnpackSoltValue(call.Object).(*values.JavaRef)
-		if !ok || ref == nil || !ref.IsThis {
+		isThisRecv := ok && ref != nil && (ref.IsThis || (c.getenv("JDEC_THIS_ALIAS_SUPER_OFF") == "" && ref.IsThisAlias))
+		if !isThisRecv {
 			continue
 		}
 		if p.delegate != nil {

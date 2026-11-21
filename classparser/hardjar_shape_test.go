@@ -3596,3 +3596,17 @@ func TestAdversarialBuilderReturnsRequireBytecodeEvidence(t *testing.T) {
 		}
 	}
 }
+
+func TestRetargetAssignToTypedSiblingGuardsDeclarationsAndForwardScope(t *testing.T) {
+	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "")
+	// AlertController shape: typed declaration on Object slot followed later by a distinct typed sibling.
+	alertShape := "class AlertController {\n\tListView g;\n\tView A;\n\tvoid a() {\n\t\tObject var20_1 = this.g;\n\t\tif (var20_1 == null) {\n\t\t\tvar20_1 = this.A;\n\t\t}\n\t\tListView var20_1_1 = this.g;\n\t\tif (var20_1_1 != null) {\n\t\t\tvar20_1_1.setSelection(0);\n\t\t}\n\t}\n}\n"
+	if got := retargetAssignToTypedSibling(alertShape); got != alertShape {
+		t.Fatalf("typed declaration or forward sibling was falsely retargeted:\n%s", got)
+	}
+	// Even when the typed sibling is already declared earlier, a declaration header must never be rewritten.
+	afterSibDecl := "class AlertController {\n\tListView g;\n\tvoid a() {\n\t\tListView var20_1_1 = null;\n\t\tObject var20_1 = this.g;\n\t}\n}\n"
+	if got := retargetAssignToTypedSibling(afterSibDecl); got != afterSibDecl {
+		t.Fatalf("local declaration was falsely rewritten:\n%s", got)
+	}
+}

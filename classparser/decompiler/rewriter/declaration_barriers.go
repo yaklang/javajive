@@ -65,6 +65,9 @@ func DeclarationInsertionBarriers(root []statements.Statement, ctx *class_contex
 			continue
 		}
 		seen[st] = true
+		if as, _ := unwrapAssignStatement(st); as != nil {
+			st = as
+		}
 		switch s := st.(type) {
 		case *statements.AssignStatement:
 			if s != nil && (s.IsFirst || s.IsDeclare) && s.ArrayMember == nil {
