@@ -31,6 +31,10 @@ type JavaRef struct {
 	StackVar                           JavaValue
 	CustomValue                        *CustomValue
 	IsThis                             bool
+	// IsThisAlias marks a local initialized solely from `this` (or another
+	// IsThisAlias) in its reaching-def web so non-<init>, super-class
+	// invokespecial calls still render `super.m(...)` instead of virtual self-calls.
+	IsThisAlias                        bool
 	originalStackMaterialization       bool
 	originalStackPC, originalStackKind int
 	originalStackValue                 JavaValue
@@ -187,6 +191,9 @@ func IsNullLiteral(v JavaValue) bool {
 }
 
 func (j *JavaRef) String(funcCtx *class_context.ClassContext) string {
+	if j == nil {
+		return IncompleteSourceValue(funcCtx)
+	}
 	if j.IsThis {
 		return "this"
 	}
@@ -1005,13 +1012,16 @@ func (s *SlotValue) ReplaceVar(oldId *utils.VariableId, newId *utils.VariableId)
 }
 
 func (s *SlotValue) Type() types.JavaType {
-	if s.val == nil {
+	if s == nil || isNilJavaValue(s.val) {
+		if s == nil {
+			return nil
+		}
 		return s.TmpType
 	}
 	return s.val.Type()
 }
 func (s *SlotValue) String(funcCtx *class_context.ClassContext) string {
-	if s.val == nil {
+	if s == nil || isNilJavaValue(s.val) {
 		return IncompleteSourceValue(funcCtx)
 	}
 	return s.val.String(funcCtx)

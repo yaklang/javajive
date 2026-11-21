@@ -9,7 +9,9 @@ import (
 	coreutils "github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	utils2 "github.com/yaklang/javajive/classparser/decompiler/utils"
 	"github.com/yaklang/javajive/internal/graph"
+	"github.com/yaklang/javajive/internal/jdecenv"
 )
 
 type irreducibleDispatchRegion struct {
@@ -31,7 +33,7 @@ func (m *RewriteManager) LowerIrreducibleDispatch(admitted, constructor bool) bo
 		m.irreducibleDispatchError = "statement CFG lacks semantic irreducibility witness"
 		return false
 	}
-	if constructor {
+	if constructor && jdecenv.Get("JDEC_CTOR_POST_SUPER_DISPATCH_OFF") != "" {
 		m.irreducibleDispatchError = "constructor state dispatch is unsupported"
 		return false
 	}
@@ -48,7 +50,16 @@ func (m *RewriteManager) LowerIrreducibleDispatch(admitted, constructor bool) bo
 			}
 			return false
 		}
-		if !m.lowerIrreducibleRegion(region) {
+		var anchorAfter *core.Node
+		if constructor {
+			anchor, ok := m.postDelegationConstructorAnchor(region)
+			if !ok {
+				m.irreducibleDispatchError = "constructor state dispatch is unsupported"
+				return false
+			}
+			anchorAfter = anchor
+		}
+		if !m.lowerIrreducibleRegionWithAnchor(region, anchorAfter) {
 			if m.irreducibleDispatchError == "" {
 				m.irreducibleDispatchError = "residual region rejected by dispatcher"
 			}
@@ -57,6 +68,62 @@ func (m *RewriteManager) LowerIrreducibleDispatch(admitted, constructor bool) bo
 	}
 	m.irreducibleDispatchError = "dispatcher rewrite limit exceeded"
 	return false
+}
+
+// postDelegationConstructorAnchor returns the constructor's unique `this(...)` / `super(...)`
+// delegation statement node if and only if it is acyclic and strictly dominates the entire
+// irreducible region (all members and entry edges). Returns (nil, false) otherwise so
+// constructors with irreducibility before/around delegation remain cleanly rejected.
+func (m *RewriteManager) postDelegationConstructorAnchor(region irreducibleDispatchRegion) (*core.Node, bool) {
+	if m == nil || m.RootNode == nil {
+		return nil, false
+	}
+	members := make(map[*core.Node]bool, len(region.component.Nodes))
+	for _, n := range region.component.Nodes {
+		members[n] = true
+	}
+	var delegation *core.Node
+	count := 0
+	for _, node := range reachableGraphNodes(m.RootNode) {
+		if isConstructorDelegationNode(node) {
+			count++
+			delegation = node
+		}
+	}
+	if count != 1 || delegation == nil || members[delegation] || len(delegation.Next) != 1 {
+		return nil, false
+	}
+	m.refreshDominatorsShared()
+	for _, n := range region.component.Nodes {
+		if n == delegation || !m.Dominates(delegation, n) {
+			return nil, false
+		}
+	}
+	for _, edge := range region.component.EntryEdges {
+		if members[edge.From] || !members[edge.To] {
+			continue
+		}
+		if !m.Dominates(delegation, edge.From) || edge.To == delegation || !m.Dominates(delegation, edge.To) {
+			return nil, false
+		}
+	}
+	return delegation, true
+}
+
+func isConstructorDelegationNode(node *core.Node) bool {
+	if node == nil {
+		return false
+	}
+	expr, ok := node.Statement.(*statements.ExpressionStatement)
+	if !ok || expr == nil {
+		return false
+	}
+	call, ok := core.UnpackSoltValue(expr.Expression).(*values.FunctionCallExpression)
+	if !ok || call == nil || !call.IsSpecialInvoke || call.FunctionName != "<init>" {
+		return false
+	}
+	ref, ok := core.UnpackSoltValue(call.Object).(*values.JavaRef)
+	return ok && ref != nil && (ref.IsThis || ref.IsThisAlias)
 }
 
 func reachableGraphNodes(root *core.Node) []*core.Node {
@@ -71,11 +138,10 @@ func reachableGraphNodes(root *core.Node) []*core.Node {
 func (m *RewriteManager) nextIrreducibleDispatchRegion() (irreducibleDispatchRegion, bool) {
 	nodes := reachableGraphNodes(m.RootNode)
 	m.refreshDominatorsShared()
-	dominators := m.DominatorMap
 	forward := func(node *core.Node) []*core.Node {
 		out := make([]*core.Node, 0, len(node.Next))
 		for _, next := range node.Next {
-			if !dominatesNode(dominators, next, node) {
+			if !m.Dominates(next, node) {
 				out = append(out, next)
 			}
 		}
@@ -139,26 +205,6 @@ func (m *RewriteManager) nextIrreducibleDispatchRegion() (irreducibleDispatchReg
 	return regions[0], true
 }
 
-func dominatesNode(tree map[*core.Node][]*core.Node, dominator, node *core.Node) bool {
-	if dominator == nil || node == nil {
-		return false
-	}
-	if dominator == node {
-		return true
-	}
-	pending := append([]*core.Node(nil), tree[dominator]...)
-	for len(pending) > 0 {
-		last := len(pending) - 1
-		current := pending[last]
-		pending = pending[:last]
-		if current == node {
-			return true
-		}
-		pending = append(pending, tree[current]...)
-	}
-	return false
-}
-
 // skipGuardTarget keeps the entry switch's own paths on the gate so the gate
 // remains an immediate dominator child of the switch. Other pre-loop exit
 // predecessors enter the loop directly; the in-loop guard skips it.
@@ -176,9 +222,9 @@ func dominatesAllEntryTargets(source *core.Node, entries []*core.Node, root *cor
 	if source == nil || root == nil || len(entries) == 0 {
 		return false
 	}
-	tree := GenerateDominatorTree(root)
+	index := utils2.NewDominateIndex(GenerateDominatorTree(root))
 	for _, entry := range entries {
-		if !dominatesNode(tree, source, entry) {
+		if !index.IsDominate(source, entry) {
 			return false
 		}
 	}
@@ -186,6 +232,10 @@ func dominatesAllEntryTargets(source *core.Node, entries []*core.Node, root *cor
 }
 
 func (m *RewriteManager) lowerIrreducibleRegion(region irreducibleDispatchRegion) bool {
+	return m.lowerIrreducibleRegionWithAnchor(region, nil)
+}
+
+func (m *RewriteManager) lowerIrreducibleRegionWithAnchor(region irreducibleDispatchRegion, anchorAfter *core.Node) bool {
 	members := map[*core.Node]bool{}
 	for _, node := range region.component.Nodes {
 		if node == nil {
@@ -410,13 +460,19 @@ func (m *RewriteManager) lowerIrreducibleRegion(region irreducibleDispatchRegion
 	declareState := m.NewNode(statements.NewAssignStatement(state, values.NewJavaLiteral(initial, integer), true))
 	declareExit := m.NewNode(statements.NewAssignStatement(exitState, values.NewJavaLiteral(0, integer), true))
 	declareState.AddNext(declareExit)
-	declareExit.AddNext(oldRoot)
+	declareHead := declareState
 	if skip != nil {
 		declareSkip := m.NewNode(statements.NewAssignStatement(skip, values.NewJavaLiteral(false, boolean), true))
 		declareSkip.AddNext(declareState)
-		m.RootNode = declareSkip
+		declareHead = declareSkip
+	}
+	if anchorAfter != nil && len(anchorAfter.Next) == 1 {
+		afterDelegation := anchorAfter.Next[0]
+		replaceNextInPlace(anchorAfter, afterDelegation, declareHead)
+		declareExit.AddNext(afterDelegation)
 	} else {
-		m.RootNode = declareState
+		declareExit.AddNext(oldRoot)
+		m.RootNode = declareHead
 	}
 	for _, node := range remaining {
 		node.RemoveAllSource()

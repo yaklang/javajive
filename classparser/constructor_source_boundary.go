@@ -19,17 +19,22 @@ import (
 // Prefix effects are either kept behind a proved inert Object initialization or
 // evaluated in the first delegation argument, before any effect of the callee.
 type constructorSourceBoundary struct {
-	lowering       *sourceConstructorLoweringPlan
-	throwsReceipt  *constructorInvocationThrowsReceipt
-	pc             int
-	delegate       *values.FunctionCallExpression
-	prefix         []statements.Statement
-	prefixEffects  []statements.Statement
-	params         []values.JavaValue
-	carrier        string
-	carrierFormals []string
-	bridgeNames    map[int]string
-	helpers        []*dumpedMethods
+	lowering             *sourceConstructorLoweringPlan
+	throwsReceipt        *constructorInvocationThrowsReceipt
+	pc                   int
+	delegate             *values.FunctionCallExpression
+	prefix               []statements.Statement
+	prefixEffects        []statements.Statement
+	foldedStatements     map[statements.Statement]bool
+	omitExplicitSuper    bool
+	emitPrefixAfterSuper bool
+	retainCarrier        bool
+	carrierArgIndex      int
+	params               []values.JavaValue
+	carrier              string
+	carrierFormals       []string
+	bridgeNames          map[int]string
+	helpers              []*dumpedMethods
 }
 
 func constructorBoundaryValue(v values.JavaValue, allowed map[*values.JavaRef]bool, active map[values.JavaValue]bool, calls map[int]*values.FunctionCallExpression, remaining *int) bool {
@@ -87,6 +92,7 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 		}
 		p.params = append(p.params, param)
 	}
+	delegateIndex := -1
 	for i, st := range body {
 		expr, ok := st.(*statements.ExpressionStatement)
 		if !ok || expr == nil {
@@ -104,6 +110,7 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 			return nil, fmt.Errorf("ambiguous constructor initialization")
 		}
 		p.pc, p.delegate = call.OriginPC, call
+		delegateIndex = i
 		for _, prefix := range body[:i] {
 			if middle, ok := prefix.(*statements.MiddleStatement); ok && middle != nil && middle.Data == nil {
 				continue
@@ -191,6 +198,12 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 							return p, nil
 						}
 					}
+					if c.options.RetainUnprovedSource && c.getenv("JDEC_CTOR_RETAIN_PREFIX_OFF") == "" {
+						p.prefix = nil
+						p.delegate = nil
+						p.pc = int(op.CurrentOffset)
+						return p, nil
+					}
 					return nil, fmt.Errorf("implicit constructor prefix lacks receiver-observation proof")
 				}
 			}
@@ -220,17 +233,44 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 	if c.constructorCapturesCommute(p, code, method, decoder) {
 		return p, nil
 	}
+	var postSuper []statements.Statement
+	if delegateIndex >= 0 && delegateIndex+1 < len(body) {
+		postSuper = body[delegateIndex+1:]
+	}
+	if c.options.RetainUnprovedSource && c.getenv("JDEC_CTOR_RETAIN_PREFIX_OFF") == "" {
+		c.foldRetainedConstructorPrefix(p, postSuper)
+		if len(p.prefix) == 0 {
+			if err := c.planConstructorArgumentBridges(p, code, method); err != nil {
+				return nil, err
+			}
+			return p, nil
+		}
+	}
+	err := c.tryStrictConstructorPrefixCarrier(p, code, method, decoder)
+	if err == nil {
+		return p, nil
+	}
+	if !c.options.RetainUnprovedSource || c.getenv("JDEC_CTOR_RETAIN_PREFIX_OFF") != "" {
+		return nil, err
+	}
+	if c.planRetainedConstructorPrefixFallback(p, code, method, postSuper) {
+		return p, nil
+	}
+	return nil, err
+}
+
+func (c *ClassObjectDumper) tryStrictConstructorPrefixCarrier(p *constructorSourceBoundary, code *CodeAttribute, method *MemberInfo, decoder *core.Decompiler) error {
 	// A prefix cannot cross an original exception domain. The bounded carrier
 	// admits straight-line expression effects and original parameter uses only;
 	// local definitions surviving the delegation require a different proof.
 	if !constructorPreludeOutsideHandlers(code, p.pc, decoder, c.Work) || len(p.delegate.Arguments) == 0 || c.isGenuineEnum() {
-		return nil, fmt.Errorf("unsupported protected or zero-argument constructor prefix")
+		return fmt.Errorf("unsupported protected or zero-argument constructor prefix")
 	}
 	allowed := map[*values.JavaRef]bool{}
 	for _, param := range p.params {
 		ref, ok := param.(*values.JavaRef)
 		if !ok || ref == nil || ref.Id == nil || ref.IsThis {
-			return nil, fmt.Errorf("unproved constructor parameter identity")
+			return fmt.Errorf("unproved constructor parameter identity")
 		}
 		allowed[ref] = true
 	}
@@ -243,38 +283,38 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 		if !ok || expr == nil {
 			expr = c.constructorDiscardedPrefixEffect(st, decoder, method, p.pc)
 			if expr == nil {
-				return nil, fmt.Errorf("constructor prefix has escaping local or control flow")
+				return fmt.Errorf("constructor prefix has escaping local or control flow")
 			}
 		}
 		p.prefixEffects = append(p.prefixEffects, expr)
 		call, ok := values.UnpackSoltValue(expr.Expression).(*values.FunctionCallExpression)
 		if !ok || call == nil || !call.HasOriginPC || call.OriginPC <= last || call.OriginPC >= p.pc || !constructorBoundaryValue(expr.Expression, allowed, map[values.JavaValue]bool{}, calls, &remaining) {
-			return nil, fmt.Errorf("unproved constructor prefix effect ordering")
+			return fmt.Errorf("unproved constructor prefix effect ordering")
 		}
 		prefixCalls = append(prefixCalls, call)
 		last = call.OriginPC
 	}
 	for _, arg := range p.delegate.Arguments {
 		if !constructorBoundaryValue(arg, allowed, map[values.JavaValue]bool{}, calls, &remaining) {
-			return nil, fmt.Errorf("unproved constructor argument dependencies")
+			return fmt.Errorf("unproved constructor argument dependencies")
 		}
 	}
 	for pc, call := range calls {
 		if pc >= p.pc || !constructorOriginalInvoke(decoder, call, func(index int) values.JavaValue { return GetValueFromCP(c.ConstantPool, index) }) {
-			return nil, fmt.Errorf("constructor prefix origin mismatch")
+			return fmt.Errorf("constructor prefix origin mismatch")
 		}
 	}
 	if err := c.planConstructorArgumentBridges(p, code, method); err != nil {
-		return nil, err
+		return err
 	}
 	desc, _ := c.obj.getUtf8(method.DescriptorIndex)
 	mt, err := types.ParseMethodDescriptor(desc)
 	if err != nil || len(mt.FunctionType().ParamTypes) != len(p.params) {
-		return nil, fmt.Errorf("invalid constructor parameter descriptor")
+		return fmt.Errorf("invalid constructor parameter descriptor")
 	}
 	target, err := types.ParseMethodDescriptor(p.delegate.Descriptor)
 	if err != nil || len(target.FunctionType().ParamTypes) != len(p.delegate.Arguments) {
-		return nil, fmt.Errorf("invalid constructor delegation descriptor")
+		return fmt.Errorf("invalid constructor delegation descriptor")
 	}
 	// Constructing a source helper must not turn a class-scoped formal into an
 	// illegal static use or silently change source binding under erasure.
@@ -285,12 +325,12 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 		var proved bool
 		formalHeader, p.carrierFormals, sourceParams, sourceReturn, proved = c.constructorPrefixFormalBinding(p, method)
 		if !proved {
-			return nil, fmt.Errorf("generic constructor prefix requires a formal binding proof")
+			return fmt.Errorf("generic constructor prefix requires a formal binding proof")
 		}
 	}
 	helperName, err := c.constructorBoundaryHelperName("prefix", p.pc)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	p.carrier = helperName
 	declarations := []string{}
@@ -320,7 +360,7 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 			}
 			formals, params, result := types.ParseMethodSignatureFull(declaration.Signature, c.FuncCtx)
 			if formals != "" || result == nil || len(params) != len(target.FunctionType().ParamTypes) || !constructorStaticSourceType(params[0], c.FuncCtx) {
-				return nil, fmt.Errorf("constructor carrier requires closed generic formal binding")
+				return fmt.Errorf("constructor carrier requires closed generic formal binding")
 			}
 			ret = params[0].String(c.FuncCtx)
 		}
@@ -328,7 +368,7 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 	helperBody := prefix.String() + "return (" + ret + ")(" + p.delegate.ArgumentStrings(c.FuncCtx)[0] + ");"
 	helperBody = c.wrapCheckedEscapeBody(helperBody)
 	p.helpers = append(p.helpers, &dumpedMethods{methodName: helperName, code: "private static " + formalHeader + ret + " " + helperName + "(" + strings.Join(declarations, ",") + ") {" + helperBody + "}", bodyCode: helperBody, checkedEscape: true})
-	return p, nil
+	return nil
 }
 
 // A dead local store may disappear, but its invocation must still run before
@@ -440,7 +480,7 @@ func constructorStaticSourceType(typ types.JavaType, ctx *class_context.ClassCon
 
 func (c *ClassObjectDumper) constructorBoundaryHelperName(role string, pc int) (string, error) {
 	inherited, complete := c.checkedEscapeInheritedNames()
-	if !complete {
+	if !complete && !c.options.RetainUnprovedSource {
 		return "", fmt.Errorf("constructor helper requires complete inherited declarations")
 	}
 	name := fmt.Sprintf("jdec$ctor$%x$%s$%d", []byte(c.obj.GetClassName()), role, pc)
@@ -466,6 +506,9 @@ func (c *ClassObjectDumper) planConstructorArgumentBridges(p *constructorSourceB
 	}
 	declaredBefore, knownBefore := originalMethodExceptions(c.obj, method)
 	if !knownBefore {
+		if c.options.RetainUnprovedSource {
+			return nil
+		}
 		return fmt.Errorf("unknown constructor Exceptions metadata")
 	}
 	rawDecoder := core.NewDecompiler(code.Code, func(index int) values.JavaValue { return GetValueFromCP(c.ConstantPool, index) })
@@ -553,6 +596,9 @@ func (c *ClassObjectDumper) planConstructorArgumentBridges(p *constructorSourceB
 		}
 		exceptions, complete := exactInvocationExceptions(c.FuncCtx.InvocationMetadata, call.ClassName, call.FunctionName, call.Descriptor)
 		if !complete {
+			if c.options.RetainUnprovedSource {
+				continue
+			}
 			return fmt.Errorf("constructor argument lacks complete invocation declaration")
 		}
 		needed := false
@@ -567,10 +613,16 @@ func (c *ClassObjectDumper) planConstructorArgumentBridges(p *constructorSourceB
 			continue
 		}
 		if !constructorPreludeOutsideHandlers(code, p.pc, decoder, c.Work) {
+			if c.options.RetainUnprovedSource {
+				continue
+			}
 			return fmt.Errorf("protected constructor argument requires its original handler domain")
 		}
 		table, complete := c.FuncCtx.InvocationMetadata(call.ClassName)
 		if !complete || !table.MembersComplete || !table.Public {
+			if c.options.RetainUnprovedSource {
+				continue
+			}
 			return fmt.Errorf("constructor argument owner is not source-accessible")
 		}
 		matches := 0
@@ -655,10 +707,14 @@ func (p *constructorSourceBoundary) renderDelegation(ctx *class_context.ClassCon
 	for i, param := range p.params {
 		inputs[i] = param.String(ctx)
 	}
-	args[0] = p.carrier + "(" + strings.Join(inputs, ",") + ")"
+	argIdx := p.carrierArgIndex
+	if argIdx < 0 || argIdx >= len(args) {
+		argIdx = 0
+	}
+	args[argIdx] = p.carrier + "(" + strings.Join(inputs, ",") + ")"
 	if len(p.carrierFormals) > 0 {
 		owner := types.NewJavaClass(ctx.ClassName).String(ctx)
-		args[0] = owner + ".<" + strings.Join(p.carrierFormals, ",") + ">" + args[0]
+		args[argIdx] = owner + ".<" + strings.Join(p.carrierFormals, ",") + ">" + args[argIdx]
 	}
 	target := "super"
 	if strings.ReplaceAll(p.delegate.ClassName, ".", "/") == strings.ReplaceAll(ctx.ClassName, ".", "/") {

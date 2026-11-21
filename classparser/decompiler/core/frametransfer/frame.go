@@ -3,6 +3,7 @@ package frametransfer
 import (
 	"fmt"
 	"math"
+	"strings"
 )
 
 type Kind uint8
@@ -498,10 +499,7 @@ func JoinTypes(a, b Type) (Type, bool) {
 		return T(UninitThis), true
 	}
 	if a.Kind == Ref && b.Kind == Ref {
-		if a.Class == b.Class {
-			return RefOf(a.Class), true
-		}
-		return RefOf("java/lang/Object"), true
+		return RefOf(joinRefClass(a.Class, b.Class)), true
 	}
 	if a.Kind == b.Kind && a.Kind != UninitNew && a.Kind != UninitThis {
 		out := a.DropValue()
@@ -567,6 +565,25 @@ func JoinFrames(a, b Frame) (Frame, error) {
 		}
 	}
 	return out, nil
+}
+
+func joinRefClass(a, b string) string {
+	if a == b {
+		return a
+	}
+	sharedRank := 0
+	for len(a) > 1 && len(b) > 1 && a[0] == '[' && b[0] == '[' {
+		ca, cb := a[1:], b[1:]
+		if (ca[0] != '[' && ca[0] != 'L') || (cb[0] != '[' && cb[0] != 'L') {
+			break
+		}
+		sharedRank++
+		a, b = ca, cb
+	}
+	if sharedRank > 0 {
+		return strings.Repeat("[", sharedRank) + "Ljava/lang/Object;"
+	}
+	return "java/lang/Object"
 }
 
 func Float64FromType(t Type) (float64, bool) {

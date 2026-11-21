@@ -215,7 +215,7 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 				stopAt = typedLoopTryNormalBoundary(manager, node, next[i])
 			}
 		}
-		if region := manager.forwardRegions[node]; region != nil && region.protectedEnd != nil && !next[i].IsCatchStart {
+		if region := manager.protectedForwardRegion(node); region != nil && region.protectedEnd != nil && !next[i].IsCatchStart {
 			stopAt = region.protectedEnd
 		}
 		body, err := getBody(next[i], stopAt)

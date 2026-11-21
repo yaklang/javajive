@@ -70,6 +70,9 @@ func (f *ClassContext) staticOwner(name string, classOwner bool) string {
 	}
 	if classOwner {
 		if !f.staticOwnerTypeSyntax(name, bound) {
+			if f.RetainUnprovedSource && name != "" {
+				return strings.TrimSuffix(retainedOwnerPrefix(name), ".")
+			}
 			f.failStaticOwner(name, "", "", "class type is obscured in both simple and qualified source syntax")
 			return bound
 		}

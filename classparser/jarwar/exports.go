@@ -23,8 +23,9 @@ type ArchiveOptions struct {
 	Work       *javaclassparser.WorkBudget
 	// MaxAnalysisUpdates bounds per-method reaching-definition work. Zero keeps
 	// the default policy; large positive values scale graph caps.
-	MaxAnalysisUpdates int
-	TargetRelease      int
+	MaxAnalysisUpdates   int
+	TargetRelease        int
+	RetainUnprovedSource bool
 }
 
 // DecompileArchiveOptions is the explicit name for ArchiveOptions.
@@ -120,6 +121,7 @@ func autoDecompileFlat(from, to string, options ArchiveOptions) error {
 		}
 		decompiler := javaclassparser.NewJarFS(zipFS)
 		decompiler.SetAnalysisBudget(options.MaxAnalysisUpdates)
+		decompiler.SetRetainUnprovedSource(options.RetainUnprovedSource)
 		jar, err := NewFromJarFS(decompiler)
 		if err != nil {
 			_ = zipFS.Close()
@@ -133,14 +135,15 @@ func autoDecompileFlat(from, to string, options ArchiveOptions) error {
 			return utils.Errorf("read class file failed: %v", err)
 		}
 		var decompiled string
-		if options.Context != nil || options.Work != nil || options.Limits != (javaclassparser.Limits{}) || options.TargetRelease != 0 || options.MaxAnalysisUpdates > 0 {
+		if options.Context != nil || options.Work != nil || options.Limits != (javaclassparser.Limits{}) || options.TargetRelease != 0 || options.MaxAnalysisUpdates > 0 || options.RetainUnprovedSource {
 			result, derr := javaclassparser.DecompileWithOptions(raw, javaclassparser.DecompileOptions{
-				Mode:               javaclassparser.Compatibility,
-				Context:            options.Context,
-				Limits:             options.Limits,
-				Work:               options.Work,
-				TargetRelease:      options.TargetRelease,
-				MaxAnalysisUpdates: options.MaxAnalysisUpdates,
+				Mode:                 javaclassparser.Compatibility,
+				Context:              options.Context,
+				Limits:               options.Limits,
+				Work:                 options.Work,
+				TargetRelease:        options.TargetRelease,
+				MaxAnalysisUpdates:   options.MaxAnalysisUpdates,
+				RetainUnprovedSource: options.RetainUnprovedSource,
 			})
 			if derr != nil {
 				return utils.Errorf("decompile class failed: %v", derr)

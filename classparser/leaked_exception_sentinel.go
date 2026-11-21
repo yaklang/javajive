@@ -31,6 +31,8 @@ func fixLeakedExceptionSentinelCode(body string) string {
 	body = rewriteLeakedTryLockFinally(body)
 	body = rewriteLeakedCatchFromSibling(body)
 	body = rewriteCatchThrowSplitId(body)
+	body = rewriteLeakedSuppressedClose(body)
+	body = stripDeadExceptionSentinelLocals(body)
 	return body
 }
 
@@ -287,4 +289,104 @@ func rewriteCatchThrowSplitId(body string) string {
 		}
 		from = close
 	}
+}
+
+func countWholeIdentifierOccurrences(text, ident string) int {
+	if ident == "" {
+		return 0
+	}
+	count := 0
+	from := 0
+	for {
+		idx := strings.Index(text[from:], ident)
+		if idx < 0 {
+			return count
+		}
+		start := from + idx
+		end := start + len(ident)
+		leftOK := start == 0 || !isJavaIdentByte(text[start-1])
+		rightOK := end == len(text) || !isJavaIdentByte(text[end])
+		if leftOK && rightOK {
+			count++
+		}
+		from = end
+	}
+}
+
+func leadingWhitespace(line string) string {
+	i := 0
+	for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
+		i++
+	}
+	return line[:i]
+}
+
+// rewriteLeakedSuppressedClose recovers Kotlin/Java try-with-resources close-suppression
+// blocks where D8/R8 emitted `<Type> <varX> = Exception; <primary>.addSuppressed(<varX>); <res>.close();`
+// directly into a `try { <res>.close(); } catch(<Type> <varX>) { <primary>.addSuppressed(<varX>); }`.
+func rewriteLeakedSuppressedClose(body string) string {
+	if !strings.Contains(body, "= Exception;") || !strings.Contains(body, ".addSuppressed(") {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	out := make([]string, 0, len(lines))
+	changed := false
+	for i := 0; i < len(lines); i++ {
+		if i+2 < len(lines) {
+			l1 := strings.TrimSpace(lines[i])
+			f1 := strings.Fields(l1)
+			if len(f1) == 4 && f1[2] == "=" && f1[3] == "Exception;" && strings.HasPrefix(f1[1], "var") {
+				typ, varName := f1[0], f1[1]
+				l2 := strings.TrimSpace(lines[i+1])
+				l3 := strings.TrimSpace(lines[i+2])
+				suffix2 := ".addSuppressed(" + varName + ");"
+				if strings.HasSuffix(l2, suffix2) && strings.HasSuffix(l3, ".close();") &&
+					!strings.ContainsAny(l3, "{}") && countWholeIdentifierOccurrences(l3, varName) == 0 &&
+					countWholeIdentifierOccurrences(body, varName) == 2 {
+					indent := leadingWhitespace(lines[i])
+					out = append(out,
+						indent+"try{",
+						indent+"\t"+l3,
+						indent+"}catch("+typ+" "+varName+"){",
+						indent+"\t"+l2,
+						indent+"}",
+					)
+					i += 2
+					changed = true
+					continue
+				}
+			}
+		}
+		out = append(out, lines[i])
+	}
+	if !changed {
+		return body
+	}
+	return strings.Join(out, "\n")
+}
+
+// stripDeadExceptionSentinelLocals removes `<Type> <varX> = Exception;` declarations
+// when `<varX>` is a synthetic decompiler variable never referenced anywhere else in the method.
+func stripDeadExceptionSentinelLocals(body string) string {
+	if !strings.Contains(body, "= Exception;") {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	out := make([]string, 0, len(lines))
+	changed := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		fields := strings.Fields(trimmed)
+		if len(fields) == 4 && fields[2] == "=" && fields[3] == "Exception;" && strings.HasPrefix(fields[1], "var") {
+			if countWholeIdentifierOccurrences(body, fields[1]) == 1 {
+				changed = true
+				continue
+			}
+		}
+		out = append(out, line)
+	}
+	if !changed {
+		return body
+	}
+	return strings.Join(out, "\n")
 }

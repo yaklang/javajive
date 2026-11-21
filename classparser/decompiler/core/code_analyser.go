@@ -220,7 +220,9 @@ type Decompiler struct {
 	// reaching-definition passes inspect a definition's RHS (e.g. recognize an `iconst_0`/`iconst_1`
 	// default initializer that must be re-typed when its slot is later proven boolean). Used by the
 	// boolean default-init phi merge (Bug AI residual).
-	slotStoreValue map[*OpCode]values.JavaValue
+	slotStoreValue   map[*OpCode]values.JavaValue
+	nonThisAliasUids map[string]bool
+	thisAliasRefs    map[string][]*values.JavaRef
 
 	// EmbeddedAssignDeclRefs collects the LHS local of every dup-collapse that bakes an embedded
 	// assignment `(varN = expr)` into an opaque CustomValue (e.g. `s == null || (n = s.length()) == 0`,
@@ -316,6 +318,8 @@ func NewDecompiler(bytecodes []byte, constantPoolGetter func(id int) values.Java
 		selfOpFoldedRefs:     map[string]bool{},
 		slotStoreTrace:       map[int]slotStoreTraceInfo{},
 		slotStoreValue:       map[*OpCode]values.JavaValue{},
+		nonThisAliasUids:     map[string]bool{},
+		thisAliasRefs:        map[string][]*values.JavaRef{},
 	}
 }
 
@@ -3953,6 +3957,16 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 				refPhiMerged = true
 			}
 		}
+		// T4b phi-convergent continuation: when an intermediate branch store changed the global slot
+		// version, reconnect a trailing same-type/subtype branch store onto the single reaching prior
+		// non-null variable at the downstream merge load. Kill-switch: JDEC_T4B_PHI_MERGE_OFF=1.
+		if !refPhiMerged {
+			if merged := d.reachingPhiConvergentSameOrSuperStore(opcode, slot, value); merged != nil {
+				runtimeStackSimulation.SetVar(slot, merged)
+				oldRef = merged
+				refPhiMerged = true
+			}
+		}
 		// Disjoint boolean-return slot split (guava LocalCache$Segment.replace): a boolean method's
 		// `return false/true` (iconst_0/1; istore S) reuses a slot a disjoint earlier range used as an
 		// int local. Coerce the 0/1 literal to boolean so AssignVarGuarded below mints a FRESH boolean
@@ -4040,6 +4054,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		if slot == 0 && oldRef != nil && oldRef.IsThis && ref != nil && oldRef.VarUid == ref.VarUid {
 			ref.IsThis = false
 		}
+		d.markThisAliasStore(opcode, slot, value, oldRef, ref, isFirst)
 		if d.traceEnabled("slot-version") {
 			last := d.slotStoreTrace[slot]
 			oldType, newType := "<nil>", "<nil>"
@@ -4480,7 +4495,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 
 		funcCallValue.Object = runtimeStackSimulation.Pop().(values.JavaValue)
 		if funcCallValue.FunctionName == "<init>" {
-			if ref, ok := values.UnpackSoltValue(funcCallValue.Object).(*values.JavaRef); ok && ref != nil && ref.IsThis {
+			if ref, ok := values.UnpackSoltValue(funcCallValue.Object).(*values.JavaRef); ok && d.isThisOrAliasRef(ref) {
 				d.constructorInitialized = true
 			}
 		}
@@ -4572,7 +4587,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// A proven lexical capture supplies the caller's parameterization while
 		// the original member descriptor and opcode remain unchanged.
 		if funcCtx != nil && funcCtx.SourceCapturedFieldType != nil {
-			if ref, ok := values.UnpackSoltValue(v).(*values.JavaRef); ok && ref.IsThis {
+			if ref, ok := values.UnpackSoltValue(v).(*values.JavaRef); ok && d.isThisOrAliasRef(ref) {
 				if view, ok := funcCtx.SourceCapturedFieldType(int(opcode.CurrentOffset), strings.ReplaceAll(member.Name, ".", "/"), member.Member, member.Description).(types.JavaType); ok && view != nil {
 					fieldType = view.Copy()
 				}
@@ -6875,7 +6890,7 @@ func (d *Decompiler) ParseStatement() error {
 						// constructors: allocation and initialization can both throw.
 						v.ConstructorCall = funcCallValue
 						skip = true
-					} else if len(funcCallValue.Arguments) == 0 && funcCallValue.ClassName != funcCtx.ClassName && !funcCtx.RetainImplicitConstructorCalls {
+					} else if len(funcCallValue.Arguments) == 0 && funcCallValue.ClassName != funcCtx.ClassName && !funcCtx.RetainImplicitConstructorCalls && !(d.HasDeferredIrreducibleControlFlow() && jdecenv.Get("JDEC_CTOR_POST_SUPER_DISPATCH_OFF") == "") {
 						// An implicit no-argument super call is inserted by javac.
 						// A this() delegation is not: it executes another constructor
 						// and must retain that initialization and its effects.
@@ -7697,6 +7712,35 @@ func (d *Decompiler) ParseStatement() error {
 				d.tracef("var-fold", "skip single-use-fold (side-effect reorder) ref=%s val=%s",
 					traceRef(ref, d.FunctionContext), traceValue(val, d.FunctionContext))
 				return true
+			}
+			if sourceNode != nil && node != nil && d.getenv("JDEC_T4B_LIVE_STORE_FOLD_OFF") == "" {
+				var storeOp *OpCode
+				if assignStmt, ok := sourceNode.Statement.(*statements.AssignStatement); ok && assignStmt != nil && assignStmt.HasOriginPC {
+					storeOp = d.opcodeAtOffset(assignStmt.OriginPC)
+				}
+				if storeOp == nil {
+					storeOp = idToOpcode[sourceNode.Id]
+				}
+				if storeOp == nil || storeOp.Instr == nil || !isLocalStoreOpcode(storeOp.Instr.OpCode) {
+					storeOp = d.refToCreatingStore[ref]
+				}
+				if storeOp != nil && storeOp.Instr != nil && isLocalStoreOpcode(storeOp.Instr.OpCode) {
+					var arrayVal *values.NewExpression
+					if arr, ok := values.UnpackSoltValue(val).(*values.NewExpression); ok && arr.IsArray() {
+						arrayVal = arr
+					}
+					soleLoad := pair.CurrentOpcode
+					if soleLoad != nil && soleLoad.Instr != nil && !isLocalLoadOpcode(soleLoad.Instr.OpCode) {
+						if found := d.findLoadByRef(ref); found != nil {
+							soleLoad = found
+						}
+					}
+					if d.singleUseStoreReachesOtherLoad(storeOp, soleLoad, GetStoreIdx(storeOp), arrayVal) {
+						d.tracef("var-fold", "skip single-use-fold (live across branch) ref=%s storePC=%d usePC=%d",
+							traceRef(ref, d.FunctionContext), storeOp.CurrentOffset, pair.CurrentOpcode.CurrentOffset)
+						return true
+					}
+				}
 			}
 			if !d.canInlineValue(val, sourceNode, node, idToOpcode, ref, pair.CurrentOpcode) {
 				sourceNodeID, targetNodeID := -1, -1

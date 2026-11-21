@@ -17,7 +17,7 @@ func materializeProtectedCommitExit(m *RewriteManager, condition *core.Node) {
 		return
 	}
 	for _, owner := range m.TryNodes {
-		if owner == nil || !owner.HasProtectedRange || m.forwardRegions[owner] != nil || owner.HideNext != nil || len(owner.EncodedJumps) != 0 || len(owner.Next) != 2 || !protectedExitOwnerHandlerKnown(m, owner) || !utils2.IsDominate(m.DominatorMap, owner, condition) {
+		if owner == nil || !owner.HasProtectedRange || len(m.forwardRegions[owner]) != 0 || owner.HideNext != nil || len(owner.EncodedJumps) != 0 || len(owner.Next) != 2 || !protectedExitOwnerHandlerKnown(m, owner) || !utils2.IsDominate(m.DominatorMap, owner, condition) {
 			continue
 		}
 		start, handler := owner.Next[0], owner.Next[1]
@@ -139,9 +139,9 @@ func materializeProtectedCommitExit(m *RewriteManager, condition *core.Node) {
 		}
 		region := &forwardRegion{exit: alternate, protectedEnd: commit, protectedRanges: slices.Clone(ranges), label: m.NewLoopLabel()}
 		if m.forwardRegions == nil {
-			m.forwardRegions = map[*core.Node]*forwardRegion{}
+			m.forwardRegions = map[*core.Node][]*forwardRegion{}
 		}
-		m.forwardRegions[owner] = region
+		m.forwardRegions[owner] = []*forwardRegion{region}
 		for _, edge := range edges {
 			if edge.to == alternate {
 				jump := m.NewNode(statements.NewSourceTransferStatement("break", region.label))

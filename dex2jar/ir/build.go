@@ -120,8 +120,8 @@ func validateInstructions(method *Method, file *model.File) error {
 			if len(descriptor) < 2 || descriptor[0] != '[' {
 				return diagnostic(method.Context, instruction, "", fmt.Errorf("filled-new-array type %q is not an array", descriptor))
 			}
-			if component := descriptor[1:]; component == "J" || component == "D" || component == "F" {
-				return diagnostic(method.Context, instruction, "", report.Unsupported("filled-new-array wide or floating element", fmt.Errorf("filled-new-array of a wide or floating element is unsupported")))
+			if component := descriptor[1:]; component == "J" || component == "D" {
+				return diagnostic(method.Context, instruction, "", report.Unsupported("filled-new-array of a wide element", fmt.Errorf("filled-new-array of a wide element is unsupported")))
 			}
 		}
 		if instruction.Opcode == 0x1c || instruction.Opcode == 0x1f || instruction.Opcode == 0x20 || instruction.Opcode == 0x22 || instruction.Opcode == 0x23 {
@@ -662,6 +662,9 @@ func mergeUntyped(left, right Category) (Category, bool, error) {
 	if typed.Kind.isUntyped() {
 		switch {
 		case untyped.Kind == typed.Kind:
+			if untyped.Kind == Null && (untyped.Allocation == PolyZeroAllocation || typed.Allocation == PolyZeroAllocation) {
+				return Category{Kind: Null, Allocation: PolyZeroAllocation}, left.Allocation != PolyZeroAllocation, nil
+			}
 			return left, false, nil
 		case untyped.Kind == Null:
 			// A zero constant is a valid 32-bit constant but never supplies the

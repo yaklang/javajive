@@ -38,7 +38,7 @@ import (
 )
 
 // Version is the javajive library/CLI version.
-const Version = "0.8.2"
+const Version = "0.9.0"
 
 // HasEmbeddedJDKConstructorBundle reports whether this binary was compiled with
 // `-tags javajive_full_jdk` (embedding the 7.7 MiB JDK constructor classfile
@@ -324,8 +324,20 @@ func DecompileDEXFileWithAnalysisBudget(src, dst string, options DexOptions, max
 
 // DecompileDEXFileWithPolicy translates DEX/Android input with an explicit
 // failure policy, decompiles the resulting private JAR, and returns the
-// detailed translation report. The temporary JAR is always removed.
+// detailed translation report. Full recovery policy (`DexFailureRecover`) also
+// retains readable Java source for R8-minified classes whose javac proof
+// metadata was stripped. The temporary JAR is always removed.
 func DecompileDEXFileWithPolicy(src, dst string, options DexConvertOptions, maxAnalysisUpdates int) (DexDetailedReport, error) {
+	return DecompileDEXFileWithArchiveOptions(src, dst, options, ArchiveOptions{
+		MaxAnalysisUpdates:   maxAnalysisUpdates,
+		RetainUnprovedSource: options.Policy == DexFailureRecover,
+	})
+}
+
+// DecompileDEXFileWithArchiveOptions translates DEX/Android input with explicit
+// DEX conversion options and archive decompiler options. The temporary JAR is
+// always removed.
+func DecompileDEXFileWithArchiveOptions(src, dst string, options DexConvertOptions, archiveOptions ArchiveOptions) (DexDetailedReport, error) {
 	tempDir, err := os.MkdirTemp("", "javajive-dex-decompile-*")
 	if err != nil {
 		return DexDetailedReport{Status: "failed"}, err
@@ -337,7 +349,7 @@ func DecompileDEXFileWithPolicy(src, dst string, options DexConvertOptions, maxA
 	if err != nil {
 		return detailed, err
 	}
-	if err := DecompileArchiveWithAnalysisBudget(jarPath, dst, maxAnalysisUpdates); err != nil {
+	if _, err := DecompileArchiveWithOptions(jarPath, dst, archiveOptions); err != nil {
 		return detailed, err
 	}
 	return detailed, nil

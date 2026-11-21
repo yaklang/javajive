@@ -82,15 +82,16 @@ Run "javajive <command> -h" for command-specific options.
 func cmdDecompile(args []string) error {
 	fs := newFlagSet("decompile")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "usage: javajive decompile [-o out] [-analysis-budget N] [--structured] [--best-effort | --stub-methods-only] <file|dir>")
+		fmt.Fprintln(fs.Output(), "usage: javajive decompile [-o out] [-analysis-budget N] [--structured] [--retain-unproved] [--best-effort | --stub-methods-only] <file|dir>")
 		fmt.Fprintln(fs.Output(), "Decompile .class, Java archives (.jar/.war/.ear/.aar/.par/.jmod/.zip), JDK runtime images (.jimage / lib/modules), DEX/APK/APKS/XAPK/APKM/AAB, or a directory of .class files.")
 		fmt.Fprintln(fs.Output(), "Android containers and DEX default to <input>.src; --structured applies to Java archives and JImage.")
-		fmt.Fprintln(fs.Output(), "--best-effort applies full DEX/Android recovery; --stub-methods-only keeps the narrower recognized-method policy.")
+		fmt.Fprintln(fs.Output(), "--best-effort applies full DEX/Android recovery (and retains unproved R8 source); --stub-methods-only keeps the narrower recognized-method policy.")
 		fs.PrintDefaults()
 	}
 	out := fs.String("o", "", "output file (for a .class) or directory (for archives/DEX/APK/dirs); default: stdout / <input>.src")
 	budget := fs.Int("analysis-budget", 0, "per-method analysis updates for very large generated methods (0 = default; >1000000 scales graph caps)")
 	structured := fs.Bool("structured", false, "for archives: emit sources/, resources/, and preserved nested archives/ views")
+	retainUnproved := fs.Bool("retain-unproved", false, "retain readable source when R8/obfuscation strips javac proof metadata")
 	bestEffort := fs.Bool("best-effort", false, "for DEX/Android: recover method/class failures and emit a traceable partial result")
 	stubMethodsOnly := fs.Bool("stub-methods-only", false, "for DEX/Android: only stub recognized unsupported methods")
 	if err := fs.Parse(args); err != nil {
@@ -110,7 +111,7 @@ func cmdDecompile(args []string) error {
 	}
 
 	if info.IsDir() {
-		return decompileDir(input, *out, *budget)
+		return decompileDir(input, *out, *budget, *retainUnproved)
 	}
 
 	kind, err := jj.ClassifyInputFile(input)
@@ -118,7 +119,7 @@ func cmdDecompile(args []string) error {
 		return err
 	}
 
-	if jj.IsAndroidContainer(kind) {
+	if jj.IsAndroidContainer(kind) || kind == jj.ContainerDEX {
 		if *structured {
 			return fmt.Errorf("--structured applies to Java archives, not %s input", kind)
 		}
@@ -135,7 +136,10 @@ func cmdDecompile(args []string) error {
 		} else if *stubMethodsOnly {
 			policy = jj.DexFailureStubUnsupportedMethods
 		}
-		detailed, err := jj.DecompileDEXFileWithPolicy(input, dst, jj.DexConvertOptions{Policy: policy}, *budget)
+		detailed, err := jj.DecompileDEXFileWithArchiveOptions(input, dst, jj.DexConvertOptions{Policy: policy}, jj.ArchiveOptions{
+			MaxAnalysisUpdates:   *budget,
+			RetainUnprovedSource: *retainUnproved || policy == jj.DexFailureRecover,
+		})
 		if err != nil {
 			return err
 		}
@@ -153,16 +157,21 @@ func cmdDecompile(args []string) error {
 		if dst == "" {
 			dst = input + ".src"
 		}
-		if *structured {
+		if *structured || *retainUnproved {
 			report, err := jj.DecompileArchiveWithOptions(input, dst, jj.ArchiveOptions{
-				Structured:         true,
-				MaxAnalysisUpdates: *budget,
+				Structured:           *structured,
+				MaxAnalysisUpdates:   *budget,
+				RetainUnprovedSource: *retainUnproved,
 			})
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(os.Stderr, "decompiled %s archive %q -> %q (%d entries, %d nested archives)\n",
-				kind, input, dst, len(report.Entries), len(report.Archives))
+			if *structured {
+				fmt.Fprintf(os.Stderr, "decompiled %s archive %q -> %q (%d entries, %d nested archives)\n",
+					kind, input, dst, len(report.Entries), len(report.Archives))
+			} else {
+				fmt.Fprintf(os.Stderr, "decompiled %s archive %q -> %q\n", kind, input, dst)
+			}
 			return nil
 		}
 		if err := jj.DecompileArchiveWithAnalysisBudget(input, dst, *budget); err != nil {
@@ -176,7 +185,7 @@ func cmdDecompile(args []string) error {
 	if err != nil {
 		return err
 	}
-	src, err := decompileClassBytes(data, *budget)
+	src, err := decompileClassBytes(data, *budget, *retainUnproved)
 	if err != nil {
 		return err
 	}
@@ -192,13 +201,14 @@ func cmdDecompile(args []string) error {
 
 // decompileClassBytes uses the explicit-budget path only when the caller asked
 // for one, preserving the default single-class behavior otherwise.
-func decompileClassBytes(data []byte, budget int) (string, error) {
-	if budget <= 0 {
+func decompileClassBytes(data []byte, budget int, retainUnproved bool) (string, error) {
+	if budget <= 0 && !retainUnproved {
 		return jj.Decompile(data)
 	}
 	result, err := jj.DecompileWithOptions(data, jj.DecompileOptions{
-		Mode:               jj.Compatibility,
-		MaxAnalysisUpdates: budget,
+		Mode:                 jj.Compatibility,
+		MaxAnalysisUpdates:   budget,
+		RetainUnprovedSource: retainUnproved,
 	})
 	if err != nil {
 		return "", err
@@ -209,7 +219,7 @@ func decompileClassBytes(data []byte, budget int) (string, error) {
 	return result.Source, nil
 }
 
-func decompileDir(dir, out string, budget int) error {
+func decompileDir(dir, out string, budget int, retainUnproved bool) error {
 	if out == "" {
 		return fmt.Errorf("decompiling a directory requires -o <output directory>")
 	}
@@ -224,7 +234,7 @@ func decompileDir(dir, out string, budget int) error {
 		if err != nil {
 			return err
 		}
-		src, decErr := decompileClassBytes(data, budget)
+		src, decErr := decompileClassBytes(data, budget, retainUnproved)
 		if decErr != nil {
 			fmt.Fprintf(os.Stderr, "skip %q: %v\n", path, decErr)
 			return nil

@@ -66,7 +66,7 @@ func TestForwardRegionRetainsSharedWorkAndBypassPolarity(t *testing.T) {
 			}
 			m.DominatorMap = GenerateDominatorTree(m.RootNode)
 			materializeForwardRegionExits(m, inner)
-			region := m.forwardRegions[owner]
+			region := m.primaryForwardRegion(owner)
 			if region == nil || region.exit != exit || region.label == "" {
 				t.Fatal("closed partial decision has no exact exit binding")
 			}
@@ -254,7 +254,7 @@ func TestForwardRegionExitCanHaveExternalPredecessors(t *testing.T) {
 	n[0].AddNext(n[6])
 	m.DominatorMap = GenerateDominatorTree(m.RootNode)
 	materializeForwardRegionExits(m, n[2])
-	region := m.forwardRegions[n[1]]
+	region := m.primaryForwardRegion(n[1])
 	if region == nil || region.exit != n[6] {
 		t.Fatal("outer bypass stole inner region ownership")
 	}
@@ -278,7 +278,7 @@ func TestForwardRegionExitTracksStructuredReplacement(t *testing.T) {
 	exit.FalseNode = func() *core.Node { return exit.Next[1] }
 	m.DominatorMap = GenerateDominatorTree(m.RootNode)
 	materializeForwardRegionExits(m, n[2])
-	region := m.forwardRegions[n[1]]
+	region := m.primaryForwardRegion(n[1])
 	if region == nil {
 		t.Fatal("missing region")
 	}

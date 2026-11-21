@@ -1,6 +1,7 @@
 package core
 
 import (
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
@@ -311,4 +312,249 @@ func (d *Decompiler) reachingSlotStoreContinuationByWeb(store *OpCode, slot int,
 		return nil
 	}
 	return canon
+}
+
+// isPureThisAliasStore reports whether storing `this` into `slot` at `store` belongs to a
+// reaching-definition web isolated from method-entry slot state and free of non-`this` stores.
+func (d *Decompiler) isPureThisAliasStore(store *OpCode, slot int) bool {
+	if store == nil || slot <= 0 {
+		return false
+	}
+	webs := d.slotWebs()
+	if webs == nil {
+		return false
+	}
+	storeWeb, ok := webs.webOf[store]
+	if !ok {
+		return false
+	}
+	if entryWeb, hasEntry := webs.entryWeb[slot]; hasEntry && entryWeb == storeWeb {
+		return false
+	}
+	for op, w := range webs.webOf {
+		if w != storeWeb || op == store || op == nil || op.Instr == nil {
+			continue
+		}
+		if !isLocalStoreOpcode(op.Instr.OpCode) || GetStoreIdx(op) != slot {
+			continue
+		}
+		if prevVal, seen := d.slotStoreValue[op]; seen {
+			unpacked := values.UnpackSoltValue(prevVal)
+			sr, ok := unpacked.(*values.JavaRef)
+			if !ok || sr == nil || !(sr.IsThis || (sr.IsThisAlias && !d.nonThisAliasUids[sr.VarUid])) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// reachingPhiConvergentSameOrSuperStore resolves T4b diamond/computeIfAbsent stores:
+// when a branch store `store` flows forward to a downstream phi load where all already-simulated
+// reaching definitions share one non-null-initialized canonical variable `canon` whose declared type
+// is equal to or a proven supertype of `val`, continue `canon` instead of splitting off a fresh
+// block-scoped local. Kill-switch: JDEC_T4B_PHI_MERGE_OFF=1.
+func (d *Decompiler) reachingPhiConvergentSameOrSuperStore(store *OpCode, slot int, val values.JavaValue) *values.JavaRef {
+	if d.getenv("JDEC_T4B_PHI_MERGE_OFF") == "1" {
+		return nil
+	}
+	if store == nil || val == nil || val.Type() == nil {
+		return nil
+	}
+	vt := slotDeclType(val)
+	if vt == nil {
+		return nil
+	}
+	if values.IsNullLiteral(values.UnpackSoltValue(val)) {
+		return nil
+	}
+	webs := d.slotWebs()
+	ctx := &class_context.ClassContext{}
+	vtName := vt.String(ctx)
+	_, vtPrim := vt.RawType().(*types.JavaPrimer)
+	var provider types.SuperTypeProvider
+	if d.FunctionContext != nil {
+		provider = d.FunctionContext.SiblingSuperTypes
+	}
+
+	visited := map[*OpCode]bool{store: true}
+	queue := append([]*OpCode{}, store.Target...)
+	for head := 0; head < len(queue); head++ {
+		cur := queue[head]
+		if cur == nil || cur.Instr == nil || visited[cur] {
+			continue
+		}
+		visited[cur] = true
+		if isLocalStoreOpcode(cur.Instr.OpCode) && GetStoreIdx(cur) == slot {
+			continue
+		}
+		if cur.Instr.OpCode == OP_IINC && GetStoreIdx(cur) == slot {
+			continue
+		}
+		if isLocalLoadOpcode(cur.Instr.OpCode) && GetRetrieveIdx(cur) == slot {
+			stores, reachesEntry := d.reachingStores(cur, slot)
+			if reachesEntry {
+				goto nextEdges
+			}
+			var (
+				sawSelf   bool
+				ambiguous bool
+				canon     *values.JavaRef
+				canonOp   *OpCode
+			)
+			for _, st := range stores {
+				if st == store {
+					sawSelf = true
+					continue
+				}
+				refs, ok := d.opcodeIdToRef[st]
+				if !ok || len(refs) == 0 {
+					continue
+				}
+				stRef, ok := refs[len(refs)-1][0].(*values.JavaRef)
+				if !ok || stRef == nil || stRef.IsThis || stRef.IsParam {
+					ambiguous = true
+					break
+				}
+				if canon == nil {
+					canon = stRef
+					canonOp = st
+				} else if canon.VarUid != stRef.VarUid {
+					ambiguous = true
+					break
+				}
+			}
+			if !sawSelf || ambiguous || canon == nil || canonOp == nil || canon.IsNullInitialized() {
+				goto nextEdges
+			}
+			ct := canon.Type()
+			if ct == nil {
+				goto nextEdges
+			}
+			if webs != nil {
+				sw, ok1 := webs.webOf[store]
+				cw, ok2 := webs.webOf[canonOp]
+				if !ok1 || !ok2 || sw != cw {
+					goto nextEdges
+				}
+			}
+			_, ctPrim := ct.RawType().(*types.JavaPrimer)
+			if ctPrim != vtPrim {
+				goto nextEdges
+			}
+			ctName := ct.String(ctx)
+			compatible := ctName == vtName
+			if !compatible && !ctPrim {
+				if cFQN, ok1 := types.RawClassFQN(ct); ok1 {
+					if vFQN, ok2 := types.RawClassFQN(vt); ok2 {
+						compatible = types.IsReferenceSubtypeBridged(vFQN, cFQN, provider)
+					}
+				}
+			}
+			if compatible {
+				return canon
+			}
+		}
+	nextEdges:
+		queue = append(queue, cur.Target...)
+	}
+	return nil
+}
+
+// singleUseStoreReachesOtherLoad reports whether a local store candidate for single-use folding
+// reaches any slot load (or IINC) other than `soleUseOp`, so deleting the store statement would leave
+// a downstream read on an unskipped/unbranching path uninitialized (T4b).
+func (d *Decompiler) singleUseStoreReachesOtherLoad(storeOp, soleUseOp *OpCode, slot int, arrayVal *values.NewExpression) bool {
+	if storeOp == nil || slot < 0 {
+		return false
+	}
+	visited := map[*OpCode]bool{storeOp: true}
+	queue := append([]*OpCode{}, storeOp.Target...)
+	for head := 0; head < len(queue); head++ {
+		cur := queue[head]
+		if cur == nil || cur.Instr == nil || visited[cur] {
+			continue
+		}
+		visited[cur] = true
+		if isLocalStoreOpcode(cur.Instr.OpCode) && GetStoreIdx(cur) == slot {
+			continue
+		}
+		isLoad := isLocalLoadOpcode(cur.Instr.OpCode) && GetRetrieveIdx(cur) == slot
+		isIinc := cur.Instr.OpCode == OP_IINC && GetStoreIdx(cur) == slot
+		if isLoad || isIinc {
+			skipWindow := arrayVal != nil && arrayVal.IsArray() && arrayVal.HasEvaluationEndPC && int(cur.CurrentOffset) <= arrayVal.EvaluationEndPC
+			if cur != soleUseOp && !skipWindow {
+				stores, _ := d.reachingStores(cur, slot)
+				for _, st := range stores {
+					if st == storeOp {
+						return true
+					}
+				}
+			}
+		}
+		if isIinc {
+			continue
+		}
+		queue = append(queue, cur.Target...)
+	}
+	return false
+}
+
+func (d *Decompiler) isThisOrAliasRef(ref *values.JavaRef) bool {
+	if ref == nil {
+		return false
+	}
+	if ref.IsThis {
+		return true
+	}
+	return d.getenv("JDEC_THIS_ALIAS_SUPER_OFF") == "" && ref.IsThisAlias && !d.nonThisAliasUids[ref.VarUid]
+}
+
+func (d *Decompiler) markThisAliasStore(opcode *OpCode, slot int, value values.JavaValue, oldRef, ref *values.JavaRef, isFirst bool) {
+	if d.getenv("JDEC_THIS_ALIAS_SUPER_OFF") != "" || d.FunctionContext == nil || d.FunctionContext.IsStatic || ref == nil {
+		return
+	}
+	if d.nonThisAliasUids == nil {
+		d.nonThisAliasUids = map[string]bool{}
+	}
+	if d.thisAliasRefs == nil {
+		d.thisAliasRefs = map[string][]*values.JavaRef{}
+	}
+	clearUidAlias := func(uid string) {
+		if uid == "" {
+			return
+		}
+		d.nonThisAliasUids[uid] = true
+		ref.IsThisAlias = false
+		for _, tracked := range d.thisAliasRefs[uid] {
+			if tracked != nil {
+				tracked.IsThisAlias = false
+			}
+		}
+	}
+	if slot == 0 {
+		if oldRef != nil && oldRef.IsThis && oldRef.VarUid == ref.VarUid {
+			clearUidAlias(ref.VarUid)
+		}
+		return
+	}
+	unpacked := values.UnpackSoltValue(value)
+	srcRef, ok := unpacked.(*values.JavaRef)
+	isThisVal := ok && srcRef != nil && (srcRef.IsThis || (srcRef.IsThisAlias && !d.nonThisAliasUids[srcRef.VarUid]))
+	if isFirst {
+		if isThisVal && !d.nonThisAliasUids[ref.VarUid] && d.isPureThisAliasStore(opcode, slot) {
+			ref.IsThisAlias = true
+			d.thisAliasRefs[ref.VarUid] = append(d.thisAliasRefs[ref.VarUid], ref)
+		} else if !isThisVal {
+			d.nonThisAliasUids[ref.VarUid] = true
+		}
+		return
+	}
+	if !isThisVal {
+		clearUidAlias(ref.VarUid)
+		return
+	}
+	if ref.IsThisAlias && !d.nonThisAliasUids[ref.VarUid] {
+		d.thisAliasRefs[ref.VarUid] = append(d.thisAliasRefs[ref.VarUid], ref)
+	}
 }

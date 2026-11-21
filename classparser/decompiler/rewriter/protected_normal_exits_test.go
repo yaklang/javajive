@@ -110,7 +110,7 @@ func TestProtectedNormalExitsRequireCompleteOriginalBoundaries(t *testing.T) {
 			}
 			m.DominatorMap = GenerateDominatorTree(root)
 			materializeProtectedNormalExit(m, condition)
-			region := m.forwardRegions[owner]
+			region := m.primaryForwardRegion(owner)
 			if (region != nil) != want {
 				t.Fatalf("planned=%v want=%v", region != nil, want)
 			}

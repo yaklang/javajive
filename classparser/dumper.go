@@ -797,7 +797,12 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 			isEnum = false
 			nonClassKeyword = false
 		} else if err := c.nativeEnumBackingArrayProtocol(initializations); err != nil {
-			return "", err
+			if !c.options.RetainUnprovedSource || isRequestWorkError(err) {
+				return "", err
+			}
+			c.renderEnumAsClass = true
+			isEnum = false
+			nonClassKeyword = false
 		} else {
 			c.enumConstantSourceName = nil
 			for field, plan := range initializations {
@@ -1223,7 +1228,11 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 		// method-level residuals on the existing usage-based path. Kill-switch JDEC_INNER_ENCLOSING_ARITY_OFF.
 		projected, methodBounds, _, methodScope, projectionErr := c.projectFlattenedMethodFormals(free)
 		if projectionErr != nil {
-			return "", projectionErr
+			if !c.options.RetainUnprovedSource || isRequestWorkError(projectionErr) {
+				return "", projectionErr
+			}
+			methodScope = false
+			free = nil
 		}
 		if methodScope {
 			free = projected
@@ -4552,6 +4561,22 @@ func (c *ClassObjectDumper) dumpMethodMemberWithSourceRequest(method *MemberInfo
 			if constructorErr != nil {
 				return nil, constructorErr
 			}
+			if constructorPlan != nil && (len(constructorPlan.foldedStatements) > 0 || (constructorPlan.retainCarrier && len(constructorPlan.prefix) > 0)) {
+				prefixSkip := map[statements.Statement]bool{}
+				if constructorPlan.retainCarrier {
+					for _, st := range constructorPlan.prefix {
+						prefixSkip[st] = true
+					}
+				}
+				filtered := make([]statements.Statement, 0, len(statementList))
+				for _, st := range statementList {
+					if constructorPlan.foldedStatements[st] || prefixSkip[st] {
+						continue
+					}
+					filtered = append(filtered, st)
+				}
+				statementList = filtered
+			}
 			var needsCheckedEscape bool
 			var ordinaryThrowsScope *ordinaryConstructorThrowsScope
 			var functionalThrowsScope *genericFunctionalThrowsScope
@@ -5377,6 +5402,9 @@ func (c *ClassObjectDumper) dumpMethodMemberWithSourceRequest(method *MemberInfo
 					// declarations have no runtime effect, but Java still forbids
 					// placing them before the original initialization delegate.
 					if call, ok := values.UnpackSoltValue(v.Expression).(*values.FunctionCallExpression); ok && constructorPlan != nil && constructorPlan.delegate == call {
+						if constructorPlan.omitExplicitSuper {
+							continue
+						}
 						delegationSource, err := constructorPlan.renderDelegation(funcCtx)
 						if err != nil {
 							return nil, err
@@ -5388,6 +5416,9 @@ func (c *ClassObjectDumper) dumpMethodMemberWithSourceRequest(method *MemberInfo
 						continue
 					}
 					if v1, ok := v.Expression.(*values.FunctionCallExpression); ok && v1.IsSupperConstructorInvoke(funcCtx) {
+						if constructorPlan != nil && constructorPlan.omitExplicitSuper {
+							continue
+						}
 						supperInvokeStr = fmt.Sprintf("%s\n", statementToString(statement))
 						if constructorPlan != nil && constructorPlan.delegate == v1 {
 							delegationSource, err := constructorPlan.renderDelegation(funcCtx)

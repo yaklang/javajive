@@ -484,13 +484,15 @@ func (c *ClassObjectDumper) methodNeedsCheckedEscapeAllProof(code *CodeAttribute
 					if sourcePlan != nil && sourcePlan.bridgeNames[int(op.CurrentOffset)] != "" {
 						continue
 					}
-					if delegatePC < 0 || int(op.CurrentOffset) <= delegatePC {
+					retainedPrefixOrder := c.options.RetainUnprovedSource && sourcePlan != nil && int(op.CurrentOffset) < delegatePC &&
+						(sourcePlan.omitExplicitSuper || sourcePlan.emitPrefixAfterSuper || sourcePlan.carrier != "")
+					if !retainedPrefixOrder && (delegatePC < 0 || int(op.CurrentOffset) <= delegatePC) {
 						// Java requires this/super (including its argument effects)
 						// before any try. A body bridge cannot cover that prefix.
 						return false, fmt.Errorf("checked constructor delegation requires original declared throws")
 					}
 				}
-				if _, complete := c.checkedEscapeInheritedNames(); !complete {
+				if _, complete := c.checkedEscapeInheritedNames(); !complete && !c.options.RetainUnprovedSource {
 					return false, fmt.Errorf("checked escape helper requires complete inherited member names")
 				}
 				return true, nil
@@ -728,6 +730,7 @@ func (c *ClassObjectDumper) checkedEscapeInheritedNames() (map[string]bool, bool
 	if superclass := c.obj.GetSupperClassName(); superclass != "" {
 		parents = append(parents, superclass)
 	}
+	complete := true
 	active, seen := map[string]bool{}, map[string]bool{}
 	var visit func(string, int) bool
 	visit = func(owner string, depth int) bool {
@@ -736,16 +739,24 @@ func (c *ClassObjectDumper) checkedEscapeInheritedNames() (map[string]bool, bool
 			return true
 		} // fixed language-defined member namespace
 		if depth > 64 || len(seen) >= 128 || active[owner] || owner == c.obj.GetClassName() {
+			complete = false
 			return false
 		}
 		if seen[owner] {
 			return true
 		}
 		if c.FuncCtx == nil || c.FuncCtx.InvocationMetadata == nil {
+			complete = false
 			return false
 		}
 		table, known := c.FuncCtx.InvocationMetadata(owner)
 		if !known || strings.ReplaceAll(table.Name, ".", "/") != owner || !table.MembersComplete || !table.ParentsComplete {
+			complete = false
+			if known && strings.ReplaceAll(table.Name, ".", "/") == owner {
+				for _, member := range table.Methods {
+					reserved[class_context.SafeIdentifier(member.Name)] = true
+				}
+			}
 			return false
 		}
 		active[owner] = true
@@ -754,7 +765,7 @@ func (c *ClassObjectDumper) checkedEscapeInheritedNames() (map[string]bool, bool
 		}
 		for _, parent := range table.Parents {
 			if !visit(parent, depth+1) {
-				return false
+				complete = false
 			}
 		}
 		delete(active, owner)
@@ -763,10 +774,10 @@ func (c *ClassObjectDumper) checkedEscapeInheritedNames() (map[string]bool, bool
 	}
 	for _, parent := range parents {
 		if !visit(parent, 0) {
-			return reserved, false
+			complete = false
 		}
 	}
-	return reserved, true
+	return reserved, complete
 }
 
 func (c *ClassObjectDumper) checkedEscapeHelperName() string {
