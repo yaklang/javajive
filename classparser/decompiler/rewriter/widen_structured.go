@@ -123,7 +123,7 @@ func walkAssignments(sts []statements.Statement, fn func(*statements.AssignState
 		if st == nil {
 			return
 		}
-		if as, ok := st.(*statements.AssignStatement); ok {
+		if as, _ := unwrapAssignStatement(st); as != nil {
 			fn(as)
 		}
 		if loop, ok := st.(*statements.ForStatement); ok {

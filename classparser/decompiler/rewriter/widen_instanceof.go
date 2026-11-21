@@ -43,7 +43,7 @@ func WidenNumericMixedSlotDecl(sts *[]statements.Statement, funcCtx *class_conte
 	var collectNumericDecls func(list []statements.Statement)
 	collectNumericDecls = func(list []statements.Statement) {
 		for _, st := range list {
-			if as, ok := st.(*statements.AssignStatement); ok && (as.IsFirst || as.IsDeclare) && as.ArrayMember == nil {
+			if as, _ := unwrapAssignStatement(st); as != nil && (as.IsFirst || as.IsDeclare) && as.ArrayMember == nil {
 				if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil {
 					if ref.Type() != nil && isConcreteNumericType(ref.Type()) {
 						if _, exists := uidToDeclRef[ref.VarUid]; !exists {
@@ -66,7 +66,7 @@ func WidenNumericMixedSlotDecl(sts *[]statements.Statement, funcCtx *class_conte
 	var scan func(list []statements.Statement)
 	scan = func(list []statements.Statement) {
 		for _, st := range list {
-			if as, ok := st.(*statements.AssignStatement); ok && !as.IsFirst && !as.IsDeclare && as.ArrayMember == nil {
+			if as, _ := unwrapAssignStatement(st); as != nil && !as.IsFirst && !as.IsDeclare && as.ArrayMember == nil {
 				if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil {
 					declRef := uidToDeclRef[ref.VarUid]
 					if declRef == nil || declRef.Type() == nil {
@@ -195,7 +195,7 @@ func WidenInstanceofReadRefs(sts *[]statements.Statement, funcCtx *class_context
 func collectDeclRefs(list []statements.Statement, ctx *class_context.ClassContext,
 	out map[string]*values.JavaRef, objectNames map[string]struct{}) {
 	for _, st := range list {
-		if as, ok := st.(*statements.AssignStatement); ok && (as.IsFirst || as.IsDeclare) && as.ArrayMember == nil {
+		if as, _ := unwrapAssignStatement(st); as != nil && (as.IsFirst || as.IsDeclare) && as.ArrayMember == nil {
 			if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil {
 				name := ref.String(ctx)
 				if _, exists := out[name]; !exists {
@@ -316,6 +316,9 @@ func stmtDirectValues(st statements.Statement) []values.JavaValue {
 		return nil
 	}
 	var out []values.JavaValue
+	if as, _ := unwrapAssignStatement(st); as != nil {
+		st = as
+	}
 	switch s := st.(type) {
 	case *statements.AssignStatement:
 		out = append(out, s.LeftValue)

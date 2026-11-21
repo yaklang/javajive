@@ -207,6 +207,33 @@ func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.Ja
 	hoistDispatchCrossCaseDeclarations(sts)
 }
 
+func unwrapAssignStatement(st statements.Statement) (*statements.AssignStatement, bool) {
+	switch s := st.(type) {
+	case *statements.AssignStatement:
+		if s == nil {
+			return nil, false
+		}
+		return s, false
+	case *statements.CustomStatement:
+		if s != nil {
+			if as, ok := s.SourceAssignmentForward(); ok && as != nil {
+				return as, true
+			}
+		}
+	}
+	return nil, false
+}
+
+func rewrapAssignStatement(as *statements.AssignStatement, forwarded bool) statements.Statement {
+	if as == nil {
+		return nil
+	}
+	if forwarded {
+		return statements.NewSourceAssignmentForward(as)
+	}
+	return as
+}
+
 // dropDuplicateDeclarations removes repeated declaration flags for an exact
 // identity already visible in the current lexical scope. Value stores and
 // independent identities in sibling scopes remain intact.
@@ -226,7 +253,7 @@ func deduplicateDeclarationIdentity(sts *[]statements.Statement, ancestors map[*
 	list := *sts
 	out := list[:0]
 	for _, st := range list {
-		if as, ok := st.(*statements.AssignStatement); ok && (as.IsFirst || as.IsDeclare) && as.ArrayMember == nil {
+		if as, forwarded := unwrapAssignStatement(st); as != nil && (as.IsFirst || as.IsDeclare) && as.ArrayMember == nil {
 			if ref, ok := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok && ref != nil && ref.Id != nil {
 				if seen[ref.Id] {
 					if as.JavaValue == nil {
@@ -237,7 +264,7 @@ func deduplicateDeclarationIdentity(sts *[]statements.Statement, ancestors map[*
 					copy := *as
 					copy.IsFirst = false
 					copy.IsDeclare = false
-					st = &copy
+					st = rewrapAssignStatement(&copy, forwarded)
 				} else {
 					seen[ref.Id] = true
 				}
@@ -265,7 +292,7 @@ type embeddedDeclInfo struct {
 // chained-assignment reuse of an already-declared slot (same name, same type).
 func collectEmbeddedDeclInfos(sts []statements.Statement, byID map[*utils.VariableId]struct{}, byName map[string][]embeddedDeclInfo) {
 	for _, st := range sts {
-		if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil && (as.IsFirst || as.IsDeclare) {
+		if as, _ := unwrapAssignStatement(st); as != nil && as.ArrayMember == nil && (as.IsFirst || as.IsDeclare) {
 			if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.Id != nil {
 				byID[ref.Id] = struct{}{}
 				name := ref.String(&class_context.ClassContext{})
@@ -397,7 +424,7 @@ func PropagateCopyArrayDeclType(sts *[]statements.Statement) {
 	var walk func(list []statements.Statement)
 	walk = func(list []statements.Statement) {
 		for _, st := range list {
-			if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil {
+			if as, _ := unwrapAssignStatement(st); as != nil && as.ArrayMember == nil {
 				if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.Id != nil {
 					refsByID[ref.Id] = append(refsByID[ref.Id], ref)
 					if as.JavaValue != nil && !as.IsDeclare {
@@ -797,6 +824,9 @@ func rewriteVar(scope *Scope, className, methodName string) int {
 	stsSnapshot := *scope.sts
 	for stmtIdx := 0; stmtIdx < len(stsSnapshot); stmtIdx++ {
 		statement := stsSnapshot[stmtIdx]
+		if as, _ := unwrapAssignStatement(statement); as != nil {
+			statement = as
+		}
 		switch statement := statement.(type) {
 		case *statements.AssignStatement:
 			left := core.UnpackSoltValue(statement.LeftValue)
@@ -961,6 +991,9 @@ func prebindSharedTryCatchSlots(scope *Scope, statement *statements.TryCatchStat
 		var walk func([]statements.Statement)
 		walk = func(sts []statements.Statement) {
 			for _, st := range sts {
+				if as, _ := unwrapAssignStatement(st); as != nil {
+					st = as
+				}
 				switch s := st.(type) {
 				case *statements.AssignStatement:
 					if s.ArrayMember != nil {
@@ -1053,6 +1086,9 @@ func prebindEscapingIfElseSlots(scope *Scope, ifst *statements.IfStatement, afte
 		var walk func([]statements.Statement)
 		walk = func(sts []statements.Statement) {
 			for _, st := range sts {
+				if as, _ := unwrapAssignStatement(st); as != nil {
+					st = as
+				}
 				switch s := st.(type) {
 				case *statements.AssignStatement:
 					if s.ArrayMember != nil {
@@ -1211,8 +1247,8 @@ func prebindParallelTypedIfElseDefs(scope *Scope, ifst *statements.IfStatement, 
 		res := map[string][]*values.JavaRef{}
 		seen := map[string]struct{}{}
 		for _, st := range arm {
-			as, ok := st.(*statements.AssignStatement)
-			if !ok || as.ArrayMember != nil || !(as.IsFirst || as.IsDeclare) {
+			as, _ := unwrapAssignStatement(st)
+			if as == nil || as.ArrayMember != nil || !(as.IsFirst || as.IsDeclare) {
 				continue
 			}
 			ref, ok := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef)
@@ -1320,6 +1356,9 @@ func prebindEscapingSwitchSlots(scope *Scope, sw *statements.SwitchStatement, af
 	var walk func([]statements.Statement)
 	walk = func(sts []statements.Statement) {
 		for _, st := range sts {
+			if as, _ := unwrapAssignStatement(st); as != nil {
+				st = as
+			}
 			switch s := st.(type) {
 			case *statements.AssignStatement:
 				if s.ArrayMember != nil {
@@ -1611,6 +1650,9 @@ func switchHoistDeclarations(sw *statements.SwitchStatement, afterSts []statemen
 	var collect func([]statements.Statement)
 	collect = func(sts []statements.Statement) {
 		for _, st := range sts {
+			if as, _ := unwrapAssignStatement(st); as != nil {
+				st = as
+			}
 			switch s := st.(type) {
 			case *statements.AssignStatement:
 				if s.ArrayMember != nil {
@@ -1689,13 +1731,13 @@ func switchHoistDeclarations(sw *statements.SwitchStatement, afterSts []statemen
 			continue
 		}
 		targetID := targetJavaRef.Id
-		for _, as := range assignsByUid[uid] {
-			if ref, ok := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok && ref != nil && ref.Id != targetID {
-				ref.Id = targetID
+		oldIds := unifyHoistedAssignTargets(assignsByUid[uid], targetID)
+		for _, c := range sw.Cases {
+			if c != nil {
+				replaceVarInStatements(c.Body, oldIds, targetID)
 			}
-			as.IsFirst = false
-			as.IsDeclare = false
 		}
+		replaceVarInStatements(afterSts, oldIds, targetID)
 		declares = append(declares, statements.NewDeclareStatement(targetRef))
 		redirectPostBlockReassignments(afterSts, uid, targetID)
 	}
@@ -1728,6 +1770,9 @@ func syncHoistDeclarations(sync *statements.SynchronizedStatement, afterSts []st
 	var collect func([]statements.Statement)
 	collect = func(sts []statements.Statement) {
 		for _, st := range sts {
+			if as, _ := unwrapAssignStatement(st); as != nil {
+				st = as
+			}
 			switch s := st.(type) {
 			case *statements.AssignStatement:
 				if s.ArrayMember != nil {
@@ -1792,13 +1837,9 @@ func syncHoistDeclarations(sync *statements.SynchronizedStatement, afterSts []st
 			continue
 		}
 		targetID := targetJavaRef.Id
-		for _, as := range assignsByUid[uid] {
-			if ref, ok := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok && ref != nil && ref.Id != targetID {
-				ref.Id = targetID
-			}
-			as.IsFirst = false
-			as.IsDeclare = false
-		}
+		oldIds := unifyHoistedAssignTargets(assignsByUid[uid], targetID)
+		replaceVarInStatements(sync.Body, oldIds, targetID)
+		replaceVarInStatements(afterSts, oldIds, targetID)
 		declares = append(declares, statements.NewDeclareStatement(targetRef))
 		redirectPostBlockReassignments(afterSts, uid, targetID)
 	}
@@ -1829,6 +1870,9 @@ func redirectPostBlockReassignments(afterSts []statements.Statement, uid string,
 	var walk func([]statements.Statement)
 	walk = func(sts []statements.Statement) {
 		for _, st := range sts {
+			if as, _ := unwrapAssignStatement(st); as != nil {
+				st = as
+			}
 			switch s := st.(type) {
 			case *statements.AssignStatement:
 				if s.ArrayMember != nil {
@@ -1888,30 +1932,32 @@ func dropEmptySlotAssignments(sts *[]statements.Statement) {
 	list := *sts
 	out := make([]statements.Statement, 0, len(list))
 	for _, st := range list {
-		switch s := st.(type) {
-		case *statements.AssignStatement:
-			if !s.IsDeclare && s.ArrayMember == nil && assignmentValueIsEmptySlot(s.JavaValue) {
+		if as, _ := unwrapAssignStatement(st); as != nil {
+			if !as.IsDeclare && as.ArrayMember == nil && assignmentValueIsEmptySlot(as.JavaValue) {
 				continue
 			}
-		case *statements.IfStatement:
-			dropEmptySlotAssignments(&s.IfBody)
-			dropEmptySlotAssignments(&s.ElseBody)
-		case *statements.ForStatement:
-			dropEmptySlotAssignments(&s.SubStatements)
-		case *statements.WhileStatement:
-			dropEmptySlotAssignments(&s.Body)
-		case *statements.DoWhileStatement:
-			dropEmptySlotAssignments(&s.Body)
-		case *statements.SynchronizedStatement:
-			dropEmptySlotAssignments(&s.Body)
-		case *statements.TryCatchStatement:
-			dropEmptySlotAssignments(&s.TryBody)
-			for i := range s.CatchBodies {
-				dropEmptySlotAssignments(&s.CatchBodies[i])
-			}
-		case *statements.SwitchStatement:
-			for i := range s.Cases {
-				dropEmptySlotAssignments(&s.Cases[i].Body)
+		} else {
+			switch s := st.(type) {
+			case *statements.IfStatement:
+				dropEmptySlotAssignments(&s.IfBody)
+				dropEmptySlotAssignments(&s.ElseBody)
+			case *statements.ForStatement:
+				dropEmptySlotAssignments(&s.SubStatements)
+			case *statements.WhileStatement:
+				dropEmptySlotAssignments(&s.Body)
+			case *statements.DoWhileStatement:
+				dropEmptySlotAssignments(&s.Body)
+			case *statements.SynchronizedStatement:
+				dropEmptySlotAssignments(&s.Body)
+			case *statements.TryCatchStatement:
+				dropEmptySlotAssignments(&s.TryBody)
+				for i := range s.CatchBodies {
+					dropEmptySlotAssignments(&s.CatchBodies[i])
+				}
+			case *statements.SwitchStatement:
+				for i := range s.Cases {
+					dropEmptySlotAssignments(&s.Cases[i].Body)
+				}
 			}
 		}
 		out = append(out, st)
@@ -1950,6 +1996,9 @@ func ifHoistDeclarations(ifst *statements.IfStatement, afterSts []statements.Sta
 	var collect func([]statements.Statement)
 	collect = func(sts []statements.Statement) {
 		for _, st := range sts {
+			if as, _ := unwrapAssignStatement(st); as != nil {
+				st = as
+			}
 			switch s := st.(type) {
 			case *statements.AssignStatement:
 				if s.ArrayMember != nil {
@@ -2019,33 +2068,42 @@ func ifHoistDeclarations(ifst *statements.IfStatement, afterSts []statements.Sta
 		}
 		targetRef := refByUid[uid]
 		name := targetRef.String(&class_context.ClassContext{})
-		for _, as := range assignsByUid[uid] {
-			ref, ok := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef)
-			if !ok || ref == nil || ref.Id == nil {
+		if jdecenv.Get("JDEC_IF_HOIST_IDENTITY_OFF") == "1" {
+			for _, as := range assignsByUid[uid] {
+				ref, ok := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef)
+				if !ok || ref == nil || ref.Id == nil {
+					continue
+				}
+				candidateName := ref.String(&class_context.ClassContext{})
+				if candidateName != "" && statementsReadName(afterSts, candidateName) {
+					targetRef = as.LeftValue
+					name = candidateName
+					break
+				}
+			}
+			if name == "" || !statementsReadName(afterSts, name) {
 				continue
 			}
-			candidateName := ref.String(&class_context.ClassContext{})
-			if candidateName != "" && statementsReadName(afterSts, candidateName) {
-				targetRef = as.LeftValue
-				name = candidateName
-				break
+		} else {
+			matchedRef, ok := findAssignReadAfterByIdentity(afterSts, assignsByUid[uid])
+			if !ok {
+				continue
 			}
-		}
-		if name == "" || !statementsReadName(afterSts, name) {
-			continue
+			targetRef = matchedRef
+			name = targetRef.String(&class_context.ClassContext{})
+			if name == "" {
+				continue
+			}
 		}
 		targetJavaRef, ok := core.UnpackSoltValue(targetRef).(*values.JavaRef)
 		if !ok || targetJavaRef == nil || targetJavaRef.Id == nil {
 			continue
 		}
 		targetID := targetJavaRef.Id
-		for _, as := range assignsByUid[uid] {
-			if ref, ok := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok && ref != nil && ref.Id != targetID {
-				ref.Id = targetID
-			}
-			as.IsFirst = false
-			as.IsDeclare = false
-		}
+		oldIds := unifyHoistedAssignTargets(assignsByUid[uid], targetID)
+		replaceVarInStatements(ifst.IfBody, oldIds, targetID)
+		replaceVarInStatements(ifst.ElseBody, oldIds, targetID)
+		replaceVarInStatements(afterSts, oldIds, targetID)
 		declares = append(declares, statements.NewDeclareStatement(targetRef))
 		redirectPostBlockReassignments(afterSts, uid, targetID)
 	}
@@ -2060,12 +2118,13 @@ func ifHoistDeclarations(ifst *statements.IfStatement, afterSts []statements.Sta
 // decompiler to a THIRD merge id but rendered as the same slot name `varN` - then has no dominating
 // declaration and javac rejects it as "cannot find symbol".
 //
-// The fix is purely name-based and id-free, which is sound because the dumper binds locals by their
-// RENDERED NAME end to end (addMissingGeneratedLocalDecls keys on the rendered `varN` token, javac
-// itself binds by name): emit ONE bare `T varN;` ahead of the if and demote both arms to plain
-// `varN = ...`. The single surviving declaration makes the slot name declared, both arm assignments
-// and the orphan read all render `varN` and bind to it, and the missing-decl safety net sees the
-// name as declared so it injects nothing. No VariableId is touched.
+// The fix unifies both arms onto one surviving declaration identity: emit ONE bare `T varN;` ahead of
+// the if, demote both arms' bare/inline declarations to plain `varN = ...`, and unify both arms'
+// VariableIds onto `declRef`'s `targetID` (`unifyHoistedAssignTargets` + `replaceVarInStatements` across
+// both arms and `afterSts`) so later identity-based collision renaming (`resolveLocalNameCollisions`)
+// renames both arms together instead of orphaning the second arm. The single surviving declaration
+// makes the slot name declared, both arm assignments and the orphan read all render cleanly, and the
+// missing-decl safety net sees the name as declared so it injects nothing.
 //
 // Declaration type T (the join / least-upper-bound problem): only merge when BOTH arms RENDER the
 // same declaration type token (compared via renderedArmDeclType, NOT ref.Type() - this pass runs
@@ -2092,8 +2151,8 @@ func parallelArmDeclHoist(ifst *statements.IfStatement, beforeSts, afterSts []st
 		out := map[string]*statements.AssignStatement{}
 		seen := map[string]bool{}
 		for _, st := range arm {
-			as, ok := st.(*statements.AssignStatement)
-			if !ok || as.ArrayMember != nil || !(as.IsFirst || as.IsDeclare) {
+			as, _ := unwrapAssignStatement(st)
+			if as == nil || as.ArrayMember != nil || !(as.IsFirst || as.IsDeclare) {
 				continue
 			}
 			ref, ok := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef)
@@ -2175,8 +2234,15 @@ func parallelArmDeclHoist(ifst *statements.IfStatement, beforeSts, afterSts []st
 		} else {
 			continue
 		}
-		ifAs.IsFirst, ifAs.IsDeclare = false, false
-		elseAs.IsFirst, elseAs.IsDeclare = false, false
+		declJavaRef, ok := core.UnpackSoltValue(declRef).(*values.JavaRef)
+		if !ok || declJavaRef == nil || declJavaRef.Id == nil {
+			continue
+		}
+		targetID := declJavaRef.Id
+		oldIds := unifyHoistedAssignTargets([]*statements.AssignStatement{ifAs, elseAs}, targetID)
+		replaceVarInStatements(ifst.IfBody, oldIds, targetID)
+		replaceVarInStatements(ifst.ElseBody, oldIds, targetID)
+		replaceVarInStatements(afterSts, oldIds, targetID)
 		declares = append(declares, statements.NewDeclareStatement(declRef))
 	}
 	return declares
@@ -2207,8 +2273,8 @@ func renderedArmDeclType(as *statements.AssignStatement, name string) (tok strin
 // declared in the enclosing block.
 func statementsDeclareNameTopLevel(sts []statements.Statement, name string) bool {
 	for _, st := range sts {
-		as, ok := st.(*statements.AssignStatement)
-		if !ok || !(as.IsFirst || as.IsDeclare) {
+		as, _ := unwrapAssignStatement(st)
+		if as == nil || !(as.IsFirst || as.IsDeclare) {
 			continue
 		}
 		ref, ok := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef)
@@ -2249,16 +2315,40 @@ func assignRendersAsPlain(as *statements.AssignStatement) (ok bool) {
 // precise signal switchHoistDeclarations needs - "is THIS variable read after the switch" - free of
 // the name-collision false positives/negatives that statementsReadName suffers. Kill-switch:
 // JDEC_SWITCH_HOIST_IDENTITY_OFF=1 falls back to the legacy name-based test.
-func assignsReadAfterByIdentity(afterSts []statements.Statement, assigns []*statements.AssignStatement) bool {
-	if jdecenv.Get("JDEC_SWITCH_HOIST_IDENTITY_OFF") == "1" {
-		for _, as := range assigns {
-			if ref, ok := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok && ref != nil && ref.Id != nil {
-				if statementsReadName(afterSts, ref.String(&class_context.ClassContext{})) {
-					return true
-				}
+func unifyHoistedAssignTargets(assigns []*statements.AssignStatement, targetID *utils.VariableId) []*utils.VariableId {
+	var oldIds []*utils.VariableId
+	seen := map[*utils.VariableId]bool{}
+	for _, as := range assigns {
+		if ref, ok := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok && ref != nil && ref.Id != targetID {
+			if ref.Id != nil && !seen[ref.Id] {
+				seen[ref.Id] = true
+				oldIds = append(oldIds, ref.Id)
 			}
+			ref.Id = targetID
 		}
-		return false
+		as.IsFirst = false
+		as.IsDeclare = false
+	}
+	return oldIds
+}
+
+func replaceVarInStatements(sts []statements.Statement, oldIds []*utils.VariableId, targetID *utils.VariableId) {
+	if targetID == nil || len(sts) == 0 || len(oldIds) == 0 {
+		return
+	}
+	for _, oldId := range oldIds {
+		if oldId == nil || oldId == targetID {
+			continue
+		}
+		for _, st := range sts {
+			st.ReplaceVar(oldId, targetID)
+		}
+	}
+}
+
+func findAssignReadAfterByIdentity(afterSts []statements.Statement, assigns []*statements.AssignStatement) (values.JavaValue, bool) {
+	if len(afterSts) == 0 || len(assigns) == 0 {
+		return nil, false
 	}
 	const probe = "__jdec_hoist_probe__"
 	seen := map[*utils.VariableId]bool{}
@@ -2274,10 +2364,25 @@ func assignsReadAfterByIdentity(afterSts []statements.Statement, assigns []*stat
 		hit := statementsReferenceName(afterSts, probe)
 		id.SetName(saved)
 		if hit {
-			return true
+			return as.LeftValue, true
 		}
 	}
-	return false
+	return nil, false
+}
+
+func assignsReadAfterByIdentity(afterSts []statements.Statement, assigns []*statements.AssignStatement) bool {
+	if jdecenv.Get("JDEC_SWITCH_HOIST_IDENTITY_OFF") == "1" {
+		for _, as := range assigns {
+			if ref, ok := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok && ref != nil && ref.Id != nil {
+				if statementsReadName(afterSts, ref.String(&class_context.ClassContext{})) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	_, hit := findAssignReadAfterByIdentity(afterSts, assigns)
+	return hit
 }
 
 func statementsReadName(sts []statements.Statement, name string) (res bool) {
@@ -2287,7 +2392,7 @@ func statementsReadName(sts []statements.Statement, name string) (res bool) {
 		}
 	}()
 	for _, st := range sts {
-		if as, ok := st.(*statements.AssignStatement); ok {
+		if as, _ := unwrapAssignStatement(st); as != nil {
 			if as.JavaValue != nil && utils2.WordMatches(as.JavaValue.String(&class_context.ClassContext{}), name) {
 				return true
 			}
@@ -2532,7 +2637,7 @@ func collectGeneratedLocalDeclIDs(list []statements.Statement, reused map[*utils
 	var walk func([]statements.Statement)
 	walk = func(sts []statements.Statement) {
 		for _, st := range sts {
-			if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil && (as.IsFirst || as.IsDeclare) {
+			if as, _ := unwrapAssignStatement(st); as != nil && as.ArrayMember == nil && (as.IsFirst || as.IsDeclare) {
 				if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.Id != nil && !ref.IsThis {
 					_, isReused := reused[ref.Id]
 					if all || isReused {
@@ -2564,7 +2669,7 @@ func collectGeneratedLocalDeclIDs(list []statements.Statement, reused map[*utils
 // scope. This also makes the pass idempotent w.r.t. the bare declarations the if/switch hoisters emit.
 func isDeclaredAtTopLevel(list []statements.Statement, id *utils.VariableId) bool {
 	for _, st := range list {
-		if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil && (as.IsFirst || as.IsDeclare) {
+		if as, _ := unwrapAssignStatement(st); as != nil && as.ArrayMember == nil && (as.IsFirst || as.IsDeclare) {
 			if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.Id == id {
 				return true
 			}
@@ -2584,7 +2689,7 @@ func relocateDeclarations(block *[]statements.Statement, id *utils.VariableId) {
 	list := *block
 	out := list[:0]
 	for _, st := range list {
-		if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil {
+		if as, _ := unwrapAssignStatement(st); as != nil && as.ArrayMember == nil {
 			if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.Id == id {
 				if as.IsDeclare && as.JavaValue == nil {
 					// A bare declaration of this id inserted by a deeper hoist; drop it because the
@@ -2621,7 +2726,7 @@ func restoreSingleDefinitionArrayDeclarations(root *[]statements.Statement, para
 	var walk func([]statements.Statement)
 	walk = func(list []statements.Statement) {
 		for _, st := range list {
-			if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil {
+			if as, _ := unwrapAssignStatement(st); as != nil && as.ArrayMember == nil {
 				if ref, ok := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok && ref != nil && ref.Id != nil && !ref.IsThis {
 					if as.IsFirst || as.IsDeclare {
 						declared[ref.Id] = true
@@ -2903,7 +3008,7 @@ func narrowNullInitObjectDecl(sts *[]statements.Statement) {
 	var collect func([]statements.Statement)
 	collect = func(list []statements.Statement) {
 		for _, st := range list {
-			if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil {
+			if as, _ := unwrapAssignStatement(st); as != nil && as.ArrayMember == nil {
 				if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.Id != nil && !ref.IsThis && !ref.IsParam {
 					name := ref.String(&class_context.ClassContext{})
 					if generatedLocalNameRe.MatchString(name) {
@@ -3022,7 +3127,7 @@ func widenConcreteDeclToObject(sts *[]statements.Statement) {
 	var collect func([]statements.Statement)
 	collect = func(list []statements.Statement) {
 		for _, st := range list {
-			if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil {
+			if as, _ := unwrapAssignStatement(st); as != nil && as.ArrayMember == nil {
 				if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.Id != nil && !ref.IsThis && !ref.IsParam {
 					name := ref.String(&class_context.ClassContext{})
 					if generatedLocalNameRe.MatchString(name) {

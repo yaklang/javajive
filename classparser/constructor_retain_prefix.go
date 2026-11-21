@@ -993,6 +993,83 @@ func tryFoldCtorArrayInit(prefix []statements.Statement, idx int, arrID *coreuti
 	return &cp, consumed, endIdx, true
 }
 
+func canCommitWithRemainingThisFieldStores(remaining []statements.Statement, remRewriteByAssign map[*statements.AssignStatement]values.JavaValue, env map[*coreutils.VariableId]values.JavaValue, newArgs []values.JavaValue, delegate *values.FunctionCallExpression, superClass string, ctx *class_context.ClassContext) bool {
+	if len(remaining) == 0 || delegate == nil || ctx == nil {
+		return false
+	}
+	allRHSIDs := map[*coreutils.VariableId]bool{}
+	for _, st := range remaining {
+		if st == nil {
+			continue
+		}
+		switch st.(type) {
+		case *statements.MiddleStatement, *statements.StackAssignStatement:
+			continue
+		}
+		as := ctorAssignStmt(st)
+		if as == nil || as.ArrayMember != nil || as.IsDeclare || as.JavaValue == nil {
+			return false
+		}
+		rm, isField := values.UnpackSoltValue(as.LeftValue).(*values.RefMember)
+		if !isField || rm == nil {
+			return false
+		}
+		recv, isRef := values.UnpackSoltValue(rm.Object).(*values.JavaRef)
+		if !isRef || recv == nil || !recv.IsThis {
+			return false
+		}
+		rhs := as.JavaValue
+		if rewritten, ok := remRewriteByAssign[as]; ok && rewritten != nil {
+			rhs = rewritten
+		}
+		if eff, _ := values.InspectValue(rhs); eff&values.BarrierEffects != 0 {
+			return false
+		}
+		rhsIDs := map[*coreutils.VariableId]bool{}
+		collectValueVarReads(rhs, ctx, rhsIDs, nil, nil, 0)
+		for id := range rhsIDs {
+			if _, inEnv := env[id]; inEnv {
+				return false
+			}
+			allRHSIDs[id] = true
+		}
+	}
+	argWritten := map[*coreutils.VariableId]bool{}
+	for _, arg := range newArgs {
+		acc := values.InspectAccess(arg)
+		if len(allRHSIDs) > 0 && acc.Effects&values.EffectOpaque != 0 {
+			return false
+		}
+		for wRef := range acc.Writes {
+			if wRef != nil && wRef.Id != nil {
+				argWritten[wRef.Id] = true
+			}
+		}
+	}
+	for id := range allRHSIDs {
+		if argWritten[id] {
+			return false
+		}
+	}
+	if len(newArgs) == 0 && strings.ReplaceAll(delegate.ClassName, ".", "/") == superClass {
+		return true
+	}
+	remWritten := map[*coreutils.VariableId]bool{}
+	collectStmtVars(remaining, ctx, nil, remWritten, nil, nil, 0)
+	if len(remWritten) > 0 {
+		argIDs := map[*coreutils.VariableId]bool{}
+		for _, arg := range newArgs {
+			collectValueVarReads(arg, ctx, argIDs, nil, nil, 0)
+		}
+		for id := range remWritten {
+			if argIDs[id] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBoundary, postSuper []statements.Statement) {
 	if c == nil || p == nil || len(p.prefix) == 0 || p.delegate == nil {
 		return
@@ -1021,6 +1098,12 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 	hasRemainingBarrier := false
 	inlinedAnyBarrier := false
 
+	type remainingAssignRewrite struct {
+		assign *statements.AssignStatement
+		newRHS values.JavaValue
+	}
+	var remRewrites []remainingAssignRewrite
+	remRewriteByAssign := map[*statements.AssignStatement]values.JavaValue{}
 	type deferredEntry struct {
 		prefixIdx int
 		st        statements.Statement
@@ -1142,12 +1225,30 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 			assignStmt := ctorAssignStmt(st)
 			lhs, rhs, ok := ctorRefLHS(st)
 			if !ok {
+				var pendingAssign *statements.AssignStatement
+				var pendingRHS values.JavaValue
+				if assignStmt != nil && assignStmt.ArrayMember == nil && assignStmt.JavaValue != nil && len(env) > 0 {
+					if rm, isField := values.UnpackSoltValue(assignStmt.LeftValue).(*values.RefMember); isField && rm != nil {
+						if recv, isRef := values.UnpackSoltValue(rm.Object).(*values.JavaRef); isRef && recv != nil && recv.IsThis {
+							if subVal, subOK := substCtorValue(assignStmt.JavaValue, env, c.FuncCtx, 0); subOK && subVal != assignStmt.JavaValue {
+								if eff, _ := values.InspectValue(subVal); eff&values.BarrierEffects == 0 {
+									pendingAssign = assignStmt
+									pendingRHS = subVal
+								}
+							}
+						}
+					}
+				}
 				written := map[*coreutils.VariableId]bool{}
 				collectStmtVars([]statements.Statement{st}, c.FuncCtx, nil, written, nil, nil, 0)
 				for id := range written {
 					delete(env, id)
 				}
 				appendRemaining(idx, st)
+				if pendingAssign != nil && pendingRHS != nil {
+					remRewrites = append(remRewrites, remainingAssignRewrite{assign: pendingAssign, newRHS: pendingRHS})
+					remRewriteByAssign[pendingAssign] = pendingRHS
+				}
 				continue
 			}
 			if rhs == nil {
@@ -1165,6 +1266,18 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 				delete(env, lhs.Id)
 				appendRemaining(idx, st)
 				continue
+			}
+			// Dead `this`-alias receiver local (`T alias = this;`) used solely as the
+			// constructor delegation receiver (`this(...)`/`super(...)` renders without it).
+			if c.getenv("JDEC_THIS_ALIAS_SUPER_OFF") == "" && lhs.IsThisAlias && !postIDs[lhs.Id] && useCount[lhs.Id] == 0 {
+				if rhsRef, isRef := values.UnpackSoltValue(subRHS).(*values.JavaRef); isRef && rhsRef != nil && (rhsRef.IsThis || rhsRef.IsThisAlias) {
+					tailIDs := map[*coreutils.VariableId]bool{}
+					collectStmtVars(p.prefix[idx+1:], c.FuncCtx, tailIDs, nil, nil, nil, 0)
+					if !tailIDs[lhs.Id] {
+						folded[st] = true
+						continue
+					}
+				}
 			}
 			if !hasRemainingBarrier && !postIDs[lhs.Id] && paramByID[lhs.Id] == nil && useCount[lhs.Id] == 1 && !condUsed[lhs.Id] {
 				if r, hasRank := useRank[lhs.Id]; hasRank && r > lastInlinedBarrierRank && (firstOrigBarrier < 0 || r < firstOrigBarrier) {
@@ -1354,10 +1467,7 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 		}
 	}
 
-	if hasRemainingBarrier && inlinedAnyBarrier {
-		return
-	}
-	if len(folded) == 0 && !mutatedDelegate && len(deferred) == 0 {
+	if len(folded) == 0 && !mutatedDelegate && len(deferred) == 0 && len(remRewrites) == 0 {
 		return
 	}
 	newArgs := make([]values.JavaValue, len(delegateArgs))
@@ -1367,6 +1477,14 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 			return
 		}
 		newArgs[i] = sub
+	}
+	if hasRemainingBarrier && inlinedAnyBarrier && !canCommitWithRemainingThisFieldStores(remaining, remRewriteByAssign, env, newArgs, p.delegate, c.obj.GetSupperClassName(), c.FuncCtx) {
+		return
+	}
+	for _, rw := range remRewrites {
+		if rw.assign != nil && rw.newRHS != nil {
+			rw.assign.JavaValue = rw.newRHS
+		}
 	}
 	for _, d := range deferred {
 		if d.newRHS != nil && d.assign != nil {
