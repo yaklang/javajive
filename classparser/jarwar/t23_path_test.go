@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -272,8 +274,8 @@ func TestStructuredWARExport(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if info.Mode().Perm() != 0o644 {
-			t.Fatalf("%s mode = %o, want 0644", name, info.Mode().Perm())
+		if perm := info.Mode().Perm(); perm != 0o644 && !(runtime.GOOS == "windows" && perm == 0o666) {
+			t.Fatalf("%s mode = %o, want 0644", name, perm)
 		}
 	}
 	assertBytes("archives/WEB-INF/lib/dependency.jar", inner)
@@ -519,8 +521,25 @@ func TestStructuredWARExportPathSafetyAndErrors(t *testing.T) {
 		src := t23WriteArchive(t, war, ".war")
 		root := t.TempDir()
 		outside := t.TempDir()
-		if err := os.Symlink(outside, filepath.Join(root, "resources")); err != nil {
-			t.Skipf("symlink unavailable: %v", err)
+		link := filepath.Join(root, "resources")
+		if err := os.Symlink(outside, link); err != nil {
+			if runtime.GOOS != "windows" {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+			cmdExe := os.Getenv("ComSpec")
+			if cmdExe == "" {
+				if sysRoot := os.Getenv("SystemRoot"); sysRoot != "" {
+					cmdExe = filepath.Join(sysRoot, "System32", "cmd.exe")
+				} else {
+					cmdExe = `C:\Windows\System32\cmd.exe`
+				}
+			}
+			if out, jerr := exec.Command(cmdExe, "/c", "mklink", "/J", link, outside).CombinedOutput(); jerr != nil {
+				t.Skipf("symlink and junction unavailable: symlink=%v junction=%v (%s)", err, jerr, strings.TrimSpace(string(out)))
+			}
+			if fi, lerr := os.Lstat(link); lerr != nil || fi.Mode()&os.ModeSymlink == 0 {
+				t.Skipf("windows junction not reported as symlink: lstat=%v mode=%v", lerr, fi)
+			}
 		}
 		_, err := AutoDecompileWithOptions(src, root, ArchiveOptions{Structured: true})
 		if err == nil || !filesys.IsPathRejected(err) {

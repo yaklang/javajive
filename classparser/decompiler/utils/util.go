@@ -43,9 +43,17 @@ func IsDominate(tree map[*core.Node][]*core.Node, node1, node2 *core.Node) bool 
 // is not a tree and falls back to the recursive implementation, preserving its
 // behavior for hand-built test fixtures.
 type DominateIndex struct {
-	tree   map[*core.Node][]*core.Node
-	parent map[*core.Node]*core.Node
-	valid  bool
+	tree           map[*core.Node][]*core.Node
+	parent         map[*core.Node]*core.Node
+	tin            map[*core.Node]int32
+	tout           map[*core.Node]int32
+	valid          bool
+	intervalsValid bool
+}
+
+type domIntervalFrame struct {
+	node     *core.Node
+	childIdx int
 }
 
 func NewDominateIndex(tree map[*core.Node][]*core.Node) *DominateIndex {
@@ -63,10 +71,18 @@ func (d *DominateIndex) Reset(tree map[*core.Node][]*core.Node) {
 	}
 	d.tree = tree
 	d.valid = true
+	d.intervalsValid = false
 	if d.parent == nil {
 		d.parent = make(map[*core.Node]*core.Node, len(tree))
 	} else {
 		clear(d.parent)
+	}
+	if d.tin == nil {
+		d.tin = make(map[*core.Node]int32, len(tree))
+		d.tout = make(map[*core.Node]int32, len(tree))
+	} else {
+		clear(d.tin)
+		clear(d.tout)
 	}
 	for dom, children := range tree {
 		for _, child := range children {
@@ -81,11 +97,63 @@ func (d *DominateIndex) Reset(tree map[*core.Node][]*core.Node) {
 			d.parent[child] = dom
 		}
 	}
+	if !d.valid {
+		return
+	}
+	// Euler-tour timestamps on the single-parent dominator forest answer
+	// dominance queries in O(1) without walking parent chains.
+	var roots []*core.Node
+	for dom := range tree {
+		if _, hasParent := d.parent[dom]; !hasParent {
+			roots = append(roots, dom)
+		}
+	}
+	visitedChildren := 0
+	var timer int32
+	stack := make([]domIntervalFrame, 0, len(tree))
+	for _, root := range roots {
+		if _, seen := d.tin[root]; seen {
+			return
+		}
+		timer++
+		d.tin[root] = timer
+		stack = append(stack, domIntervalFrame{node: root})
+		for len(stack) > 0 {
+			top := &stack[len(stack)-1]
+			children := tree[top.node]
+			if top.childIdx < len(children) {
+				child := children[top.childIdx]
+				top.childIdx++
+				if child == nil || child == top.node {
+					return
+				}
+				if _, seen := d.tin[child]; seen {
+					return
+				}
+				visitedChildren++
+				timer++
+				d.tin[child] = timer
+				stack = append(stack, domIntervalFrame{node: child})
+			} else {
+				timer++
+				d.tout[top.node] = timer
+				stack = stack[:len(stack)-1]
+			}
+		}
+	}
+	if visitedChildren == len(d.parent) {
+		d.intervalsValid = true
+	}
 }
 
 func (d *DominateIndex) IsDominate(node1, node2 *core.Node) bool {
 	if node1 == node2 {
 		return true
+	}
+	if d != nil && d.valid && d.intervalsValid {
+		in1, ok1 := d.tin[node1]
+		in2, ok2 := d.tin[node2]
+		return ok1 && ok2 && in1 <= in2 && d.tout[node2] <= d.tout[node1]
 	}
 	if d == nil || !d.valid {
 		if d == nil {

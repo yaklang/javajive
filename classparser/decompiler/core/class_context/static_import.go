@@ -132,14 +132,23 @@ func (f *ClassContext) staticImportCallPrefix(owner, member, descriptor, bound s
 		f.failStaticOwner(owner, member, descriptor, reason)
 		return bound + "."
 	}
-	if f.InvocationMetadata == nil || SafeIdentifier(member) != member || member == "" {
+	retainOrFail := func(reason string) string {
+		if f.RetainUnprovedSource && owner != "" && SafeIdentifier(member) == member {
+			return retainedOwnerPrefix(owner)
+		}
+		return fail(reason)
+	}
+	if SafeIdentifier(member) != member || member == "" {
 		return fail("missing original declaration or unnameable member")
+	}
+	if f.InvocationMetadata == nil {
+		return retainOrFail("missing original declaration or unnameable member")
 	}
 	// An owned lexical declaration may be private or require a source binder.
 	// Its qualified importability needs a separate certificate.
 	if f.DeclarationSourceName != nil {
 		if _, owned := f.DeclarationSourceName(owner); owned {
-			return fail("lexical declaration importability unknown")
+			return retainOrFail("lexical declaration importability unknown")
 		}
 	}
 	internal := strings.ReplaceAll(owner, ".", "/")
@@ -148,10 +157,7 @@ func (f *ClassContext) staticImportCallPrefix(owner, member, descriptor, bound s
 		// The invoke already names this owner. A missing JDK table is not a
 		// different target. Analysis output keeps the qualified call; the default
 		// path still refuses an unproved owner.
-		if f.RetainUnprovedSource && owner != "" && SafeIdentifier(member) == member {
-			return retainedOwnerPrefix(owner)
-		}
-		return fail("incomplete, mismatched or inaccessible original owner")
+		return retainOrFail("incomplete, mismatched or inaccessible original owner")
 	}
 	matches := 0
 	for _, method := range declaration.Methods {
@@ -168,18 +174,15 @@ func (f *ClassContext) staticImportCallPrefix(owner, member, descriptor, bound s
 		if spelling := f.importedTypeCallPrefix(owner, member, descriptor, interfaceOwner); spelling != "" {
 			return spelling
 		}
-		// The invoke names one public static method, but neither a static import
-		// nor a single-type import can spell it. Analysis output keeps that owner.
-		// Keyword segments use the same SafeIdentifier spelling as other types.
-		// The default path still refuses instead of choosing another method.
-		if f.RetainUnprovedSource && matches == 1 {
-			return retainedOwnerPrefix(owner)
-		}
-		return fail("method namespace or original static target unproved")
+		// The invoke names a qualified static target whose import or declared
+		// certificate cannot be proved (e.g., R8 inherited or package-private
+		// static calls, or namespace collisions). Analysis output keeps that
+		// owner while the default path refuses instead of guessing another method.
+		return retainOrFail("method namespace or original static target unproved")
 	}
 	pkg, cls := SplitPackageClassName(owner)
 	if pkg == "" || isAnonymousOrLocalBinaryName(cls) {
-		return fail("owner has no importable qualified source name")
+		return retainOrFail("owner has no importable qualified source name")
 	}
 	// The dotting policy describes how an existing binary nesting separator
 	// is rendered. It also returns true for top-level external/platform types;
@@ -188,18 +191,18 @@ func (f *ClassContext) staticImportCallPrefix(owner, member, descriptor, bound s
 		var valid bool
 		cls, valid = binaryNestedNameToSource(cls)
 		if !valid {
-			return fail("nested source identity unknown")
+			return retainOrFail("nested source identity unknown")
 		}
 	}
 	qualified := pkg + "." + cls
 	for _, word := range strings.Split(qualified, ".") {
 		if word == "" || SafeIdentifier(word) != word {
-			return fail("owner source spelling changed")
+			return retainOrFail("owner source spelling changed")
 		}
 	}
 	if prior := f.StaticMethodImports.owners[member]; prior != "" {
 		if prior != qualified {
-			return fail("different owners require the same imported method name")
+			return retainOrFail("different owners require the same imported method name")
 		}
 		return ""
 	}

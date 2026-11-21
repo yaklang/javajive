@@ -159,8 +159,6 @@ func unsupportedMapItem(itemType uint16) (string, bool) {
 		return "call_site_id", true
 	case 0x0008:
 		return "method_handle", true
-	case 0xf000:
-		return "hiddenapi_class_data", true
 	default:
 		return "", false
 	}
@@ -170,7 +168,8 @@ func knownMapItem(itemType uint16) bool {
 	switch itemType {
 	case 0x0000, 0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006,
 		0x1000, 0x1001, 0x1002, 0x1003,
-		0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006:
+		0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006,
+		0xf000:
 		return true
 	default:
 		return false

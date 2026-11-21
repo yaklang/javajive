@@ -11,6 +11,11 @@ import (
 	"github.com/yaklang/javajive/dex2jar/model"
 )
 
+type polySlotKey struct {
+	reg  uint16
+	kind classfilebuilder.LocalKind
+}
+
 type methodLowerer struct {
 	file     *model.File
 	class    *model.Class
@@ -31,6 +36,14 @@ type methodLowerer struct {
 	// homeSlots maps a DEX register to the JVM local where its value starts.
 	// Registers that can hold a category-2 value reserve a second slot.
 	homeSlots []uint16
+	// directParamSlots maps a read-only incoming DEX parameter register directly
+	// to its incoming JVM argument local (< homeBase), avoiding prologue copies.
+	// Entries >= 0 bypass homeSlots and emitPrologue stores.
+	directParamSlots []int
+	// polySlots maps (register, LocalKind) to companion JVM locals when a
+	// polymorphic zero constant (const 0) is used across multiple categories.
+	polySlots      map[polySlotKey]uint16
+	registerWidths []int
 	// homeLimit is the number of local slots the register homes occupy.
 	homeLimit uint16
 	// tempLimit is the number of extra local slots used to capture values that
@@ -166,11 +179,109 @@ func (l *methodLowerer) assignHomes() error {
 			}
 		}
 	}
+
+	written := make([]bool, registerCount)
+	for idx := range l.method.Instructions {
+		_, defs := l.method.EffectsAt(idx)
+		for _, reg := range defs {
+			if int(reg) < registerCount {
+				written[reg] = true
+			}
+		}
+		if def, ok := l.method.DefinitionAt(idx); ok && def.Register >= 0 && int(def.Register) < registerCount {
+			written[def.Register] = true
+		}
+	}
+	for _, allocation := range l.method.Allocations {
+		if allocation.NewInstruction >= 0 && allocation.NewInstruction < len(l.method.Instructions) {
+			regs := l.method.Instructions[allocation.NewInstruction].Regs
+			if len(regs) > 0 && int(regs[0]) < registerCount {
+				written[regs[0]] = true
+			}
+		}
+		for _, alias := range allocation.AliasRegisters {
+			if int(alias) < registerCount {
+				written[alias] = true
+			}
+		}
+	}
+
+	l.directParamSlots = make([]int, registerCount)
+	for index := range l.directParamSlots {
+		l.directParamSlots[index] = -1
+	}
+	skipHome := make([]bool, registerCount)
+	parameterRegister := int(l.method.Code.RegistersSize) - int(l.method.Code.InsSize)
+	jvmLocal := 0
+	if l.encoded.AccessFlags&dexStatic == 0 {
+		if parameterRegister >= 0 && parameterRegister < registerCount && !written[parameterRegister] && widths[parameterRegister] == 1 {
+			l.directParamSlots[parameterRegister] = jvmLocal
+			skipHome[parameterRegister] = true
+		}
+		parameterRegister++
+		jvmLocal++
+	}
+	for _, descriptor := range l.method.Proto.Parameters {
+		words := descriptorWords(descriptor)
+		if parameterRegister >= 0 && parameterRegister+words <= registerCount && widths[parameterRegister] == words {
+			dirty := written[parameterRegister]
+			if words == 2 && (written[parameterRegister+1] || widths[parameterRegister+1] != 1) {
+				dirty = true
+			}
+			if !dirty {
+				l.directParamSlots[parameterRegister] = jvmLocal
+				skipHome[parameterRegister] = true
+				if words == 2 {
+					skipHome[parameterRegister+1] = true
+				}
+			}
+		}
+		parameterRegister += words
+		jvmLocal += words
+	}
+
+	l.registerWidths = widths
 	l.homeSlots = make([]uint16, registerCount)
 	next := 0
 	for register, width := range widths {
+		if skipHome[register] {
+			continue
+		}
 		l.homeSlots[register] = uint16(next)
 		next += width
+	}
+	for register, mask := range l.method.PolyZeroRegisters {
+		if mask == 0 || register >= registerCount || skipHome[register] {
+			continue
+		}
+		if l.polySlots == nil {
+			l.polySlots = make(map[polySlotKey]uint16)
+		}
+		first := true
+		for _, entry := range []struct {
+			bit  uint8
+			kind classfilebuilder.LocalKind
+		}{
+			{ir.PolyZeroRef, classfilebuilder.RefLocal},
+			{ir.PolyZeroInt, classfilebuilder.IntLocal},
+			{ir.PolyZeroFloat, classfilebuilder.FloatLocal},
+		} {
+			if mask&entry.bit == 0 {
+				continue
+			}
+			var slot uint16
+			if first {
+				slot = l.home(uint16(register))
+				first = false
+			} else {
+				if int(l.homeBase)+next > math.MaxUint16 {
+					return fmt.Errorf("incoming arguments and DEX register homes require %d locals", int(l.homeBase)+next)
+				}
+				slot = uint16(int(l.homeBase) + next)
+				next++
+			}
+			l.polySlots[polySlotKey{reg: uint16(register), kind: entry.kind}] = slot
+		}
 	}
 	if int(l.homeBase)+next > math.MaxUint16 {
 		return fmt.Errorf("incoming arguments and DEX register homes require %d locals", int(l.homeBase)+next)
@@ -334,14 +445,18 @@ func (l *methodLowerer) emitDebug() error {
 		if local.Register >= l.method.Code.RegistersSize || local.Name == "" || local.Type == "" || local.Start >= local.End || local.End > codeUnits {
 			continue
 		}
-		if local.Type == "J" || local.Type == "D" || local.Type == "F" {
+		kind, err := ir.DescriptorCategory(local.Type)
+		if err != nil {
+			continue
+		}
+		if kind.Words() == 2 && (int(local.Register) >= len(l.registerWidths) || l.registerWidths[local.Register] < 2) {
 			continue
 		}
 		start, end := l.addressLabels[local.Start], l.addressLabels[local.End]
 		if start == nil || end == nil {
 			continue
 		}
-		l.code.Local(start, end, local.Name, local.Type, l.home(local.Register))
+		l.code.Local(start, end, local.Name, local.Type, l.slotFor(local.Register, localKind(kind)))
 		described[localRange{register: local.Register, start: start, end: end}] = true
 	}
 	parameterRegisters := debugParameterRegisters(l.method.Code, l.method.Proto, l.encoded.AccessFlags)
@@ -427,7 +542,9 @@ func (l *methodLowerer) emitPrologue() error {
 	parameterRegister := l.method.Code.RegistersSize - l.method.Code.InsSize
 	jvmLocal := uint16(0)
 	if l.encoded.AccessFlags&dexStatic == 0 {
-		l.code.Load(classfilebuilder.RefLocal, jvmLocal).Store(classfilebuilder.RefLocal, l.home(parameterRegister))
+		if int(parameterRegister) >= len(l.directParamSlots) || l.directParamSlots[parameterRegister] < 0 {
+			l.code.Load(classfilebuilder.RefLocal, jvmLocal).Store(classfilebuilder.RefLocal, l.home(parameterRegister))
+		}
 		parameterRegister++
 		jvmLocal++
 	}
@@ -437,8 +554,10 @@ func (l *methodLowerer) emitPrologue() error {
 			return methodDiagnostic(l.method.Context, nil, "prologue", err)
 		}
 		words := uint16(kind.Words())
-		local := localKind(kind)
-		l.code.Load(local, jvmLocal).Store(local, l.home(parameterRegister))
+		if int(parameterRegister) >= len(l.directParamSlots) || l.directParamSlots[parameterRegister] < 0 {
+			local := localKind(kind)
+			l.code.Load(local, jvmLocal).Store(local, l.home(parameterRegister))
+		}
 		parameterRegister += words
 		jvmLocal += words
 	}
@@ -480,7 +599,7 @@ func (l *methodLowerer) emitInstruction(index int) error {
 		if err != nil {
 			return methodDiagnostic(l.method.Context, instruction, "", err)
 		}
-		l.load(instruction.Regs[0])
+		l.loadAs(instruction.Regs[0], localKind(kind))
 		if kind == ir.Float {
 			l.code.Emit(classfilebuilder.FRETURN)
 		} else {
@@ -491,6 +610,24 @@ func (l *methodLowerer) emitInstruction(index int) error {
 	case instruction.Opcode == 0x11:
 		l.load(instruction.Regs[0]).Emit(classfilebuilder.ARETURN)
 	case instruction.Opcode >= 0x12 && instruction.Opcode <= 0x15:
+		if defCat := l.definitionCategory(instruction.Regs[0]); defCat.Kind == ir.Null && defCat.Allocation == ir.PolyZeroAllocation && instruction.Literal == 0 {
+			stored := false
+			if slot, ok := l.polySlots[polySlotKey{reg: instruction.Regs[0], kind: classfilebuilder.RefLocal}]; ok {
+				l.code.Emit(classfilebuilder.ACONST_NULL).Store(classfilebuilder.RefLocal, slot)
+				stored = true
+			}
+			if slot, ok := l.polySlots[polySlotKey{reg: instruction.Regs[0], kind: classfilebuilder.IntLocal}]; ok {
+				l.code.Emit(classfilebuilder.ICONST_0).Store(classfilebuilder.IntLocal, slot)
+				stored = true
+			}
+			if slot, ok := l.polySlots[polySlotKey{reg: instruction.Regs[0], kind: classfilebuilder.FloatLocal}]; ok {
+				l.code.Emit(classfilebuilder.FCONST_0).Store(classfilebuilder.FloatLocal, slot)
+				stored = true
+			}
+			if stored {
+				return nil
+			}
+		}
 		if err := l.pushDexInt(instruction.Regs[0], int32(instruction.Literal)); err != nil {
 			return methodDiagnostic(l.method.Context, instruction, "", err)
 		}
@@ -582,6 +719,27 @@ func (l *methodLowerer) emitMove(instruction *ir.Instruction) error {
 			return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("move-object opcode does not match stable register category %s", kind))
 		}
 	}
+	if instruction.Opcode <= 0x03 {
+		if srcCat := l.method.CategoryAt(l.index, instruction.Regs[1]); srcCat.Kind == ir.Null && srcCat.Allocation == ir.PolyZeroAllocation {
+			dst, src := instruction.Regs[0], instruction.Regs[1]
+			copied := false
+			for _, lk := range []classfilebuilder.LocalKind{classfilebuilder.RefLocal, classfilebuilder.IntLocal, classfilebuilder.FloatLocal} {
+				dstSlot, ok := l.polySlots[polySlotKey{reg: dst, kind: lk}]
+				if !ok {
+					continue
+				}
+				srcSlot := l.slotFor(src, lk)
+				l.code.Load(lk, srcSlot).Store(lk, dstSlot)
+				copied = true
+			}
+			if !copied {
+				// Dead polymorphic-zero move whose destination is never read.
+				l.code.Emit(classfilebuilder.ACONST_NULL).Store(classfilebuilder.RefLocal, l.home(dst))
+			}
+			l.registerDescriptor[dst] = l.registerDescriptor[src]
+			return nil
+		}
+	}
 	l.load(instruction.Regs[1])
 	l.store(instruction.Regs[0])
 	if isReferenceKind(kind) {
@@ -668,7 +826,7 @@ func (l *methodLowerer) emitNewArray(instruction *ir.Instruction) error {
 	if !strings.HasPrefix(descriptor, "[") || len(descriptor) < 2 {
 		return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("new-array type %q is not an array", descriptor))
 	}
-	l.load(instruction.Regs[1])
+	l.loadAs(instruction.Regs[1], classfilebuilder.IntLocal)
 	component := descriptor[1:]
 	if atype, ok := primitiveArrayType(component); ok {
 		l.code.Byte(classfilebuilder.NEWARRAY, atype)
@@ -868,12 +1026,18 @@ func (l *methodLowerer) emitFilledNewArray(index int, instruction *ir.Instructio
 		}
 		l.code.CP(classfilebuilder.ANEWARRAY, constant)
 	}
+	elemKind := classfilebuilder.IntLocal
+	if storeOp == classfilebuilder.FASTORE {
+		elemKind = classfilebuilder.FloatLocal
+	} else if storeOp == classfilebuilder.AASTORE {
+		elemKind = classfilebuilder.RefLocal
+	}
 	for offset, register := range instruction.Regs {
 		l.code.Emit(classfilebuilder.DUP)
 		if err := l.pushInt(int32(offset)); err != nil {
 			return methodDiagnostic(l.method.Context, instruction, "", err)
 		}
-		l.load(register)
+		l.loadAs(register, elemKind)
 		l.code.Emit(storeOp)
 	}
 	next := index + 1
@@ -887,15 +1051,15 @@ func (l *methodLowerer) emitFilledNewArray(index int, instruction *ir.Instructio
 // filledArrayShape maps an array component descriptor to its construction and
 // element-store form.
 func filledArrayShape(component string) (classfilebuilder.Opcode, int, string, error) {
+	if component == "J" || component == "D" {
+		return 0, 0, "", fmt.Errorf("unsupported filled array component %q", component)
+	}
 	if atype, ok := primitiveArrayType(component); ok {
 		stores := map[string]classfilebuilder.Opcode{
 			"I": classfilebuilder.IASTORE, "Z": classfilebuilder.BASTORE, "B": classfilebuilder.BASTORE,
-			"C": classfilebuilder.CASTORE, "S": classfilebuilder.SASTORE,
+			"C": classfilebuilder.CASTORE, "S": classfilebuilder.SASTORE, "F": classfilebuilder.FASTORE,
 		}
 		return stores[component], atype, "", nil
-	}
-	if component == "J" || component == "D" || component == "F" {
-		return 0, 0, "", fmt.Errorf("unsupported filled array component %q", component)
 	}
 	name, err := ir.InternalName(component)
 	if err != nil {
@@ -915,14 +1079,25 @@ func (l *methodLowerer) emitArray(instruction *ir.Instruction) error {
 	if err != nil {
 		return methodDiagnostic(l.method.Context, instruction, "", err)
 	}
-	l.load(instruction.Regs[1])
-	l.load(instruction.Regs[2])
+	l.loadAs(instruction.Regs[1], classfilebuilder.RefLocal)
+	l.loadAs(instruction.Regs[2], classfilebuilder.IntLocal)
 	if instruction.Opcode <= 0x4a {
 		l.code.Emit(op)
 		l.store(instruction.Regs[0])
 		return nil
 	}
-	l.load(instruction.Regs[0])
+	valueKind := classfilebuilder.IntLocal
+	switch op {
+	case classfilebuilder.FASTORE:
+		valueKind = classfilebuilder.FloatLocal
+	case classfilebuilder.LASTORE:
+		valueKind = classfilebuilder.LongLocal
+	case classfilebuilder.DASTORE:
+		valueKind = classfilebuilder.DoubleLocal
+	case classfilebuilder.AASTORE:
+		valueKind = classfilebuilder.RefLocal
+	}
+	l.loadAs(instruction.Regs[0], valueKind)
 	l.code.Emit(op)
 	return nil
 }
@@ -1016,7 +1191,7 @@ func (l *methodLowerer) loadArguments(registers []uint16, proto model.Proto, pos
 		if err != nil {
 			return err
 		}
-		l.load(registers[position])
+		l.loadAs(registers[position], localKind(kind))
 		position += kind.Words()
 	}
 	return nil
@@ -1037,10 +1212,10 @@ func (l *methodLowerer) emitSwitch(instruction *ir.Instruction) error {
 			return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("switch target %d is not a basic block", target))
 		}
 	}
-	if kind := l.method.CategoryAt(l.index, instruction.Regs[0]).Kind; !isIntKind(kind) && kind != ir.Unknown {
+	if kind := l.method.CategoryAt(l.index, instruction.Regs[0]).Kind; !isIntKind(kind) && kind != ir.Null && kind != ir.Unknown {
 		return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("switch selector has category %s, want int", kind))
 	}
-	l.load(instruction.Regs[0])
+	l.loadAs(instruction.Regs[0], classfilebuilder.IntLocal)
 	if len(targets) == 0 {
 		// A table with no cases can only fall through.
 		l.code.Branch(classfilebuilder.GOTO, defaultTarget)
@@ -1069,8 +1244,14 @@ func (l *methodLowerer) emitCompare(instruction *ir.Instruction) error {
 	if !ok {
 		return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("unsupported comparison opcode %#x", instruction.Opcode))
 	}
-	l.load(instruction.Regs[1])
-	l.load(instruction.Regs[2])
+	operandKind := classfilebuilder.FloatLocal
+	if instruction.Opcode == 0x2f || instruction.Opcode == 0x30 {
+		operandKind = classfilebuilder.DoubleLocal
+	} else if instruction.Opcode == 0x31 {
+		operandKind = classfilebuilder.LongLocal
+	}
+	l.loadAs(instruction.Regs[1], operandKind)
+	l.loadAs(instruction.Regs[2], operandKind)
 	l.code.Emit(opcode)
 	l.store(instruction.Regs[0])
 	return nil
@@ -1081,38 +1262,76 @@ func (l *methodLowerer) emitIf(instruction *ir.Instruction) error {
 	if instruction.Opcode <= 0x37 {
 		left := l.method.CategoryAt(l.index, instruction.Regs[0]).Kind
 		right := l.method.CategoryAt(l.index, instruction.Regs[1]).Kind
-		leftReference, rightReference := isReferenceKind(left), isReferenceKind(right)
-		if leftReference != rightReference {
-			return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("comparison mixes reference and integer register homes"))
-		}
-		if leftReference && instruction.Opcode > 0x33 {
+		leftNonNullRef := isReferenceKind(left) && left != ir.Null
+		rightNonNullRef := isReferenceKind(right) && right != ir.Null
+		if (leftNonNullRef || rightNonNullRef) && instruction.Opcode > 0x33 {
 			return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("ordered reference comparison is invalid"))
 		}
-		l.load(instruction.Regs[0])
-		l.load(instruction.Regs[1])
-		if leftReference {
-			opcode = classfilebuilder.IF_ACMPEQ + classfilebuilder.Opcode(instruction.Opcode-0x32)
-		} else {
-			if !isIntKind(left) || !isIntKind(right) {
+		if (leftNonNullRef && isIntKind(right)) || (rightNonNullRef && isIntKind(left)) {
+			return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("comparison mixes reference and integer register homes"))
+		}
+		if instruction.Opcode >= 0x34 || isIntKind(left) || isIntKind(right) {
+			if (!isIntKind(left) && left != ir.Null) || (!isIntKind(right) && right != ir.Null) {
 				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("comparison requires int or reference registers, got %s and %s", left, right))
 			}
+			l.loadAs(instruction.Regs[0], classfilebuilder.IntLocal)
+			l.loadAs(instruction.Regs[1], classfilebuilder.IntLocal)
 			opcode = classfilebuilder.IF_ICMPEQ + classfilebuilder.Opcode(instruction.Opcode-0x32)
+		} else {
+			if !isReferenceKind(left) || !isReferenceKind(right) {
+				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("comparison requires int or reference registers, got %s and %s", left, right))
+			}
+			_, hasRef0 := l.polySlots[polySlotKey{reg: instruction.Regs[0], kind: classfilebuilder.RefLocal}]
+			_, hasRef1 := l.polySlots[polySlotKey{reg: instruction.Regs[1], kind: classfilebuilder.RefLocal}]
+			_, hasInt0 := l.polySlots[polySlotKey{reg: instruction.Regs[0], kind: classfilebuilder.IntLocal}]
+			_, hasInt1 := l.polySlots[polySlotKey{reg: instruction.Regs[1], kind: classfilebuilder.IntLocal}]
+			if left == ir.Null && right == ir.Null && (hasInt0 || hasInt1) && !hasRef0 && !hasRef1 {
+				l.loadAs(instruction.Regs[0], classfilebuilder.IntLocal)
+				l.loadAs(instruction.Regs[1], classfilebuilder.IntLocal)
+				opcode = classfilebuilder.IF_ICMPEQ + classfilebuilder.Opcode(instruction.Opcode-0x32)
+			} else {
+				l.loadAs(instruction.Regs[0], classfilebuilder.RefLocal)
+				l.loadAs(instruction.Regs[1], classfilebuilder.RefLocal)
+				opcode = classfilebuilder.IF_ACMPEQ + classfilebuilder.Opcode(instruction.Opcode-0x32)
+			}
 		}
 	} else {
 		kind := l.method.CategoryAt(l.index, instruction.Regs[0]).Kind
-		l.load(instruction.Regs[0])
-		if isReferenceKind(kind) {
+		if instruction.Opcode >= 0x3a {
+			if isReferenceKind(kind) && kind != ir.Null {
+				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("ordered reference comparison is invalid"))
+			}
+			if !isIntKind(kind) && kind != ir.Null && kind != ir.Unknown {
+				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("branch requires an int or reference register, got %s", kind))
+			}
+			l.loadAs(instruction.Regs[0], classfilebuilder.IntLocal)
+			opcode = classfilebuilder.IFEQ + classfilebuilder.Opcode(instruction.Opcode-0x38)
+		} else if kind == ir.Null {
+			_, hasRef := l.polySlots[polySlotKey{reg: instruction.Regs[0], kind: classfilebuilder.RefLocal}]
+			_, hasInt := l.polySlots[polySlotKey{reg: instruction.Regs[0], kind: classfilebuilder.IntLocal}]
+			if hasInt && !hasRef {
+				l.loadAs(instruction.Regs[0], classfilebuilder.IntLocal)
+				opcode = classfilebuilder.IFEQ + classfilebuilder.Opcode(instruction.Opcode-0x38)
+			} else {
+				l.loadAs(instruction.Regs[0], classfilebuilder.RefLocal)
+				if instruction.Opcode == 0x38 {
+					opcode = classfilebuilder.IFNULL
+				} else {
+					opcode = classfilebuilder.IFNONNULL
+				}
+			}
+		} else if isReferenceKind(kind) {
+			l.loadAs(instruction.Regs[0], classfilebuilder.RefLocal)
 			if instruction.Opcode == 0x38 {
 				opcode = classfilebuilder.IFNULL
-			} else if instruction.Opcode == 0x39 {
-				opcode = classfilebuilder.IFNONNULL
 			} else {
-				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("ordered reference comparison is invalid"))
+				opcode = classfilebuilder.IFNONNULL
 			}
 		} else {
 			if !isIntKind(kind) && kind != ir.Unknown {
 				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("branch requires an int or reference register, got %s", kind))
 			}
+			l.loadAs(instruction.Regs[0], classfilebuilder.IntLocal)
 			opcode = classfilebuilder.IFEQ + classfilebuilder.Opcode(instruction.Opcode-0x38)
 		}
 	}
@@ -1142,7 +1361,16 @@ func (l *methodLowerer) emitUnary(instruction *ir.Instruction) error {
 		0x8e: classfilebuilder.I2C,
 		0x8f: classfilebuilder.I2S,
 	}
-	l.load(instruction.Regs[1])
+	inputKind := classfilebuilder.IntLocal
+	switch instruction.Opcode {
+	case 0x7f, 0x87, 0x88, 0x89:
+		inputKind = classfilebuilder.FloatLocal
+	case 0x7d, 0x7e, 0x84, 0x85, 0x86:
+		inputKind = classfilebuilder.LongLocal
+	case 0x80, 0x8a, 0x8b, 0x8c:
+		inputKind = classfilebuilder.DoubleLocal
+	}
+	l.loadAs(instruction.Regs[1], inputKind)
 	switch instruction.Opcode {
 	case 0x7c:
 		// not-int is x ^ -1; the JVM has no dedicated opcode.
@@ -1184,12 +1412,23 @@ func (l *methodLowerer) emitArithmetic(instruction *ir.Instruction) error {
 	if index < 0 || index >= len(opcodes) {
 		return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("unsupported arithmetic opcode %#x", instruction.Opcode))
 	}
+	leftKind, rightKind := classfilebuilder.IntLocal, classfilebuilder.IntLocal
+	switch {
+	case base >= 0x9b && base <= 0xa2:
+		leftKind, rightKind = classfilebuilder.LongLocal, classfilebuilder.LongLocal
+	case base >= 0xa3 && base <= 0xa5:
+		leftKind, rightKind = classfilebuilder.LongLocal, classfilebuilder.IntLocal
+	case base >= 0xa6 && base <= 0xaa:
+		leftKind, rightKind = classfilebuilder.FloatLocal, classfilebuilder.FloatLocal
+	case base >= 0xab && base <= 0xaf:
+		leftKind, rightKind = classfilebuilder.DoubleLocal, classfilebuilder.DoubleLocal
+	}
 	if instruction.Opcode < 0xb0 {
-		l.load(instruction.Regs[1])
-		l.load(instruction.Regs[2])
+		l.loadAs(instruction.Regs[1], leftKind)
+		l.loadAs(instruction.Regs[2], rightKind)
 	} else {
-		l.load(instruction.Regs[0])
-		l.load(instruction.Regs[1])
+		l.loadAs(instruction.Regs[0], leftKind)
+		l.loadAs(instruction.Regs[1], rightKind)
 	}
 	l.code.Emit(opcodes[index])
 	l.store(instruction.Regs[0])
@@ -1203,6 +1442,11 @@ func (l *methodLowerer) emitLiteralArithmetic(instruction *ir.Instruction) error
 	} else {
 		opIndex = instruction.Opcode - 0xd8
 	}
+	if opIndex == 0 && instruction.Regs[0] == instruction.Regs[1] &&
+		instruction.Literal >= math.MinInt16 && instruction.Literal <= math.MaxInt16 {
+		l.code.IInc(l.slotFor(instruction.Regs[0], classfilebuilder.IntLocal), int16(instruction.Literal))
+		return nil
+	}
 	opcodes := []classfilebuilder.Opcode{
 		classfilebuilder.IADD, classfilebuilder.ISUB, classfilebuilder.IMUL, classfilebuilder.IDIV, classfilebuilder.IREM,
 		classfilebuilder.IAND, classfilebuilder.IOR, classfilebuilder.IXOR, classfilebuilder.ISHL, classfilebuilder.ISHR, classfilebuilder.IUSHR,
@@ -1211,9 +1455,9 @@ func (l *methodLowerer) emitLiteralArithmetic(instruction *ir.Instruction) error
 		if err := l.pushInt(int32(instruction.Literal)); err != nil {
 			return methodDiagnostic(l.method.Context, instruction, "", err)
 		}
-		l.load(instruction.Regs[1])
+		l.loadAs(instruction.Regs[1], classfilebuilder.IntLocal)
 	} else {
-		l.load(instruction.Regs[1])
+		l.loadAs(instruction.Regs[1], classfilebuilder.IntLocal)
 		if err := l.pushInt(int32(instruction.Literal)); err != nil {
 			return methodDiagnostic(l.method.Context, instruction, "", err)
 		}
@@ -1250,7 +1494,7 @@ func (l *methodLowerer) emitField(instruction *ir.Instruction) error {
 		}
 	case instruction.Opcode >= 0x59 && instruction.Opcode <= 0x5f:
 		l.load(instruction.Regs[1])
-		l.load(instruction.Regs[0])
+		l.loadAs(instruction.Regs[0], localKind(kind))
 		l.code.CP(classfilebuilder.PUTFIELD, constant)
 	case instruction.Opcode >= 0x60 && instruction.Opcode <= 0x66:
 		l.code.CP(classfilebuilder.GETSTATIC, constant)
@@ -1259,7 +1503,7 @@ func (l *methodLowerer) emitField(instruction *ir.Instruction) error {
 			l.registerDescriptor[instruction.Regs[0]] = field.Type
 		}
 	case instruction.Opcode >= 0x67 && instruction.Opcode <= 0x6d:
-		l.load(instruction.Regs[0])
+		l.loadAs(instruction.Regs[0], localKind(kind))
 		l.code.CP(classfilebuilder.PUTSTATIC, constant)
 	}
 	return nil
@@ -1475,14 +1719,32 @@ func (l *methodLowerer) pushInt(value int32) error {
 }
 
 func (l *methodLowerer) home(register uint16) uint16 {
+	if int(register) < len(l.directParamSlots) && l.directParamSlots[register] >= 0 {
+		return uint16(l.directParamSlots[register])
+	}
 	if int(register) >= len(l.homeSlots) {
 		return l.homeBase + register
 	}
 	return l.homeBase + l.homeSlots[register]
 }
 
+func (l *methodLowerer) slotFor(register uint16, kind classfilebuilder.LocalKind) uint16 {
+	if slot, ok := l.polySlots[polySlotKey{reg: register, kind: kind}]; ok {
+		return slot
+	}
+	return l.home(register)
+}
+
+func (l *methodLowerer) loadAs(register uint16, expected classfilebuilder.LocalKind) *classfilebuilder.Code {
+	kind := l.method.CategoryAt(l.index, register).Kind
+	if kind != ir.Null {
+		expected = localKind(kind)
+	}
+	return l.code.Load(expected, l.slotFor(register, expected))
+}
+
 func (l *methodLowerer) load(register uint16) *classfilebuilder.Code {
-	return l.code.Load(localKind(l.method.CategoryAt(l.index, register).Kind), l.home(register))
+	return l.loadAs(register, localKind(l.method.CategoryAt(l.index, register).Kind))
 }
 
 func (l *methodLowerer) store(register uint16) *classfilebuilder.Code {
@@ -1496,7 +1758,8 @@ func (l *methodLowerer) storeAt(register uint16, index int) *classfilebuilder.Co
 	if definition, ok := l.method.DefinitionAt(index); ok && definition.Register == int32(register) {
 		category = definition.Category
 	}
-	return l.code.Store(localKind(category.Kind), l.home(register))
+	lk := localKind(category.Kind)
+	return l.code.Store(lk, l.slotFor(register, lk))
 }
 
 func localKind(kind ir.CategoryKind) classfilebuilder.LocalKind {
@@ -1564,6 +1827,12 @@ func (l *methodLowerer) assignDeferredTemps() error {
 	for index := range l.deferredStores {
 		store := &l.deferredStores[index]
 		category := l.method.CategoryAt(store.index, store.register)
+		if category.Kind == ir.Null {
+			field := l.file.Fields[l.method.Instructions[store.index].Index]
+			if fk, err := fieldKind(field.Type); err == nil {
+				category = ir.Category{Kind: fk, Descriptor: field.Type}
+			}
+		}
 		if category.Kind == ir.Unknown {
 			return methodDiagnostic(l.method.Context, &l.method.Instructions[store.index], "", fmt.Errorf("deferred field store value v%d has no category", store.register))
 		}
@@ -1583,8 +1852,9 @@ func (l *methodLowerer) assignDeferredTemps() error {
 func (l *methodLowerer) captureDeferredValue(store *deferredStore) {
 	previous := l.index
 	l.index = store.index
-	l.load(store.register)
-	l.code.Store(localKind(store.category.Kind), store.temp)
+	lk := localKind(store.category.Kind)
+	l.loadAs(store.register, lk)
+	l.code.Store(lk, store.temp)
 	l.index = previous
 }
 

@@ -194,12 +194,12 @@ func walkBlock(method *Method, file *model.File, allocations []Allocation, block
 		record := make([]demand, 0, len(uses))
 		// Operand requirements first: they constrain the values read at this
 		// point, including a destination register that is also an operand.
-		for _, register := range sortedCategoryRegisters(uses) {
-			category := uses[register]
+		for _, item := range uses {
+			register, category := item.register, item.category
 			if category.Kind == Unknown {
 				continue
 			}
-			record = append(record, demand{register: register, category: category})
+			record = append(record, item)
 			merged, _, err := mergeCategory(state[register], category)
 			if err != nil {
 				if !final {
@@ -211,6 +211,12 @@ func walkBlock(method *Method, file *model.File, allocations []Allocation, block
 					continue
 				}
 				return nil, diagnostic(method.Context, instruction, "", fmt.Errorf("v%d: %w", register, err))
+			}
+			if state[register].Kind == Null {
+				// Keep zero/null constants open during forward propagation so
+				// refineConstants can distinguish single-type uses from a
+				// polymorphic zero shared across int/float/reference reads.
+				continue
 			}
 			if state[register].Kind.isUntyped() && merged.Kind != state[register].Kind {
 				if start, ok := untypedLifetime[register]; ok && start < position {

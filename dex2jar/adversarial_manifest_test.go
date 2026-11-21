@@ -90,7 +90,8 @@ func TestAdversarialManifestSchemaAndPins(t *testing.T) {
 			t.Fatalf("duplicate id or path: %q %q", artifact.ID, artifact.Path)
 		}
 		seenID[artifact.ID], seenPath[artifact.Path] = true, true
-		if artifact.ID == "" || artifact.Path == "" || filepath.IsAbs(artifact.Path) || filepath.Clean(artifact.Path) != artifact.Path || strings.HasPrefix(artifact.Path, "..") {
+		cleanSlash := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(filepath.FromSlash(artifact.Path))), "./")
+		if artifact.ID == "" || artifact.Path == "" || filepath.IsAbs(artifact.Path) || strings.HasPrefix(artifact.Path, "/") || cleanSlash != artifact.Path || strings.HasPrefix(artifact.Path, "..") {
 			t.Fatalf("unsafe artifact path: %#v", artifact)
 		}
 		if artifact.License != "MIT" || artifact.LicenseFile != "licenses/Arsylk-dexfile-MIT.txt" {

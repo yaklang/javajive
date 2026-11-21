@@ -31,6 +31,10 @@ type JavaRef struct {
 	StackVar                           JavaValue
 	CustomValue                        *CustomValue
 	IsThis                             bool
+	// IsThisAlias marks a local initialized solely from `this` (or another
+	// IsThisAlias) in its reaching-def web so non-<init>, super-class
+	// invokespecial calls still render `super.m(...)` instead of virtual self-calls.
+	IsThisAlias                        bool
 	originalStackMaterialization       bool
 	originalStackPC, originalStackKind int
 	originalStackValue                 JavaValue

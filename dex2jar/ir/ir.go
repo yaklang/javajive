@@ -56,6 +56,16 @@ const (
 	Conflict
 )
 
+// PolyZeroAllocation marks a zero constant that is shared across multiple
+// 32-bit JVM local categories (e.g. int and reference, or int and float).
+const PolyZeroAllocation = ^uint32(0)
+
+const (
+	PolyZeroInt uint8 = 1 << iota
+	PolyZeroFloat
+	PolyZeroRef
+)
+
 // IntLike is retained as an internal compatibility alias for Int.
 const IntLike = Int
 
@@ -211,6 +221,9 @@ type Method struct {
 	blockByInstruction []int
 	allocationNew      map[int]bool
 	allocationCtor     map[int]bool
+	// PolyZeroRegisters records which 32-bit JVM local categories each
+	// polymorphic-zero register requires in lowering.
+	PolyZeroRegisters []uint8
 }
 
 func contextFor(in Input) Context {

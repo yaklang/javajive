@@ -10,14 +10,16 @@ import (
 // instructionConstraints separates the category an instruction reads from its
 // operands (uses) from the category it writes into its destination (defs). The
 // distinction matters when one register is both: `new-array v1, v1` reads an int
-// size and writes an array reference into the same register.
-func instructionConstraints(method *Method, file *model.File, index int, current []Category, allocations []Allocation, final bool) (uses, defs map[uint16]Category, err error) {
+// size and writes an array reference into the same register, and `invoke` can
+// pass one zero-constant register as both int and Object.
+func instructionConstraints(method *Method, file *model.File, index int, current []Category, allocations []Allocation, final bool) (uses []demand, defs map[uint16]Category, err error) {
 	instruction := method.Instructions[index]
-	uses = make(map[uint16]Category)
 	defs = make(map[uint16]Category)
 	intCategory := Category{Kind: IntLike}
 	refCategory := Category{Kind: Reference}
-	use := func(register uint16, category Category) { uses[register] = category }
+	use := func(register uint16, category Category) {
+		uses = append(uses, demand{register: register, category: category})
+	}
 	define := func(register uint16, category Category) { defs[register] = category }
 
 	// The constructor initializes every alias that still points at the new
@@ -43,7 +45,7 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 		source := current[instruction.Regs[1]]
 		switch {
 		case instruction.Opcode >= 0x07:
-			if source.Kind == Unknown {
+			if source.Kind == Unknown || source.Kind == Null {
 				source = refCategory
 			}
 		case instruction.Opcode >= 0x04:
@@ -161,6 +163,10 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 		if instruction.Opcode >= 0x34 || left.Kind == IntLike || right.Kind == IntLike {
 			use(instruction.Regs[0], intCategory)
 			use(instruction.Regs[1], intCategory)
+		} else if left.Kind != Unknown && !left.Kind.isUntyped() {
+			use(instruction.Regs[1], left)
+		} else if right.Kind != Unknown && !right.Kind.isUntyped() {
+			use(instruction.Regs[0], right)
 		} else if left.Kind != Unknown {
 			use(instruction.Regs[1], left)
 		} else if right.Kind != Unknown {

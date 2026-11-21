@@ -797,7 +797,12 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 			isEnum = false
 			nonClassKeyword = false
 		} else if err := c.nativeEnumBackingArrayProtocol(initializations); err != nil {
-			return "", err
+			if !c.options.RetainUnprovedSource || isRequestWorkError(err) {
+				return "", err
+			}
+			c.renderEnumAsClass = true
+			isEnum = false
+			nonClassKeyword = false
 		} else {
 			c.enumConstantSourceName = nil
 			for field, plan := range initializations {
@@ -1223,7 +1228,11 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 		// method-level residuals on the existing usage-based path. Kill-switch JDEC_INNER_ENCLOSING_ARITY_OFF.
 		projected, methodBounds, _, methodScope, projectionErr := c.projectFlattenedMethodFormals(free)
 		if projectionErr != nil {
-			return "", projectionErr
+			if !c.options.RetainUnprovedSource || isRequestWorkError(projectionErr) {
+				return "", projectionErr
+			}
+			methodScope = false
+			free = nil
 		}
 		if methodScope {
 			free = projected

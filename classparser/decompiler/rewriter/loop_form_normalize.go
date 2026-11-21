@@ -5,6 +5,7 @@ import (
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
 
 // NormalizeLoopForms rewrites two generic loop shapes after the CFG has been
@@ -25,8 +26,37 @@ func NormalizeLoopForms(sts []statements.Statement) []statements.Statement {
 		return sts
 	}
 	normalized := make([]statements.Statement, 0, len(sts))
-	for _, st := range sts {
-		normalized = append(normalized, normalizeLoopStatement(st))
+	for i, st := range sts {
+		normalizedSt := normalizeLoopStatement(st)
+		if dw, ok := normalizedSt.(*statements.DoWhileStatement); ok && jdecenv.Get("JDEC_LOOP_NORM_EXT_OFF") == "" {
+			if prefix, whileSt := doWhileWithConstPrefixAsWhile(dw, sts[i+1:]); whileSt != nil {
+				if len(normalized) > 0 {
+					if prevAssign, ok := normalized[len(normalized)-1].(*statements.AssignStatement); ok && prevAssign != nil {
+						var usedInPrev bool
+						for _, p := range prefix {
+							if pa, ok := p.(*statements.AssignStatement); ok {
+								if pr := plainLoopRef(pa.LeftValue); pr != nil && varUsedInStatements([]statements.Statement{prevAssign}, pr.VarUid) {
+									usedInPrev = true
+									break
+								}
+							}
+						}
+						if !usedInPrev {
+							prevIdx := len(normalized) - 1
+							normalized = append(normalized, prefix...)
+							copy(normalized[prevIdx+len(prefix):], normalized[prevIdx:prevIdx+1])
+							copy(normalized[prevIdx:prevIdx+len(prefix)], prefix)
+							normalized = append(normalized, whileSt)
+							continue
+						}
+					}
+				}
+				normalized = append(normalized, prefix...)
+				normalized = append(normalized, whileSt)
+				continue
+			}
+		}
+		normalized = append(normalized, normalizedSt)
 	}
 	return convertForLikeLoops(normalized)
 }
@@ -93,6 +123,28 @@ func trimTrailingContinue(body []statements.Statement) []statements.Statement {
 	return body
 }
 
+func extractDoWhileGuard(guard *statements.IfStatement) (values.JavaValue, []statements.Statement, bool) {
+	if guard == nil || guard.Condition == nil {
+		return nil, nil, false
+	}
+	if len(guard.IfBody) > 0 && len(guard.ElseBody) == 1 {
+		if kind, label, known := sourceTransferKind(guard.ElseBody[0]); known && kind == "break" && label == "" {
+			return guard.Condition, guard.IfBody, true
+		}
+	}
+	if jdecenv.Get("JDEC_LOOP_NORM_EXT_OFF") == "" && len(guard.IfBody) == 1 && len(guard.ElseBody) > 0 {
+		if kind, label, known := sourceTransferKind(guard.IfBody[0]); known && kind == "break" && label == "" {
+			neg := values.SimplifyConditionValue(&values.JavaExpression{
+				Op:     values.Not,
+				Values: []values.JavaValue{guard.Condition},
+				Typ:    types.NewJavaPrimer(types.JavaBoolean),
+			})
+			return neg, guard.ElseBody, true
+		}
+	}
+	return nil, nil, false
+}
+
 // doWhileAsWhile recognizes the canonical top-tested loop lowering. The
 // condition is evaluated exactly once per iteration in both forms; `continue`
 // inside the body still reaches the condition because the original do-while
@@ -103,14 +155,108 @@ func doWhileAsWhile(loop *statements.DoWhileStatement) *statements.WhileStatemen
 		return nil
 	}
 	guard, ok := loop.Body[0].(*statements.IfStatement)
-	if !ok || guard == nil || guard.Condition == nil || len(guard.IfBody) == 0 || len(guard.ElseBody) != 1 {
+	if !ok {
 		return nil
 	}
-	kind, label, known := sourceTransferKind(guard.ElseBody[0])
-	if !known || kind != "break" || label != "" {
+	cond, body, ok := extractDoWhileGuard(guard)
+	if !ok {
 		return nil
 	}
-	return &statements.WhileStatement{ConditionValue: guard.Condition, Body: trimTrailingContinue(guard.IfBody)}
+	return &statements.WhileStatement{ConditionValue: cond, Body: trimTrailingContinue(body)}
+}
+
+func doWhileWithConstPrefixAsWhile(loop *statements.DoWhileStatement, remaining []statements.Statement) ([]statements.Statement, *statements.WhileStatement) {
+	if loop == nil || loop.Label != "" || loop.ConditionValue == nil || !isTrueBooleanLiteral(loop.ConditionValue) ||
+		len(loop.Body) < 2 {
+		return nil, nil
+	}
+	last := len(loop.Body) - 1
+	guard, ok := loop.Body[last].(*statements.IfStatement)
+	if !ok {
+		return nil, nil
+	}
+	cond, body, ok := extractDoWhileGuard(guard)
+	if !ok {
+		return nil, nil
+	}
+	prefix := loop.Body[:last]
+	seenUids := make(map[string]bool, len(prefix))
+	for _, st := range prefix {
+		as, ok := st.(*statements.AssignStatement)
+		if !ok || as == nil || as.ArrayMember != nil || (!as.IsFirst && !as.IsDeclare) || as.JavaValue == nil {
+			return nil, nil
+		}
+		ref := plainLoopRef(as.LeftValue)
+		if ref == nil || ref.VarUid == "" || ref.IsThis || ref.IsParam || seenUids[ref.VarUid] {
+			return nil, nil
+		}
+		lit, ok := values.UnpackSoltValue(as.JavaValue).(*values.JavaLiteral)
+		if !ok || lit == nil {
+			return nil, nil
+		}
+		seenUids[ref.VarUid] = true
+		if varUsedInStatements(remaining, ref.VarUid) || varAssignedInStatements(body, ref.VarUid) {
+			return nil, nil
+		}
+	}
+	hoisted := append([]statements.Statement(nil), prefix...)
+	return hoisted, &statements.WhileStatement{ConditionValue: cond, Body: trimTrailingContinue(body)}
+}
+
+func varAssignedInStatements(sts []statements.Statement, uid string) bool {
+	if len(sts) == 0 || uid == "" {
+		return false
+	}
+	for _, st := range sts {
+		switch s := st.(type) {
+		case *statements.AssignStatement:
+			if s != nil && s.ArrayMember == nil {
+				if ref := plainLoopRef(s.LeftValue); ref != nil && ref.VarUid == uid {
+					return true
+				}
+			}
+		case *statements.IfStatement:
+			if s != nil && (varAssignedInStatements(s.IfBody, uid) || varAssignedInStatements(s.ElseBody, uid)) {
+				return true
+			}
+		case *statements.WhileStatement:
+			if s != nil && varAssignedInStatements(s.Body, uid) {
+				return true
+			}
+		case *statements.DoWhileStatement:
+			if s != nil && varAssignedInStatements(s.Body, uid) {
+				return true
+			}
+		case *statements.ForStatement:
+			if s != nil && (varAssignedInStatements([]statements.Statement{s.InitVar, s.EndExp}, uid) || varAssignedInStatements(s.SubStatements, uid)) {
+				return true
+			}
+		case *statements.SwitchStatement:
+			if s != nil {
+				for _, c := range s.Cases {
+					if c != nil && varAssignedInStatements(c.Body, uid) {
+						return true
+					}
+				}
+			}
+		case *statements.TryCatchStatement:
+			if s != nil {
+				if varAssignedInStatements(s.TryBody, uid) {
+					return true
+				}
+				for _, b := range s.CatchBodies {
+					if varAssignedInStatements(b, uid) {
+						return true
+					}
+				}
+			}
+		case *statements.SynchronizedStatement:
+			if s != nil && varAssignedInStatements(s.Body, uid) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func convertForLikeLoops(sts []statements.Statement) []statements.Statement {
@@ -188,6 +334,21 @@ func plainLoopRef(v values.JavaValue) *values.JavaRef {
 func isSimpleLoopUpdate(st statements.Statement, uid string) bool {
 	if st == nil || uid == "" {
 		return false
+	}
+	if assign, ok := st.(*statements.AssignStatement); ok {
+		if assign == nil || assign.IsFirst || assign.IsDeclare || assign.ArrayMember != nil || jdecenv.Get("JDEC_LOOP_NORM_EXT_OFF") != "" {
+			return false
+		}
+		lhs := plainLoopRef(assign.LeftValue)
+		if lhs == nil || lhs.VarUid != uid {
+			return false
+		}
+		es, ok := values.UnpackSoltValue(assign.JavaValue).(*values.JavaExpression)
+		if !ok || es == nil || (es.Op != values.ADD && es.Op != values.SUB) || len(es.Values) != 2 || !values.IsPure(es) {
+			return false
+		}
+		first := plainLoopRef(es.Values[0])
+		return first != nil && first.VarUid == uid
 	}
 	var expr values.JavaValue
 	switch s := st.(type) {

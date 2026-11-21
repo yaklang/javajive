@@ -189,7 +189,7 @@ func exceptionPlan(fn *ssabuild.Function, values *ValueRegistry, cov map[uint16]
 					return fail("PC %d lacks pre-throw local snapshot", pc)
 				}
 				typ := pre.Before.Locals[slot]
-				if !spillType(typ) || !typ.DropValue().Equal(p.Type.DropValue()) || !state.Frame.Locals[slot].DropValue().Equal(typ.DropValue()) {
+				if !compatibleExceptionSpillType(p.Type, typ) || !state.Frame.Locals[slot].DropValue().Equal(typ.DropValue()) {
 					return fail("PC %d local %d requires type conversion or initialization", pc, slot)
 				}
 				if pre.BeforeOrigins[slot] != op.Origin || state.Origins[slot] != op.Origin {
@@ -263,4 +263,12 @@ func exceptionPlan(fn *ssabuild.Function, values *ValueRegistry, cov map[uint16]
 }
 func spillType(t frametransfer.Type) bool {
 	return t.Computational() && t.Kind != frametransfer.UninitNew && t.Kind != frametransfer.UninitThis
+}
+
+func compatibleExceptionSpillType(phiType, preType frametransfer.Type) bool {
+	if !spillType(phiType) || !spillType(preType) {
+		return false
+	}
+	joined, ok := frametransfer.JoinTypes(phiType.DropValue(), preType.DropValue())
+	return ok && joined.DropValue().Equal(phiType.DropValue())
 }

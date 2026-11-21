@@ -5128,7 +5128,7 @@ func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext)
 	// is a `super.method(...)` call. Rendering it as `this.method(...)` re-dispatches virtually to the
 	// overriding method and recurses forever (guava CaseFormat constant bodies' `super.convert(...)`).
 	if f.IsSpecialInvoke && f.FunctionName != "<init>" && f.ClassName != "" && !f.isCurrentClass(funcCtx) {
-		if ref, ok := UnpackSoltValue(f.Object).(*JavaRef); ok && ref != nil && ref.IsThis {
+		if ref, ok := UnpackSoltValue(f.Object).(*JavaRef); ok && ref != nil && (ref.IsThis || (funcCtx.Getenv("JDEC_THIS_ALIAS_SUPER_OFF") == "" && ref.IsThisAlias)) {
 			// A `super.m()` invokespecial whose target is a directly-implemented INTERFACE (not the
 			// superclass) is an interface-default super call, which Java spells `Iface.super.m()`. A bare
 			// `super.m()` dispatches to the SUPERCLASS, which does not declare the interface's default

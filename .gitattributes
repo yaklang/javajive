@@ -1,0 +1,11 @@
+* text=auto eol=lf
+*.go text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
+*.java text eol=lf
+SHA256SUMS text eol=lf

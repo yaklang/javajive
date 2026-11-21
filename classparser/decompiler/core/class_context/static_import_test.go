@@ -288,6 +288,52 @@ func TestRetainedIncompleteStaticOwnerKeepsQualifiedTarget(t *testing.T) {
 	if got := f.staticImportCallPrefix("mt.if", "a", "()I", "mt.if", false); got != "mt.if_." || f.StaticMethodImports.Error() != nil {
 		t.Fatalf("keyword owner prefix=%q err=%v", got, f.StaticMethodImports.Error())
 	}
+
+	// Inherited static call: complete public subclass c.e extends c.f (matches == 0 on c.e).
+	declarations["c/f"] = callbinding.Class{
+		Name: "c/f", MembersComplete: true, ParentsComplete: true,
+		Methods: []callbinding.Method{{Name: "a", Desc: "(Lc/o/c/a;)Lc/d;", Public: true, Static: true}},
+	}
+	declarations["c/e"] = callbinding.Class{
+		Name: "c/e", Public: true, MembersComplete: true, ParentsComplete: true,
+		Parents: []string{"c/f"},
+	}
+	f.RetainUnprovedSource = false
+	f.StaticMethodImports = NewStaticMethodImports()
+	if got := f.staticImportCallPrefix("c.e", "a", "(Lc/o/c/a;)Lc/d;", "c.e", false); f.StaticMethodImports.Error() == nil {
+		t.Fatalf("strict path accepted inherited static target with matches==0: %q", got)
+	}
+	f.RetainUnprovedSource = true
+	f.StaticMethodImports = NewStaticMethodImports()
+	if got := f.staticImportCallPrefix("c.e", "a", "(Lc/o/c/a;)Lc/d;", "c.e", false); got != "c.e." || f.StaticMethodImports.Error() != nil {
+		t.Fatalf("retained inherited static call prefix=%q err=%v", got, f.StaticMethodImports.Error())
+	}
+
+	// Conflicting static-import member names across two complete public owners.
+	declarations["a/One"] = callbinding.Class{
+		Name: "a/One", Public: true, MembersComplete: true, ParentsComplete: true,
+		Methods: []callbinding.Method{{Name: "m", Desc: "()V", Public: true, Static: true}},
+	}
+	declarations["a/Two"] = callbinding.Class{
+		Name: "a/Two", Public: true, MembersComplete: true, ParentsComplete: true,
+		Methods: []callbinding.Method{{Name: "m", Desc: "()V", Public: true, Static: true}},
+	}
+	f.RetainUnprovedSource = false
+	f.StaticMethodImports = NewStaticMethodImports()
+	if got := f.staticImportCallPrefix("a.One", "m", "()V", "a.One", false); got != "" || f.StaticMethodImports.Error() != nil {
+		t.Fatalf("unexpected failure importing first owner: got=%q err=%v", got, f.StaticMethodImports.Error())
+	}
+	if got := f.staticImportCallPrefix("a.Two", "m", "()V", "a.Two", false); f.StaticMethodImports.Error() == nil {
+		t.Fatalf("strict path accepted conflicting static import: %q", got)
+	}
+	f.RetainUnprovedSource = true
+	f.StaticMethodImports = NewStaticMethodImports()
+	if got := f.staticImportCallPrefix("a.One", "m", "()V", "a.One", false); got != "" || f.StaticMethodImports.Error() != nil {
+		t.Fatalf("retained first static import failed: got=%q err=%v", got, f.StaticMethodImports.Error())
+	}
+	if got := f.staticImportCallPrefix("a.Two", "m", "()V", "a.Two", false); got != "a.Two." || f.StaticMethodImports.Error() != nil {
+		t.Fatalf("retained conflicting static call prefix=%q err=%v", got, f.StaticMethodImports.Error())
+	}
 }
 
 func TestStaticOwnerWithoutMemberCannotCertifyAnObscuredCastType(t *testing.T) {
