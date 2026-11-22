@@ -144,6 +144,45 @@ func TestThrownOperandParticipatesInPrivateArrayOwnership(t *testing.T) {
 	}
 }
 
+func TestSourceAssignmentForwardParticipatesInLocalReferenceChecks(t *testing.T) {
+	target := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("java.lang.Object"))
+	unrelatedLHS := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("java.lang.String"))
+	unrelatedRHS := values.NewJavaLiteral("hello", types.NewJavaClass("java.lang.String"))
+
+	for _, tc := range []struct {
+		name string
+		stmt statements.Statement
+		want bool
+	}{
+		{
+			name: "unrelated assignment forward",
+			stmt: statements.NewSourceAssignmentForward(statements.NewAssignStatement(unrelatedLHS, unrelatedRHS, true)),
+			want: false,
+		},
+		{
+			name: "writes target ref",
+			stmt: statements.NewSourceAssignmentForward(statements.NewAssignStatement(target, unrelatedRHS, true)),
+			want: true,
+		},
+		{
+			name: "reads target ref on RHS",
+			stmt: statements.NewSourceAssignmentForward(statements.NewAssignStatement(unrelatedLHS, target, true)),
+			want: true,
+		},
+		{
+			name: "opaque custom statement stays true",
+			stmt: &statements.CustomStatement{StringFunc: func(*class_context.ClassContext) string { return "custom();" }},
+			want: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := statementReferencesLocal(tc.stmt, target); got != tc.want {
+				t.Fatalf("statementReferencesLocal=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBranchArrayReturnWalkPreservesNestedCatchConsumer(t *testing.T) {
 	for _, scenario := range []string{"nested catch", "multiple uses", "opaque", "live expression"} {
 		t.Run(scenario, func(t *testing.T) {

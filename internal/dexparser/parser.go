@@ -24,9 +24,17 @@ const (
 
 var supportedDEXVersions = map[string]bool{"035": true, "037": true, "038": true, "039": true, "040": true}
 
+// ParseOptions controls recoverable validation exceptions during DEX parsing.
+// Zero-value ParseOptions enforces strict integrity and metadata membership.
+type ParseOptions struct {
+	TolerateSignatureMismatch       bool
+	TolerateOrphanAnnotationDefault bool
+}
+
 type parser struct {
 	data             []byte
 	entry            string
+	options          ParseOptions
 	file             *model.File
 	class            string
 	method           string
@@ -39,7 +47,13 @@ type parser struct {
 }
 
 func Parse(data []byte, entry string) (*model.File, error) {
-	p := &parser{data: data, entry: entry}
+	return ParseWithOptions(data, entry, ParseOptions{})
+}
+
+// ParseWithOptions decodes a DEX file while applying explicit recovery
+// tolerances when configured.
+func ParseWithOptions(data []byte, entry string, options ParseOptions) (*model.File, error) {
+	p := &parser{data: data, entry: entry, options: options}
 	return p.parse()
 }
 
@@ -130,13 +144,22 @@ func (p *parser) parse() (*model.File, error) {
 	if err := p.checkAnnotationMethodMembership(); err != nil {
 		return nil, err
 	}
-	wantSignature := sha1.Sum(p.data[32:])
-	if !bytes.Equal(h.Signature[:], wantSignature[:]) {
-		return nil, p.fail(12, "header signature", "SHA-1 signature mismatch")
-	}
 	wantChecksum := adler32.Checksum(p.data[12:])
 	if h.Checksum != wantChecksum {
 		return nil, p.fail(8, "header checksum", "Adler-32 checksum=%08x, computed=%08x", h.Checksum, wantChecksum)
+	}
+	wantSignature := sha1.Sum(p.data[32:])
+	if !bytes.Equal(h.Signature[:], wantSignature[:]) {
+		if !p.options.TolerateSignatureMismatch {
+			return nil, p.fail(12, "header signature", "SHA-1 signature mismatch")
+		}
+		p.file.ParseWarnings = append(p.file.ParseWarnings, model.ParseWarning{
+			Entry:   p.entry,
+			Code:    "header.signature_mismatch",
+			Action:  "ignore_header_signature",
+			Feature: "dex-header",
+			Message: fmt.Sprintf("SHA-1 signature=%x, computed=%x (Adler-32 checksum valid)", h.Signature, wantSignature),
+		})
 	}
 	return p.file, nil
 }

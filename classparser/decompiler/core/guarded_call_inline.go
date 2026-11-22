@@ -348,6 +348,9 @@ func statementReferencesLocal(statement statements.Statement, ref *values.JavaRe
 	case *statements.SynchronizedStatement:
 		return read(s.Argument) || listReads(s.Body)
 	case *statements.CustomStatement:
+		if assign, ok := s.SourceAssignmentForward(); ok {
+			return statementReferencesLocal(assign, ref, skip...)
+		}
 		if s.ThrownValue != nil {
 			// ATHROW records its complete typed operand. Its rendering closure
 			// adds no hidden dependencies; inspect the thrown expression itself.

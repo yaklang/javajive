@@ -104,6 +104,7 @@ type stackFrameEntry struct {
 type Code struct {
 	pool         *ConstantPool
 	nodes        []codeNode
+	insnCount    int
 	nextLabel    int
 	handlers     []exceptionHandler
 	lines        []lineNumber
@@ -118,6 +119,17 @@ type Code struct {
 }
 
 func newCode(pool *ConstantPool) *Code { return &Code{pool: pool} }
+
+// InstructionCount returns the number of bytecode instructions appended so far.
+func (c *Code) InstructionCount() int {
+	return c.insnCount
+}
+
+func (c *Code) appendInsn(insn *instruction) *Code {
+	c.nodes = append(c.nodes, codeNode{insn: insn})
+	c.insnCount++
+	return c
+}
 
 func (c *Code) fail(format string, args ...any) {
 	if c.err == nil {
@@ -165,8 +177,7 @@ func (c *Code) Emit(op Opcode) *Code {
 		c.fail("opcode 0x%02x is not an operandless supported instruction", byte(op))
 		return c
 	}
-	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindSimple, op: op}})
-	return c
+	return c.appendInsn(&instruction{kind: kindSimple, op: op})
 }
 
 // Byte appends a supported instruction with one signed or unsigned byte
@@ -187,8 +198,7 @@ func (c *Code) Byte(op Opcode, operand int) *Code {
 		c.fail("opcode 0x%02x does not take a one-byte operand", byte(op))
 		return c
 	}
-	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindByte, op: op, arg: operand}})
-	return c
+	return c.appendInsn(&instruction{kind: kindByte, op: op, arg: operand})
 }
 
 // Short appends SIPUSH with a signed 16-bit operand.
@@ -201,8 +211,7 @@ func (c *Code) Short(op Opcode, operand int) *Code {
 		c.fail("SIPUSH operand %d is outside signed short range", operand)
 		return c
 	}
-	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindShort, op: op, arg: operand}})
-	return c
+	return c.appendInsn(&instruction{kind: kindShort, op: op, arg: operand})
 }
 
 // CP appends a supported instruction with a u2 constant-pool operand.
@@ -227,8 +236,7 @@ func (c *Code) CP(op Opcode, index uint16) *Code {
 		c.fail("opcode 0x%02x cannot use constant pool index %d (tag %d)", byte(op), index, entry.tag)
 		return c
 	}
-	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindCP, op: op, arg: int(index)}})
-	return c
+	return c.appendInsn(&instruction{kind: kindCP, op: op, arg: int(index)})
 }
 
 // InvokeInterface appends invokeinterface. The count byte is derived from the
@@ -252,8 +260,7 @@ func (c *Code) InvokeInterface(index uint16) *Code {
 		c.fail("invokeinterface argument word count %d exceeds 255", args+1)
 		return c
 	}
-	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindInvokeInterface, op: INVOKEINTERFACE, arg: int(index), arg2: args + 1}})
-	return c
+	return c.appendInsn(&instruction{kind: kindInvokeInterface, op: INVOKEINTERFACE, arg: int(index), arg2: args + 1})
 }
 
 // InvokeDynamic appends invokedynamic referencing a CONSTANT_InvokeDynamic CP entry.
@@ -271,8 +278,7 @@ func (c *Code) InvokeDynamic(index uint16) *Code {
 		c.fail("invokedynamic descriptor %q: %v", entry.text, err)
 		return c
 	}
-	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindInvokeDynamic, op: INVOKEDYNAMIC, arg: int(index)}})
-	return c
+	return c.appendInsn(&instruction{kind: kindInvokeDynamic, op: INVOKEDYNAMIC, arg: int(index)})
 }
 
 // Load appends a typed local load, selecting compact or WIDE encoding.
@@ -282,8 +288,7 @@ func (c *Code) Load(kind LocalKind, index uint16) *Code {
 		c.fail("invalid local kind %d", kind)
 		return c
 	}
-	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindLocal, op: op, arg: int(index), arg2: localWidth(kind)}})
-	return c
+	return c.appendInsn(&instruction{kind: kindLocal, op: op, arg: int(index), arg2: localWidth(kind)})
 }
 
 // Store appends a typed local store, selecting compact or WIDE encoding.
@@ -293,14 +298,12 @@ func (c *Code) Store(kind LocalKind, index uint16) *Code {
 		c.fail("invalid local kind %d", kind)
 		return c
 	}
-	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindLocal, op: op, arg: int(index), arg2: localWidth(kind)}})
-	return c
+	return c.appendInsn(&instruction{kind: kindLocal, op: op, arg: int(index), arg2: localWidth(kind)})
 }
 
 // IInc appends iinc, selecting WIDE when either operand requires it.
 func (c *Code) IInc(index uint16, delta int16) *Code {
-	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindIInc, op: IINC, arg: int(index), arg2: int(delta)}})
-	return c
+	return c.appendInsn(&instruction{kind: kindIInc, op: IINC, arg: int(index), arg2: int(delta)})
 }
 
 // LDC appends ldc or ldc_w according to the final constant-pool index.
@@ -314,8 +317,7 @@ func (c *Code) LDC(index uint16) *Code {
 		c.fail("ldc does not support constant pool tag %d at index %d", entry.tag, index)
 		return c
 	}
-	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindLDC, op: LDC, arg: int(index)}})
-	return c
+	return c.appendInsn(&instruction{kind: kindLDC, op: LDC, arg: int(index)})
 }
 
 // LDC2 appends ldc2_w, which pushes a long or double constant.
@@ -329,8 +331,7 @@ func (c *Code) LDC2(index uint16) *Code {
 		c.fail("ldc2_w does not support constant pool tag %d at index %d", entry.tag, index)
 		return c
 	}
-	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindCP, op: LDC2_W, arg: int(index)}})
-	return c
+	return c.appendInsn(&instruction{kind: kindCP, op: LDC2_W, arg: int(index)})
 }
 
 // Branch appends goto or a supported conditional branch. Goto is widened to
@@ -343,8 +344,7 @@ func (c *Code) Branch(op Opcode, target *Label) *Code {
 		c.fail("opcode 0x%02x is not a supported branch", byte(op))
 		return c
 	}
-	c.nodes = append(c.nodes, codeNode{insn: &instruction{kind: kindBranch, op: op, target: target}})
-	return c
+	return c.appendInsn(&instruction{kind: kindBranch, op: op, target: target})
 }
 
 // TableSwitch appends a tableswitch whose consecutive case values start at
@@ -367,11 +367,10 @@ func (c *Code) TableSwitch(low int32, defaultTarget *Label, targets ...*Label) *
 			return c
 		}
 	}
-	c.nodes = append(c.nodes, codeNode{insn: &instruction{
+	return c.appendInsn(&instruction{
 		kind: kindTableSwitch, op: TABLESWITCH, arg: int(low), target: defaultTarget,
 		targets: append([]*Label(nil), targets...),
-	}})
-	return c
+	})
 }
 
 // LookupSwitch appends a lookupswitch. keys and targets are corresponding
@@ -393,11 +392,10 @@ func (c *Code) LookupSwitch(defaultTarget *Label, keys []int32, targets ...*Labe
 			return c
 		}
 	}
-	c.nodes = append(c.nodes, codeNode{insn: &instruction{
+	return c.appendInsn(&instruction{
 		kind: kindLookupSwitch, op: LOOKUPSWITCH, target: defaultTarget,
 		keys: append([]int32(nil), keys...), targets: append([]*Label(nil), targets...),
-	}})
-	return c
+	})
 }
 
 // Catch adds an exception-table entry. catchClass is an internal class name;

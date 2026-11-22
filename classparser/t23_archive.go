@@ -32,13 +32,14 @@ func ArchiveOptionsFrom(opts DecompileOptions) filesys.ArchiveOptions {
 
 // archiveFSState is the request-scoped archive policy copied onto ExpandedZipFS/JarFS.
 type archiveFSState struct {
-	budget        *filesys.ArchiveBudget
-	limits        filesys.ArchiveLimits
-	ctx           context.Context
-	depth         int
-	targetRelease int
-	safe          bool
-	active        bool
+	budget                  *filesys.ArchiveBudget
+	limits                  filesys.ArchiveLimits
+	ctx                     context.Context
+	depth                   int
+	targetRelease           int
+	safe                    bool
+	allowCaseFoldCollisions bool
+	active                  bool
 }
 
 func archiveStateFromZipFS(z *filesys.ZipFS) *archiveFSState {
@@ -46,13 +47,14 @@ func archiveStateFromZipFS(z *filesys.ZipFS) *archiveFSState {
 		return nil
 	}
 	return &archiveFSState{
-		budget:        z.ArchiveBudget(),
-		limits:        z.ArchiveLimits(),
-		ctx:           z.ArchiveContext(),
-		depth:         z.ArchiveDepth(),
-		targetRelease: z.TargetRelease(),
-		safe:          z.SafeArchive() || z.ArchiveActive(),
-		active:        true,
+		budget:                  z.ArchiveBudget(),
+		limits:                  z.ArchiveLimits(),
+		ctx:                     z.ArchiveContext(),
+		depth:                   z.ArchiveDepth(),
+		targetRelease:           z.TargetRelease(),
+		safe:                    z.SafeArchive() || z.ArchiveActive(),
+		allowCaseFoldCollisions: z.AllowCaseFoldCollisions(),
+		active:                  true,
 	}
 }
 
@@ -89,6 +91,9 @@ func (s *archiveFSState) zipOptions(depth int) []filesys.ZipFSOption {
 	if s.ctx != nil {
 		opts = append(opts, filesys.WithArchiveContext(s.ctx))
 	}
+	if s.allowCaseFoldCollisions {
+		opts = append(opts, filesys.WithAllowCaseFoldCollisions(true))
+	}
 	return opts
 }
 
@@ -111,6 +116,7 @@ func mergeArchiveState(base *archiveFSState, opts filesys.ArchiveOptions) *archi
 	}
 	s.targetRelease = opts.TargetRelease
 	s.safe = true
+	s.allowCaseFoldCollisions = s.allowCaseFoldCollisions || opts.AllowCaseFoldCollisions
 	s.active = true
 	if s.budget == nil && opts.Limits != (filesys.ArchiveLimits{}) {
 		s.budget = filesys.NewArchiveBudget(opts.Context, s.limits)

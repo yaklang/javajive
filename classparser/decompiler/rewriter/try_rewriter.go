@@ -369,3 +369,53 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 	}
 	return finishForwardRegion(manager, node, regionStart)
 }
+
+func isDanglingCaughtExceptionDiscard(st statements.Statement) bool {
+	expr, ok := st.(*statements.ExpressionStatement)
+	if !ok || expr == nil {
+		return false
+	}
+	cv, ok := core.UnpackSoltValue(expr.Expression).(*values.CustomValue)
+	return ok && cv != nil && cv.Flag == "exception"
+}
+
+// dropDanglingCaughtExceptionDiscards removes orphaned statement-level caught
+// exception placeholders (`Exception;` from JVM/DEX handler exception pops) left
+// outside structured catch headers. AssignStatement, ThrowStatement, and other
+// expressions are left untouched.
+func dropDanglingCaughtExceptionDiscards(sts *[]statements.Statement) {
+	if sts == nil {
+		return
+	}
+	list := *sts
+	out := make([]statements.Statement, 0, len(list))
+	for _, st := range list {
+		if isDanglingCaughtExceptionDiscard(st) {
+			continue
+		}
+		switch s := st.(type) {
+		case *statements.IfStatement:
+			dropDanglingCaughtExceptionDiscards(&s.IfBody)
+			dropDanglingCaughtExceptionDiscards(&s.ElseBody)
+		case *statements.ForStatement:
+			dropDanglingCaughtExceptionDiscards(&s.SubStatements)
+		case *statements.WhileStatement:
+			dropDanglingCaughtExceptionDiscards(&s.Body)
+		case *statements.DoWhileStatement:
+			dropDanglingCaughtExceptionDiscards(&s.Body)
+		case *statements.SynchronizedStatement:
+			dropDanglingCaughtExceptionDiscards(&s.Body)
+		case *statements.TryCatchStatement:
+			dropDanglingCaughtExceptionDiscards(&s.TryBody)
+			for i := range s.CatchBodies {
+				dropDanglingCaughtExceptionDiscards(&s.CatchBodies[i])
+			}
+		case *statements.SwitchStatement:
+			for i := range s.Cases {
+				dropDanglingCaughtExceptionDiscards(&s.Cases[i].Body)
+			}
+		}
+		out = append(out, st)
+	}
+	*sts = out
+}

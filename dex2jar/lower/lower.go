@@ -4,6 +4,7 @@ package lower
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/classfilebuilder"
@@ -114,7 +115,7 @@ func ClassWithPolicy(file *model.File, class *model.Class, options ClassOptions,
 			}
 			return emitClassShell(file, class, options, errors.New(reason), false)
 		}
-		result, err := classWithPolicyOnce(file, class, options, StubUnsupportedMethods)
+		result, err := classWithPolicyOnce(file, class, options, Recover)
 		if err == nil {
 			return result, nil
 		}
@@ -286,7 +287,7 @@ func lowerClassBody(file *model.File, class *model.Class, builder *classfilebuil
 		}
 		builder.AddInterface(name)
 	}
-	if err := addFields(file, class, builder); err != nil {
+	if err := addFields(file, class, options.Hierarchy, builder); err != nil {
 		return ClassResult{}, err
 	}
 	seenMethods := make(map[string]bool)
@@ -331,13 +332,64 @@ func appendMethods(first, second []model.EncodedMethod) []model.EncodedMethod {
 	return methods
 }
 
-func addFields(file *model.File, class *model.Class, builder *classfilebuilder.Class) error {
+func addFields(file *model.File, class *model.Class, hierarchy map[string]*model.Class, builder *classfilebuilder.Class) error {
 	seen := make(map[string]bool)
-	fields := make([]model.EncodedField, 0, len(class.StaticFields)+len(class.InstanceFields))
-	fields = append(fields, class.StaticFields...)
-	fields = append(fields, class.InstanceFields...)
-	for index := range fields {
-		field := fields[index]
+	type fieldEntry struct {
+		field        model.EncodedField
+		isStatic     bool
+		hasStaticVal bool
+		staticVal    model.EncodedValue
+	}
+	entries := make([]fieldEntry, 0, len(class.StaticFields)+len(class.InstanceFields))
+	for i, sf := range class.StaticFields {
+		item := fieldEntry{field: sf, isStatic: true}
+		if i < len(class.StaticValues) {
+			item.hasStaticVal = true
+			item.staticVal = class.StaticValues[i]
+		}
+		entries = append(entries, item)
+	}
+	for _, inf := range class.InstanceFields {
+		entries = append(entries, fieldEntry{field: inf})
+	}
+	if class.AccessFlags&dexEnum != 0 && class.Superclass == "Ljava/lang/Enum;" && len(class.StaticFields) > 1 {
+		if ordinals := inferEnumFieldOrdinals(file, class, hierarchy); len(ordinals) > 0 {
+			var enumPositions []int
+			for i := 0; i < len(class.StaticFields); i++ {
+				sf := class.StaticFields[i]
+				if sf.AccessFlags&dexEnum != 0 && sf.Field.Type == class.Descriptor {
+					enumPositions = append(enumPositions, i)
+				}
+			}
+			if len(enumPositions) == len(ordinals) && len(enumPositions) > 1 {
+				seenOrd := make([]bool, len(enumPositions))
+				valid := true
+				for _, pos := range enumPositions {
+					ord, ok := ordinals[entries[pos].field.Field.Name]
+					if !ok || ord < 0 || ord >= len(enumPositions) || seenOrd[ord] {
+						valid = false
+						break
+					}
+					seenOrd[ord] = true
+				}
+				if valid {
+					ordered := make([]fieldEntry, len(enumPositions))
+					for i, pos := range enumPositions {
+						ordered[i] = entries[pos]
+					}
+					sort.Slice(ordered, func(i, j int) bool {
+						return ordinals[ordered[i].field.Field.Name] < ordinals[ordered[j].field.Field.Name]
+					})
+					for i, pos := range enumPositions {
+						entries[pos] = ordered[i]
+					}
+				}
+			}
+		}
+	}
+	for index := range entries {
+		entry := entries[index]
+		field := entry.field
 		if field.Field.Class != class.Descriptor {
 			return classDiagnostic(file, class, "field", fmt.Errorf("field %q owner %q does not match class", field.Field.Name, field.Field.Class))
 		}
@@ -359,16 +411,15 @@ func addFields(file *model.File, class *model.Class, builder *classfilebuilder.C
 		if err != nil {
 			return classDiagnostic(file, class, "field", fmt.Errorf("field %q: %w", field.Field.Name, err))
 		}
-		isStatic := index < len(class.StaticFields)
-		if isStatic != (field.AccessFlags&dexStatic != 0) {
+		if entry.isStatic != (field.AccessFlags&dexStatic != 0) {
 			return classDiagnostic(file, class, "field", fmt.Errorf("field %q static membership and access flag disagree", field.Field.Name))
 		}
 		if err := validateInterfaceFieldShape(class, field.AccessFlags); err != nil {
 			return classDiagnostic(file, class, "field", fmt.Errorf("field %q: %w", field.Field.Name, err))
 		}
 		member := builder.AddField(access, field.Field.Name, field.Field.Type)
-		if isStatic && index < len(class.StaticValues) {
-			if err := applyStaticValue(file, class, &fields[index], member, builder, class.StaticValues[index]); err != nil {
+		if entry.isStatic && entry.hasStaticVal {
+			if err := applyStaticValue(file, class, &entries[index].field, member, builder, entry.staticVal); err != nil {
 				return err
 			}
 		}
@@ -386,6 +437,115 @@ func addFields(file *model.File, class *model.Class, builder *classfilebuilder.C
 		}
 	}
 	return nil
+}
+
+// inferEnumFieldOrdinals decodes an enum class initializer and maps each ACC_ENUM
+// static field name to the ordinal passed to Enum(String, int) before sput-object.
+func inferEnumFieldOrdinals(file *model.File, class *model.Class, hierarchy map[string]*model.Class) map[string]int {
+	if file == nil || class == nil {
+		return nil
+	}
+	enumFields := make(map[string]bool)
+	for _, sf := range class.StaticFields {
+		if sf.AccessFlags&dexEnum != 0 && sf.Field.Type == class.Descriptor {
+			enumFields[sf.Field.Name] = true
+		}
+	}
+	if len(enumFields) < 2 {
+		return nil
+	}
+	var clinit *model.EncodedMethod
+	for i := range class.DirectMethods {
+		m := &class.DirectMethods[i]
+		if m.Method.Name == "<clinit>" && m.Code != nil {
+			clinit = m
+			break
+		}
+	}
+	if clinit == nil {
+		return nil
+	}
+	insns, err := ir.Decode(clinit.Code, methodContext(file, class, clinit))
+	if err != nil || len(insns) == 0 {
+		return nil
+	}
+
+	prefix := strings.TrimSuffix(class.Descriptor, ";") + "$"
+	isEnumSubclass := func(desc string) bool {
+		if desc == class.Descriptor || strings.HasPrefix(desc, prefix) {
+			return true
+		}
+		if hierarchy != nil {
+			if sub, ok := hierarchy[desc]; ok && sub != nil && sub.Superclass == class.Descriptor {
+				return true
+			}
+		}
+		for i := range file.Classes {
+			if file.Classes[i].Descriptor == desc && file.Classes[i].Superclass == class.Descriptor {
+				return true
+			}
+		}
+		return false
+	}
+
+	intVals := make(map[uint16]int32)
+	enumOrd := make(map[uint16]int)
+	ordinals := make(map[string]int, len(enumFields))
+
+	for i := range insns {
+		ins := insns[i]
+		op := ins.Opcode
+		switch {
+		case op >= 0x12 && op <= 0x15 && len(ins.Regs) > 0:
+			intVals[ins.Regs[0]] = int32(ins.Literal)
+			delete(enumOrd, ins.Regs[0])
+		case op >= 0x01 && op <= 0x03 && len(ins.Regs) >= 2:
+			if v, ok := intVals[ins.Regs[1]]; ok {
+				intVals[ins.Regs[0]] = v
+			} else {
+				delete(intVals, ins.Regs[0])
+			}
+			delete(enumOrd, ins.Regs[0])
+		case op >= 0x07 && op <= 0x09 && len(ins.Regs) >= 2:
+			if ord, ok := enumOrd[ins.Regs[1]]; ok {
+				enumOrd[ins.Regs[0]] = ord
+			} else {
+				delete(enumOrd, ins.Regs[0])
+			}
+			delete(intVals, ins.Regs[0])
+		case (op == 0x70 || op == 0x76) && int(ins.Index) < len(file.Methods):
+			callee := file.Methods[ins.Index]
+			if callee.Name == "<init>" && int(callee.ProtoIndex) < len(file.Protos) && len(ins.Regs) >= 3 && isEnumSubclass(callee.Class) {
+				proto := file.Protos[callee.ProtoIndex]
+				if len(proto.Parameters) >= 2 && proto.Parameters[0] == "Ljava/lang/String;" && proto.Parameters[1] == "I" {
+					if ord, ok := intVals[ins.Regs[2]]; ok {
+						enumOrd[ins.Regs[0]] = int(ord)
+						delete(intVals, ins.Regs[0])
+						continue
+					}
+				}
+			}
+			_, defs := ir.InstructionEffects(ins)
+			for _, r := range defs {
+				delete(intVals, r)
+				delete(enumOrd, r)
+			}
+		case op == 0x69 && len(ins.Regs) > 0 && int(ins.Index) < len(file.Fields):
+			f := file.Fields[ins.Index]
+			if f.Class == class.Descriptor && f.Type == class.Descriptor && enumFields[f.Name] {
+				if ord, ok := enumOrd[ins.Regs[0]]; ok {
+					ordinals[f.Name] = ord
+				}
+			}
+		default:
+			_, defs := ir.InstructionEffects(ins)
+			for _, r := range defs {
+				delete(intVals, r)
+				delete(enumOrd, r)
+			}
+		}
+	}
+	return ordinals
 }
 
 func fieldAnnotationsOf(class *model.Class, index uint32) []model.Annotation {
@@ -566,7 +726,7 @@ func addMethod(file *model.File, class *model.Class, method *model.EncodedMethod
 	if !declarationOnly {
 		built, err = ir.Build(ir.Input{File: file, Class: class, Method: method, SkipFileValidation: options.FileValidated})
 		if err != nil {
-			if policy != StubUnsupportedMethods || !report.IsUnsupported(err) {
+			if (policy != StubUnsupportedMethods && policy != Recover) || !report.IsUnsupported(err) {
 				return nil, err
 			}
 			var capability *report.CapabilityError
@@ -602,11 +762,27 @@ func addMethod(file *model.File, class *model.Class, method *model.EncodedMethod
 		}
 	}
 	if parameters := parameterAnnotationsOf(class, method.MethodIndex); len(parameters) > 0 {
-		converted, visible, err := translateParameterAnnotations(file, parameters, len(proto.Parameters))
-		if err != nil {
-			return nil, methodDiagnostic(ctx, nil, "parameter annotation", err)
+		if len(parameters) != len(proto.Parameters) {
+			if policy == Recover {
+				if method.Method.Name == "<init>" && len(parameters) < len(proto.Parameters) {
+					aligned := make([][]model.Annotation, len(proto.Parameters))
+					copy(aligned[len(proto.Parameters)-len(parameters):], parameters)
+					converted, visible, err := translateParameterAnnotations(file, aligned, len(proto.Parameters))
+					if err == nil {
+						builder.SetMethodParameterAnnotations(member, converted, visible)
+					}
+				}
+			} else {
+				_, _, err := translateParameterAnnotations(file, parameters, len(proto.Parameters))
+				return nil, methodDiagnostic(ctx, nil, "parameter annotation", err)
+			}
+		} else {
+			converted, visible, err := translateParameterAnnotations(file, parameters, len(proto.Parameters))
+			if err != nil {
+				return nil, methodDiagnostic(ctx, nil, "parameter annotation", err)
+			}
+			builder.SetMethodParameterAnnotations(member, converted, visible)
 		}
-		builder.SetMethodParameterAnnotations(member, converted, visible)
 	}
 	if declarationOnly {
 		return nil, nil

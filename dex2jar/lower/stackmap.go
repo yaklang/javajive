@@ -15,6 +15,15 @@ type slotEntry struct {
 
 type slotFrame []slotEntry
 
+type stackMapState struct {
+	entryFrame       slotFrame
+	in               []slotFrame
+	visited          []bool
+	blockByStart     map[uint32]int
+	catchClassByAddr map[uint32]string
+	deferred         map[int]*deferredStore
+}
+
 func topSlotEntry() slotEntry {
 	return slotEntry{vt: classfilebuilder.VerificationType{Tag: classfilebuilder.VerifyTop}}
 }
@@ -113,6 +122,17 @@ func verifyTypeFromCategory(cat ir.Category) classfilebuilder.VerificationType {
 	}
 }
 
+func verifyTagForLocalKind(lk classfilebuilder.LocalKind) classfilebuilder.VerifyTag {
+	switch lk {
+	case classfilebuilder.IntLocal:
+		return classfilebuilder.VerifyInt
+	case classfilebuilder.FloatLocal:
+		return classfilebuilder.VerifyFloat
+	default:
+		return classfilebuilder.VerifyNull
+	}
+}
+
 func (l *methodLowerer) definitionCategoryAt(index int, register uint16) ir.Category {
 	if definition, ok := l.method.DefinitionAt(index); ok && definition.Register == int32(register) {
 		return definition.Category
@@ -164,6 +184,66 @@ func (l *methodLowerer) commonVerifyClass(a, b string) string {
 		cur = c.Superclass
 	}
 	return "java/lang/Object"
+}
+
+func (l *methodLowerer) isVerifySubtype(sub, sup string) bool {
+	if sub == sup || sup == "java/lang/Object" {
+		return true
+	}
+	if sub == "" || sup == "" || strings.HasPrefix(sub, "[") || strings.HasPrefix(sup, "[") {
+		return false
+	}
+	index := l.classIndex()
+	cur := "L" + sub + ";"
+	for step := 0; step < maxAssignabilityDepth; step++ {
+		c, ok := index[cur]
+		if !ok || c.Superclass == "" {
+			break
+		}
+		superInternal, err := objectInternalName(c.Superclass)
+		if err != nil {
+			break
+		}
+		if superInternal == sup {
+			return true
+		}
+		cur = c.Superclass
+	}
+	return false
+}
+
+func (l *methodLowerer) slotFrameCompatibleWithHandler(cur, handler slotFrame) bool {
+	for s := 0; s < len(handler); s++ {
+		h := handler[s]
+		if h.cat2Tail || h.vt.Tag == classfilebuilder.VerifyTop {
+			continue
+		}
+		if s >= len(cur) {
+			return false
+		}
+		c := cur[s]
+		if c.cat2Tail || c.vt.Tag == classfilebuilder.VerifyTop {
+			return false
+		}
+		switch h.vt.Tag {
+		case classfilebuilder.VerifyObject:
+			if c.vt.Tag == classfilebuilder.VerifyNull {
+				continue
+			}
+			if c.vt.Tag != classfilebuilder.VerifyObject || !l.isVerifySubtype(c.vt.Class, h.vt.Class) {
+				return false
+			}
+		case classfilebuilder.VerifyUninitialized:
+			if c.vt.Tag != classfilebuilder.VerifyUninitialized || c.vt.NewAt != h.vt.NewAt {
+				return false
+			}
+		default:
+			if c.vt.Tag != h.vt.Tag {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (l *methodLowerer) isProvablyThrowable(internalName string) bool {
@@ -265,6 +345,9 @@ func compactStackMapLocals(frame slotFrame) []classfilebuilder.VerificationType 
 }
 
 func (l *methodLowerer) transferSlotFrame(blockIdx, insnIdx int, frame slotFrame, deferred map[int]*deferredStore, catchClassByAddr map[uint32]string) {
+	if l.fusedNoLocals[insnIdx] {
+		return
+	}
 	insn := &l.method.Instructions[insnIdx]
 	if store, ok := deferred[insnIdx]; ok {
 		if !store.direct {
@@ -313,7 +396,7 @@ func (l *methodLowerer) transferSlotFrame(blockIdx, insnIdx int, frame slotFrame
 		}
 		return
 	}
-	if insnIdx == l.delegationIndex {
+	if l.isDelegationSite(insnIdx) {
 		thisName, err := objectInternalName(l.class.Descriptor)
 		if err != nil {
 			thisName = "java/lang/Object"
@@ -329,49 +412,66 @@ func (l *methodLowerer) transferSlotFrame(blockIdx, insnIdx int, frame slotFrame
 
 	switch {
 	case insn.Opcode >= 0x01 && insn.Opcode <= 0x09:
-		kind := l.method.CategoryAt(insnIdx, insn.Regs[0]).Kind
-		if def, ok := l.method.DefinitionAt(insnIdx); ok && def.Register == int32(insn.Regs[0]) {
-			kind = def.Category.Kind
-		}
+		kind := l.resolvedDefCategoryAt(insnIdx, insn.Regs[0]).Kind
 		if kind == ir.Unknown {
-			kind = l.method.CategoryAt(insnIdx, insn.Regs[1]).Kind
+			kind = l.resolvedUseCategoryAt(insnIdx, insn.Regs[1]).Kind
 		}
 		if kind == ir.Unknown {
 			return
 		}
 		if insn.Opcode <= 0x03 {
-			if srcCat := l.method.CategoryAt(insnIdx, insn.Regs[1]); srcCat.Kind == ir.Null && srcCat.Allocation == ir.PolyZeroAllocation {
+			if rawSrc := l.method.CategoryAt(insnIdx, insn.Regs[1]); rawSrc.Kind == ir.Null {
 				dst, src := insn.Regs[0], insn.Regs[1]
-				copied := false
-				for _, entry := range []struct {
-					lk  classfilebuilder.LocalKind
-					tag classfilebuilder.VerifyTag
-				}{
-					{classfilebuilder.RefLocal, classfilebuilder.VerifyNull},
-					{classfilebuilder.IntLocal, classfilebuilder.VerifyInt},
-					{classfilebuilder.FloatLocal, classfilebuilder.VerifyFloat},
-				} {
-					dstSlot, ok := l.polySlots[polySlotKey{reg: dst, kind: entry.lk}]
-					if !ok {
-						continue
+				hasDstPoly := false
+				for _, lk := range []classfilebuilder.LocalKind{classfilebuilder.RefLocal, classfilebuilder.IntLocal, classfilebuilder.FloatLocal} {
+					if _, ok := l.slotIfCompanion(insnIdx, dst, lk, true); ok {
+						hasDstPoly = true
+						break
 					}
-					srcSlot := int(l.slotFor(src, entry.lk))
-					vt := classfilebuilder.VerificationType{Tag: entry.tag}
+				}
+				srcResolvedLK := localKind(l.resolvedUseCategoryAt(insnIdx, src).Kind)
+				if hasDstPoly {
+					for _, lk := range []classfilebuilder.LocalKind{classfilebuilder.RefLocal, classfilebuilder.IntLocal, classfilebuilder.FloatLocal} {
+						dstSlot, ok := l.slotIfCompanion(insnIdx, dst, lk, true)
+						if !ok {
+							continue
+						}
+						vt := classfilebuilder.VerificationType{Tag: verifyTagForLocalKind(lk)}
+						if srcSlot, srcOK := l.slotIfCompanion(insnIdx, src, lk, false); srcOK {
+							if int(srcSlot) < len(frame) && frame[srcSlot].vt.Tag != classfilebuilder.VerifyTop {
+								vt = frame[srcSlot].vt
+							}
+						} else if srcResolvedLK == lk && rawSrc.Allocation != ir.PolyZeroAllocation {
+							srcSlot := int(l.loadSlotAt(insnIdx, src, lk))
+							if srcSlot >= 0 && srcSlot < len(frame) && frame[srcSlot].vt.Tag != classfilebuilder.VerifyTop {
+								vt = frame[srcSlot].vt
+							}
+						}
+						setSlot(frame, int(dstSlot), vt)
+					}
+					return
+				}
+				dstLK := localKind(kind)
+				dstSlot := int(l.storeSlotAt(insnIdx, dst, dstLK))
+				vt := classfilebuilder.VerificationType{Tag: verifyTagForLocalKind(dstLK)}
+				if srcSlot, srcOK := l.slotIfCompanion(insnIdx, src, dstLK, false); srcOK {
+					if int(srcSlot) < len(frame) && frame[srcSlot].vt.Tag != classfilebuilder.VerifyTop {
+						vt = frame[srcSlot].vt
+					}
+				} else if srcResolvedLK == dstLK && rawSrc.Allocation != ir.PolyZeroAllocation {
+					srcSlot := int(l.loadSlotAt(insnIdx, src, dstLK))
 					if srcSlot >= 0 && srcSlot < len(frame) && frame[srcSlot].vt.Tag != classfilebuilder.VerifyTop {
 						vt = frame[srcSlot].vt
 					}
-					setSlot(frame, int(dstSlot), vt)
-					copied = true
 				}
-				if !copied {
-					setSlot(frame, int(l.home(dst)), classfilebuilder.VerificationType{Tag: classfilebuilder.VerifyNull})
-				}
+				setSlot(frame, dstSlot, vt)
 				return
 			}
 		}
-		srcLK := localKind(l.method.CategoryAt(insnIdx, insn.Regs[1]).Kind)
+		srcCat := l.resolvedUseCategoryAt(insnIdx, insn.Regs[1])
+		srcLK := localKind(srcCat.Kind)
 		srcSlot := int(l.loadSlotAt(insnIdx, insn.Regs[1], srcLK))
-		dstCat := l.definitionCategoryAt(insnIdx, insn.Regs[0])
+		dstCat := l.resolvedDefCategoryAt(insnIdx, insn.Regs[0])
 		dstLK := localKind(dstCat.Kind)
 		dstSlot := int(l.storeSlotAt(insnIdx, insn.Regs[0], dstLK))
 		vt := verifyTypeFromCategory(dstCat)
@@ -390,20 +490,21 @@ func (l *methodLowerer) transferSlotFrame(blockIdx, insnIdx int, frame slotFrame
 		setSlot(frame, dstSlot, classfilebuilder.VerificationType{Tag: classfilebuilder.VerifyObject, Class: catchCls})
 
 	case insn.Opcode >= 0x12 && insn.Opcode <= 0x15:
-		defCat := l.definitionCategoryAt(insnIdx, insn.Regs[0])
-		if defCat.Kind == ir.Null && defCat.Allocation == ir.PolyZeroAllocation && insn.Literal == 0 {
+		defCat := l.resolvedDefCategoryAt(insnIdx, insn.Regs[0])
+		if defCat.Kind == ir.Null && insn.Literal == 0 {
 			stored := false
-			if slot, ok := l.polySlots[polySlotKey{reg: insn.Regs[0], kind: classfilebuilder.RefLocal}]; ok {
-				setSlot(frame, int(slot), classfilebuilder.VerificationType{Tag: classfilebuilder.VerifyNull})
-				stored = true
-			}
-			if slot, ok := l.polySlots[polySlotKey{reg: insn.Regs[0], kind: classfilebuilder.IntLocal}]; ok {
-				setSlot(frame, int(slot), classfilebuilder.VerificationType{Tag: classfilebuilder.VerifyInt})
-				stored = true
-			}
-			if slot, ok := l.polySlots[polySlotKey{reg: insn.Regs[0], kind: classfilebuilder.FloatLocal}]; ok {
-				setSlot(frame, int(slot), classfilebuilder.VerificationType{Tag: classfilebuilder.VerifyFloat})
-				stored = true
+			for _, entry := range []struct {
+				lk  classfilebuilder.LocalKind
+				tag classfilebuilder.VerifyTag
+			}{
+				{classfilebuilder.RefLocal, classfilebuilder.VerifyNull},
+				{classfilebuilder.IntLocal, classfilebuilder.VerifyInt},
+				{classfilebuilder.FloatLocal, classfilebuilder.VerifyFloat},
+			} {
+				if slot, ok := l.slotIfCompanion(insnIdx, insn.Regs[0], entry.lk, true); ok {
+					setSlot(frame, int(slot), classfilebuilder.VerificationType{Tag: entry.tag})
+					stored = true
+				}
 			}
 			if stored {
 				return
@@ -493,12 +594,16 @@ func (l *methodLowerer) transferSlotFrame(blockIdx, insnIdx int, frame slotFrame
 	case insn.Opcode == 0x46:
 		vt := classfilebuilder.VerificationType{Tag: classfilebuilder.VerifyObject, Class: "java/lang/Object"}
 		arrSlot := int(l.loadSlotAt(insnIdx, insn.Regs[1], classfilebuilder.RefLocal))
-		if arrSlot >= 0 && arrSlot < len(frame) && frame[arrSlot].vt.Tag == classfilebuilder.VerifyObject &&
+		if arrSlot >= 0 && arrSlot < len(frame) && frame[arrSlot].vt.Tag == classfilebuilder.VerifyNull {
+			vt = classfilebuilder.VerificationType{Tag: classfilebuilder.VerifyNull}
+		} else if arrSlot >= 0 && arrSlot < len(frame) && frame[arrSlot].vt.Tag == classfilebuilder.VerifyObject &&
 			strings.HasPrefix(frame[arrSlot].vt.Class, "[") && len(frame[arrSlot].vt.Class) >= 2 {
 			if elemVT, _, err := verifyTypeFromDescriptor(frame[arrSlot].vt.Class[1:]); err == nil {
 				vt = elemVT
 			}
-		} else if arr := l.method.CategoryAt(insnIdx, insn.Regs[1]); strings.HasPrefix(arr.Descriptor, "[") && len(arr.Descriptor) >= 2 {
+		} else if arr := l.method.CategoryAt(insnIdx, insn.Regs[1]); arr.Kind == ir.Null || (arr.Kind == ir.Reference && arr.Descriptor == "") {
+			vt = classfilebuilder.VerificationType{Tag: classfilebuilder.VerifyNull}
+		} else if strings.HasPrefix(arr.Descriptor, "[") && len(arr.Descriptor) >= 2 {
 			if elemVT, _, err := verifyTypeFromDescriptor(arr.Descriptor[1:]); err == nil {
 				vt = elemVT
 			}
@@ -546,9 +651,9 @@ func (l *methodLowerer) transferSlotFrame(blockIdx, insnIdx int, frame slotFrame
 	}
 }
 
-func (l *methodLowerer) emitStackMapTable() error {
+func (l *methodLowerer) computeStackMapFrames() (*stackMapState, error) {
 	if len(l.method.Blocks) == 0 {
-		return nil
+		return &stackMapState{}, nil
 	}
 	totalSlots := int(l.homeBase + l.homeLimit + l.tempLimit)
 	entryFrame := make(slotFrame, totalSlots)
@@ -572,7 +677,7 @@ func (l *methodLowerer) emitStackMapTable() error {
 	for _, descriptor := range l.method.Proto.Parameters {
 		vt, wide, err := verifyTypeFromDescriptor(descriptor)
 		if err != nil {
-			return methodDiagnostic(l.method.Context, nil, "stackmap", err)
+			return nil, methodDiagnostic(l.method.Context, nil, "stackmap", err)
 		}
 		setSlot(entryFrame, slot, vt)
 		slot++
@@ -586,7 +691,7 @@ func (l *methodLowerer) emitStackMapTable() error {
 	jvmLocal := 0
 	if l.encoded.AccessFlags&dexStatic == 0 {
 		if int(paramReg) >= len(l.directParamSlots) || l.directParamSlots[paramReg] < 0 {
-			setSlot(entryFrame, int(l.prologueStoreSlot(paramReg)), entryFrame[jvmLocal].vt)
+			setSlot(entryFrame, int(l.prologueStoreSlot(paramReg, classfilebuilder.RefLocal)), entryFrame[jvmLocal].vt)
 		}
 		paramReg++
 		jvmLocal++
@@ -594,11 +699,11 @@ func (l *methodLowerer) emitStackMapTable() error {
 	for _, descriptor := range l.method.Proto.Parameters {
 		kind, err := fieldKind(descriptor)
 		if err != nil {
-			return methodDiagnostic(l.method.Context, nil, "stackmap", err)
+			return nil, methodDiagnostic(l.method.Context, nil, "stackmap", err)
 		}
 		words := kind.Words()
 		if int(paramReg) >= len(l.directParamSlots) || l.directParamSlots[paramReg] < 0 {
-			setSlot(entryFrame, int(l.prologueStoreSlot(paramReg)), entryFrame[jvmLocal].vt)
+			setSlot(entryFrame, int(l.prologueStoreSlot(paramReg, localKind(kind))), entryFrame[jvmLocal].vt)
 		}
 		paramReg += uint16(words)
 		jvmLocal += words
@@ -647,8 +752,10 @@ func (l *methodLowerer) emitStackMapTable() error {
 		startAddr := try.StartAddress
 		endAddr := try.StartAddress + uint32(try.InstructionCount)
 		for idx := range l.method.Instructions {
-			off := l.method.Instructions[idx].Offset
-			if off >= startAddr && off < endAddr {
+			insn := &l.method.Instructions[idx]
+			off := insn.Offset
+			alloc, isNew := l.allocationByNew[idx]
+			if off >= startAddr && off < endAddr && ir.MayThrow(insn.Opcode) && !(isNew && alloc.Fused) && !l.deferredInsn[idx] {
 				for _, addr := range tryHandlers {
 					if hb, ok := blockByStart[addr]; ok {
 						handlersForInsn[idx] = append(handlersForInsn[idx], hb)
@@ -669,12 +776,12 @@ func (l *methodLowerer) emitStackMapTable() error {
 	worklist := []int{0}
 	inQueue[0] = true
 
-	maxSteps := numBlocks*32 + 256
+	maxSteps := numBlocks*64 + 1024
 	steps := 0
 	for len(worklist) > 0 {
 		steps++
 		if steps > maxSteps {
-			return methodDiagnostic(l.method.Context, nil, "stackmap", fmt.Errorf("stack map frame analysis did not converge"))
+			return nil, methodDiagnostic(l.method.Context, nil, "stackmap", fmt.Errorf("stack map frame analysis did not converge"))
 		}
 		b := worklist[0]
 		worklist = worklist[1:]
@@ -692,7 +799,7 @@ func (l *methodLowerer) emitStackMapTable() error {
 							exState[i] = topSlotEntry()
 						}
 					}
-				} else if insnIdx == l.delegationIndex {
+				} else if l.isDelegationSite(insnIdx) {
 					exState = cloneSlotFrame(st)
 					for i := range exState {
 						if exState[i].vt.Tag == classfilebuilder.VerifyUninitializedThis {
@@ -726,6 +833,35 @@ func (l *methodLowerer) emitStackMapTable() error {
 			}
 		}
 	}
+
+	return &stackMapState{
+		entryFrame:       entryFrame,
+		in:               in,
+		visited:          visited,
+		blockByStart:     blockByStart,
+		catchClassByAddr: catchClassByAddr,
+		deferred:         deferred,
+	}, nil
+}
+
+func (l *methodLowerer) emitStackMapTable(state *stackMapState) error {
+	if len(l.method.Blocks) == 0 {
+		return nil
+	}
+	if state == nil {
+		var err error
+		state, err = l.computeStackMapFrames()
+		if err != nil {
+			return err
+		}
+	}
+	entryFrame := state.entryFrame
+	in := state.in
+	visited := state.visited
+	blockByStart := state.blockByStart
+	catchClassByAddr := state.catchClassByAddr
+	deferred := state.deferred
+	numBlocks := len(l.method.Blocks)
 
 	blockEmitsBytes := make([]bool, numBlocks)
 	for b, block := range l.method.Blocks {

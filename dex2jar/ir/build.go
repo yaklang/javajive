@@ -274,11 +274,28 @@ func validateInstructions(method *Method, file *model.File) error {
 }
 
 func validateInvokeShape(method *Method, instruction *Instruction, proto model.Proto, wordCount, firstParamPos int) error {
-	if len(instruction.Regs) != wordCount {
-		return diagnostic(method.Context, instruction, "", fmt.Errorf("invoke has %d register words; descriptor requires %d", len(instruction.Regs), wordCount))
+	if instruction.ExtraNullArgs < 0 {
+		return diagnostic(method.Context, instruction, "", fmt.Errorf("negative extra null arguments %d", instruction.ExtraNullArgs))
 	}
-	if wordCount > int(method.Code.OutsSize) {
-		return diagnostic(method.Context, instruction, "", fmt.Errorf("invoke requires %d outgoing register words; outs_size is %d", wordCount, method.Code.OutsSize))
+	if instruction.ExtraNullArgs > 0 {
+		if !isInvoke(instruction.Opcode) {
+			return diagnostic(method.Context, instruction, "", fmt.Errorf("extra null arguments are only valid on invoke instructions"))
+		}
+		if len(proto.Parameters) < instruction.ExtraNullArgs {
+			return diagnostic(method.Context, instruction, "", fmt.Errorf("invoke extra null arguments %d exceed %d parameters", instruction.ExtraNullArgs, len(proto.Parameters)))
+		}
+		for _, p := range proto.Parameters[len(proto.Parameters)-instruction.ExtraNullArgs:] {
+			if p != "Ljava/lang/Void;" {
+				return diagnostic(method.Context, instruction, "", fmt.Errorf("invoke extra null arguments require trailing Ljava/lang/Void; parameters, got %q", p))
+			}
+		}
+	}
+	expectedRegWords := wordCount - instruction.ExtraNullArgs
+	if len(instruction.Regs) != expectedRegWords {
+		return diagnostic(method.Context, instruction, "", fmt.Errorf("invoke has %d register words; descriptor requires %d", len(instruction.Regs), expectedRegWords))
+	}
+	if expectedRegWords > int(method.Code.OutsSize) {
+		return diagnostic(method.Context, instruction, "", fmt.Errorf("invoke requires %d outgoing register words; outs_size is %d", expectedRegWords, method.Code.OutsSize))
 	}
 	if _, err := DescriptorCategory(proto.ReturnType); err != nil {
 		return diagnostic(method.Context, instruction, "", err)

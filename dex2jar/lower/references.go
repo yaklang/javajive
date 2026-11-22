@@ -384,7 +384,9 @@ func (l *methodLowerer) transferReferences(index int, state referenceState) {
 	case instruction.Opcode == 0x46:
 		var components descriptorSet
 		for _, array := range state[instruction.Regs[1]] {
-			if strings.HasPrefix(array, "[") {
+			if array == nullDescriptor {
+				components = unionDescriptorSets(components, descriptorSet{nullDescriptor})
+			} else if strings.HasPrefix(array, "[") {
 				components = unionDescriptorSets(components, descriptorSet{array[1:]})
 			}
 		}
@@ -505,11 +507,18 @@ func (l *methodLowerer) provablyAssignable(actual, expected string) bool {
 		}
 	}
 	index := l.classIndex()
-	if _, ok := index[expected]; !ok {
+	expectedClass, ok := index[expected]
+	if !ok {
 		// The expected type lives outside the application. Proving the relation
 		// needs the platform classpath the input was verified against, which the
 		// DEX file does not carry; rejecting here would refuse valid code such as
 		// String to CharSequence or IllegalArgumentException to Throwable.
+		return true
+	}
+	if expectedClass.AccessFlags&dexInterface != 0 {
+		// Under JVMS §4.10.1.2 verification assignability, every object reference
+		// is assignable to an interface type (runtime invokeinterface / checkcast
+		// enforces implementation).
 		return true
 	}
 	// The expected type is declared in this application, so the declared

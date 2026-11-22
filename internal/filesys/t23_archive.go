@@ -72,13 +72,14 @@ func ArchiveLimitsFromWork(l workbudget.Limits) ArchiveLimits {
 
 // ArchiveOptions is the request-scoped archive policy passed into ZipFS constructors.
 type ArchiveOptions struct {
-	Limits        ArchiveLimits
-	Budget        *ArchiveBudget
-	Work          *workbudget.Budget // canonical request budget; Budget wraps this when set
-	Context       context.Context
-	Depth         int
-	TargetRelease int
-	SafeArchive   bool
+	Limits                  ArchiveLimits
+	Budget                  *ArchiveBudget
+	Work                    *workbudget.Budget // canonical request budget; Budget wraps this when set
+	Context                 context.Context
+	Depth                   int
+	TargetRelease           int
+	SafeArchive             bool
+	AllowCaseFoldCollisions bool
 }
 
 // ArchiveBudget is a thin adapter over the canonical *workbudget.Budget.
@@ -318,6 +319,12 @@ func WithSafeArchive(v bool) ZipFSOption {
 	}
 }
 
+func WithAllowCaseFoldCollisions(v bool) ZipFSOption {
+	return func(c *zipFSConfig) {
+		c.allowCaseFoldCollisions = v
+	}
+}
+
 func WithArchiveOptions(o ArchiveOptions) ZipFSOption {
 	return func(c *zipFSConfig) {
 		c.limits = o.Limits
@@ -330,6 +337,7 @@ func WithArchiveOptions(o ArchiveOptions) ZipFSOption {
 		c.ctx = o.Context
 		c.depth = o.Depth
 		c.targetRelease = o.TargetRelease
+		c.allowCaseFoldCollisions = o.AllowCaseFoldCollisions
 		if o.SafeArchive || o.Budget != nil || o.Work != nil || o.Limits.limited() || o.Context != nil || o.TargetRelease != 0 || o.Depth != 0 {
 			c.safeArchive = true
 		}
@@ -395,6 +403,13 @@ func (z *ZipFS) SafeArchive() bool {
 		return false
 	}
 	return z.safeArchive
+}
+
+func (z *ZipFS) AllowCaseFoldCollisions() bool {
+	if z == nil {
+		return false
+	}
+	return z.allowCaseFoldCollisions
 }
 
 func (z *ZipFS) ArchiveActive() bool {
@@ -541,6 +556,9 @@ func (z *ZipFS) NestedArchiveOptions(depth int) []ZipFSOption {
 	if z.password != "" {
 		opts = append(opts, WithZipFSPassword(z.password))
 	}
+	if z.allowCaseFoldCollisions {
+		opts = append(opts, WithAllowCaseFoldCollisions(true))
+	}
 	return opts
 }
 
@@ -553,6 +571,7 @@ func (z *ZipFS) applyArchiveConfig(cfg *zipFSConfig) error {
 	z.depth = cfg.depth
 	z.targetRelease = cfg.targetRelease
 	z.safeArchive = cfg.safeArchive
+	z.allowCaseFoldCollisions = cfg.allowCaseFoldCollisions
 	z.budget = cfg.budget
 	z.archiveActive = cfg.limitsSet || cfg.budget != nil || cfg.work != nil || cfg.safeArchive || cfg.ctx != nil || cfg.targetRelease != 0 || cfg.depth != 0
 	if err := z.limits.Validate(); err != nil {
@@ -617,11 +636,13 @@ func (z *ZipFS) catalogArchiveFiles() error {
 				return pathRejectedError("duplicate entry", key)
 			}
 			seen[key] = struct{}{}
-			fold := strings.ToLower(key)
-			if prev, ok := seenFold[fold]; ok && prev != key {
-				return pathRejectedError("case-fold collision", prev+" vs "+key)
+			if !z.allowCaseFoldCollisions {
+				fold := strings.ToLower(key)
+				if prev, ok := seenFold[fold]; ok && prev != key {
+					return pathRejectedError("case-fold collision", prev+" vs "+key)
+				}
+				seenFold[fold] = key
 			}
-			seenFold[fold] = key
 			if err := noteFileDirCollision(seenFile, seenDir, key, isDir); err != nil {
 				return err
 			}

@@ -187,9 +187,18 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 		}
 	case instruction.Opcode >= 0x44 && instruction.Opcode <= 0x51:
 		// The element type is not encoded in the instruction: DEX tracks it in
-		// the array register's type, which the category analysis carries.
+		// the array register's type, which the category analysis carries. A known
+		// null reference is also legal under the JVM verifier (it throws NPE at
+		// runtime) and produces Null/default-width values.
 		array := current[instruction.Regs[1]]
-		if len(array.Descriptor) < 2 || array.Descriptor[0] != '[' {
+		isNullArray := array.Kind == Null || (array.Kind == Reference && array.Descriptor == "")
+		component := ""
+		arrCategory := Category{Kind: Reference, Descriptor: array.Descriptor}
+		if len(array.Descriptor) >= 2 && array.Descriptor[0] == '[' {
+			component = array.Descriptor[1:]
+		} else if isNullArray {
+			arrCategory = refCategory
+		} else {
 			if !final {
 				// During the category fixpoint a predecessor entry may not be
 				// resolved yet. Leave the register untouched: merging an empty
@@ -199,9 +208,11 @@ func instructionConstraints(method *Method, file *model.File, index int, current
 			}
 			return nil, nil, fmt.Errorf("array register v%d has no array type", instruction.Regs[1])
 		}
-		component := array.Descriptor[1:]
 		value := arrayElementCategory(instruction.Opcode, component)
-		use(instruction.Regs[1], Category{Kind: Reference, Descriptor: array.Descriptor})
+		if isNullArray && instruction.Opcode == 0x46 {
+			value = Category{Kind: Null}
+		}
+		use(instruction.Regs[1], arrCategory)
 		use(instruction.Regs[2], intCategory)
 		if instruction.Opcode <= 0x4a {
 			define(instruction.Regs[0], value)

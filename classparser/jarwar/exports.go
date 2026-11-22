@@ -112,6 +112,7 @@ func autoDecompileFlat(from, to string, options ArchiveOptions) error {
 			Work:          options.Work,
 			TargetRelease: options.TargetRelease,
 		})
+		archiveOptions.AllowCaseFoldCollisions = options.RetainUnprovedSource
 		if err := archiveOptions.Work.CheckContext(options.Context); err != nil {
 			return err
 		}
@@ -127,6 +128,7 @@ func autoDecompileFlat(from, to string, options ArchiveOptions) error {
 			_ = zipFS.Close()
 			return utils.Errorf("create archive failed: %v", err)
 		}
+		jar.bestEffort = options.RetainUnprovedSource
 		defer jar.Close()
 		return jar.DumpToLocalFileSystem(to)
 	case strings.HasSuffix(fromLower, ".class"):

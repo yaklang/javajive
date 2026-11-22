@@ -7,9 +7,10 @@ import (
 	"github.com/yaklang/javajive/dex2jar/model"
 )
 
-// mayThrow reports whether an instruction can transfer control to an exception
-// handler. Moves, constants, comparisons, branches and returns cannot.
-func mayThrow(opcode byte) bool {
+// MayThrow reports whether a DEX opcode can transfer control to an exception
+// handler. Moves, numeric/null constants, comparisons, branches, switches,
+// returns, unary casts/negations, and non-div/rem integer/float binary ops cannot.
+func MayThrow(opcode byte) bool {
 	switch {
 	case opcode == 0x00:
 		return false
@@ -17,9 +18,22 @@ func mayThrow(opcode byte) bool {
 		return false
 	case opcode >= 0x28 && opcode <= 0x3d:
 		return false
+	case opcode >= 0x7b && opcode <= 0x8f:
+		return false
+	case opcode >= 0x90 && opcode <= 0xe2:
+		switch opcode {
+		case 0x93, 0x94, 0x9e, 0x9f, 0xb3, 0xb4, 0xbe, 0xbf, 0xd3, 0xd4, 0xdb, 0xdc:
+			return true
+		default:
+			return false
+		}
 	default:
 		return true
 	}
+}
+
+func mayThrow(opcode byte) bool {
+	return MayThrow(opcode)
 }
 
 func isGoto(opcode byte) bool { return opcode >= 0x28 && opcode <= 0x2a }
