@@ -26,14 +26,15 @@ type ZipFSOption func(*zipFSConfig)
 type zipFSConfig struct {
 	Password string
 
-	limits        ArchiveLimits
-	limitsSet     bool
-	budget        *ArchiveBudget
-	work          *workbudget.Budget
-	ctx           context.Context
-	depth         int
-	targetRelease int
-	safeArchive   bool
+	limits                  ArchiveLimits
+	limitsSet               bool
+	budget                  *ArchiveBudget
+	work                    *workbudget.Budget
+	ctx                     context.Context
+	depth                   int
+	targetRelease           int
+	safeArchive             bool
+	allowCaseFoldCollisions bool
 }
 
 // WithZipFSPassword 设置加密 zip 的解密密码
@@ -62,13 +63,14 @@ type ZipFS struct {
 	// 关键词: ZipFS 密码字段
 	password string
 
-	budget        *ArchiveBudget
-	limits        ArchiveLimits
-	ctx           context.Context
-	depth         int
-	targetRelease int
-	safeArchive   bool
-	archiveActive bool
+	budget                  *ArchiveBudget
+	limits                  ArchiveLimits
+	ctx                     context.Context
+	depth                   int
+	targetRelease           int
+	safeArchive             bool
+	allowCaseFoldCollisions bool
+	archiveActive           bool
 }
 
 // SetPassword 后置设置 ZipFS 解密密码

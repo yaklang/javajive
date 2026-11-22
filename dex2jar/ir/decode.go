@@ -176,6 +176,12 @@ func Decode(code *model.Code, ctx Context) ([]Instruction, error) {
 		default:
 			return nil, diagnostic(ctx, &instruction, "", fmt.Errorf("decoder has no implementation for format %s", info.format))
 		}
+		if patched, ok := code.PatchedMethods[offset]; ok {
+			instruction.Index = patched
+		}
+		if extra, ok := code.PatchedNullArgs[offset]; ok && extra > 0 {
+			instruction.ExtraNullArgs = extra
+		}
 		instructions = append(instructions, instruction)
 		offset += uint32(info.width)
 	}

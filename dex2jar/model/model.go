@@ -3,6 +3,17 @@ package model
 
 const NoIndex = ^uint32(0)
 
+// ParseWarning records a recoverable DEX parse discrepancy tolerated under an
+// explicit recovery policy.
+type ParseWarning struct {
+	Entry   string
+	Class   string
+	Code    string
+	Action  string
+	Feature string
+	Message string
+}
+
 // File is one DEX file, either standalone or embedded in an archive.
 type File struct {
 	Entry         string
@@ -15,6 +26,7 @@ type File struct {
 	MethodHandles []MethodHandle
 	CallSites     []CallSite
 	Classes       []Class
+	ParseWarnings []ParseWarning
 }
 
 // Application is an ordered collection of DEX files.
@@ -158,6 +170,12 @@ type Code struct {
 	Debug           *DebugInfo
 	Instructions    []uint16
 	Tries           []Try
+	// PatchedMethods overrides 16-bit method indices at specific instruction
+	// offsets when FailureRecover synthesizes targets past 65535 methods.
+	PatchedMethods map[uint32]uint32
+	// PatchedNullArgs records extra trailing null (Ljava/lang/Void;) arguments
+	// to emit at specific invoke offsets for R8 forwarding <init> disambiguation.
+	PatchedNullArgs map[uint32]int
 }
 
 // DebugInfo is the decoded debug_info_item of one code item. Addresses are DEX

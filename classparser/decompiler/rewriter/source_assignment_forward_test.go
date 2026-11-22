@@ -308,4 +308,55 @@ func TestHoistDeclarationsRewritesInBodyReadsAndUsesIdentity(t *testing.T) {
 			t.Fatalf("expected zero stale var29 tokens in unified arms, got:\n%s", rendered)
 		}
 	})
+
+	t.Run("drop_dangling_caught_exception_discards", func(t *testing.T) {
+		excType := types.NewJavaClass("java/lang/Exception")
+		newExcVal := func(name string) *values.CustomValue {
+			cv := values.NewCustomValue(func(*class_context.ClassContext) string {
+				return name
+			}, func() types.JavaType {
+				return excType
+			})
+			cv.Flag = "exception"
+			return cv
+		}
+
+		danglingTop := statements.NewExpressionStatement(newExcVal("Exception;"))
+		danglingIf := statements.NewExpressionStatement(newExcVal("Throwable;"))
+		danglingElse := statements.NewExpressionStatement(newExcVal("RuntimeException;"))
+
+		savedID := utils.NewRootVariableId().Next()
+		keepAssign := statements.NewAssignStatement(mkRef("ref-400", "saved", savedID, excType), newExcVal("caught"), true)
+		keepNormal := statements.NewExpressionStatement(values.NewJavaLiteral(1, intType))
+		keepThrow := statements.NewThrowStatement(newExcVal("rethrown"))
+
+		ifSt := statements.NewIfStatement(
+			values.NewJavaLiteral(true, boolType),
+			[]statements.Statement{danglingIf, keepAssign},
+			[]statements.Statement{danglingElse, keepNormal, keepThrow},
+		)
+		root := []statements.Statement{danglingTop, ifSt}
+
+		dropDanglingCaughtExceptionDiscards(&root)
+
+		if len(root) != 1 || root[0] != ifSt {
+			t.Fatalf("expected dangling top-level exception discard dropped, got len=%d", len(root))
+		}
+		if len(ifSt.IfBody) != 1 || ifSt.IfBody[0] != keepAssign {
+			t.Fatalf("expected dangling exception in IfBody dropped and AssignStatement kept, got %#v", ifSt.IfBody)
+		}
+		if len(ifSt.ElseBody) != 2 || ifSt.ElseBody[0] != keepNormal || ifSt.ElseBody[1] != keepThrow {
+			t.Fatalf("expected dangling exception in ElseBody dropped while normal expr & throw kept, got %#v", ifSt.ElseBody)
+		}
+
+		// Also confirm RewriteVar invokes dangling discard cleanup end-to-end.
+		rootViaRewrite := []statements.Statement{
+			statements.NewExpressionStatement(newExcVal("Exception;")),
+			statements.NewReturnStatement(values.NewJavaLiteral(0, intType)),
+		}
+		RewriteVar(&rootViaRewrite, 0, nil)
+		if len(rootViaRewrite) != 1 {
+			t.Fatalf("expected RewriteVar to drop dangling exception discard, got len=%d", len(rootViaRewrite))
+		}
+	})
 }

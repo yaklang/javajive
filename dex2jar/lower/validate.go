@@ -8,12 +8,7 @@ import (
 )
 
 func (l *methodLowerer) validateInvokes() error {
-	delegation := -1
-	thisRegister := uint16(0)
 	isConstructor := l.encoded.Method.Name == "<init>"
-	if isConstructor {
-		thisRegister = l.method.Code.RegistersSize - l.method.Code.InsSize
-	}
 	for index := range l.method.Instructions {
 		instruction := &l.method.Instructions[index]
 		if instruction.Opcode == 0xfa || instruction.Opcode == 0xfb {
@@ -51,24 +46,6 @@ func (l *methodLowerer) validateInvokes() error {
 				}
 				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("constructor receiver v%d is not a fused new-instance allocation", instruction.Regs[0]))
 			}
-			// The receiver may name any register that still aliases uninitialized
-			// this; d8 moves this into a low register for range invokes.
-			aliases := l.thisAliasSet(index, thisRegister)
-			if !aliases[instruction.Regs[0]] {
-				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("constructor receiver v%d is initialized; delegation requires uninitialized this v%d", instruction.Regs[0], thisRegister))
-			}
-			if callee.Class != l.class.Descriptor && callee.Class != l.class.Superclass {
-				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("uninitialized this may only delegate to %s.<init> or %s.<init>", l.class.Descriptor, l.class.Superclass))
-			}
-			for _, argument := range instruction.Regs[1:] {
-				if aliases[argument] {
-					return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("uninitialized this v%d is also a constructor argument", argument))
-				}
-			}
-			if delegation >= 0 {
-				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("constructor initializes this more than once"))
-			}
-			delegation = index
 			continue
 		}
 		switch instruction.Opcode {
@@ -88,10 +65,464 @@ func (l *methodLowerer) validateInvokes() error {
 	if !isConstructor {
 		return nil
 	}
-	if delegation < 0 {
+	return l.validateConstructorDelegations()
+}
+
+type thisInitState uint8
+
+const (
+	thisUninit thisInitState = iota
+	thisInit
+	thisMixed
+)
+
+func joinThisInit(a, b thisInitState) thisInitState {
+	if a == b {
+		return a
+	}
+	return thisMixed
+}
+
+func cloneRegSet(src map[uint16]bool) map[uint16]bool {
+	out := make(map[uint16]bool, len(src))
+	for k, v := range src {
+		if v {
+			out[k] = true
+		}
+	}
+	return out
+}
+
+func intersectRegSets(a, b map[uint16]bool) map[uint16]bool {
+	out := make(map[uint16]bool)
+	for k := range a {
+		if b[k] {
+			out[k] = true
+		}
+	}
+	return out
+}
+
+func unionRegSets(a, b map[uint16]bool) map[uint16]bool {
+	out := cloneRegSet(a)
+	for k := range b {
+		out[k] = true
+	}
+	return out
+}
+
+func regSetsEqual(a, b map[uint16]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if !b[k] {
+			return false
+		}
+	}
+	return true
+}
+
+func (l *methodLowerer) isConstructorDelegationInsn(index int) (model.MethodID, bool) {
+	instruction := &l.method.Instructions[index]
+	if !isInvoke(instruction.Opcode) || !isDirectInvoke(instruction.Opcode) {
+		return model.MethodID{}, false
+	}
+	if _, ok := l.allocationByCtor[index]; ok {
+		return model.MethodID{}, false
+	}
+	callee := l.file.Methods[instruction.Index]
+	if callee.Name != "<init>" {
+		return model.MethodID{}, false
+	}
+	return callee, true
+}
+
+func (l *methodLowerer) validateConstructorDelegations() error {
+	if len(l.method.Blocks) == 0 {
 		return methodDiagnostic(l.method.Context, nil, "constructor", fmt.Errorf("constructor does not initialize this or delegate"))
 	}
-	return l.validateDelegationShape(delegation, thisRegister)
+	thisRegister := l.method.Code.RegistersSize - l.method.Code.InsSize
+	numBlocks := len(l.method.Blocks)
+
+	blockOf := make([]int, len(l.method.Instructions))
+	for i := range blockOf {
+		blockOf[i] = -1
+	}
+	blockByOffset := make(map[uint32]int, numBlocks)
+	for b := range l.method.Blocks {
+		blockByOffset[l.method.Blocks[b].Start] = b
+		for _, idx := range l.method.Blocks[b].Instructions {
+			blockOf[idx] = b
+		}
+	}
+
+	handlersForInsn := make([][]int, len(l.method.Instructions))
+	for _, try := range l.method.Code.Tries {
+		startAddr := try.StartAddress
+		endAddr := try.StartAddress + uint32(try.InstructionCount)
+		var hbs []int
+		seenHB := make(map[int]bool)
+		for _, h := range try.Handler.Handlers {
+			if hb, ok := blockByOffset[h.Address]; ok && !seenHB[hb] {
+				seenHB[hb] = true
+				hbs = append(hbs, hb)
+			}
+		}
+		if try.Handler.CatchAllAddress != nil {
+			if hb, ok := blockByOffset[*try.Handler.CatchAllAddress]; ok && !seenHB[hb] {
+				seenHB[hb] = true
+				hbs = append(hbs, hb)
+			}
+		}
+		if len(hbs) == 0 {
+			continue
+		}
+		for idx := range l.method.Instructions {
+			insn := &l.method.Instructions[idx]
+			if insn.Offset >= startAddr && insn.Offset < endAddr && ir.MayThrow(insn.Opcode) {
+				handlersForInsn[idx] = append(handlersForInsn[idx], hbs...)
+			}
+		}
+	}
+
+	inState := make([]thisInitState, numBlocks)
+	inMust := make([]map[uint16]bool, numBlocks)
+	inMay := make([]map[uint16]bool, numBlocks)
+	visited := make([]bool, numBlocks)
+
+	visited[0] = true
+	inState[0] = thisUninit
+	inMust[0] = map[uint16]bool{thisRegister: true}
+	inMay[0] = map[uint16]bool{thisRegister: true}
+
+	worklist := []int{0}
+	inQueue := make([]bool, numBlocks)
+	inQueue[0] = true
+
+	propagate := func(succ int, st thisInitState, must, may map[uint16]bool) {
+		if !visited[succ] {
+			visited[succ] = true
+			inState[succ] = st
+			inMust[succ] = cloneRegSet(must)
+			inMay[succ] = cloneRegSet(may)
+			inQueue[succ] = true
+			worklist = append(worklist, succ)
+			return
+		}
+		js := joinThisInit(inState[succ], st)
+		jMust := intersectRegSets(inMust[succ], must)
+		jMay := unionRegSets(inMay[succ], may)
+		if js != inState[succ] || !regSetsEqual(jMust, inMust[succ]) || !regSetsEqual(jMay, inMay[succ]) {
+			inState[succ] = js
+			inMust[succ] = jMust
+			inMay[succ] = jMay
+			if !inQueue[succ] {
+				inQueue[succ] = true
+				worklist = append(worklist, succ)
+			}
+		}
+	}
+
+	transferAliases := func(index int, must, may map[uint16]bool) {
+		instruction := &l.method.Instructions[index]
+		if instruction.Opcode >= 0x01 && instruction.Opcode <= 0x09 && len(instruction.Regs) >= 2 {
+			dst, src := instruction.Regs[0], instruction.Regs[1]
+			if must[src] {
+				must[dst] = true
+			} else {
+				delete(must, dst)
+			}
+			if may[src] {
+				may[dst] = true
+			} else {
+				delete(may, dst)
+			}
+			return
+		}
+		_, defs := l.method.EffectsAt(index)
+		for _, r := range defs {
+			delete(must, r)
+			delete(may, r)
+		}
+	}
+
+	maxSteps := numBlocks*64 + 1024
+	for steps := 0; len(worklist) > 0 && steps < maxSteps; steps++ {
+		b := worklist[0]
+		worklist = worklist[1:]
+		inQueue[b] = false
+
+		st := inState[b]
+		must := cloneRegSet(inMust[b])
+		may := cloneRegSet(inMay[b])
+
+		for _, idx := range l.method.Blocks[b].Instructions {
+			insn := &l.method.Instructions[idx]
+			if _, isCtorCall := l.isConstructorDelegationInsn(idx); isCtorCall && len(insn.Regs) > 0 && must[insn.Regs[0]] {
+				if len(handlersForInsn[idx]) > 0 {
+					for _, hb := range handlersForInsn[idx] {
+						propagate(hb, thisUninit, map[uint16]bool{}, map[uint16]bool{})
+					}
+				}
+				st = thisInit
+				continue
+			}
+			if ir.MayThrow(insn.Opcode) && len(handlersForInsn[idx]) > 0 {
+				for _, hb := range handlersForInsn[idx] {
+					propagate(hb, st, must, may)
+				}
+			}
+			transferAliases(idx, must, may)
+		}
+
+		for _, succ := range l.method.Blocks[b].Successors {
+			if l.blockHasNormalEdgeTo(b, succ) {
+				propagate(succ, st, must, may)
+			}
+		}
+	}
+
+	findRepeatBranch := func(fromIdx, targetIdx int) (*ir.Instruction, bool) {
+		fromBlock := blockOf[fromIdx]
+		targetBlock := blockOf[targetIdx]
+		if fromBlock < 0 || targetBlock < 0 {
+			return nil, false
+		}
+		past := false
+		for _, idx := range l.method.Blocks[fromBlock].Instructions {
+			if idx == fromIdx {
+				past = true
+				continue
+			}
+			if past && idx == targetIdx {
+				return &l.method.Instructions[idx], true
+			}
+		}
+		seen := make([]bool, numBlocks)
+		var q []int
+		lastInsn := func(b int) *ir.Instruction {
+			ins := l.method.Blocks[b].Instructions
+			if len(ins) == 0 {
+				return nil
+			}
+			return &l.method.Instructions[ins[len(ins)-1]]
+		}
+		for _, succ := range l.method.Blocks[fromBlock].Successors {
+			if !l.blockHasNormalEdgeTo(fromBlock, succ) {
+				otherThrows := false
+				if len(handlersForInsn) > 0 {
+					pastFrom := false
+					for _, idx := range l.method.Blocks[fromBlock].Instructions {
+						if idx == fromIdx {
+							pastFrom = true
+							continue
+						}
+						if pastFrom {
+							for _, hb := range handlersForInsn[idx] {
+								if hb == succ {
+									otherThrows = true
+									break
+								}
+							}
+						}
+						if otherThrows {
+							break
+						}
+					}
+				}
+				if !otherThrows {
+					continue
+				}
+			}
+			if succ == targetBlock {
+				return lastInsn(fromBlock), true
+			}
+			if !seen[succ] {
+				seen[succ] = true
+				q = append(q, succ)
+			}
+		}
+		for len(q) > 0 {
+			cur := q[0]
+			q = q[1:]
+			for _, succ := range l.method.Blocks[cur].Successors {
+				if succ == targetBlock {
+					return lastInsn(cur), true
+				}
+				if !seen[succ] {
+					seen[succ] = true
+					q = append(q, succ)
+				}
+			}
+		}
+		return nil, false
+	}
+
+	delegationSites := make(map[int]bool)
+	deferredSeen := make(map[int]bool)
+	l.deferredStores = nil
+
+	for b := range l.method.Blocks {
+		if !visited[b] || !l.method.Blocks[b].Reachable {
+			continue
+		}
+		st := inState[b]
+		must := cloneRegSet(inMust[b])
+		may := cloneRegSet(inMay[b])
+
+		for _, idx := range l.method.Blocks[b].Instructions {
+			insn := &l.method.Instructions[idx]
+			if callee, isCtorCall := l.isConstructorDelegationInsn(idx); isCtorCall {
+				recv := insn.Regs[0]
+				if !must[recv] {
+					return methodDiagnostic(l.method.Context, insn, "", fmt.Errorf("constructor receiver v%d is initialized; delegation requires uninitialized this v%d", recv, thisRegister))
+				}
+				if callee.Class != l.class.Descriptor && callee.Class != l.class.Superclass {
+					return methodDiagnostic(l.method.Context, insn, "", fmt.Errorf("uninitialized this may only delegate to %s.<init> or %s.<init>", l.class.Descriptor, l.class.Superclass))
+				}
+				if st != thisInit {
+					for _, arg := range insn.Regs[1:] {
+						if may[arg] {
+							return methodDiagnostic(l.method.Context, insn, "", fmt.Errorf("uninitialized this v%d is also a constructor argument", arg))
+						}
+					}
+				}
+				if st == thisInit {
+					return methodDiagnostic(l.method.Context, insn, "", fmt.Errorf("constructor initializes this more than once"))
+				}
+				if st == thisMixed {
+					if edgeInsn, repeated := findRepeatBranch(idx, idx); repeated {
+						if edgeInsn == nil {
+							edgeInsn = insn
+						}
+						return methodDiagnostic(l.method.Context, edgeInsn, "", fmt.Errorf("control flow may repeat constructor delegation"))
+					}
+					return methodDiagnostic(l.method.Context, insn, "", fmt.Errorf("constructor initializes this more than once"))
+				}
+				delegationSites[idx] = true
+				st = thisInit
+				continue
+			}
+
+			if st != thisInit {
+				uses, _ := l.method.EffectsAt(idx)
+				aliasMove := insn.Opcode >= 0x01 && insn.Opcode <= 0x09 && len(insn.Regs) >= 2 && may[insn.Regs[1]]
+				if isBranchOpcode(insn.Opcode) {
+					for _, r := range uses {
+						if may[r] {
+							return l.uninitializedThisUse(insn, r)
+						}
+					}
+					continue
+				}
+				usesThis := false
+				aliased := uint16(0)
+				for _, r := range uses {
+					if may[r] {
+						usesThis = true
+						aliased = r
+						break
+					}
+				}
+				if usesThis {
+					switch {
+					case aliasMove:
+					case insn.Opcode >= 0x59 && insn.Opcode <= 0x5f && st == thisUninit && must[insn.Regs[1]] && !may[insn.Regs[0]]:
+						if !deferredSeen[idx] {
+							deferredSeen[idx] = true
+							l.deferredStores = append(l.deferredStores, deferredStore{index: idx, register: insn.Regs[0]})
+						}
+					default:
+						return l.uninitializedThisUse(insn, aliased)
+					}
+				}
+			}
+
+			if insn.Opcode >= 0x0e && insn.Opcode <= 0x11 && st != thisInit {
+				return methodDiagnostic(l.method.Context, insn, "", fmt.Errorf("constructor does not initialize this or delegate"))
+			}
+			transferAliases(idx, must, may)
+		}
+	}
+
+	l.delegationSites = delegationSites
+	l.delegationIndex = -1
+	if len(delegationSites) == 1 {
+		for idx := range delegationSites {
+			l.delegationIndex = idx
+		}
+	}
+	l.deferredByDelegation = make(map[int][]int, len(delegationSites))
+
+	for storePos := range l.deferredStores {
+		store := &l.deferredStores[storePos]
+		storeBlock := blockOf[store.index]
+		if storeBlock < 0 {
+			return l.uninitializedThisUse(&l.method.Instructions[store.index], l.method.Instructions[store.index].Regs[1])
+		}
+		var targets []int
+		seenTarget := make(map[int]bool)
+		stoppedInStart := false
+		pastStore := false
+		for _, idx := range l.method.Blocks[storeBlock].Instructions {
+			if idx == store.index {
+				pastStore = true
+				continue
+			}
+			if pastStore && delegationSites[idx] {
+				targets = append(targets, idx)
+				seenTarget[idx] = true
+				stoppedInStart = true
+				break
+			}
+		}
+		if !stoppedInStart {
+			seenBlk := map[int]bool{storeBlock: true}
+			var q []int
+			for _, succ := range l.method.Blocks[storeBlock].Successors {
+				if l.method.Blocks[succ].Reachable && !seenBlk[succ] {
+					seenBlk[succ] = true
+					q = append(q, succ)
+				}
+			}
+			for len(q) > 0 {
+				cur := q[0]
+				q = q[1:]
+				hitDelegation := false
+				for _, idx := range l.method.Blocks[cur].Instructions {
+					if delegationSites[idx] {
+						if !seenTarget[idx] {
+							seenTarget[idx] = true
+							targets = append(targets, idx)
+						}
+						hitDelegation = true
+						break
+					}
+				}
+				if hitDelegation {
+					continue
+				}
+				for _, succ := range l.method.Blocks[cur].Successors {
+					if l.method.Blocks[succ].Reachable && !seenBlk[succ] {
+						seenBlk[succ] = true
+						q = append(q, succ)
+					}
+				}
+			}
+		}
+		if len(targets) == 0 {
+			return l.uninitializedThisUse(&l.method.Instructions[store.index], l.method.Instructions[store.index].Regs[1])
+		}
+		for _, d := range targets {
+			dBlock := blockOf[d]
+			if dBlock < 0 || (storeBlock == dBlock && store.index > d) || (storeBlock != dBlock && !l.dominates(storeBlock, dBlock)) {
+				return methodDiagnostic(l.method.Context, &l.method.Instructions[store.index], "", fmt.Errorf("field store before delegation is not on every path to the constructor call"))
+			}
+			l.deferredByDelegation[d] = append(l.deferredByDelegation[d], storePos)
+		}
+	}
+	return nil
 }
 
 func (l *methodLowerer) validateFusedConstructor(instruction *ir.Instruction, allocation ir.Allocation) error {
@@ -136,27 +567,6 @@ func (l *methodLowerer) isSuperclass(target string) bool {
 	return false
 }
 
-// thisAliasSet returns the registers that alias uninitialized this after the
-// instructions before limit. A move-object from a known alias creates one;
-// defining the register with anything else destroys it.
-func (l *methodLowerer) thisAliasSet(limit int, thisRegister uint16) map[uint16]bool {
-	aliases := map[uint16]bool{thisRegister: true}
-	for index := 0; index < limit && index < len(l.method.Instructions); index++ {
-		instruction := &l.method.Instructions[index]
-		if instruction.Opcode >= 0x01 && instruction.Opcode <= 0x09 && aliases[instruction.Regs[1]] {
-			aliases[instruction.Regs[0]] = true
-			continue
-		}
-		_, definitions := l.method.EffectsAt(index)
-		for _, register := range definitions {
-			if register != thisRegister {
-				delete(aliases, register)
-			}
-		}
-	}
-	return aliases
-}
-
 // blockOfInstruction returns the index of the block containing an instruction.
 func (l *methodLowerer) blockOfInstruction(instructionIndex int) int {
 	for index := range l.method.Blocks {
@@ -194,83 +604,6 @@ func (l *methodLowerer) dominates(beforeBlock, afterBlock int) bool {
 		}
 	}
 	return true
-}
-
-func (l *methodLowerer) validateDelegationShape(delegation int, thisRegister uint16) error {
-	delegationOffset := l.method.Instructions[delegation].Offset
-	l.delegationIndex = delegation
-	aliases := map[uint16]bool{thisRegister: true}
-	isThis := func(register uint16) bool { return aliases[register] }
-	hasBranch := false
-	for index := range l.method.Instructions {
-		instruction := &l.method.Instructions[index]
-		if index < delegation {
-			uses, definitions := l.method.EffectsAt(index)
-			aliasMove := instruction.Opcode >= 0x01 && instruction.Opcode <= 0x09 && isThis(instruction.Regs[1])
-			if isBranchOpcode(instruction.Opcode) {
-				// Branches before delegation are argument computation; they may
-				// not touch uninitialized this, and deferred stores must still
-				// dominate the constructor call.
-				for _, register := range uses {
-					if isThis(register) {
-						return l.uninitializedThisUse(instruction, register)
-					}
-				}
-				hasBranch = true
-				continue
-			}
-			// Only the registers the instruction reads matter; defining an alias
-			// register (for example moving a parameter into it) retires the alias.
-			usesThis := false
-			aliased := uint16(0)
-			for _, register := range uses {
-				if isThis(register) {
-					usesThis = true
-					aliased = register
-					break
-				}
-			}
-			if usesThis {
-				switch {
-				case aliasMove:
-					// Aliasing uninitialized this is inert; the alias is only
-					// meaningful once it is used, which is checked separately.
-				case instruction.Opcode >= 0x59 && instruction.Opcode <= 0x5f && isThis(instruction.Regs[1]) && !isThis(instruction.Regs[0]):
-					// DEX permits field stores on uninitialized this before
-					// super(). The JVM does not, so the value is captured at the
-					// original position and the store is emitted after delegation.
-					l.deferredStores = append(l.deferredStores, deferredStore{index: index, register: instruction.Regs[0]})
-				default:
-					return l.uninitializedThisUse(instruction, aliased)
-				}
-			}
-			if aliasMove {
-				aliases[instruction.Regs[0]] = true
-			} else {
-				for _, register := range definitions {
-					if register != thisRegister {
-						delete(aliases, register)
-					}
-				}
-			}
-		}
-		if index > delegation && instruction.Target >= 0 && uint32(instruction.Target) <= delegationOffset {
-			return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("control flow may repeat constructor delegation"))
-		}
-	}
-	if hasBranch {
-		delegationBlock := l.blockOfInstruction(delegation)
-		for _, store := range l.deferredStores {
-			storeBlock := l.blockOfInstruction(store.index)
-			if storeBlock < 0 || delegationBlock < 0 || storeBlock == delegationBlock && store.index > delegation {
-				return methodDiagnostic(l.method.Context, &l.method.Instructions[store.index], "", fmt.Errorf("field store before delegation is not on every path to the constructor call"))
-			}
-			if storeBlock != delegationBlock && !l.dominates(storeBlock, delegationBlock) {
-				return methodDiagnostic(l.method.Context, &l.method.Instructions[store.index], "", fmt.Errorf("field store before delegation is not on every path to the constructor call"))
-			}
-		}
-	}
-	return nil
 }
 
 // isAllocationAlias reports whether the register still aliases an allocation

@@ -251,7 +251,7 @@ func DexToJarWithOptions(data []byte, options ConvertOptions) (jar []byte, detai
 	if policy != FailureStrict && policy != FailureStubUnsupportedMethods && policy != FailureRecover {
 		return nil, detailed, fmt.Errorf("dex2jar: unknown failure policy %q", policy)
 	}
-	app, _, err := parseApplication(data, options.Input)
+	app, _, err := parseApplicationWithPolicy(data, options.Input, policy)
 	if err != nil {
 		appendConversionDiagnostic(&detailed, diagnosticFromError(err, "failed", ""))
 		return nil, detailed, err
@@ -359,8 +359,13 @@ func inputOptions(options Options) input.Options {
 	}
 }
 
-func parseApplication(data []byte, options Options) (*model.Application, ContainerKind, error) {
-	app, kind, err := input.ParseApplicationWithOptions(data, "", inputOptions(options))
+func parseApplicationWithPolicy(data []byte, options Options, policy FailurePolicy) (*model.Application, ContainerKind, error) {
+	inOpts := inputOptions(options)
+	if policy == FailureRecover {
+		inOpts.TolerateSignatureMismatch = true
+		inOpts.TolerateOrphanAnnotationDefault = true
+	}
+	app, kind, err := input.ParseApplicationWithOptions(data, "", inOpts)
 	if err != nil {
 		return nil, ContainerKind(kind), err
 	}
@@ -388,6 +393,10 @@ func applicationToJarWithPolicy(app *model.Application, policy FailurePolicy) ([
 		lowerPolicy = lower.StubUnsupportedMethods
 	case FailureRecover:
 		lowerPolicy = lower.Recover
+		for _, diag := range synthesizeR8InlinedConstructors(app, hierarchy) {
+			appendConversionDiagnostic(&detailed, diag)
+			detailed.Summary.Warnings++
+		}
 	}
 	for _, file := range app.Files {
 		if file == nil {
@@ -397,6 +406,17 @@ func applicationToJarWithPolicy(app *model.Application, policy FailurePolicy) ([
 			err = dexreport.New(file.Entry, "", "", 0, "metadata", err)
 			appendConversionDiagnostic(&detailed, diagnosticFromError(err, "failed", ""))
 			return nil, detailed, err
+		}
+		for _, w := range file.ParseWarnings {
+			detailed.Summary.Warnings++
+			if w.Action == "drop_attribute" {
+				detailed.DroppedAttributes++
+			}
+			appendConversionDiagnostic(&detailed, ConversionDiagnostic{
+				Entry: w.Entry, Class: w.Class, Category: "recovery", Action: w.Action,
+				Feature: w.Feature, Code: w.Code, Kind: "structural",
+				Scope: "dex", Stage: "parse_dex", Severity: "warning", Message: w.Message,
+			})
 		}
 		for classIndex := range file.Classes {
 			class := &file.Classes[classIndex]

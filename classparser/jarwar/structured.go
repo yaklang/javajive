@@ -33,6 +33,7 @@ func decompileArchiveStructured(from, to string, options ArchiveOptions) (Archiv
 		Work:          options.Work,
 		TargetRelease: options.TargetRelease,
 	})
+	archiveOptions.AllowCaseFoldCollisions = options.RetainUnprovedSource
 	zipFS, err := filesys.NewZipFSFromLocalWithOptions(from, filesys.WithArchiveOptions(archiveOptions))
 	if err != nil {
 		return ArchiveReport{}, fmt.Errorf("open archive %q: %w", from, err)
@@ -47,7 +48,11 @@ func decompileArchiveStructured(from, to string, options ArchiveOptions) (Archiv
 	}
 
 	var report ArchiveReport
-	exportErr := exportStructuredArchive(to, zipFS, decompiler, "", 0, options.MaxAnalysisUpdates, options.RetainUnprovedSource, &report)
+	var usedFold map[string]int
+	if options.RetainUnprovedSource {
+		usedFold = make(map[string]int)
+	}
+	exportErr := exportStructuredArchive(to, zipFS, decompiler, "", 0, options.MaxAnalysisUpdates, options.RetainUnprovedSource, usedFold, &report)
 	closeErr := decompilerOwner.Close()
 	if exportErr != nil {
 		return ArchiveReport{}, exportErr
@@ -96,11 +101,11 @@ func prepareStructuredRoot(root string) error {
 	return nil
 }
 
-func exportStructuredArchive(root string, zipFS *filesys.ZipFS, decompiler *javaclassparser.JarFS, archivePath string, depth, maxAnalysisUpdates int, retainUnproved bool, report *ArchiveReport) error {
-	return walkStructuredDirectory(root, zipFS, decompiler, ".", archivePath, depth, maxAnalysisUpdates, retainUnproved, report)
+func exportStructuredArchive(root string, zipFS *filesys.ZipFS, decompiler *javaclassparser.JarFS, archivePath string, depth, maxAnalysisUpdates int, retainUnproved bool, usedFold map[string]int, report *ArchiveReport) error {
+	return walkStructuredDirectory(root, zipFS, decompiler, ".", archivePath, depth, maxAnalysisUpdates, retainUnproved, usedFold, report)
 }
 
-func walkStructuredDirectory(root string, zipFS *filesys.ZipFS, decompiler *javaclassparser.JarFS, directory, archivePath string, depth, maxAnalysisUpdates int, retainUnproved bool, report *ArchiveReport) error {
+func walkStructuredDirectory(root string, zipFS *filesys.ZipFS, decompiler *javaclassparser.JarFS, directory, archivePath string, depth, maxAnalysisUpdates int, retainUnproved bool, usedFold map[string]int, report *ArchiveReport) error {
 	entries, err := decompiler.ReadDir(directory)
 	if err != nil {
 		return fmt.Errorf("read archive directory %q: %w", provenancePath(archivePath, cleanArchivePath(directory)), err)
@@ -111,32 +116,34 @@ func walkStructuredDirectory(root string, zipFS *filesys.ZipFS, decompiler *java
 		entryPath := path.Join(directory, javaclassparser.EntryOriginalName(entry))
 		entryPath = cleanArchivePath(entryPath)
 		if isArchiveName(entryPath) {
-			if err := exportNestedArchive(root, zipFS, entryPath, archivePath, depth+1, maxAnalysisUpdates, retainUnproved, report); err != nil {
+			if err := exportNestedArchive(root, zipFS, entryPath, archivePath, depth+1, maxAnalysisUpdates, retainUnproved, usedFold, report); err != nil {
 				return err
 			}
 			continue
 		}
 		if entry.IsDir() {
-			if err := walkStructuredDirectory(root, zipFS, decompiler, entryPath, archivePath, depth, maxAnalysisUpdates, retainUnproved, report); err != nil {
+			if err := walkStructuredDirectory(root, zipFS, decompiler, entryPath, archivePath, depth, maxAnalysisUpdates, retainUnproved, usedFold, report); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := exportStructuredFile(root, decompiler, entryPath, archivePath, report); err != nil {
+		if err := exportStructuredFile(root, decompiler, entryPath, archivePath, retainUnproved, usedFold, report); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func exportNestedArchive(root string, parentZip *filesys.ZipFS, entryPath, parentArchive string, depth, maxAnalysisUpdates int, retainUnproved bool, report *ArchiveReport) error {
+func exportNestedArchive(root string, parentZip *filesys.ZipFS, entryPath, parentArchive string, depth, maxAnalysisUpdates int, retainUnproved bool, usedFold map[string]int, report *ArchiveReport) error {
 	raw, err := parentZip.ReadFile(entryPath)
 	if err != nil {
 		return fmt.Errorf("read nested archive %q: %w", provenancePath(parentArchive, entryPath), err)
 	}
 	provenance := provenancePath(parentArchive, entryPath)
 	outputPath := path.Join(structuredArchivesRoot, provenance)
-	if err := reserveStructuredOutput(report, outputPath); err != nil {
+	if retainUnproved {
+		outputPath = disambiguateCaseFoldPath(sanitizeBestEffortPath(outputPath), usedFold)
+	} else if err := reserveStructuredOutput(report, outputPath); err != nil {
 		return err
 	}
 	if err := writeStructuredFile(root, outputPath, raw); err != nil {
@@ -158,13 +165,13 @@ func exportNestedArchive(root string, parentZip *filesys.ZipFS, entryPath, paren
 	nestedDecompiler := javaclassparser.NewJarFS(nestedZip)
 	nestedDecompiler.SetAnalysisBudget(maxAnalysisUpdates)
 	nestedDecompiler.SetRetainUnprovedSource(retainUnproved)
-	if err := exportStructuredArchive(root, nestedZip, nestedDecompiler, provenance, depth, maxAnalysisUpdates, retainUnproved, report); err != nil {
+	if err := exportStructuredArchive(root, nestedZip, nestedDecompiler, provenance, depth, maxAnalysisUpdates, retainUnproved, usedFold, report); err != nil {
 		return err
 	}
 	return nil
 }
 
-func exportStructuredFile(root string, decompiler *javaclassparser.JarFS, entryPath, archivePath string, report *ArchiveReport) error {
+func exportStructuredFile(root string, decompiler *javaclassparser.JarFS, entryPath, archivePath string, retainUnproved bool, usedFold map[string]int, report *ArchiveReport) error {
 	outcome, err := decompiler.ReadClassOutcome(entryPath)
 	if err != nil {
 		return fmt.Errorf("read archive entry %q: %w", provenancePath(archivePath, entryPath), err)
@@ -188,7 +195,9 @@ func exportStructuredFile(root string, decompiler *javaclassparser.JarFS, entryP
 		outputEntry = provenancePath(archivePath, outputEntry)
 	}
 	outputPath := path.Join(outputRoot, outputEntry)
-	if err := reserveStructuredOutput(report, outputPath); err != nil {
+	if retainUnproved {
+		outputPath = disambiguateCaseFoldPath(sanitizeBestEffortPath(outputPath), usedFold)
+	} else if err := reserveStructuredOutput(report, outputPath); err != nil {
 		return err
 	}
 	if err := writeStructuredFile(root, outputPath, data); err != nil {

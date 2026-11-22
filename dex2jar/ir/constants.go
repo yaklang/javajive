@@ -262,9 +262,14 @@ func resolveConstant(category, demand Category) (Category, error) {
 	switch category.Kind {
 	case Null:
 		switch demand.Kind {
-		case Int, Float, Reference:
-			// The zero constant is 32 bits and fits all three readings.
+		case Int, Float:
+			// The zero constant is 32 bits and fits int, float and reference readings.
 			return demand, nil
+		case Reference:
+			// Keep reference null constants untyped by class/interface descriptor so
+			// later control-flow joins (e.g., merging null with an array) do not
+			// inherit an unrelated non-array reference descriptor.
+			return Category{Kind: Reference}, nil
 		case Bits32:
 			// A move chain left the interpretation open; the raw zero bits are
 			// an int constant.

@@ -55,6 +55,11 @@ type methodLowerer struct {
 	useWebDef         map[regUseKey]int
 	entryDefByReg     []int
 	webReachIn        []defState
+	webPolySlots      map[webPolyKey]uint16
+	webPolyMask       map[int]uint8
+	webZeroKind       map[int]ir.CategoryKind
+	webSingleZeroKind map[int]ir.CategoryKind
+	pinnedZeroKind    map[uint16]ir.CategoryKind
 	refIn             []referenceState
 	// allocationNewLabels maps an Allocation.ID to the JVM bytecode label right
 	// before NEW so StackMapTable frames can emit ITEM_Uninitialized offsets.
@@ -74,10 +79,21 @@ type methodLowerer struct {
 	// caught exception to the stub that discards it.
 	handlerTrampolines map[uint32]*classfilebuilder.Label
 
-	// delegationIndex marks this-constructor delegation; field stores that DEX
-	// permits before it are emitted immediately after it.
-	delegationIndex int
-	deferredStores  []deferredStore
+	// delegationIndex marks a single-site this-constructor delegation; field
+	// stores that DEX permits before delegation are tracked per delegation site.
+	delegationIndex          int
+	delegationSites          map[int]bool
+	deferredByDelegation     map[int][]int
+	deferredStores           []deferredStore
+	deferredInsn             map[int]bool
+	labelOp                  map[*classfilebuilder.Label]int
+	insnStartLabel           []*classfilebuilder.Label
+	insnThrowEndLabel        []*classfilebuilder.Label
+	insnEndLabel             []*classfilebuilder.Label
+	canonicalClinit          *canonicalClinitPlan
+	canonicalClinitConsts    map[int]*canonicalEnumConstSpan
+	canonicalClinitConstSkip map[int]bool
+	fusedNoLocals            map[int]bool
 }
 
 func (l *methodLowerer) lower() error {
@@ -87,6 +103,11 @@ func (l *methodLowerer) lower() error {
 	if err := l.assignHomes(); err != nil {
 		return methodDiagnostic(l.method.Context, nil, "locals", err)
 	}
+	l.index = -1
+	l.labelOp = make(map[*classfilebuilder.Label]int, len(l.method.Instructions)*3+len(l.method.Blocks)+16)
+	l.insnStartLabel = make([]*classfilebuilder.Label, len(l.method.Instructions))
+	l.insnThrowEndLabel = make([]*classfilebuilder.Label, len(l.method.Instructions))
+	l.insnEndLabel = make([]*classfilebuilder.Label, len(l.method.Instructions))
 	l.labels = make(map[uint32]*classfilebuilder.Label, len(l.method.Blocks))
 	for _, block := range l.method.Blocks {
 		l.labels[block.Start] = l.code.NewLabel()
@@ -97,6 +118,8 @@ func (l *methodLowerer) lower() error {
 		l.registerDescriptor[register] = category.Descriptor
 	}
 	l.delegationIndex = -1
+	l.delegationSites = nil
+	l.deferredByDelegation = nil
 	l.allocationAliasOps = make(map[int]bool)
 	for _, allocation := range l.method.Allocations {
 		l.allocationByNew[allocation.NewInstruction] = allocation
@@ -124,6 +147,11 @@ func (l *methodLowerer) lower() error {
 	if err := l.validateReferenceUses(); err != nil {
 		return err
 	}
+	if handled, err := l.tryEmitCanonicalEnumMethod(); err != nil {
+		return err
+	} else if handled {
+		return nil
+	}
 	if err := l.emitPrologue(); err != nil {
 		return err
 	}
@@ -132,43 +160,88 @@ func (l *methodLowerer) lower() error {
 		return err
 	}
 	deferred := make(map[int]*deferredStore, len(l.deferredStores))
+	l.deferredInsn = make(map[int]bool, len(l.deferredStores))
 	for index := range l.deferredStores {
 		deferred[l.deferredStores[index].index] = &l.deferredStores[index]
+		l.deferredInsn[l.deferredStores[index].index] = true
 	}
+	l.canonicalClinit = l.detectCanonicalEnumClinitBacking()
+	l.detectCanonicalEnumClinitConstSpans()
 	for _, block := range l.method.Blocks {
-		l.code.Mark(l.labels[block.Start])
+		l.markLabel(l.labels[block.Start])
 		for _, index := range block.Instructions {
 			instruction := &l.method.Instructions[index]
 			// A deferred store still owns its address: debug data may reference
 			// it, and an unmarked label would fail class assembly.
-			if label := l.addressLabels[instruction.Offset]; label != nil && label != l.labels[block.Start] {
-				l.code.Mark(label)
+			startLabel := l.addressLabels[instruction.Offset]
+			if startLabel != nil && startLabel != l.labels[block.Start] {
+				l.markLabel(startLabel)
+			} else if startLabel == nil {
+				startLabel = l.code.NewLabel()
+				l.markLabel(startLabel)
 			}
-			if store, ok := deferred[index]; ok {
+			l.insnStartLabel[index] = startLabel
+			if span := l.canonicalClinitConsts[index]; span != nil {
+				if err := l.emitCanonicalEnumConstSpan(span); err != nil {
+					return err
+				}
+			} else if l.canonicalClinitConstSkip[index] {
+				// Fused into canonical enum constant allocation span.
+			} else if l.canonicalClinit != nil && index == l.canonicalClinit.startIdx {
+				if err := l.emitCanonicalEnumClinitPacket(); err != nil {
+					return err
+				}
+			} else if l.canonicalClinit != nil && l.canonicalClinit.skipSet[index] {
+				// Fused into canonical enum backing packet at startIdx.
+			} else if store, ok := deferred[index]; ok {
 				l.captureDeferredValue(store)
-				continue
-			}
-			if err := l.emitInstruction(index); err != nil {
-				return err
-			}
-			if index == l.delegationIndex {
-				for position := range l.deferredStores {
-					if err := l.emitDeferredStore(&l.deferredStores[position]); err != nil {
-						return err
+			} else {
+				if err := l.emitInstruction(index); err != nil {
+					return err
+				}
+				if l.isDelegationSite(index) {
+					positions := l.deferredByDelegation[index]
+					if len(positions) == 0 && index == l.delegationIndex && len(l.delegationSites) <= 1 {
+						for position := range l.deferredStores {
+							if err := l.emitDeferredStore(&l.deferredStores[position]); err != nil {
+								return err
+							}
+						}
+					} else {
+						for _, position := range positions {
+							if err := l.emitDeferredStore(&l.deferredStores[position]); err != nil {
+								return err
+							}
+						}
 					}
 				}
 			}
+			endLabel := l.code.NewLabel()
+			l.markLabel(endLabel)
+			l.insnEndLabel[index] = endLabel
 		}
 	}
+	l.index = -1
 	if l.endLabel != nil {
-		l.code.Mark(l.endLabel)
+		l.markLabel(l.endLabel)
 	}
 	l.emitHandlerTrampolines()
-	if err := l.emitExceptionTable(); err != nil {
+	var smState *stackMapState
+	if len(l.method.Code.Tries) > 0 || l.builder.Version() >= classfilebuilder.VersionJava7 {
+		state, err := l.computeStackMapFrames()
+		if err != nil {
+			if l.builder.Version() >= classfilebuilder.VersionJava7 {
+				return err
+			}
+		} else {
+			smState = state
+		}
+	}
+	if err := l.emitExceptionTable(smState); err != nil {
 		return err
 	}
 	if l.builder.Version() >= classfilebuilder.VersionJava7 {
-		if err := l.emitStackMapTable(); err != nil {
+		if err := l.emitStackMapTable(smState); err != nil {
 			return err
 		}
 	}
@@ -179,6 +252,33 @@ func (l *methodLowerer) lower() error {
 	return nil
 }
 
+func (l *methodLowerer) markLabel(label *classfilebuilder.Label) *classfilebuilder.Code {
+	if l.labelOp != nil && label != nil {
+		l.labelOp[label] = l.code.InstructionCount()
+	}
+	return l.code.Mark(label)
+}
+
+func (l *methodLowerer) markThrowEnd() {
+	if l.index < 0 || l.index >= len(l.insnThrowEndLabel) {
+		return
+	}
+	if l.insnThrowEndLabel[l.index] != nil || !ir.MayThrow(l.method.Instructions[l.index].Opcode) {
+		return
+	}
+	startLabel := l.insnStartLabel[l.index]
+	if startLabel == nil {
+		return
+	}
+	startOp, ok := l.labelOp[startLabel]
+	if !ok || l.code.InstructionCount() <= startOp {
+		return
+	}
+	end := l.code.NewLabel()
+	l.markLabel(end)
+	l.insnThrowEndLabel[l.index] = end
+}
+
 // prepareAddressLabels binds a JVM label to every DEX address that debug data
 // refers to, so line numbers and local ranges survive branch widening.
 // assignHomesLegacy gives every DEX register a JVM local. A register that ever holds
@@ -187,6 +287,11 @@ func (l *methodLowerer) lower() error {
 func (l *methodLowerer) assignHomesLegacy() error {
 	l.webSplitting = false
 	l.polySlots = nil
+	l.webPolySlots = nil
+	l.webPolyMask = nil
+	l.webZeroKind = nil
+	l.webSingleZeroKind = nil
+	l.pinnedZeroKind = nil
 	l.paramPrologueSlot = nil
 	registerCount := int(l.method.Code.RegistersSize)
 	widths := make([]int, registerCount)
@@ -278,14 +383,97 @@ func (l *methodLowerer) assignHomesLegacy() error {
 		l.homeSlots[register] = uint16(next)
 		next += width
 	}
-	for register, mask := range l.method.PolyZeroRegisters {
-		if mask == 0 || register >= registerCount || skipHome[register] {
+	regNarrowMask := make([]uint8, registerCount)
+	regHasWide := make([]bool, registerCount)
+	incomingReg := registerCount - int(l.method.Code.InsSize)
+	if l.encoded.AccessFlags&dexStatic == 0 {
+		if incomingReg >= 0 && incomingReg < registerCount {
+			regNarrowMask[incomingReg] |= ir.PolyZeroRef
+		}
+		incomingReg++
+	}
+	for _, descriptor := range l.method.Proto.Parameters {
+		if incomingReg >= 0 && incomingReg < registerCount {
+			if fk, fkErr := fieldKind(descriptor); fkErr == nil {
+				if bit, wide := categoryMaskBit(fk, 0, descriptor); bit != 0 || wide {
+					regNarrowMask[incomingReg] |= bit
+					if wide {
+						regHasWide[incomingReg] = true
+					}
+				}
+			}
+		}
+		incomingReg += descriptorWords(descriptor)
+	}
+	for _, block := range l.method.Blocks {
+		if !block.Reachable {
+			continue
+		}
+		for _, idx := range block.Instructions {
+			_, effDefs := l.method.EffectsAt(idx)
+			var defReg int = -1
+			if len(effDefs) > 0 {
+				defReg = int(effDefs[0])
+			} else if def, ok := l.method.DefinitionAt(idx); ok && def.Register >= 0 {
+				defReg = int(def.Register)
+			}
+			if defReg >= 0 && defReg < registerCount {
+				cat := l.definitionCategoryAt(idx, uint16(defReg))
+				if bit, wide := categoryMaskBit(cat.Kind, cat.Allocation, cat.Descriptor); bit != 0 || wide {
+					regNarrowMask[defReg] |= bit
+					if wide {
+						regHasWide[defReg] = true
+					}
+				}
+			}
+			uses, _ := l.method.EffectsAt(idx)
+			for _, u := range uses {
+				if int(u) >= registerCount {
+					continue
+				}
+				cat := l.method.CategoryAt(idx, u)
+				if cat.Kind == ir.WideUpper {
+					continue
+				}
+				if bit, wide := categoryMaskBit(cat.Kind, cat.Allocation, cat.Descriptor); bit != 0 || wide {
+					regNarrowMask[u] |= bit
+					if wide {
+						regHasWide[u] = true
+					}
+				}
+			}
+		}
+	}
+	for register := 0; register < registerCount; register++ {
+		if skipHome[register] {
+			continue
+		}
+		var mask uint8
+		if register < len(l.method.PolyZeroRegisters) {
+			mask = l.method.PolyZeroRegisters[register]
+		}
+		if hasMultipleNarrowBits(regNarrowMask[register]) || (regNarrowMask[register] != 0 && regHasWide[register]) {
+			mask |= regNarrowMask[register]
+		}
+		if !hasMultipleNarrowBits(regNarrowMask[register]) && !regHasWide[register] && (register >= len(l.method.PolyZeroRegisters) || l.method.PolyZeroRegisters[register] == 0) {
+			if regNarrowMask[register] == ir.PolyZeroInt || regNarrowMask[register] == ir.PolyZeroFloat {
+				if l.pinnedZeroKind == nil {
+					l.pinnedZeroKind = make(map[uint16]ir.CategoryKind)
+				}
+				k := ir.Int
+				if regNarrowMask[register] == ir.PolyZeroFloat {
+					k = ir.Float
+				}
+				l.pinnedZeroKind[uint16(register)] = k
+			}
+		}
+		if mask == 0 {
 			continue
 		}
 		if l.polySlots == nil {
 			l.polySlots = make(map[polySlotKey]uint16)
 		}
-		first := true
+		first := widths[register] == 1 && !regHasWide[register]
 		for _, entry := range []struct {
 			bit  uint8
 			kind classfilebuilder.LocalKind
@@ -309,6 +497,27 @@ func (l *methodLowerer) assignHomesLegacy() error {
 				next++
 			}
 			l.polySlots[polySlotKey{reg: uint16(register), kind: entry.kind}] = slot
+		}
+	}
+	for _, block := range l.method.Blocks {
+		if !block.Reachable {
+			continue
+		}
+		for _, idx := range block.Instructions {
+			insn := &l.method.Instructions[idx]
+			if insn.Opcode < 0x12 || insn.Opcode > 0x15 || insn.Literal != 0 || len(insn.Regs) == 0 {
+				continue
+			}
+			r := insn.Regs[0]
+			if k, ok := l.pinnedZeroKind[r]; ok {
+				defCat := l.definitionCategoryAt(idx, r)
+				if defCat.Kind == ir.Null && defCat.Allocation == 0 {
+					if l.webZeroKind == nil {
+						l.webZeroKind = make(map[int]ir.CategoryKind)
+					}
+					l.webZeroKind[idx] = k
+				}
+			}
 		}
 	}
 	if int(l.homeBase)+next > math.MaxUint16 {
@@ -357,16 +566,22 @@ func (l *methodLowerer) prepareAddressLabels() {
 	}
 }
 
-// emitExceptionTable records every DEX try item as JVM exception-table
-// entries. Handler order is preserved: typed handlers first, then catch-all.
-func (l *methodLowerer) emitExceptionTable() error {
+// emitExceptionTable records narrowed JVM exception-table entries covering only
+// throwing instructions while coalescing safe intermediate non-throwing ranges
+// whose stackmap frames stay compatible with every active catch handler.
+func (l *methodLowerer) emitExceptionTable(state *stackMapState) error {
 	for _, try := range l.method.Code.Tries {
-		start := l.addressLabels[try.StartAddress]
-		end := l.addressLabels[try.StartAddress+uint32(try.InstructionCount)]
-		if start == nil || end == nil {
-			return methodDiagnostic(l.method.Context, nil, "try", fmt.Errorf("try item [%d,%d) has no bound labels", try.StartAddress, try.StartAddress+uint32(try.InstructionCount)))
+		tryStart := try.StartAddress
+		tryEnd := try.StartAddress + uint32(try.InstructionCount)
+		if l.addressLabels[tryStart] == nil || l.addressLabels[tryEnd] == nil {
+			return methodDiagnostic(l.method.Context, nil, "try", fmt.Errorf("try item [%d,%d) has no bound labels", tryStart, tryEnd))
 		}
-		emit := func(address uint32, catchType string) error {
+		type resolvedHandler struct {
+			handler *classfilebuilder.Label
+			class   string
+		}
+		resolved := make([]resolvedHandler, 0, len(try.Handler.Handlers)+1)
+		resolve := func(address uint32, catchType string) error {
 			handler := l.labels[address]
 			if handler == nil {
 				return methodDiagnostic(l.method.Context, nil, "try", fmt.Errorf("handler address %d is not a basic block", address))
@@ -385,17 +600,150 @@ func (l *methodLowerer) emitExceptionTable() error {
 				}
 				class = name
 			}
-			l.code.Catch(start, end, handler, class)
+			resolved = append(resolved, resolvedHandler{handler: handler, class: class})
 			return nil
 		}
 		for _, handler := range try.Handler.Handlers {
-			if err := emit(handler.Address, handler.Type); err != nil {
+			if err := resolve(handler.Address, handler.Type); err != nil {
 				return err
 			}
 		}
 		if try.Handler.CatchAllAddress != nil {
-			if err := emit(*try.Handler.CatchAllAddress, ""); err != nil {
+			if err := resolve(*try.Handler.CatchAllAddress, ""); err != nil {
 				return err
+			}
+		}
+
+		var handlerFrames []slotFrame
+		canCoalesce := state != nil
+		if canCoalesce {
+			collectFrame := func(addr uint32) {
+				if hb, ok := state.blockByStart[addr]; ok && state.visited[hb] {
+					handlerFrames = append(handlerFrames, state.in[hb])
+				} else {
+					canCoalesce = false
+				}
+			}
+			for _, handler := range try.Handler.Handlers {
+				collectFrame(handler.Address)
+			}
+			if try.Handler.CatchAllAddress != nil {
+				collectFrame(*try.Handler.CatchAllAddress)
+			}
+			if len(handlerFrames) == 0 {
+				canCoalesce = false
+			}
+		}
+		compatibleFrame := func(frame slotFrame) bool {
+			if !canCoalesce || frame == nil {
+				return false
+			}
+			for _, hf := range handlerFrames {
+				if !l.slotFrameCompatibleWithHandler(frame, hf) {
+					return false
+				}
+			}
+			return true
+		}
+
+		type labelRun struct {
+			start, end *classfilebuilder.Label
+		}
+		var runs []labelRun
+		var curStart, curEnd *classfilebuilder.Label
+		hasOpen := false
+		flush := func() {
+			if hasOpen {
+				runs = append(runs, labelRun{start: curStart, end: curEnd})
+				hasOpen = false
+			}
+		}
+		for blockIdx, block := range l.method.Blocks {
+			var curFrame slotFrame
+			blockValid := canCoalesce && state.visited[blockIdx]
+			if blockValid {
+				curFrame = cloneSlotFrame(state.in[blockIdx])
+				if hasOpen && !compatibleFrame(curFrame) {
+					flush()
+				}
+			} else {
+				flush()
+			}
+			for _, index := range block.Instructions {
+				insn := &l.method.Instructions[index]
+				inTry := insn.Offset >= tryStart && insn.Offset < tryEnd
+				if !inTry {
+					flush()
+					if blockValid {
+						l.transferSlotFrame(blockIdx, index, curFrame, state.deferred, state.catchClassByAddr)
+					}
+					continue
+				}
+				alloc, isNew := l.allocationByNew[index]
+				protected := ir.MayThrow(insn.Opcode) &&
+					!l.allocationAliasOps[index] &&
+					!(isNew && alloc.Fused) &&
+					!l.deferredInsn[index]
+				if !protected {
+					if hasOpen {
+						if !blockValid || !compatibleFrame(curFrame) {
+							flush()
+						} else {
+							l.transferSlotFrame(blockIdx, index, curFrame, state.deferred, state.catchClassByAddr)
+							if !compatibleFrame(curFrame) {
+								flush()
+							}
+							continue
+						}
+					}
+					if blockValid {
+						l.transferSlotFrame(blockIdx, index, curFrame, state.deferred, state.catchClassByAddr)
+					}
+					continue
+				}
+				s := l.insnStartLabel[index]
+				e := l.insnThrowEndLabel[index]
+				if e == nil {
+					e = l.insnEndLabel[index]
+				}
+				if s == nil || e == nil {
+					flush()
+					if blockValid {
+						l.transferSlotFrame(blockIdx, index, curFrame, state.deferred, state.catchClassByAddr)
+					}
+					continue
+				}
+				sOp, okS := l.labelOp[s]
+				eOp, okE := l.labelOp[e]
+				if !okS || !okE || sOp >= eOp {
+					flush()
+					if blockValid {
+						l.transferSlotFrame(blockIdx, index, curFrame, state.deferred, state.catchClassByAddr)
+					}
+					continue
+				}
+				if hasOpen && (l.labelOp[curEnd] == sOp || compatibleFrame(curFrame)) {
+					curEnd = e
+				} else {
+					flush()
+					curStart, curEnd = s, e
+					hasOpen = true
+				}
+				if blockValid {
+					l.transferSlotFrame(blockIdx, index, curFrame, state.deferred, state.catchClassByAddr)
+					if hasOpen && !compatibleFrame(curFrame) {
+						flush()
+					}
+				} else {
+					flush()
+				}
+			}
+		}
+		flush()
+
+		for _, r := range runs {
+			for _, rh := range resolved {
+				l.code.Catch(r.start, r.end, rh.handler, rh.class)
 			}
 		}
 	}
@@ -436,7 +784,7 @@ func (l *methodLowerer) emitHandlerTrampolines() {
 				continue
 			}
 			label := l.code.NewLabel()
-			l.code.Mark(label).Emit(classfilebuilder.POP)
+			l.markLabel(label).Emit(classfilebuilder.POP)
 			l.code.Branch(classfilebuilder.GOTO, l.labels[address])
 			l.handlerTrampolines[address] = label
 		}
@@ -444,23 +792,30 @@ func (l *methodLowerer) emitHandlerTrampolines() {
 }
 
 // emitDebug records line numbers, local variable names and parameter names from
-// the original DEX debug_info. Positions that cannot be anchored to a real
-// instruction boundary are dropped rather than misattributed.
+// the original DEX debug_info. Positions that cannot be anchored strictly inside
+// emitted JVM code are dropped rather than misattributed or failing assembly.
 func (l *methodLowerer) emitDebug() error {
 	debug := l.method.Code.Debug
 	if debug == nil {
 		return nil
 	}
+	codeUnits := uint32(len(l.method.Code.Instructions))
+	totalOps := l.code.InstructionCount()
 	for _, position := range debug.Positions {
+		if position.Line == 0 || position.Address >= codeUnits {
+			continue
+		}
 		label := l.addressLabels[position.Address]
-		if label == nil || position.Line == 0 {
-			// R8 emits line 0 for synthetic code; a JVM LineNumberTable cannot
-			// represent it, so the entry is dropped instead of failing the class.
+		if label == nil {
+			// R8 emits line 0 or out-of-range positions for synthetic code; a
+			// JVM LineNumberTable requires start_pc < code_length.
+			continue
+		}
+		if opIdx, ok := l.labelOp[label]; !ok || opIdx >= totalOps {
 			continue
 		}
 		l.code.Line(label, uint16(position.Line))
 	}
-	codeUnits := uint32(len(l.method.Code.Instructions))
 	startLabel := l.addressLabels[0]
 	// The JVM rejects duplicate LocalVariableTable entries for the same slot and
 	// range, so an explicitly described range keeps only that entry.
@@ -484,6 +839,11 @@ func (l *methodLowerer) emitDebug() error {
 		if start == nil || end == nil {
 			continue
 		}
+		startOp, okS := l.labelOp[start]
+		endOp, okE := l.labelOp[end]
+		if !okS || !okE || startOp >= endOp {
+			continue
+		}
 		slot, ok := l.debugWebSlot(local.Register, local.Start, local.End, kind)
 		if !ok {
 			continue
@@ -499,6 +859,11 @@ func (l *methodLowerer) emitDebug() error {
 	if l.endLabel == nil || startLabel == nil {
 		return nil
 	}
+	startOp, okS := l.labelOp[startLabel]
+	endOp, okE := l.labelOp[l.endLabel]
+	if !okS || !okE || startOp >= endOp {
+		return nil
+	}
 	for index, name := range debug.ParameterNames {
 		if index >= len(parameterRegisters) {
 			break
@@ -508,7 +873,11 @@ func (l *methodLowerer) emitDebug() error {
 		if name == "" || register >= l.method.Code.RegistersSize {
 			continue
 		}
-		slot := l.prologueStoreSlot(register)
+		pk := classfilebuilder.RefLocal
+		if k, err := fieldKind(descriptor); err == nil {
+			pk = localKind(k)
+		}
+		slot := l.prologueStoreSlot(register, pk)
 		if l.directParamSlots[register] >= 0 {
 			slot = uint16(l.directParamSlots[register])
 		} else if l.webSplitting && !l.webPinned[register] && l.paramPrologueSlot[register] < 0 {
@@ -580,11 +949,17 @@ func (l *methodLowerer) validateMoveResults() error {
 	return nil
 }
 
-func (l *methodLowerer) prologueStoreSlot(register uint16) uint16 {
+func (l *methodLowerer) prologueStoreSlot(register uint16, kind classfilebuilder.LocalKind) uint16 {
 	if l.webSplitting && int(register) < len(l.paramPrologueSlot) && l.paramPrologueSlot[register] >= 0 {
+		if kind != classfilebuilder.LongLocal && kind != classfilebuilder.DoubleLocal &&
+			int(register) < len(l.entryDefByReg) && l.entryDefByReg[register] >= 0 {
+			if slot, ok := l.webPolySlots[webPolyKey{root: l.ufFindRoot(l.entryDefByReg[register]), kind: kind}]; ok {
+				return slot
+			}
+		}
 		return uint16(l.paramPrologueSlot[register])
 	}
-	return l.home(register)
+	return l.slotFor(register, kind)
 }
 
 func (l *methodLowerer) emitPrologue() error {
@@ -592,7 +967,7 @@ func (l *methodLowerer) emitPrologue() error {
 	jvmLocal := uint16(0)
 	if l.encoded.AccessFlags&dexStatic == 0 {
 		if int(parameterRegister) >= len(l.directParamSlots) || l.directParamSlots[parameterRegister] < 0 {
-			l.code.Load(classfilebuilder.RefLocal, jvmLocal).Store(classfilebuilder.RefLocal, l.prologueStoreSlot(parameterRegister))
+			l.code.Load(classfilebuilder.RefLocal, jvmLocal).Store(classfilebuilder.RefLocal, l.prologueStoreSlot(parameterRegister, classfilebuilder.RefLocal))
 		}
 		parameterRegister++
 		jvmLocal++
@@ -605,7 +980,7 @@ func (l *methodLowerer) emitPrologue() error {
 		words := uint16(kind.Words())
 		if int(parameterRegister) >= len(l.directParamSlots) || l.directParamSlots[parameterRegister] < 0 {
 			local := localKind(kind)
-			l.code.Load(local, jvmLocal).Store(local, l.prologueStoreSlot(parameterRegister))
+			l.code.Load(local, jvmLocal).Store(local, l.prologueStoreSlot(parameterRegister, local))
 		}
 		parameterRegister += words
 		jvmLocal += words
@@ -659,22 +1034,25 @@ func (l *methodLowerer) emitInstruction(index int) error {
 	case instruction.Opcode == 0x11:
 		l.load(instruction.Regs[0]).Emit(classfilebuilder.ARETURN)
 	case instruction.Opcode >= 0x12 && instruction.Opcode <= 0x15:
-		if defCat := l.definitionCategory(instruction.Regs[0]); defCat.Kind == ir.Null && defCat.Allocation == ir.PolyZeroAllocation && instruction.Literal == 0 {
-			stored := false
-			if slot, ok := l.polySlots[polySlotKey{reg: instruction.Regs[0], kind: classfilebuilder.RefLocal}]; ok {
-				l.code.Emit(classfilebuilder.ACONST_NULL).Store(classfilebuilder.RefLocal, slot)
-				stored = true
-			}
-			if slot, ok := l.polySlots[polySlotKey{reg: instruction.Regs[0], kind: classfilebuilder.IntLocal}]; ok {
-				l.code.Emit(classfilebuilder.ICONST_0).Store(classfilebuilder.IntLocal, slot)
-				stored = true
-			}
-			if slot, ok := l.polySlots[polySlotKey{reg: instruction.Regs[0], kind: classfilebuilder.FloatLocal}]; ok {
-				l.code.Emit(classfilebuilder.FCONST_0).Store(classfilebuilder.FloatLocal, slot)
-				stored = true
-			}
-			if stored {
-				return nil
+		if instruction.Literal == 0 {
+			if defCat := l.definitionCategory(instruction.Regs[0]); defCat.Kind == ir.Null {
+				stored := false
+				for _, entry := range []struct {
+					lk classfilebuilder.LocalKind
+					op classfilebuilder.Opcode
+				}{
+					{classfilebuilder.RefLocal, classfilebuilder.ACONST_NULL},
+					{classfilebuilder.IntLocal, classfilebuilder.ICONST_0},
+					{classfilebuilder.FloatLocal, classfilebuilder.FCONST_0},
+				} {
+					if slot, ok := l.slotIfCompanion(l.index, instruction.Regs[0], entry.lk, true); ok {
+						l.code.Emit(entry.op).Store(entry.lk, slot)
+						stored = true
+					}
+				}
+				if stored {
+					return nil
+				}
 			}
 		}
 		if err := l.pushDexInt(instruction.Regs[0], int32(instruction.Literal)); err != nil {
@@ -750,12 +1128,9 @@ func (l *methodLowerer) emitInstruction(index int) error {
 }
 
 func (l *methodLowerer) emitMove(instruction *ir.Instruction) error {
-	kind := l.method.CategoryAt(l.index, instruction.Regs[0]).Kind
-	if definition, ok := l.method.DefinitionAt(l.index); ok && definition.Register == int32(instruction.Regs[0]) {
-		kind = definition.Category.Kind
-	}
+	kind := l.resolvedDefCategoryAt(l.index, instruction.Regs[0]).Kind
 	if kind == ir.Unknown {
-		kind = l.method.CategoryAt(l.index, instruction.Regs[1]).Kind
+		kind = l.resolvedUseCategoryAt(l.index, instruction.Regs[1]).Kind
 	}
 	if kind == ir.Unknown {
 		return nil
@@ -777,23 +1152,45 @@ func (l *methodLowerer) emitMove(instruction *ir.Instruction) error {
 		}
 	}
 	if instruction.Opcode <= 0x03 {
-		if srcCat := l.method.CategoryAt(l.index, instruction.Regs[1]); srcCat.Kind == ir.Null && srcCat.Allocation == ir.PolyZeroAllocation {
+		if rawSrc := l.method.CategoryAt(l.index, instruction.Regs[1]); rawSrc.Kind == ir.Null {
 			dst, src := instruction.Regs[0], instruction.Regs[1]
-			copied := false
+			hasDstPoly := false
 			for _, lk := range []classfilebuilder.LocalKind{classfilebuilder.RefLocal, classfilebuilder.IntLocal, classfilebuilder.FloatLocal} {
-				dstSlot, ok := l.polySlots[polySlotKey{reg: dst, kind: lk}]
-				if !ok {
-					continue
+				if _, ok := l.slotIfCompanion(l.index, dst, lk, true); ok {
+					hasDstPoly = true
+					break
 				}
-				srcSlot := l.slotFor(src, lk)
-				l.code.Load(lk, srcSlot).Store(lk, dstSlot)
-				copied = true
 			}
-			if !copied {
-				// Dead polymorphic-zero move whose destination is never read.
-				l.code.Emit(classfilebuilder.ACONST_NULL).Store(classfilebuilder.RefLocal, l.home(dst))
+			srcResolvedLK := localKind(l.resolvedUseCategoryAt(l.index, src).Kind)
+			if hasDstPoly {
+				for _, lk := range []classfilebuilder.LocalKind{classfilebuilder.RefLocal, classfilebuilder.IntLocal, classfilebuilder.FloatLocal} {
+					dstSlot, ok := l.slotIfCompanion(l.index, dst, lk, true)
+					if !ok {
+						continue
+					}
+					if srcSlot, srcOK := l.slotIfCompanion(l.index, src, lk, false); srcOK {
+						l.code.Load(lk, srcSlot).Store(lk, dstSlot)
+					} else if srcResolvedLK == lk && rawSrc.Allocation != ir.PolyZeroAllocation {
+						l.code.Load(lk, l.loadSlotAt(l.index, src, lk)).Store(lk, dstSlot)
+					} else {
+						l.code.Emit(zeroOpcodeForLocalKind(lk)).Store(lk, dstSlot)
+					}
+				}
+				l.registerDescriptor[dst] = l.registerDescriptor[src]
+				return nil
 			}
-			l.registerDescriptor[dst] = l.registerDescriptor[src]
+			dstLK := localKind(kind)
+			dstSlot := l.storeSlotAt(l.index, dst, dstLK)
+			if srcSlot, srcOK := l.slotIfCompanion(l.index, src, dstLK, false); srcOK {
+				l.code.Load(dstLK, srcSlot).Store(dstLK, dstSlot)
+			} else if srcResolvedLK == dstLK && rawSrc.Allocation != ir.PolyZeroAllocation {
+				l.code.Load(dstLK, l.loadSlotAt(l.index, src, dstLK)).Store(dstLK, dstSlot)
+			} else {
+				l.code.Emit(zeroOpcodeForLocalKind(dstLK)).Store(dstLK, dstSlot)
+			}
+			if isReferenceKind(kind) {
+				l.registerDescriptor[dst] = l.registerDescriptor[src]
+			}
 			return nil
 		}
 	}
@@ -1099,8 +1496,11 @@ func (l *methodLowerer) emitFilledNewArray(index int, instruction *ir.Instructio
 	}
 	next := index + 1
 	if next >= len(l.method.Instructions) || l.method.Instructions[next].Opcode != 0x0c {
-		return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("filled-new-array must be followed by move-result-object"))
+		l.markThrowEnd()
+		l.code.Emit(classfilebuilder.POP)
+		return nil
 	}
+	l.markThrowEnd()
 	l.storeAt(l.method.Instructions[next].Regs[0], next)
 	return nil
 }
@@ -1129,10 +1529,13 @@ func (l *methodLowerer) emitArray(instruction *ir.Instruction) error {
 	// The element type comes from the array register's flow type; DEX does not
 	// encode it in the instruction.
 	array := l.method.CategoryAt(l.index, instruction.Regs[1])
-	if len(array.Descriptor) < 2 || array.Descriptor[0] != '[' {
+	component := ""
+	if len(array.Descriptor) >= 2 && array.Descriptor[0] == '[' {
+		component = array.Descriptor[1:]
+	} else if array.Kind != ir.Null && !(array.Kind == ir.Reference && array.Descriptor == "") {
 		return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("array register v%d has no array type", instruction.Regs[1]))
 	}
-	op, err := arrayElementOpcode(instruction.Opcode, array.Descriptor[1:])
+	op, err := arrayElementOpcode(instruction.Opcode, component)
 	if err != nil {
 		return methodDiagnostic(l.method.Context, instruction, "", err)
 	}
@@ -1172,7 +1575,7 @@ func (l *methodLowerer) emitAllocationNew(instruction *ir.Instruction, allocatio
 		return methodDiagnostic(l.method.Context, instruction, "", err)
 	}
 	newLabel := l.code.NewLabel()
-	l.code.Mark(newLabel)
+	l.markLabel(newLabel)
 	if l.allocationNewLabels != nil {
 		l.allocationNewLabels[allocation.ID] = newLabel
 	}
@@ -1206,6 +1609,9 @@ func (l *methodLowerer) emitAllocationFused(instruction *ir.Instruction, allocat
 	if err := l.loadArguments(instruction.Regs, proto, 1); err != nil {
 		return methodDiagnostic(l.method.Context, instruction, "", err)
 	}
+	for i := 0; i < instruction.ExtraNullArgs; i++ {
+		l.code.Emit(classfilebuilder.ACONST_NULL)
+	}
 	l.code.CP(classfilebuilder.INVOKESPECIAL, methodIndex)
 	first := allocation.AliasRegisters[0]
 	l.store(first)
@@ -1236,6 +1642,9 @@ func (l *methodLowerer) emitAllocationCtor(instruction *ir.Instruction, allocati
 	l.load(instruction.Regs[0])
 	if err := l.loadArguments(instruction.Regs, proto, 1); err != nil {
 		return methodDiagnostic(l.method.Context, instruction, "", err)
+	}
+	for i := 0; i < instruction.ExtraNullArgs; i++ {
+		l.code.Emit(classfilebuilder.ACONST_NULL)
 	}
 	l.code.CP(classfilebuilder.INVOKESPECIAL, methodIndex)
 	return nil
@@ -1322,8 +1731,8 @@ func (l *methodLowerer) emitCompare(instruction *ir.Instruction) error {
 func (l *methodLowerer) emitIf(instruction *ir.Instruction) error {
 	var opcode classfilebuilder.Opcode
 	if instruction.Opcode <= 0x37 {
-		left := l.method.CategoryAt(l.index, instruction.Regs[0]).Kind
-		right := l.method.CategoryAt(l.index, instruction.Regs[1]).Kind
+		left := l.resolvedUseCategoryAt(l.index, instruction.Regs[0]).Kind
+		right := l.resolvedUseCategoryAt(l.index, instruction.Regs[1]).Kind
 		leftNonNullRef := isReferenceKind(left) && left != ir.Null
 		rightNonNullRef := isReferenceKind(right) && right != ir.Null
 		if (leftNonNullRef || rightNonNullRef) && instruction.Opcode > 0x33 {
@@ -1343,10 +1752,10 @@ func (l *methodLowerer) emitIf(instruction *ir.Instruction) error {
 			if !isReferenceKind(left) || !isReferenceKind(right) {
 				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("comparison requires int or reference registers, got %s and %s", left, right))
 			}
-			_, hasRef0 := l.polySlots[polySlotKey{reg: instruction.Regs[0], kind: classfilebuilder.RefLocal}]
-			_, hasRef1 := l.polySlots[polySlotKey{reg: instruction.Regs[1], kind: classfilebuilder.RefLocal}]
-			_, hasInt0 := l.polySlots[polySlotKey{reg: instruction.Regs[0], kind: classfilebuilder.IntLocal}]
-			_, hasInt1 := l.polySlots[polySlotKey{reg: instruction.Regs[1], kind: classfilebuilder.IntLocal}]
+			_, hasRef0 := l.slotIfCompanion(l.index, instruction.Regs[0], classfilebuilder.RefLocal, false)
+			_, hasRef1 := l.slotIfCompanion(l.index, instruction.Regs[1], classfilebuilder.RefLocal, false)
+			_, hasInt0 := l.slotIfCompanion(l.index, instruction.Regs[0], classfilebuilder.IntLocal, false)
+			_, hasInt1 := l.slotIfCompanion(l.index, instruction.Regs[1], classfilebuilder.IntLocal, false)
 			if left == ir.Null && right == ir.Null && (hasInt0 || hasInt1) && !hasRef0 && !hasRef1 {
 				l.loadAs(instruction.Regs[0], classfilebuilder.IntLocal)
 				l.loadAs(instruction.Regs[1], classfilebuilder.IntLocal)
@@ -1358,7 +1767,7 @@ func (l *methodLowerer) emitIf(instruction *ir.Instruction) error {
 			}
 		}
 	} else {
-		kind := l.method.CategoryAt(l.index, instruction.Regs[0]).Kind
+		kind := l.resolvedUseCategoryAt(l.index, instruction.Regs[0]).Kind
 		if instruction.Opcode >= 0x3a {
 			if isReferenceKind(kind) && kind != ir.Null {
 				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("ordered reference comparison is invalid"))
@@ -1369,8 +1778,8 @@ func (l *methodLowerer) emitIf(instruction *ir.Instruction) error {
 			l.loadAs(instruction.Regs[0], classfilebuilder.IntLocal)
 			opcode = classfilebuilder.IFEQ + classfilebuilder.Opcode(instruction.Opcode-0x38)
 		} else if kind == ir.Null {
-			_, hasRef := l.polySlots[polySlotKey{reg: instruction.Regs[0], kind: classfilebuilder.RefLocal}]
-			_, hasInt := l.polySlots[polySlotKey{reg: instruction.Regs[0], kind: classfilebuilder.IntLocal}]
+			_, hasRef := l.slotIfCompanion(l.index, instruction.Regs[0], classfilebuilder.RefLocal, false)
+			_, hasInt := l.slotIfCompanion(l.index, instruction.Regs[0], classfilebuilder.IntLocal, false)
 			if hasInt && !hasRef {
 				l.loadAs(instruction.Regs[0], classfilebuilder.IntLocal)
 				opcode = classfilebuilder.IFEQ + classfilebuilder.Opcode(instruction.Opcode-0x38)
@@ -1648,6 +2057,9 @@ func (l *methodLowerer) emitInvoke(index int, instruction *ir.Instruction) error
 	if err := l.loadArguments(instruction.Regs, proto, position); err != nil {
 		return methodDiagnostic(l.method.Context, instruction, "", err)
 	}
+	for i := 0; i < instruction.ExtraNullArgs; i++ {
+		l.code.Emit(classfilebuilder.ACONST_NULL)
+	}
 	if isInterfaceInvoke(instruction.Opcode) {
 		constant, err := l.builder.Pool().InterfaceMethodref(owner, callee.Name, descriptor)
 		if err != nil {
@@ -1684,6 +2096,7 @@ func (l *methodLowerer) emitInvokeResult(index int, instruction *ir.Instruction,
 			// The move-result instruction owns the destination category; the
 			// invoke itself defines nothing, so the pre-invoke category of that
 			// register is unrelated to the returned value.
+			l.markThrowEnd()
 			l.storeAt(next.Regs[0], index+1)
 			if result == ir.Reference {
 				l.registerDescriptor[next.Regs[0]] = returnType
@@ -1691,6 +2104,7 @@ func (l *methodLowerer) emitInvokeResult(index int, instruction *ir.Instruction,
 			return nil
 		}
 	}
+	l.markThrowEnd()
 	if result.Words() == 2 {
 		l.code.Emit(classfilebuilder.POP2)
 	} else {
@@ -1900,13 +2314,74 @@ func (l *methodLowerer) lowerBootstrapArg(value model.EncodedValue) (uint16, err
 	}
 }
 
+func (l *methodLowerer) resolvedDefCategoryAt(index int, register uint16) ir.Category {
+	category := l.definitionCategoryAt(index, register)
+	if category.Kind == ir.Null && category.Allocation == 0 {
+		if k, ok := l.webZeroKind[index]; ok {
+			return ir.Category{Kind: k}
+		}
+		if k, ok := l.resolvedZeroKindForUse(index, register, true); ok {
+			return ir.Category{Kind: k}
+		}
+	}
+	return category
+}
+
+func (l *methodLowerer) resolvedUseCategoryAt(index int, register uint16) ir.Category {
+	category := l.method.CategoryAt(index, register)
+	if category.Kind == ir.Null && category.Allocation == 0 {
+		if k, ok := l.resolvedZeroKindForUse(index, register, false); ok {
+			return ir.Category{Kind: k}
+		}
+	}
+	return category
+}
+
+func (l *methodLowerer) resolvedZeroKindForUse(index int, register uint16, isDef bool) (ir.CategoryKind, bool) {
+	if l.webSplitting && int(register) < len(l.webPinned) && !l.webPinned[register] {
+		var d int
+		var ok bool
+		if isDef {
+			d, ok = l.instDefID[regUseKey{index: index, reg: register}]
+		} else {
+			d, ok = l.useWebDef[regUseKey{index: index, reg: register}]
+		}
+		if ok {
+			if k, exists := l.webSingleZeroKind[l.ufFindRoot(d)]; exists {
+				return k, true
+			}
+		}
+		return ir.Unknown, false
+	}
+	if k, exists := l.pinnedZeroKind[register]; exists {
+		return k, true
+	}
+	return ir.Unknown, false
+}
+
+func (l *methodLowerer) slotIfCompanion(index int, register uint16, lk classfilebuilder.LocalKind, isDef bool) (uint16, bool) {
+	if l.webSplitting && int(register) < len(l.webPinned) && !l.webPinned[register] &&
+		lk != classfilebuilder.LongLocal && lk != classfilebuilder.DoubleLocal {
+		var d int
+		var ok bool
+		if isDef {
+			d, ok = l.instDefID[regUseKey{index: index, reg: register}]
+		} else {
+			d, ok = l.useWebDef[regUseKey{index: index, reg: register}]
+		}
+		if ok {
+			slot, exists := l.webPolySlots[webPolyKey{root: l.ufFindRoot(d), kind: lk}]
+			return slot, exists
+		}
+	}
+	slot, ok := l.polySlots[polySlotKey{reg: register, kind: lk}]
+	return slot, ok
+}
+
 // definitionCategory returns the category an instruction writes into the
 // register, falling back to the category the register carried before it.
 func (l *methodLowerer) definitionCategory(register uint16) ir.Category {
-	if definition, ok := l.method.DefinitionAt(l.index); ok && definition.Register == int32(register) {
-		return definition.Category
-	}
-	return l.method.CategoryAt(l.index, register)
+	return l.resolvedDefCategoryAt(l.index, register)
 }
 
 func (l *methodLowerer) pushDexInt(register uint16, value int32) error {
@@ -2007,15 +2482,36 @@ func (l *methodLowerer) slotFor(register uint16, kind classfilebuilder.LocalKind
 }
 
 func (l *methodLowerer) loadAs(register uint16, expected classfilebuilder.LocalKind) *classfilebuilder.Code {
-	kind := l.method.CategoryAt(l.index, register).Kind
+	if rawCat := l.method.CategoryAt(l.index, register); rawCat.Kind == ir.Null {
+		if slot, ok := l.slotIfCompanion(l.index, register, expected, false); ok {
+			return l.code.Load(expected, slot)
+		}
+		resolved := l.resolvedUseCategoryAt(l.index, register).Kind
+		if localKind(resolved) == expected && rawCat.Allocation != ir.PolyZeroAllocation {
+			return l.code.Load(expected, l.loadSlotAt(l.index, register, expected))
+		}
+		return l.code.Emit(zeroOpcodeForLocalKind(expected))
+	}
+	kind := l.resolvedUseCategoryAt(l.index, register).Kind
 	if kind != ir.Null {
 		expected = localKind(kind)
 	}
 	return l.code.Load(expected, l.loadSlotAt(l.index, register, expected))
 }
 
+func zeroOpcodeForLocalKind(lk classfilebuilder.LocalKind) classfilebuilder.Opcode {
+	switch lk {
+	case classfilebuilder.IntLocal:
+		return classfilebuilder.ICONST_0
+	case classfilebuilder.FloatLocal:
+		return classfilebuilder.FCONST_0
+	default:
+		return classfilebuilder.ACONST_NULL
+	}
+}
+
 func (l *methodLowerer) load(register uint16) *classfilebuilder.Code {
-	return l.loadAs(register, localKind(l.method.CategoryAt(l.index, register).Kind))
+	return l.loadAs(register, localKind(l.resolvedUseCategoryAt(l.index, register).Kind))
 }
 
 func (l *methodLowerer) store(register uint16) *classfilebuilder.Code {
@@ -2025,10 +2521,8 @@ func (l *methodLowerer) store(register uint16) *classfilebuilder.Code {
 // storeAt stores using the category defined by the given instruction, which is
 // how an invoke or filled-new-array writes its move-result destination.
 func (l *methodLowerer) storeAt(register uint16, index int) *classfilebuilder.Code {
-	category := l.method.CategoryAt(index, register)
-	if definition, ok := l.method.DefinitionAt(index); ok && definition.Register == int32(register) {
-		category = definition.Category
-	}
+	l.markThrowEnd()
+	category := l.resolvedDefCategoryAt(index, register)
 	lk := localKind(category.Kind)
 	return l.code.Store(lk, l.storeSlotAt(index, register, lk))
 }
@@ -2092,11 +2586,18 @@ func isBranchOpcode(opcode byte) bool {
 	return opcode >= 0x28 && opcode <= 0x2a || opcode >= 0x32 && opcode <= 0x3d
 }
 
+func (l *methodLowerer) isDelegationSite(index int) bool {
+	if len(l.delegationSites) > 0 {
+		return l.delegationSites[index]
+	}
+	return index >= 0 && index == l.delegationIndex
+}
+
 // canDirectDeferredStore reports whether the stored value register and its
 // receiver remain unmodified between store.index and l.delegationIndex, so the
 // pre-delegation temporary copy can be elided safely.
 func (l *methodLowerer) canDirectDeferredStore(store *deferredStore) bool {
-	if jdecenv.Get("JDEC_DEX_DIRECT_DEFERRED_OFF") == "1" || l.delegationIndex < 0 || store.index < 0 || store.index >= l.delegationIndex {
+	if jdecenv.Get("JDEC_DEX_DIRECT_DEFERRED_OFF") == "1" || len(l.delegationSites) > 1 || l.delegationIndex < 0 || store.index < 0 || store.index >= l.delegationIndex {
 		return false
 	}
 	startBlock := l.blockOfInstruction(store.index)
@@ -2246,7 +2747,7 @@ func (l *methodLowerer) emitDeferredStore(store *deferredStore) error {
 	}
 	previous := l.index
 	l.index = store.index
-	l.load(instruction.Regs[1])
+	l.code.Load(classfilebuilder.RefLocal, 0)
 	if store.direct {
 		l.loadAs(store.register, localKind(store.category.Kind))
 	} else {

@@ -148,6 +148,9 @@ type Instruction struct {
 	// DataWidth the element width the payload declares.
 	Data      []byte
 	DataWidth uint16
+	// ExtraNullArgs records trailing null reference arguments appended during
+	// JVM lowering for R8-synthesized disambiguating forwarding constructors.
+	ExtraNullArgs int
 }
 
 func (i Instruction) End() uint32 { return i.Offset + uint32(i.Width) }

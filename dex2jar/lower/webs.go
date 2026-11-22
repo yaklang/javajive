@@ -14,6 +14,35 @@ type regUseKey struct {
 	reg   uint16
 }
 
+type webPolyKey struct {
+	root int
+	kind classfilebuilder.LocalKind
+}
+
+func categoryMaskBit(kind ir.CategoryKind, alloc uint32, desc string) (narrowBit uint8, isWide bool) {
+	switch kind {
+	case ir.Int, ir.Bits32:
+		return ir.PolyZeroInt, false
+	case ir.Float:
+		return ir.PolyZeroFloat, false
+	case ir.Reference, ir.Uninitialized:
+		return ir.PolyZeroRef, false
+	case ir.Null:
+		if desc != "" || (alloc != 0 && alloc != ir.PolyZeroAllocation) {
+			return ir.PolyZeroRef, false
+		}
+		return 0, false
+	case ir.Long, ir.Double, ir.Bits64:
+		return 0, true
+	default:
+		return 0, false
+	}
+}
+
+func hasMultipleNarrowBits(mask uint8) bool {
+	return mask&(mask-1) != 0
+}
+
 type defKindInfo struct {
 	reg         uint16
 	width       int
@@ -235,21 +264,26 @@ func (l *methodLowerer) assignWebs() bool {
 		reg      uint16
 		jvmLocal uint16
 		words    int
+		lk       classfilebuilder.LocalKind
 	}
 	var params []paramEntry
 	pReg := paramStart
 	jvmLocal := 0
 	if l.encoded.AccessFlags&dexStatic == 0 {
 		if pReg >= 0 && pReg < registerCount {
-			params = append(params, paramEntry{reg: uint16(pReg), jvmLocal: uint16(jvmLocal), words: 1})
+			params = append(params, paramEntry{reg: uint16(pReg), jvmLocal: uint16(jvmLocal), words: 1, lk: classfilebuilder.RefLocal})
 		}
 		pReg++
 		jvmLocal++
 	}
 	for _, descriptor := range l.method.Proto.Parameters {
 		words := descriptorWords(descriptor)
+		pk := classfilebuilder.RefLocal
+		if k, err := fieldKind(descriptor); err == nil {
+			pk = localKind(k)
+		}
 		if pReg >= 0 && pReg+words <= registerCount {
-			params = append(params, paramEntry{reg: uint16(pReg), jvmLocal: uint16(jvmLocal), words: words})
+			params = append(params, paramEntry{reg: uint16(pReg), jvmLocal: uint16(jvmLocal), words: words, lk: pk})
 		}
 		pReg += words
 		jvmLocal += words
@@ -447,7 +481,7 @@ func (l *methodLowerer) assignWebs() bool {
 			worklist = append(worklist, i)
 		}
 	}
-	maxSteps := numBlocks*16 + 256
+	maxSteps := numBlocks*32 + 512
 	steps := 0
 	for len(worklist) > 0 {
 		steps++
@@ -577,6 +611,92 @@ func (l *methodLowerer) assignWebs() bool {
 		}
 	}
 
+	// Collect per-web and per-pinned-register concrete kind masks so untyped
+	// zero constants stay consistent with their web and mixed-kind webs or
+	// pinned registers get separate JVM locals per LocalKind.
+	webKindMask := make([]uint8, len(defs))
+	webHasWide := make([]bool, len(defs))
+	pinnedNarrowMask := make([]uint8, registerCount)
+	pinnedHasWide := make([]bool, registerCount)
+	for _, p := range params {
+		d := entryDefByReg[p.reg]
+		if d < 0 {
+			continue
+		}
+		root := ufFind(d)
+		switch p.lk {
+		case classfilebuilder.IntLocal:
+			webKindMask[root] |= ir.PolyZeroInt
+		case classfilebuilder.FloatLocal:
+			webKindMask[root] |= ir.PolyZeroFloat
+		case classfilebuilder.RefLocal:
+			webKindMask[root] |= ir.PolyZeroRef
+		case classfilebuilder.LongLocal, classfilebuilder.DoubleLocal:
+			webHasWide[root] = true
+		}
+	}
+	recordCat := func(pinnedReg int, defIdx int, hasWeb bool, cat ir.Category) {
+		bit, wide := categoryMaskBit(cat.Kind, cat.Allocation, cat.Descriptor)
+		if bit == 0 && !wide {
+			return
+		}
+		if hasWeb {
+			root := ufFind(defIdx)
+			webKindMask[root] |= bit
+			if wide {
+				webHasWide[root] = true
+			}
+			return
+		}
+		if pinnedReg >= 0 && pinnedReg < registerCount && pinned[pinnedReg] {
+			pinnedNarrowMask[pinnedReg] |= bit
+			if wide {
+				pinnedHasWide[pinnedReg] = true
+			}
+		}
+	}
+	for _, block := range l.method.Blocks {
+		if !block.Reachable {
+			continue
+		}
+		for _, idx := range block.Instructions {
+			_, effDefs := l.method.EffectsAt(idx)
+			var defReg int = -1
+			if len(effDefs) > 0 {
+				defReg = int(effDefs[0])
+			} else if def, ok := l.method.DefinitionAt(idx); ok && def.Register >= 0 {
+				defReg = int(def.Register)
+			}
+			if defReg >= 0 && defReg < registerCount {
+				cat := l.definitionCategoryAt(idx, uint16(defReg))
+				if !pinned[defReg] {
+					if d, ok := instDefID[regUseKey{index: idx, reg: uint16(defReg)}]; ok {
+						recordCat(-1, d, true, cat)
+					}
+				} else {
+					recordCat(defReg, 0, false, cat)
+				}
+			}
+			uses, _ := l.method.EffectsAt(idx)
+			for _, u := range uses {
+				if int(u) >= registerCount {
+					continue
+				}
+				cat := l.method.CategoryAt(idx, u)
+				if cat.Kind == ir.WideUpper {
+					continue
+				}
+				if !pinned[u] {
+					if d, ok := useWebDef[regUseKey{index: idx, reg: u}]; ok {
+						recordCat(-1, d, true, cat)
+					}
+				} else {
+					recordCat(int(u), 0, false, cat)
+				}
+			}
+		}
+	}
+
 	// Assign JVM slots to webs and fallback homes for pinned/unreachable registers.
 	l.directParamSlots = make([]int, registerCount)
 	l.paramPrologueSlot = make([]int, registerCount)
@@ -587,6 +707,7 @@ func (l *methodLowerer) assignWebs() bool {
 
 	webSlots := make([]uint16, len(defs))
 	webAssigned := make([]bool, len(defs))
+	directParamRootKind := make(map[int]classfilebuilder.LocalKind)
 	directWideParam := make([]bool, registerCount)
 	next := 0
 
@@ -610,6 +731,7 @@ func (l *methodLowerer) assignWebs() bool {
 			webSlots[root] = p.jvmLocal
 			webAssigned[root] = true
 			l.directParamSlots[p.reg] = int(p.jvmLocal)
+			directParamRootKind[root] = p.lk
 			if p.words == 2 {
 				directWideParam[p.reg] = true
 			}
@@ -637,6 +759,71 @@ func (l *methodLowerer) assignWebs() bool {
 		webSlots[root] = l.homeBase + uint16(next)
 		webAssigned[root] = true
 		next += webWidth[root]
+	}
+
+	// Allocate companion 1-word slots for webs that mix multiple narrow LocalKinds
+	// or combine wide and narrow operations on the same Union-Find root.
+	l.webPolySlots = nil
+	l.webPolyMask = nil
+	for i := range defs {
+		root := ufFind(i)
+		if root != i || !webAssigned[root] {
+			continue
+		}
+		mask := webKindMask[root]
+		if !hasMultipleNarrowBits(mask) && !(webHasWide[root] && mask != 0) {
+			continue
+		}
+		if l.webPolySlots == nil {
+			l.webPolySlots = make(map[webPolyKey]uint16)
+			l.webPolyMask = make(map[int]uint8)
+		}
+		l.webPolyMask[root] = mask
+		directKind, hasDirectKind := directParamRootKind[root]
+		reusedBase := false
+		if hasDirectKind && !webHasWide[root] {
+			for _, entry := range []struct {
+				bit  uint8
+				kind classfilebuilder.LocalKind
+			}{
+				{ir.PolyZeroRef, classfilebuilder.RefLocal},
+				{ir.PolyZeroInt, classfilebuilder.IntLocal},
+				{ir.PolyZeroFloat, classfilebuilder.FloatLocal},
+			} {
+				if mask&entry.bit != 0 && entry.kind == directKind {
+					l.webPolySlots[webPolyKey{root: root, kind: entry.kind}] = webSlots[root]
+					reusedBase = true
+				}
+			}
+		}
+		first := !reusedBase && !hasDirectKind && !webHasWide[root]
+		for _, entry := range []struct {
+			bit  uint8
+			kind classfilebuilder.LocalKind
+		}{
+			{ir.PolyZeroRef, classfilebuilder.RefLocal},
+			{ir.PolyZeroInt, classfilebuilder.IntLocal},
+			{ir.PolyZeroFloat, classfilebuilder.FloatLocal},
+		} {
+			if mask&entry.bit == 0 {
+				continue
+			}
+			if _, exists := l.webPolySlots[webPolyKey{root: root, kind: entry.kind}]; exists {
+				continue
+			}
+			var slot uint16
+			if first {
+				slot = webSlots[root]
+				first = false
+			} else {
+				if int(l.homeBase)+next >= math.MaxUint16 {
+					return false
+				}
+				slot = l.homeBase + uint16(next)
+				next++
+			}
+			l.webPolySlots[webPolyKey{root: root, kind: entry.kind}] = slot
+		}
 	}
 
 	// Check which pinned registers can still be direct read-only parameters,
@@ -685,8 +872,15 @@ func (l *methodLowerer) assignWebs() bool {
 		next += widths[r]
 	}
 	l.polySlots = nil
-	for r, mask := range l.method.PolyZeroRegisters {
-		if mask == 0 || r >= registerCount || l.directParamSlots[r] >= 0 {
+	for r := 0; r < registerCount; r++ {
+		var polyMask uint8
+		if r < len(l.method.PolyZeroRegisters) {
+			polyMask = l.method.PolyZeroRegisters[r]
+		}
+		if pinned[r] && (hasMultipleNarrowBits(pinnedNarrowMask[r]) || (pinnedNarrowMask[r] != 0 && pinnedHasWide[r])) {
+			polyMask |= pinnedNarrowMask[r]
+		}
+		if polyMask == 0 || l.directParamSlots[r] >= 0 {
 			continue
 		}
 		if !hasLegacyHome[r] {
@@ -700,7 +894,7 @@ func (l *methodLowerer) assignWebs() bool {
 		if l.polySlots == nil {
 			l.polySlots = make(map[polySlotKey]uint16)
 		}
-		first := true
+		first := widths[r] == 1 && !pinnedHasWide[r]
 		for _, entry := range []struct {
 			bit  uint8
 			kind classfilebuilder.LocalKind
@@ -709,7 +903,7 @@ func (l *methodLowerer) assignWebs() bool {
 			{ir.PolyZeroInt, classfilebuilder.IntLocal},
 			{ir.PolyZeroFloat, classfilebuilder.FloatLocal},
 		} {
-			if mask&entry.bit == 0 {
+			if polyMask&entry.bit == 0 {
 				continue
 			}
 			var slot uint16
@@ -728,6 +922,80 @@ func (l *methodLowerer) assignWebs() bool {
 	}
 	if int(l.homeBase)+next > math.MaxUint16 {
 		return false
+	}
+
+	// Record resolved single narrow kinds for webs and pinned registers whose
+	// only concrete uses/defs are Int or Float (and never Wide/Ref/PolyZero),
+	// plus resolve untyped zero instructions (const/4..const #0).
+	l.webZeroKind = nil
+	l.webSingleZeroKind = nil
+	l.pinnedZeroKind = nil
+	for i := range defs {
+		root := ufFind(i)
+		if root != i || !webAssigned[root] || webHasWide[root] {
+			continue
+		}
+		if webKindMask[root] == ir.PolyZeroInt || webKindMask[root] == ir.PolyZeroFloat {
+			if l.webSingleZeroKind == nil {
+				l.webSingleZeroKind = make(map[int]ir.CategoryKind)
+			}
+			k := ir.Int
+			if webKindMask[root] == ir.PolyZeroFloat {
+				k = ir.Float
+			}
+			l.webSingleZeroKind[root] = k
+		}
+	}
+	for r := 0; r < registerCount; r++ {
+		if !pinned[r] || pinnedHasWide[r] {
+			continue
+		}
+		if r < len(l.method.PolyZeroRegisters) && l.method.PolyZeroRegisters[r] != 0 {
+			continue
+		}
+		if pinnedNarrowMask[r] == ir.PolyZeroInt || pinnedNarrowMask[r] == ir.PolyZeroFloat {
+			if l.pinnedZeroKind == nil {
+				l.pinnedZeroKind = make(map[uint16]ir.CategoryKind)
+			}
+			k := ir.Int
+			if pinnedNarrowMask[r] == ir.PolyZeroFloat {
+				k = ir.Float
+			}
+			l.pinnedZeroKind[uint16(r)] = k
+		}
+	}
+	for _, block := range l.method.Blocks {
+		if !block.Reachable {
+			continue
+		}
+		for _, idx := range block.Instructions {
+			insn := &l.method.Instructions[idx]
+			if insn.Opcode < 0x12 || insn.Opcode > 0x15 || insn.Literal != 0 || len(insn.Regs) == 0 {
+				continue
+			}
+			r := insn.Regs[0]
+			if int(r) >= registerCount {
+				continue
+			}
+			defCat := l.definitionCategoryAt(idx, r)
+			if defCat.Kind != ir.Null || defCat.Allocation != 0 {
+				continue
+			}
+			var k ir.CategoryKind
+			if !pinned[r] {
+				if d, ok := instDefID[regUseKey{index: idx, reg: r}]; ok {
+					k = l.webSingleZeroKind[ufFind(d)]
+				}
+			} else {
+				k = l.pinnedZeroKind[r]
+			}
+			if k != ir.Unknown {
+				if l.webZeroKind == nil {
+					l.webZeroKind = make(map[int]ir.CategoryKind)
+				}
+				l.webZeroKind[idx] = k
+			}
+		}
 	}
 
 	// Build sorted offset -> block instructions lookup for emitDebug resolution.
@@ -758,6 +1026,11 @@ func (l *methodLowerer) loadSlotAt(index int, register uint16, kind classfilebui
 	if l.webSplitting && int(register) < len(l.webPinned) && !l.webPinned[register] {
 		if d, ok := l.useWebDef[regUseKey{index: index, reg: register}]; ok {
 			root := l.ufFindRoot(d)
+			if kind != classfilebuilder.LongLocal && kind != classfilebuilder.DoubleLocal {
+				if slot, exists := l.webPolySlots[webPolyKey{root: root, kind: kind}]; exists {
+					return slot
+				}
+			}
 			if l.webAssigned[root] {
 				return l.webSlots[root]
 			}
@@ -770,6 +1043,11 @@ func (l *methodLowerer) storeSlotAt(index int, register uint16, kind classfilebu
 	if l.webSplitting && int(register) < len(l.webPinned) && !l.webPinned[register] {
 		if d, ok := l.instDefID[regUseKey{index: index, reg: register}]; ok {
 			root := l.ufFindRoot(d)
+			if kind != classfilebuilder.LongLocal && kind != classfilebuilder.DoubleLocal {
+				if slot, exists := l.webPolySlots[webPolyKey{root: root, kind: kind}]; exists {
+					return slot
+				}
+			}
 			if l.webAssigned[root] {
 				return l.webSlots[root]
 			}

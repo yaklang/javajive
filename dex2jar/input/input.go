@@ -36,6 +36,12 @@ type Options struct {
 	// MaxNestedAPKs bounds the number of nested APK entries in a split bundle.
 	// Non-positive values use DefaultMaxNestedAPKs.
 	MaxNestedAPKs int
+	// TolerateSignatureMismatch accepts a DEX whose Adler-32 checksum matches
+	// even if its SHA-1 signature was left stale by anti-tamper or repackers.
+	TolerateSignatureMismatch bool
+	// TolerateOrphanAnnotationDefault drops AnnotationDefault entries whose
+	// annotation method was stripped by ProGuard/R8 shrinking.
+	TolerateOrphanAnnotationDefault bool
 }
 
 func ParseDEX(data []byte, entry string) (*model.File, error) {
@@ -47,7 +53,10 @@ func ParseDEXWithOptions(data []byte, entry string, options Options) (*model.Fil
 	if int64(len(data)) > limit {
 		return nil, report.New(entry, "", "", 0, "input", fmt.Errorf("DEX size %d exceeds limit %d", len(data), limit))
 	}
-	return dexparser.Parse(data, entry)
+	return dexparser.ParseWithOptions(data, entry, dexparser.ParseOptions{
+		TolerateSignatureMismatch:       options.TolerateSignatureMismatch,
+		TolerateOrphanAnnotationDefault: options.TolerateOrphanAnnotationDefault,
+	})
 }
 
 func ParseAPK(data []byte) (*model.Application, error) {

@@ -2,6 +2,7 @@ package dexparser
 
 import (
 	"encoding/binary"
+	"fmt"
 
 	"github.com/yaklang/javajive/dex2jar/model"
 )
@@ -363,6 +364,17 @@ func (p *parser) applyAnnotationDefaults(c *model.Class, annotation model.Annota
 	for _, element := range value.Annotation.Elements {
 		methodIndex, exists := methods[element.Name]
 		if !exists {
+			if p.options.TolerateOrphanAnnotationDefault {
+				p.file.ParseWarnings = append(p.file.ParseWarnings, model.ParseWarning{
+					Entry:   p.entry,
+					Class:   c.Descriptor,
+					Code:    "annotation.orphan_default",
+					Action:  "drop_attribute",
+					Feature: "system-annotation",
+					Message: fmt.Sprintf("AnnotationDefault element %q has no annotation method", element.Name),
+				})
+				continue
+			}
 			return p.fail(0, "system annotation", "AnnotationDefault element %q has no annotation method", element.Name)
 		}
 		annotation := model.Annotation{

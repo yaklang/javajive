@@ -12840,10 +12840,11 @@ func (c *ClassObjectDumper) dumpStubMethod(method *MemberInfo, name, descriptor,
 	case "<init>":
 		src = fmt.Sprintf("%s%s(%s)%s", prefix, c.GetConstructorMethodName(), paramsStr, throwBody)
 	default:
+		safeName := class_context.SafeIdentifier(name)
 		if isAbstract {
-			src = fmt.Sprintf("%s%s %s(%s);", prefix, returnTypeForRender.String(funcCtx), name, paramsStr)
+			src = fmt.Sprintf("%s%s %s(%s);", prefix, returnTypeForRender.String(funcCtx), safeName, paramsStr)
 		} else {
-			src = fmt.Sprintf("%s%s %s(%s)%s", prefix, returnTypeForRender.String(funcCtx), name, paramsStr, throwBody)
+			src = fmt.Sprintf("%s%s %s(%s)%s", prefix, returnTypeForRender.String(funcCtx), safeName, paramsStr, throwBody)
 		}
 	}
 	return &dumpedMethods{methodName: name, code: src, bodyCode: "stub", isStub: true}

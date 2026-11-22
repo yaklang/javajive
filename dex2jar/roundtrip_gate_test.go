@@ -547,7 +547,9 @@ func (b *cappedBuffer) String() string { return b.data.String() }
 
 func assertGateProcess(t *testing.T, label string, got gateProcessResult, exit int, stdout, stderr string) {
 	t.Helper()
-	if got.ExitCode != exit || got.Stdout != stdout || got.Stderr != stderr {
+	gotStdout := strings.ReplaceAll(got.Stdout, "\r\n", "\n")
+	gotStderr := strings.ReplaceAll(got.Stderr, "\r\n", "\n")
+	if got.ExitCode != exit || gotStdout != stdout || gotStderr != stderr {
 		t.Fatalf("%s result mismatch after %s: exit=%d want=%d stdout=%q want=%q stderr=%q want=%q", label, got.Duration, got.ExitCode, exit, got.Stdout, stdout, got.Stderr, stderr)
 	}
 }

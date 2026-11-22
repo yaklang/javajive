@@ -30,6 +30,11 @@ func (m *Method) EffectsAt(index int) (uses, defs []uint16) {
 	return instructionEffects(instruction)
 }
 
+// InstructionEffects returns the read and written registers of one decoded instruction.
+func InstructionEffects(instruction Instruction) (uses, defs []uint16) {
+	return instructionEffects(instruction)
+}
+
 // instructionEffects is the per-opcode use/define table shared by liveness,
 // definite-assignment and category analysis. A category-2 definition also
 // defines the following register, which is how the pair stays assigned.
@@ -214,10 +219,10 @@ func walkBlock(method *Method, file *model.File, allocations []Allocation, block
 				}
 				return nil, diagnostic(method.Context, instruction, "", fmt.Errorf("v%d: %w", register, err))
 			}
-			if state[register].Kind == Null {
-				// Keep zero/null constants open during forward propagation so
-				// refineConstants can distinguish single-type uses from a
-				// polymorphic zero shared across int/float/reference reads.
+			if state[register].Kind == Null || (state[register].Kind == Reference && state[register].Descriptor == "") {
+				// Keep zero/null constants and untyped-descriptor reference values open
+				// across use constraints so refineConstants stays accurate and a non-array
+				// null use does not stamp a concrete descriptor before an array/ref join.
 				continue
 			}
 			if state[register].Kind.isUntyped() && merged.Kind != state[register].Kind {

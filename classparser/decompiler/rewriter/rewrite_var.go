@@ -157,6 +157,7 @@ func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.Ja
 	// IsFirst decisions above are final and this pass's demotions are not subsequently undone.
 	hoistSwitchDeclarations(sts)
 	dropEmptySlotAssignments(sts)
+	dropDanglingCaughtExceptionDiscards(sts)
 	// General LCA declaration placement: hoist any generated local whose variable is referenced
 	// across more than one sibling scope to the block that dominates all of its uses. Runs last so it
 	// sees the final IsFirst/IsDeclare flags and any bare declarations the if/switch hoisters already
