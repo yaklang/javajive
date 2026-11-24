@@ -90,9 +90,10 @@ func (f *ClassContext) staticTypeOwner(name string) (string, bool) {
 	}
 	pkg, _ := SplitPackageClassName(name)
 	if pkg != "" {
+		safePkg := SafePackageName(pkg)
 		qualified := bound
-		if !strings.HasPrefix(bound, pkg+".") {
-			qualified = pkg + "." + bound
+		if !strings.HasPrefix(bound, safePkg+".") {
+			qualified = safePkg + "." + bound
 		}
 		root := strings.SplitN(qualified, ".", 2)[0]
 		if f.staticOwnerTypeSyntax(name, qualified) && !f.valueNameShadows(root) {
@@ -112,7 +113,7 @@ func (f *ClassContext) staticOwnerTypeSyntax(owner, source string) bool {
 		return false
 	}
 	pkg, _ := SplitPackageClassName(owner)
-	return pkg == "" || !strings.HasPrefix(source, pkg+".") || !f.typeNameShadowsPackageRoot(root)
+	return pkg == "" || !strings.HasPrefix(source, SafePackageName(pkg)+".") || !f.typeNameShadowsPackageRoot(root)
 }
 
 // typeImportOwner returns the dotted binary name that must own the single-type
@@ -141,7 +142,7 @@ func (f *ClassContext) typeImportOwner(simple string) string {
 				owner = ""
 				break
 			}
-			root := strings.SplitN(pkg, ".", 2)[0]
+			root := SafePackageSegment(strings.SplitN(pkg, ".", 2)[0])
 			if !f.typeNameShadowsPackageRoot(root) {
 				continue
 			}
@@ -167,7 +168,7 @@ func (f *ClassContext) packageNameObscured() bool {
 	if f == nil || f.PackageName == "" {
 		return false
 	}
-	return f.typeNameShadowsPackageRoot(strings.SplitN(f.PackageName, ".", 2)[0])
+	return f.typeNameShadowsPackageRoot(SafePackageSegment(strings.SplitN(f.PackageName, ".", 2)[0]))
 }
 
 func (f *ClassContext) typeNameShadowsPackageRoot(name string) bool {

@@ -963,6 +963,13 @@ func rewriteVar(scope *Scope, className, methodName string) int {
 				core.TraceRewriteVar(className, methodName, "enter catch depth=%d body=%d", subScope.deep, len(statement.CatchBodies[i]))
 				rewriteVar(subScope, className, methodName)
 			}
+		case *statements.SynchronizedStatement:
+			if jdecenv.Get("JDEC_SYNC_REWRITE_OFF") != "1" {
+				prebindEscapingBlockSlots(scope, statement.Body, stsSnapshot[stmtIdx+1:], idReplaceMap, className, methodName, "synchronized")
+				subScope := scope.SubScope(&statement.Body)
+				core.TraceRewriteVar(className, methodName, "enter synchronized depth=%d body=%d", subScope.deep, len(statement.Body))
+				rewriteVar(subScope, className, methodName)
+			}
 		}
 	}
 	return scope.nowId
@@ -1450,10 +1457,19 @@ func isLiteralFalse(v values.JavaValue) bool {
 
 // prebindEscapingDoWhileSlots pre-binds any local assigned inside a one-shot
 // forward-region `do { ... } while (false)` block whose variable is referenced
-// after the block, unifying nested branch/label-break definitions onto a single
+// after the loop, unifying nested branch/label-break definitions onto a single
 // parent-scope VariableId instead of letting disjoint sub-scopes split them.
 func prebindEscapingDoWhileSlots(scope *Scope, dw *statements.DoWhileStatement, afterSts []statements.Statement, idReplaceMap map[*utils.VariableId]*utils.VariableId, className, methodName string) {
 	if dw == nil || !isLiteralFalse(dw.ConditionValue) || len(dw.Body) == 0 || len(afterSts) == 0 {
+		return
+	}
+	prebindEscapingBlockSlots(scope, dw.Body, afterSts, idReplaceMap, className, methodName, "do-while")
+}
+
+// prebindEscapingBlockSlots unifies any local assigned inside body and referenced in
+// afterSts onto a single parent-scope VariableId before rewriteVar descends into body.
+func prebindEscapingBlockSlots(scope *Scope, body []statements.Statement, afterSts []statements.Statement, idReplaceMap map[*utils.VariableId]*utils.VariableId, className, methodName, kind string) {
+	if len(body) == 0 || len(afterSts) == 0 {
 		return
 	}
 	writesByUid := map[string][]*values.JavaRef{}
@@ -1500,7 +1516,7 @@ func prebindEscapingDoWhileSlots(scope *Scope, dw *statements.DoWhileStatement, 
 			}
 		}
 	}
-	walk(dw.Body)
+	walk(body)
 	if len(writesByUid) == 0 {
 		return
 	}
@@ -1526,7 +1542,7 @@ func prebindEscapingDoWhileSlots(scope *Scope, dw *statements.DoWhileStatement, 
 			}
 		}
 		if minted {
-			core.TraceRewriteVar(className, methodName, "prebind do-while skip already-minted uid=%s id=%s", uid, first.Id.String())
+			core.TraceRewriteVar(className, methodName, "prebind %s skip already-minted uid=%s id=%s", kind, uid, first.Id.String())
 			continue
 		}
 		baseType := first.Type().String(&class_context.ClassContext{})
@@ -1543,7 +1559,7 @@ func prebindEscapingDoWhileSlots(scope *Scope, dw *statements.DoWhileStatement, 
 			seenIds[r.Id] = true
 			origIds = append(origIds, r.Id)
 		}
-		const probe = "__jdec_dowhile_prebind_probe__"
+		const probe = "__jdec_block_prebind_probe__"
 		escapes := false
 		for _, origId := range origIds {
 			saved := origId.Name
@@ -1567,7 +1583,7 @@ func prebindEscapingDoWhileSlots(scope *Scope, dw *statements.DoWhileStatement, 
 		for _, origId := range origIds {
 			idReplaceMap[origId] = newId
 		}
-		core.TraceRewriteVar(className, methodName, "prebind do-while escaping slot uid=%s old=%s new=%s", uid, first.Id.String(), newId.String())
+		core.TraceRewriteVar(className, methodName, "prebind %s escaping slot uid=%s old=%s new=%s", kind, uid, first.Id.String(), newId.String())
 	}
 }
 

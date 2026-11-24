@@ -10,10 +10,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yaklang/javajive/dex2jar/input"
@@ -414,6 +418,17 @@ func applicationToJarWithPolicy(app *model.Application, policy FailurePolicy) ([
 			detailed.Summary.Warnings++
 		}
 	}
+	type classJob struct {
+		file  *model.File
+		class *model.Class
+		name  string
+	}
+	type classJobResult struct {
+		result   lower.ClassResult
+		err      error
+		panicVal any
+	}
+	jobs := make([]classJob, 0, len(hierarchy))
 	for _, file := range app.Files {
 		if file == nil {
 			return nil, detailed, errors.New("dex2jar: application contains a nil DEX file")
@@ -449,15 +464,81 @@ func applicationToJarWithPolicy(app *model.Application, policy FailurePolicy) ([
 				return nil, detailed, err
 			}
 			seen[name] = file.Entry
-
-			result, err := lower.ClassWithPolicy(file, class, lower.ClassOptions{FileValidated: true, Hierarchy: hierarchy}, lowerPolicy)
-			if err != nil {
-				detailed.Summary.Classes = len(converted)
-				appendConversionDiagnostic(&detailed, diagnosticFromError(err, "failed", ""))
-				return nil, detailed, err
-			}
-			converted = append(converted, convertedClass{file: file, class: class, name: name, result: result})
+			jobs = append(jobs, classJob{file: file, class: class, name: name})
 		}
+	}
+	results := make([]classJobResult, len(jobs))
+	runClassJob := func(job classJob) (res classJobResult) {
+		defer func() {
+			if r := recover(); r != nil {
+				res.panicVal = r
+			}
+		}()
+		res.result, res.err = lower.ClassWithPolicy(job.file, job.class, lower.ClassOptions{FileValidated: true, Hierarchy: hierarchy}, lowerPolicy)
+		return res
+	}
+	if len(jobs) == 1 {
+		results[0] = runClassJob(jobs[0])
+	} else if len(jobs) > 1 {
+		workers := runtime.GOMAXPROCS(0)
+		if workers > 16 {
+			workers = 16
+		}
+		if workers < 1 {
+			workers = 1
+		}
+		if workers > len(jobs) {
+			workers = len(jobs)
+		}
+		var nextIdx atomic.Int64
+		var firstFailIdx atomic.Int64
+		firstFailIdx.Store(math.MaxInt64)
+		recordFirstFail := func(idx int64) {
+			for {
+				cur := firstFailIdx.Load()
+				if idx >= cur {
+					return
+				}
+				if firstFailIdx.CompareAndSwap(cur, idx) {
+					return
+				}
+			}
+		}
+		var wg sync.WaitGroup
+		wg.Add(workers)
+		for w := 0; w < workers; w++ {
+			go func() {
+				defer wg.Done()
+				for {
+					idx := int(nextIdx.Add(1) - 1)
+					if idx >= len(jobs) {
+						return
+					}
+					if policy != FailureRecover && int64(idx) >= firstFailIdx.Load() {
+						return
+					}
+					res := runClassJob(jobs[idx])
+					results[idx] = res
+					if (res.panicVal != nil || res.err != nil) && policy != FailureRecover {
+						recordFirstFail(int64(idx))
+					}
+				}
+			}()
+		}
+		wg.Wait()
+	}
+	for i, job := range jobs {
+		res := results[i]
+		if res.panicVal != nil {
+			panic(res.panicVal)
+		}
+		if res.err != nil {
+			detailed.AttemptedClasses = i + 1
+			detailed.Summary.Classes = i
+			appendConversionDiagnostic(&detailed, diagnosticFromError(res.err, "failed", ""))
+			return nil, detailed, res.err
+		}
+		converted = append(converted, convertedClass{file: job.file, class: job.class, name: job.name, result: res.result})
 	}
 	if policy == FailureRecover {
 		if err := recoverMinimalDependencies(converted, hierarchy); err != nil {

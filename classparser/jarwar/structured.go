@@ -216,7 +216,11 @@ func exportStructuredFile(root string, decompiler *javaclassparser.JarFS, entryP
 	}
 	outputPath := path.Join(outputRoot, outputEntry)
 	if retainUnproved {
-		outputPath = disambiguateCaseFoldPath(sanitizeBestEffortPath(outputPath), usedFold)
+		sanitized := sanitizeBestEffortPath(outputPath)
+		if kind == "source" {
+			sanitized = sanitizeBestEffortClassPath(outputPath)
+		}
+		outputPath = disambiguateCaseFoldPath(sanitized, usedFold)
 	} else if err := reserveStructuredOutput(report, outputPath); err != nil {
 		return err
 	}

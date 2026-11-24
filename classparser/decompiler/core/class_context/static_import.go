@@ -101,12 +101,16 @@ func (f *ClassContext) StaticClassCallPrefix(owner, member, descriptor string) s
 	return f.staticImportCallPrefix(owner, member, descriptor, bound, false)
 }
 
-// retainedOwnerPrefix keeps the original package path. A keyword segment
-// such as `if` is spelled `if_`, matching every other rendered type name.
+// retainedOwnerPrefix keeps the original package path, sanitizing illegal
+// package segments with SafePackageSegment and the type name with SafeIdentifier.
 func retainedOwnerPrefix(owner string) string {
 	parts := strings.Split(owner, ".")
 	for i, part := range parts {
-		parts[i] = SafeIdentifier(part)
+		if i < len(parts)-1 {
+			parts[i] = SafePackageSegment(part)
+		} else {
+			parts[i] = SafeIdentifier(part)
+		}
 	}
 	return strings.Join(parts, ".") + "."
 }
@@ -261,7 +265,7 @@ func (f *ClassContext) packageRootIsType(owner string) bool {
 	if pkg == "" {
 		return false
 	}
-	root := strings.SplitN(pkg, ".", 2)[0]
+	root := SafePackageSegment(strings.SplitN(pkg, ".", 2)[0])
 	return f.LexicalTypeNames[root] || f.IsTypeParam(root) || f.typeNameShadowsPackageRoot(root)
 }
 

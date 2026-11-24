@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
@@ -98,7 +99,7 @@ func (c *ClassObjectDumper) dumpPackageDescriptor() (string, error) {
 			}
 		}
 	}
-	out.WriteString("package " + c.PackageName + ";\n")
+	out.WriteString("package " + class_context.SafePackageName(c.PackageName) + ";\n")
 	// Imports legally follow the annotated package declaration and resolve
 	// annotation types, enum constants, nested annotations and class literals.
 	for _, name := range c.FuncCtx.GetAllImported() {

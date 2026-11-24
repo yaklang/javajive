@@ -1,6 +1,7 @@
 package class_context
 
 import (
+	"fmt"
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/fieldbinding"
 	coreutils "github.com/yaklang/javajive/classparser/decompiler/core/utils"
@@ -771,6 +772,91 @@ func SafeIdentifier(name string) string {
 	return name
 }
 
+func isASCIIJavaIdentFast(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b >= 0x80 {
+			return false
+		}
+		start := (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_' || b == '$'
+		part := start || (b >= '0' && b <= '9')
+		if (i == 0 && !start) || (i > 0 && !part) {
+			return false
+		}
+	}
+	_, kw := javaKeywords[s]
+	return !kw
+}
+
+// SafePackageSegment converts a single raw package segment into a deterministic,
+// legal Java 21 identifier, using hex Unicode escapes (_uXXXX) for invalid
+// code points to avoid collisions across obfuscated package names while leaving
+// legal ASCII and Unicode package segments unchanged.
+func SafePackageSegment(seg string) string {
+	if seg == "" {
+		return "__"
+	}
+	if isASCIIJavaIdentFast(seg) {
+		return seg
+	}
+	if SafeIdentifier(seg) == seg {
+		return seg
+	}
+	if _, kw := javaKeywords[seg]; kw {
+		return seg + "_"
+	}
+	var b strings.Builder
+	b.Grow(len(seg))
+	for i, r := range seg {
+		bits := java21IdentifierBits(r)
+		if bits&1 != 0 || (i > 0 && bits&2 != 0) {
+			b.WriteRune(r)
+			continue
+		}
+		if i == 0 && bits&2 != 0 {
+			b.WriteByte('_')
+			b.WriteRune(r)
+			continue
+		}
+		fmt.Fprintf(&b, "_u%04x", r)
+	}
+	out := b.String()
+	if out == "" {
+		return "__"
+	}
+	if _, kw := javaKeywords[out]; kw {
+		return out + "_"
+	}
+	return out
+}
+
+// SafePackageName sanitizes each dot-separated segment of a package name for
+// Java source emission while preserving valid ASCII and Unicode packages.
+func SafePackageName(pkg string) string {
+	if pkg == "" {
+		return ""
+	}
+	if !strings.ContainsRune(pkg, '.') {
+		return SafePackageSegment(pkg)
+	}
+	parts := strings.Split(pkg, ".")
+	changed := false
+	for i, part := range parts {
+		safe := SafePackageSegment(part)
+		if safe != part {
+			parts[i] = safe
+			changed = true
+		}
+	}
+	if !changed {
+		return pkg
+	}
+	return strings.Join(parts, ".")
+}
+
 func (f *ClassContext) GetAllImported() []string {
 	imports := []string{}
 	seen := map[string]struct{}{}
@@ -801,7 +887,13 @@ func (f *ClassContext) GetAllImported() []string {
 				// every cross-package use site (`cannot find symbol`, gson's largest cluster). Kill-switch
 				// JDEC_DOLLAR_FLAT_IMPORT_OFF restores the legacy drop-on-empty-segment behaviour.
 				if isAnonymousOrLocalBinaryName(className) {
-					continue
+					fullBin := strings.ReplaceAll(pkg+"."+className, ".", "/")
+					if f.SiblingClassAccessible == nil {
+						continue
+					}
+					if accessible, known := f.SiblingClassAccessible(fullBin); !known || !accessible {
+						continue
+					}
 				}
 				src, dotOK := binaryNestedNameToSource(className)
 				if !dotOK && f.Getenv("JDEC_DOLLAR_FLAT_IMPORT_OFF") != "" {
@@ -820,7 +912,7 @@ func (f *ClassContext) GetAllImported() []string {
 				}
 				// else: keep the flat `Outer$Inner` / `$Gson$Preconditions` name verbatim.
 			}
-			imp := pkg + "." + className
+			imp := SafePackageName(pkg) + "." + className
 			if _, dup := seen[imp]; dup {
 				continue
 			}
@@ -901,6 +993,7 @@ func (f *ClassContext) nestedTypeShouldDot(pkg, className string) bool {
 	if pkg == f.PackageName {
 		return false
 	}
+	fullBin := strings.ReplaceAll(pkg+"."+className, ".", "/")
 	outerBin := pkg + "." + className
 	if i := strings.IndexByte(className, '$'); i >= 0 {
 		outerBin = pkg + "." + className[:i]
@@ -910,6 +1003,9 @@ func (f *ClassContext) nestedTypeShouldDot(pkg, className string) bool {
 	// SiblingSuperTypes which also knows JDK/dependency declarations. Only an
 	// actual emitted sibling unit may use the flat `Outer$Inner` spelling.
 	if f.SiblingClassAccessible != nil {
+		if _, known := f.SiblingClassAccessible(fullBin); known {
+			return false
+		}
 		if _, known := f.SiblingClassAccessible(outerBin); known {
 			return false
 		}
@@ -923,6 +1019,9 @@ func (f *ClassContext) nestedTypeShouldDot(pkg, className string) bool {
 		return true
 	}
 	if f.SiblingSuperTypes != nil {
+		if _, ok := f.SiblingSuperTypes(fullBin); ok {
+			return false
+		}
 		if _, ok := f.SiblingSuperTypes(outerBin); ok {
 			return false
 		}
@@ -979,6 +1078,11 @@ func (f *ClassContext) ShortTypeName(name string) string {
 			// name, exactly like every other unit in the emitted family. A
 			// nested source spelling (Outer.Inner) is still returned as is.
 			if source != strings.ReplaceAll(name, "/", ".") {
+				if rawPkg, _ := SplitPackageClassName(strings.ReplaceAll(name, "/", ".")); rawPkg != "" {
+					if safePkg := SafePackageName(rawPkg); safePkg != rawPkg && strings.HasPrefix(source, rawPkg+".") {
+						return safePkg + source[len(rawPkg):]
+					}
+				}
 				return source
 			}
 		}
@@ -1003,12 +1107,13 @@ func (f *ClassContext) ShortTypeName(name string) string {
 			dotted = src
 		}
 	}
+	safePkg := SafePackageName(pkg)
 	first := strings.SplitN(dotted, ".", 2)[0]
 	if f.LexicalTypeNames[first] || f.IsTypeParam(first) {
 		// A qualified class identity and a same-spelled formal are different
 		// declarations. Keep the class qualified where shortening would bind
 		// to the formal; bare type-variable inputs returned above stay bare.
-		return pkg + "." + dotted
+		return safePkg + "." + dotted
 	}
 	if pkg == f.PackageName || pkg == "java.lang" {
 		// A same-package (or java.lang) type is normally reachable by its bare simple name with no
@@ -1022,7 +1127,7 @@ func (f *ClassContext) ShortTypeName(name string) string {
 			if pkg == f.PackageName && f.packageNameObscured() {
 				return dotted
 			}
-			return pkg + "." + dotted
+			return safePkg + "." + dotted
 		}
 		// Runtime lowering can introduce a platform owner absent from the
 		// original CP. Check its declaration identity too, rather than relying
@@ -1033,7 +1138,7 @@ func (f *ClassContext) ShortTypeName(name string) string {
 				own = strings.ReplaceAll(f.PackageName, ".", "/") + "/" + className
 			}
 			if declaration, known := f.InvocationMetadata(own); known && declaration.Name == own {
-				return pkg + "." + dotted
+				return safePkg + "." + dotted
 			}
 		}
 		return dotted
@@ -1047,10 +1152,10 @@ func (f *ClassContext) ShortTypeName(name string) string {
 			f.Import(name)
 			return dotted
 		}
-		return pkg + "." + dotted
+		return safePkg + "." + dotted
 	}
 	if f.SamePkgFQNames != nil && f.SamePkgFQNames[className] && f.packageNameObscured() {
-		return pkg + "." + dotted
+		return safePkg + "." + dotted
 	}
 	f.Import(name)
 	if f.BuildInLibsMap == nil {
@@ -1061,7 +1166,7 @@ func (f *ClassContext) ShortTypeName(name string) string {
 		return dotted
 	}
 	//f.BuildInLibsMap.Set(pkg, append(f.BuildInLibsMap.GetMust(pkg), className))
-	return pkg + "." + dotted
+	return safePkg + "." + dotted
 }
 
 // binaryNestedNameToSource converts a binary nested class simple name (Outer$Inner$Deeper) into its

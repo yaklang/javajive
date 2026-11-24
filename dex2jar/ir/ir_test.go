@@ -650,3 +650,65 @@ func TestBuildNestedTryCatchPropagatesHandlerLivenessFixpoint(t *testing.T) {
 		t.Fatalf("v1 category at return-object = %v, want Reference", method.CategoryAt(returnIdx, 1))
 	}
 }
+
+func TestBuildHandlerLivenessRespectsIntraBlockDefBeforeThrow(t *testing.T) {
+	// v2 holds double on the branch target and int on the fallthrough path into
+	// a dead-for-v2 join block, which jumps to a protected block that defines v2
+	// as int BEFORE throwing to a catch handler that returns v2 as int. Because
+	// v2 is defined before the throw inside the protected block, liveness must
+	// not propagate backward through the join block.
+	handlerOff := uint32(9)
+	in := fixture([]uint16{
+		// 0..1: if-eqz v4, +4 -> 4 (fallthrough sets v2 int, jump sets v2 double)
+		0x0438, 0x0004,
+		// 2: const/4 v2, 1 -> 3: goto +3 -> 6
+		0x1212,
+		0x0328,
+		// 4..5: const-wide/16 v2, 0 -> join at 6
+		0x0216, 0x0000,
+		// 6: nop (join block; v2 is dead across it)
+		0x0000,
+		// 7..8: protected block: const/4 v2, 7; throw v5
+		0x7212,
+		0x0527,
+		// 9..10: handler: move-exception v0; return v2
+		0x000d,
+		0x020f,
+	}, 6, 2, model.Proto{Parameters: []string{"I", "Ljava/lang/Throwable;"}, ParameterTypes: []uint32{3, 4}, ReturnType: "I"}, dexAccessStatic)
+	in.File.Types = append(in.File.Types, model.Type{Descriptor: "I"}, model.Type{Descriptor: "Ljava/lang/Throwable;"})
+	in.Method.Code.Tries = []model.Try{
+		{StartAddress: 7, InstructionCount: 2, Handler: model.CatchHandler{CatchAllAddress: &handlerOff}},
+	}
+	method, err := Build(in)
+	if err != nil {
+		t.Fatalf("Build() rejected intra-block def before throw: %v", err)
+	}
+	retIdx := len(method.Instructions) - 1
+	if got := method.CategoryAt(retIdx, 2).Kind; got != Int {
+		t.Fatalf("handler return v2 category = %v, want Int", got)
+	}
+
+	// Boundary case: when the throwing instruction ITSELF is the first definition
+	// of v2 (throwPos == firstDef), its pre-state observes block entry, so the
+	// join/entry block must still propagate v2's entry category into the handler.
+	hEntry := uint32(5)
+	boundary := fixture([]uint16{
+		0x5212,         // 0: const/4 v2, 5
+		0x0000,         // 1: nop
+		0x0260, 0x0000, // 2..3: sget v2, field#0 (may throw; firstDef == throwPos == 0)
+		0x020f,         // 4: return v2
+		0x000d,         // 5: move-exception v0
+		0x020f,         // 6: return v2
+	}, 3, 0, model.Proto{ReturnType: "I"}, dexAccessStatic)
+	boundary.Method.Code.Tries = []model.Try{
+		{StartAddress: 2, InstructionCount: 2, Handler: model.CatchHandler{CatchAllAddress: &hEntry}},
+	}
+	bMethod, err := Build(boundary)
+	if err != nil {
+		t.Fatalf("Build() failed on throwPos == firstDef boundary: %v", err)
+	}
+	bRetIdx := len(bMethod.Instructions) - 1
+	if got := bMethod.CategoryAt(bRetIdx, 2).Kind; got != Int {
+		t.Fatalf("boundary handler return v2 category = %v, want Int", got)
+	}
+}

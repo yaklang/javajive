@@ -39,7 +39,7 @@ func (p *constructorAllocationPlan) entryFor(initOp *OpCode) *constructorAllocat
 // allocation + alias chain to the <init> site in argument-evaluated order.
 // Kill-switch: JDEC_ALLOC_INIT_BIND_OFF=1.
 func (d *Decompiler) planConstructorAllocations(protectedStores map[*OpCode]bool) *constructorAllocationPlan {
-	if d == nil || d.getenv("JDEC_ALLOC_INIT_BIND_OFF") != "" || len(d.opCodes) > 8192 {
+	if d == nil || d.getenv("JDEC_ALLOC_INIT_BIND_OFF") != "" || len(d.opCodes) > 32768 {
 		return nil
 	}
 	if d.Work != nil && (d.Work.Charge(workbudget.CounterGraphScans, int64(len(d.opCodes))) != nil || d.Work.CheckAlloc(int64(len(d.opCodes))*128) != nil) {
@@ -251,6 +251,27 @@ func (d *Decompiler) resolveLocalAllocationRoot(recvLoad *OpCode, targetClass st
 func (d *Decompiler) opsBetween(rootStore *OpCode, inits []*OpCode) (map[*OpCode]bool, bool) {
 	if d == nil || rootStore == nil || len(inits) == 0 {
 		return nil, false
+	}
+	if len(inits) == 1 && inits[0] != nil {
+		if rootStore == inits[0] {
+			return map[*OpCode]bool{rootStore: true}, true
+		}
+		path := map[*OpCode]bool{rootStore: true}
+		cur := rootStore
+		for steps := 0; steps < 64 && len(cur.Target) == 1; steps++ {
+			next := cur.Target[0]
+			if next == nil || path[next] || len(next.Source) != 1 {
+				break
+			}
+			if d.Work != nil && d.Work.Charge(workbudget.CounterGraphEdges, 1) != nil {
+				return nil, false
+			}
+			path[next] = true
+			if next == inits[0] {
+				return path, true
+			}
+			cur = next
+		}
 	}
 	initSet := make(map[*OpCode]bool, len(inits))
 	for _, initOp := range inits {

@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 
 	"github.com/yaklang/javajive/classparser"
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/internal/filesys"
 	"github.com/yaklang/javajive/internal/jdecenv"
 	"github.com/yaklang/javajive/internal/log"
@@ -208,7 +209,14 @@ func (j *JarWar) recordFailedFile(visiblePath string) {
 }
 
 func (j *JarWar) bestEffortOutputPath(rel string) string {
-	sanitized := sanitizeBestEffortPath(rel)
+	return j.bestEffortDisambiguate(sanitizeBestEffortPath(rel))
+}
+
+func (j *JarWar) bestEffortClassOutputPath(rel string) string {
+	return j.bestEffortDisambiguate(sanitizeBestEffortClassPath(rel))
+}
+
+func (j *JarWar) bestEffortDisambiguate(sanitized string) string {
 	j.failedFilesLock.Lock()
 	defer j.failedFilesLock.Unlock()
 	if j.writtenFold == nil {
@@ -247,13 +255,10 @@ func (j *JarWar) collectDumpTasks(root, directory string, tasks *[]dumpTask) err
 				}
 				return fmt.Errorf("resolve archive directory %q: %w", entryPath, joinErr)
 			}
-			if mkdirErr := os.MkdirAll(target, 0o755); mkdirErr != nil {
-				if j.bestEffort {
-					log.Warnf("create archive directory %q failed: %v", entryPath, mkdirErr)
-					j.recordFailedFile(entryPath)
-					continue
+			if !j.bestEffort {
+				if mkdirErr := os.MkdirAll(target, 0o755); mkdirErr != nil {
+					return fmt.Errorf("create archive directory %q: %w", entryPath, mkdirErr)
 				}
-				return fmt.Errorf("create archive directory %q: %w", entryPath, mkdirErr)
 			}
 			if walkErr := j.collectDumpTasks(root, entryPath, tasks); walkErr != nil {
 				return walkErr
@@ -273,7 +278,11 @@ func (j *JarWar) collectDumpTasks(root, directory string, tasks *[]dumpTask) err
 			outPath = strings.TrimSuffix(actualPath, ".class") + ".java"
 		}
 		if j.bestEffort {
-			outPath = j.bestEffortOutputPath(outPath)
+			if isClass {
+				outPath = j.bestEffortClassOutputPath(outPath)
+			} else {
+				outPath = j.bestEffortOutputPath(outPath)
+			}
 		}
 		*tasks = append(*tasks, dumpTask{
 			visiblePath: entryPath,
@@ -347,6 +356,37 @@ func writeFlatFile(root, name string, data []byte) error {
 		return err
 	}
 	return os.WriteFile(target, data, 0o644)
+}
+
+func sanitizeBestEffortClassPath(rel string) string {
+	slash := strings.ReplaceAll(filepath.ToSlash(rel), "\\", "/")
+	slash = strings.TrimPrefix(slash, "./")
+	prefix := ""
+	rest := slash
+	if idx := strings.LastIndex(slash, "!/"); idx >= 0 {
+		prefix = sanitizeBestEffortPath(slash[:idx+2])
+		rest = slash[idx+2:]
+	}
+	parts := strings.Split(rest, "/")
+	for i := 0; i < len(parts)-1; i++ {
+		seg := parts[i]
+		if seg == "" || seg == "." || seg == ".." || isBestEffortContainerSegment(seg, i == 0 && prefix == "") {
+			continue
+		}
+		parts[i] = class_context.SafePackageSegment(seg)
+	}
+	return prefix + sanitizeBestEffortPath(strings.Join(parts, "/"))
+}
+
+func isBestEffortContainerSegment(seg string, allowStructuredRoot bool) bool {
+	if allowStructuredRoot && seg == structuredSourcesRoot {
+		return true
+	}
+	switch strings.ToUpper(seg) {
+	case "WEB-INF", "BOOT-INF", "META-INF":
+		return true
+	}
+	return isArchiveName(seg)
 }
 
 func sanitizeBestEffortPath(rel string) string {

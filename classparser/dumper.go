@@ -1721,7 +1721,7 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 	}
 	packageSource := ""
 	if packageName != "" {
-		packageSource = fmt.Sprintf("package %s;\n\n", packageName)
+		packageSource = fmt.Sprintf("package %s;\n\n", class_context.SafePackageName(packageName))
 	}
 	if className == "" {
 		return "", utils.Error("className is empty")
@@ -13157,12 +13157,12 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		if strings.HasPrefix(name, "lambda$") && isSyntheticMethod(method.AccessFlags) {
 			continue
 		}
-		// Compiler-generated bridge methods (ACC_BRIDGE, always also ACC_SYNTHETIC) implement
+		// Compiler-generated bridge methods (ACC_BRIDGE, instance override bridges) implement
 		// covariant returns and generic erasure. They are not source-level declarations; dumping
 		// them yields illegal Java (two methods differing only by return type, e.g. `String build()`
-		// plus a synthetic `Object build()`). Suppress them so the output mirrors the original
-		// source. CFR and Vineflower suppress bridge methods as well.
-		if isBridgeMethod(method.AccessFlags) {
+		// plus a synthetic `Object build()`). Static methods (e.g. D8/R8 API model outline helpers
+		// marked ACC_PUBLIC|ACC_STATIC|ACC_BRIDGE|ACC_SYNTHETIC) never override and must be emitted.
+		if isBridgeMethod(method.AccessFlags) && method.AccessFlags&StaticFlag == 0 {
 			if c.keepDescriptorProjectionBridge(method) {
 				// The physical bridge is required by the descriptor projection;
 				// fall through and dump it below.

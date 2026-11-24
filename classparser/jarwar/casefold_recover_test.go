@@ -79,3 +79,64 @@ func TestCaseFoldAndIllegalFilenameRecovery(t *testing.T) {
 		t.Fatalf("expected 3 structured entries, got %d (%+v)", len(rep.Entries), rep.Entries)
 	}
 }
+
+func TestBestEffortEscapesIllegalJavaPackageDirectories(t *testing.T) {
+	archive := t23ZipOrdered(t, []struct {
+		name string
+		body []byte
+	}{
+		{"\u266b/", nil},
+		{"\u266b/A.class", buildMinimalClassBytes("\u266b/A")},
+		{"WEB-INF/classes/\u266b/B.class", buildMinimalClassBytes("\u266b/B")},
+		{"res/\u266b/note.txt", []byte("ok")},
+	})
+	src := t23WriteArchive(t, archive, ".jar")
+
+	recoverDst := t.TempDir()
+	if _, err := AutoDecompileWithOptions(src, recoverDst, ArchiveOptions{
+		RetainUnprovedSource: true,
+	}); err != nil {
+		t.Fatalf("best-effort AutoDecompileWithOptions failed: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(recoverDst, "\u266b")); !os.IsNotExist(err) {
+		t.Fatalf("expected no stale unsanitized package directory, stat err=%v", err)
+	}
+	aBytes, err := os.ReadFile(filepath.Join(recoverDst, "_u266b", "A.java"))
+	if err != nil {
+		t.Fatalf("expected sanitized _u266b/A.java: %v (files=%#v)", err, t23Files(t, recoverDst))
+	}
+	if !strings.Contains(string(aBytes), "package _u266b;") {
+		t.Fatalf("expected escaped package declaration in _u266b/A.java, got:\n%s", aBytes)
+	}
+	if _, err := os.Stat(filepath.Join(recoverDst, "WEB-INF", "classes", "_u266b", "B.java")); err != nil {
+		t.Fatalf("expected WEB-INF/classes/_u266b/B.java without escaping container segment: %v (files=%#v)", err, t23Files(t, recoverDst))
+	}
+	if _, err := os.Stat(filepath.Join(recoverDst, "res", "\u266b", "note.txt")); err != nil {
+		t.Fatalf("expected non-class resource path preserved: %v", err)
+	}
+
+	structDst := t.TempDir()
+	rep, err := AutoDecompileWithOptions(src, structDst, ArchiveOptions{
+		Structured:           true,
+		RetainUnprovedSource: true,
+	})
+	if err != nil {
+		t.Fatalf("structured RetainUnprovedSource failed: %v", err)
+	}
+	wantOutputs := map[string]bool{
+		"sources/_u266b/A.java":                  false,
+		"sources/WEB-INF/classes/_u266b/B.java": false,
+		"resources/res/\u266b/note.txt":         false,
+	}
+	for _, entry := range rep.Entries {
+		if _, ok := wantOutputs[entry.OutputPath]; ok {
+			wantOutputs[entry.OutputPath] = true
+		}
+	}
+	for out, seen := range wantOutputs {
+		if !seen {
+			t.Fatalf("missing structured output %q in %+v", out, rep.Entries)
+		}
+	}
+}

@@ -39,3 +39,40 @@ func TestNestedTypeShouldDotPrefersArchiveSiblingLookup(t *testing.T) {
 		t.Fatal("resolved third-party sibling was dotted without an archive callback")
 	}
 }
+
+func TestNestedTypeShouldDotArchiveFlatSiblingWithoutOuter(t *testing.T) {
+	// R8 can shrink or inline the outer class while leaving the flat $ sibling
+	// in the archive. Lookup of the full binary name must win over the missing outer.
+	f := &ClassContext{PackageName: "com.example.caller"}
+	f.SiblingClassAccessible = func(name string) (bool, bool) {
+		switch name {
+		case "androidx/emoji2/text/EmojiProcessor$Callback":
+			return true, true
+		case "androidx/emoji2/text/EmojiProcessor":
+			return false, true
+		default:
+			return false, false
+		}
+	}
+	if f.nestedTypeShouldDot("androidx.emoji2.text", "EmojiProcessor$Callback") {
+		t.Fatal("archive flat sibling with shrunk outer was dotted into nonexistent Outer.Inner")
+	}
+}
+
+func TestR8HorizontalMergedDollarOneImportedWhenAccessible(t *testing.T) {
+	f := &ClassContext{PackageName: "com.example.caller"}
+	f.SiblingClassAccessible = func(name string) (bool, bool) {
+		return name == "androidx/cardview/widget/CardView$1", true
+	}
+
+	got := f.ShortTypeName("androidx.cardview.widget.CardView$1")
+	if got != "CardView$1" {
+		t.Fatalf("ShortTypeName(accessible CardView$1) = %q, want CardView$1", got)
+	}
+	_ = f.ShortTypeName("com.other.Anon$1")
+
+	imports := f.GetAllImported()
+	if len(imports) != 1 || imports[0] != "androidx.cardview.widget.CardView$1" {
+		t.Fatalf("GetAllImported() = %#v, want [androidx.cardview.widget.CardView$1]", imports)
+	}
+}

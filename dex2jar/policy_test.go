@@ -517,3 +517,46 @@ func TestApplicationBestEffortStubsAndReports(t *testing.T) {
 		t.Fatalf("diagnostic message = %q", diagnostic.Message)
 	}
 }
+
+func TestDexToJarParallelDeterministicBytes(t *testing.T) {
+	file := &model.File{
+		Entry:  "classes.dex",
+		Protos: []model.Proto{{ReturnType: "V"}},
+	}
+	classes := make([]model.Class, 0, 32)
+	for i := 0; i < 32; i++ {
+		desc := fmt.Sprintf("Lexample/Parallel%02d;", i)
+		classes = append(classes, model.Class{
+			Descriptor:  desc,
+			Superclass:  "Ljava/lang/Object;",
+			AccessFlags: 0x0001,
+			DirectMethods: []model.EncodedMethod{{
+				AccessFlags: 0x0009,
+				Method:      model.MethodID{Class: desc, Name: "ok", ProtoIndex: 0},
+				Code:        &model.Code{RegistersSize: 1, Instructions: []uint16{0x0012, 0x000e}},
+			}},
+		})
+	}
+	file.Classes = classes
+	app := &model.Application{Files: []*model.File{file}}
+
+	firstJar, firstReport, err := applicationToJarWithPolicy(app, FailureStrict)
+	if err != nil {
+		t.Fatalf("first conversion: %v", err)
+	}
+	if firstReport.Summary.Classes != 32 || firstReport.Summary.TranslatedMethods != 32 {
+		t.Fatalf("report = %#v", firstReport)
+	}
+	for run := 0; run < 5; run++ {
+		gotJar, gotReport, runErr := applicationToJarWithPolicy(app, FailureStrict)
+		if runErr != nil {
+			t.Fatalf("run %d err: %v", run, runErr)
+		}
+		if !bytes.Equal(firstJar, gotJar) {
+			t.Fatalf("run %d produced non-deterministic JAR bytes", run)
+		}
+		if !reflect.DeepEqual(firstReport, gotReport) {
+			t.Fatalf("run %d produced differing report: %#v vs %#v", run, firstReport, gotReport)
+		}
+	}
+}

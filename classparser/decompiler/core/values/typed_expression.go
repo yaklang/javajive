@@ -38,8 +38,9 @@ func (c *CastExpression) String(ctx *class_context.ClassContext) string {
 			name := types.NewJavaClass(raw).String(ctx)
 			if strings.Contains(raw, ".") {
 				pkg, _ := class_context.SplitPackageClassName(raw)
-				if !strings.HasPrefix(name, pkg+".") {
-					name = pkg + "." + name
+				safePkg := class_context.SafePackageName(pkg)
+				if !strings.HasPrefix(name, safePkg+".") {
+					name = safePkg + "." + name
 				}
 			}
 			names[i] = name
@@ -62,9 +63,10 @@ func (c *CastExpression) String(ctx *class_context.ClassContext) string {
 		}
 		if raw, ok := types.RawClassFQN(target); rawClass && ok && strings.Contains(raw, ".") {
 			pkg, _ := class_context.SplitPackageClassName(raw)
+			safePkg := class_context.SafePackageName(pkg)
 			name := types.NewJavaClass(raw).String(ctx)
-			if !strings.HasPrefix(name, pkg+".") {
-				name = pkg + "." + name
+			if !strings.HasPrefix(name, safePkg+".") {
+				name = safePkg + "." + name
 			}
 			return fmt.Sprintf("((%s)(%s))", name+strings.Repeat("[]", rank), operand.String(ctx))
 		}

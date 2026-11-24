@@ -189,6 +189,7 @@ func ParseBytesCode(decompiler *core.Decompiler) (res []statements.Statement, er
 	// short-circuit condition). Without it that local renders undeclared and duplicate-named against a
 	// later sibling-scope local sharing its slot-derived name -> cannot find symbol (Bug Y residual C).
 	rewriter.SynthesizeUndeclaredEmbeddedAssignDecls(&sts, decompiler.EmbeddedAssignDeclRefs)
+	rewriter.RewriteThisAliasFieldStores(&sts, decompiler.FunctionContext)
 	rewriter.PlaceConstructorCallFirst(&sts)
 	// Drop statements javac would reject as unreachable (e.g. a back-edge `continue`
 	// emitted after an inner infinite loop that only exits via return / labelled
