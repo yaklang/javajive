@@ -7,8 +7,8 @@ package javaclassparser
 // descriptor 渲染成 raw `appendTo(StringBuilder, Iterator)`, 使调用点 `this.appendTo(sb, it)` 在它与
 // 泛型 `appendTo(A extends Appendable, Iterator<?>)` 之间无法择优 → `reference to appendTo is ambiguous`。
 // 治法(kill-switch JDEC_STUB_GENERIC_SIG_OFF): stub 在方法无自身形参型变(签名以 '(' 开头)且签名形参数与
-// descriptor 一致时, 用泛型 Signature 的形参/返回类型渲染。种子用 native 方法(无 Code, 必走 stub 路径)
-// 携带 `Iterator<?>` 形参确定复现。ON=`Iterator<?>` / OFF=裸 `Iterator`。
+// descriptor 一致时, 用泛型 Signature 的形参/返回类型渲染。构造无 Code 的非 native 具体方法确定触发 stub 路径,
+// 并携带 `Iterator<?>` 形参确定复现。ON=`Iterator<?>` / OFF=裸 `Iterator`。
 
 import (
 	"os"
@@ -17,10 +17,20 @@ import (
 )
 
 func TestStubGenericSigIsLoadBearing(t *testing.T) {
-	data, err := os.ReadFile("testdata/regression/StubGenericSigSeed.class")
+	raw, err := os.ReadFile("testdata/regression/StubGenericSigSeed.class")
 	if err != nil {
 		t.Fatalf("read StubGenericSigSeed seed: %v", err)
 	}
+	obj, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("parse StubGenericSigSeed seed: %v", err)
+	}
+	for _, m := range obj.Methods {
+		if n, _ := obj.getUtf8(m.NameIndex); n != "<init>" {
+			m.AccessFlags &^= 0x0100
+		}
+	}
+	data := obj.Bytes()
 
 	// Fix ON (default): the stub renders the generic Signature parameter type `Iterator<?>`.
 	os.Unsetenv("JDEC_STUB_GENERIC_SIG_OFF")

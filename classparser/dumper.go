@@ -4230,6 +4230,7 @@ func (c *ClassObjectDumper) dumpMethodMemberWithSourceRequest(method *MemberInfo
 
 	var isVarArgs bool
 	var abstractMethod bool
+	var nativeMethod bool
 	accessFlagsVerbose = lo.Filter(accessFlagsVerbose, func(item string, index int) bool {
 		if item == "varargs" {
 			isVarArgs = true
@@ -4237,10 +4238,12 @@ func (c *ClassObjectDumper) dumpMethodMemberWithSourceRequest(method *MemberInfo
 		}
 		if item == "abstract" {
 			abstractMethod = true
+		} else if item == "native" {
+			nativeMethod = true
 		}
 		return true
 	})
-	_ = abstractMethod
+	bodylessMethod := abstractMethod || nativeMethod
 
 	accessFlags := accessFlagCode
 	// A private instance method is a nonvirtual target even on a subclass
@@ -5610,7 +5613,7 @@ func (c *ClassObjectDumper) dumpMethodMemberWithSourceRequest(method *MemberInfo
 	}
 	c.UnTab()
 
-	if paramsNewStr == "" && abstractMethod {
+	if paramsNewStr == "" && bodylessMethod {
 		paramList := []string{}
 		// fetch from method type
 		paramTypes := methodType.FunctionType().ParamTypes
@@ -5725,7 +5728,7 @@ func (c *ClassObjectDumper) dumpMethodMemberWithSourceRequest(method *MemberInfo
 		// is a default method and must carry the `default` keyword. A private interface
 		// method (Java 9+) has a body but is not a default method; `private default` is
 		// an illegal modifier combination.
-		if isInterfaceType && !abstractMethod && name != "<init>" && name != "<clinit>" &&
+		if isInterfaceType && !bodylessMethod && name != "<init>" && name != "<clinit>" &&
 			!strings.Contains(accessFlags, "static") && !strings.Contains(accessFlags, "private") {
 			methodSourceBuffer.Write([]byte("default "))
 		}
@@ -5785,6 +5788,8 @@ func (c *ClassObjectDumper) dumpMethodMemberWithSourceRequest(method *MemberInfo
 			// AnnotationDefault attribute we must re-emit its `default <value>` clause, otherwise
 			// any use site that omits the element fails javac ("missing a default value").
 			methodSourceBuffer.Write([]byte(c.annotationElementDefaultClause(method) + ";"))
+		} else if nativeMethod {
+			methodSourceBuffer.WriteByte(';')
 		} else if emitBridgeThisCall {
 			methodSourceBuffer.Write([]byte(fmt.Sprintf(" {\n%sthis();\n%s}",
 				strings.Repeat("\t", c.TabNumber()+1), strings.Repeat("\t", c.TabNumber()))))
@@ -13366,7 +13371,7 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 				!c.isOmittableDefaultCtor(descriptor, accessFlagsVerbose)
 			if isSynBridgeCtor || keepDeclaredCtor || res.initializerCode != "" || res.enumLambdaInitializer != nil {
 				// keep res as the empty-body constructor (faithful: empty body == implicit super())
-			} else if !slices.Contains(accessFlagsVerbose, "abstract") && !slices.Contains(accessFlagsVerbose, "annotation") && !slices.Contains(accessFlagsVerbose, "interface") && !slices.Contains(accessFlagsVerbose, "enum") {
+			} else if !slices.Contains(accessFlagsVerbose, "abstract") && !slices.Contains(accessFlagsVerbose, "native") && !slices.Contains(accessFlagsVerbose, "annotation") && !slices.Contains(accessFlagsVerbose, "interface") && !slices.Contains(accessFlagsVerbose, "enum") {
 				methodType, perr := types.ParseMethodDescriptor(descriptor)
 				descBroken := perr != nil || methodType == nil || methodType.FunctionType() == nil
 				isVoid := !descBroken && methodType.FunctionType().ReturnType.String(c.FuncCtx) == "void"
