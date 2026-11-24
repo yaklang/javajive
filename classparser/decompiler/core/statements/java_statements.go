@@ -3910,14 +3910,19 @@ func NewDeclareStatement(leftVal values.JavaValue) *AssignStatement {
 	}
 }
 func NewAssignStatement(leftVal, value values.JavaValue, isFirst bool) *AssignStatement {
-	if value == nil || leftVal == nil || value.Type() == nil || leftVal.Type() == nil {
+	if value == nil || leftVal == nil {
 		// Guard against nil values/types in malformed bytecode: rather than panicking
 		// (which forces the whole method into a stub), create the assignment as-is.
 		// The type merge is skipped when either side has no type.
+		return &AssignStatement{
+			LeftValue: leftVal,
+			JavaValue: value,
+			IsFirst:   isFirst,
+		}
 	}
 
 	shared := false
-	if ref, ok := values.UnpackSoltValue(value).(*values.JavaRef); ok {
+	if ref, ok := values.UnpackSoltValue(value).(*values.JavaRef); ok && ref != nil {
 		_, _, shared = ref.OriginalStackMaterializationWitness(ref.Val)
 	}
 	// DUP shares the producer's computational value across consumers. A Z

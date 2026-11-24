@@ -111,6 +111,15 @@ func refineConstants(method *Method, file *model.File) (bool, error) {
 					if err := joinDemandState(&demands[instruction.Regs[1]], carry); err != nil {
 						return false, diagnostic(method.Context, instruction, "", fmt.Errorf("v%d: %w", instruction.Regs[1], err))
 					}
+					if carry.single.Kind == Unknown {
+						srcCat := method.CategoryAt(index, instruction.Regs[1])
+						switch srcCat.Kind {
+						case Int, Float, Long, Double, Reference:
+							if err := joinDemand(&demands[instruction.Regs[1]], Category{Kind: srcCat.Kind}); err != nil {
+								return false, diagnostic(method.Context, instruction, "", fmt.Errorf("v%d: %w", instruction.Regs[1], err))
+							}
+						}
+					}
 				} else {
 					for _, operand := range method.demands[index] {
 						if err := joinDemand(&demands[operand.register], operand.category); err != nil {

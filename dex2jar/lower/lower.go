@@ -158,10 +158,10 @@ func classWithPolicyOnce(file *model.File, class *model.Class, options ClassOpti
 // classMinVersion returns the minimum classfile major version required for
 // class while preserving Java 5 for ordinary DEX 035/037 classes.
 func classMinVersion(file *model.File, class *model.Class, hierarchy map[string]*model.Class) uint16 {
-	if interfaceNeedsJava8(class) {
-		return classfilebuilder.VersionJava8
+	version := interfaceMinVersion(class)
+	if version >= classfilebuilder.VersionJava9 {
+		return version
 	}
-	version := classfilebuilder.VersionJava5
 	raise := func(candidate uint16) {
 		if candidate > version {
 			version = candidate
@@ -169,6 +169,9 @@ func classMinVersion(file *model.File, class *model.Class, hierarchy map[string]
 	}
 	index := hierarchy
 	isInterfaceTarget := func(descriptor string) bool {
+		if descriptor == class.Descriptor {
+			return class.AccessFlags&dexInterface != 0
+		}
 		if index == nil {
 			index = classHierarchy(file)
 		}
@@ -198,6 +201,23 @@ func classMinVersion(file *model.File, class *model.Class, hierarchy map[string]
 			continue
 		}
 		for _, instruction := range instructions {
+			if instruction.Opcode == 0x6f || instruction.Opcode == 0x75 {
+				if int(instruction.Index) < len(file.Methods) {
+					if index == nil {
+						index = classHierarchy(file)
+					}
+					if _, isIface, ok := resolveInvokeSuperTarget(class, file.Methods[instruction.Index].Class, index); ok && isIface {
+						raise(classfilebuilder.VersionJava8)
+					}
+				}
+				continue
+			}
+			if (instruction.Opcode == 0x71 || instruction.Opcode == 0x77) && int(instruction.Index) < len(file.Methods) {
+				if isInterfaceTarget(file.Methods[instruction.Index].Class) {
+					raise(classfilebuilder.VersionJava8)
+				}
+				continue
+			}
 			if instruction.Opcode < 0xfa {
 				continue
 			}
@@ -205,17 +225,17 @@ func classMinVersion(file *model.File, class *model.Class, hierarchy map[string]
 			switch instruction.Opcode {
 			case 0xfe:
 				if needsJava8Handle(uint64(instruction.Index)) {
-					return classfilebuilder.VersionJava8
+					raise(classfilebuilder.VersionJava8)
 				}
 			case 0xfc, 0xfd:
 				if int(instruction.Index) < len(file.CallSites) {
 					cs := file.CallSites[instruction.Index]
 					if needsJava8Handle(uint64(cs.BootstrapMethodHandle)) {
-						return classfilebuilder.VersionJava8
+						raise(classfilebuilder.VersionJava8)
 					}
 					for _, arg := range cs.Arguments {
 						if arg.Type == model.ValueMethodHandle && needsJava8Handle(arg.Unsigned) {
-							return classfilebuilder.VersionJava8
+							raise(classfilebuilder.VersionJava8)
 						}
 					}
 				}
@@ -225,21 +245,26 @@ func classMinVersion(file *model.File, class *model.Class, hierarchy map[string]
 	return version
 }
 
-// interfaceNeedsJava8 reports whether an interface carries a static or default
-// method, which a Java 5 class file cannot express.
-func interfaceNeedsJava8(class *model.Class) bool {
+// interfaceMinVersion returns the minimum classfile major version required
+// by an interface's declared methods: Java 9 for private interface methods,
+// Java 8 for static or default methods, and Java 5 otherwise.
+func interfaceMinVersion(class *model.Class) uint16 {
 	if class.AccessFlags&dexInterface == 0 {
-		return false
+		return classfilebuilder.VersionJava5
 	}
+	version := classfilebuilder.VersionJava5
 	for _, method := range appendMethods(class.DirectMethods, class.VirtualMethods) {
 		if method.Method.Name == "<clinit>" {
 			continue
 		}
+		if method.AccessFlags&dexPrivate != 0 {
+			return classfilebuilder.VersionJava9
+		}
 		if method.Code != nil || method.AccessFlags&dexStatic != 0 || method.AccessFlags&dexAbstract == 0 {
-			return true
+			version = classfilebuilder.VersionJava8
 		}
 	}
-	return false
+	return version
 }
 
 // lowerClassBody emits members and attributes into an already configured
@@ -1074,6 +1099,20 @@ func validateInterfaceMethodShape(class *model.Class, method *model.EncodedMetho
 		const allowed = required | dexBridge | dexVarargs | dexSynthetic
 		if method.AccessFlags&required != required || method.AccessFlags&^allowed != 0 {
 			return fmt.Errorf("Java 5 interface method must be public abstract with only bridge, varargs, and synthetic as optional flags")
+		}
+		return nil
+	}
+	if version >= classfilebuilder.VersionJava9 {
+		const allowed = dexPublic | dexPrivate | dexStatic | dexAbstract | dexStrict | dexBridge | dexVarargs | dexSynthetic
+		vis := method.AccessFlags & (dexPublic | dexPrivate)
+		if vis == 0 || vis == (dexPublic|dexPrivate) || method.AccessFlags&^allowed != 0 {
+			return fmt.Errorf("Java 9 interface method has illegal access flags")
+		}
+		if method.AccessFlags&dexPrivate != 0 && method.AccessFlags&dexAbstract != 0 {
+			return fmt.Errorf("private interface method cannot be abstract")
+		}
+		if method.AccessFlags&dexAbstract == 0 && method.Code == nil {
+			return fmt.Errorf("interface method has neither code nor the abstract flag")
 		}
 		return nil
 	}

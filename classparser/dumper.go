@@ -2209,7 +2209,9 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 		// Local declarations are placed by VariableId and lexical dominance in
 		// RewriteVar. Reintroducing declarations from printed slot names here
 		// can duplicate a declaration already recovered by that typed pass.
-		full = c.sourceRewrite("fixJacksonRemainingReconstructs", "class_source", full, fixJacksonRemainingReconstructs)
+		full = c.sourceRewrite("fixJacksonRemainingReconstructs", "class_source", full, func(body string) string {
+			return fixJacksonRemainingReconstructsWithSameJar(body, c.hasSameJarClass)
+		})
 		// javac 9-13 TWR synthetic `$closeResource(Throwable, AutoCloseable)` invokeinterfaces
 		// AutoCloseable.close() which throws Exception, but the synthetic method does not declare
 		// it (okhttp ResponseBody / DiskLruCache). Kill-switch: JDEC_CLOSE_RESOURCE_THROWS_OFF=1.
@@ -2382,7 +2384,9 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 		// BloomFilter boolean-OR accumulator can be reverted by math3 bool-counter
 		// retype when nextMemberStart swallows a later varN++ in the enum constant.
 		full = c.sourceRewrite("fixOrig14RemainderReconstructs", "class_source", full, fixOrig14RemainderReconstructs)
-		full = c.sourceRewrite("fixJacksonRemainingReconstructs", "class_source", full, fixJacksonRemainingReconstructs)
+		full = c.sourceRewrite("fixJacksonRemainingReconstructs", "class_source", full, func(body string) string {
+			return fixJacksonRemainingReconstructsWithSameJar(body, c.hasSameJarClass)
+		})
 		full = c.sourceRewrite("fixNettyRemainingReconstructs", "class_source", full, fixNettyRemainingReconstructs)
 		full = c.sourceRewrite("fixLog4jRemainingReconstructs", "class_source", full, fixLog4jRemainingReconstructs)
 		if !hardjarShapeOff() {
@@ -8977,10 +8981,29 @@ func fixGetFieldClassHoist(body string) string {
 	return body
 }
 
+func (c *ClassObjectDumper) hasSameJarClass(internal string) bool {
+	if c == nil || internal == "" {
+		return false
+	}
+	if c.obj != nil && c.obj.GetClassName() == internal {
+		return true
+	}
+	if c.foldSiblingResolver != nil {
+		if _, ok := c.foldSiblingResolver(internal); ok {
+			return true
+		}
+	}
+	return false
+}
+
 // fixJacksonRemainingReconstructs applies the remaining jackson-databind dump reconstructs
 // (empty-sync return, CAP#1 ctor args, raw Map.Entry keys,
 // LinkedDeque type-var returns, etc.). Kill-switch: JDEC_JACKSON_REMAINING_OFF=1.
 func fixJacksonRemainingReconstructs(body string) string {
+	return fixJacksonRemainingReconstructsWithSameJar(body, nil)
+}
+
+func fixJacksonRemainingReconstructsWithSameJar(body string, isSameJar func(internalName string) bool) string {
 	if jdecenv.Get("JDEC_JACKSON_REMAINING_OFF") == "1" {
 		return body
 	}
@@ -9045,13 +9068,19 @@ func fixJacksonRemainingReconstructs(body string) string {
 	body = strings.ReplaceAll(body,
 		"return this._delegatee.deserialize(var1,var2,var3);",
 		"return ((JsonDeserializer)(this._delegatee)).deserialize(var1,var2,var3);")
-	// EnumSerializer: external nested JsonFormat$Shape must be dotted.
-	body = strings.ReplaceAll(body,
-		"com.fasterxml.jackson.annotation.JsonFormat$Shape",
-		"com.fasterxml.jackson.annotation.JsonFormat.Shape")
+	// EnumSerializer: external nested JsonFormat$Shape must be dotted when not
+	// present as a flat top-level class in the same JAR.
+	if isSameJar == nil || !isSameJar("com/fasterxml/jackson/annotation/JsonFormat$Shape") {
+		body = strings.ReplaceAll(body,
+			"com.fasterxml.jackson.annotation.JsonFormat$Shape",
+			"com.fasterxml.jackson.annotation.JsonFormat.Shape")
+	}
 	// jackson-annotations nested types dumped flat (`JsonInclude$Value`) are only
-	// resolvable as `JsonInclude.Value` on the compile classpath.
-	body = strings.ReplaceAll(body, "JsonInclude$Value", "JsonInclude.Value")
+	// resolvable as `JsonInclude.Value` on the external classpath; keep `$` when
+	// declared in the same decompiled JAR.
+	if isSameJar == nil || !isSameJar("com/fasterxml/jackson/annotation/JsonInclude$Value") {
+		body = strings.ReplaceAll(body, "JsonInclude$Value", "JsonInclude.Value")
+	}
 	// StdScalarSerializer(Class<?>, boolean) -> super(Class<T>): raw Class cast.
 	body = strings.ReplaceAll(body,
 		"protected StdScalarSerializer(Class<?> var1, boolean var2) {\n\t\tsuper(var1);",

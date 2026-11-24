@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	javaclassparser "github.com/yaklang/javajive/classparser"
+	"github.com/yaklang/javajive/dex2jar/ir"
 	"github.com/yaklang/javajive/dex2jar/model"
 )
 
@@ -797,4 +798,169 @@ func TestR8InitEnumPlatformSuperclassCtor(t *testing.T) {
 		t.Fatalf("expected 0 stubs, got %d (%+v)", detailed.StubbedMethods, detailed.Diagnostics)
 	}
 	verifyAllR8JarClasses(t, jarBytes, "r8.Color")
+}
+
+func TestR8InitPreservesAllocationAcrossTryCatch(t *testing.T) {
+	const (
+		parentDesc = "Lr8/TryParent;"
+		subDesc    = "Lr8/TryChild;"
+		callerDesc = "Lr8/TryCaller;"
+	)
+	file := &model.File{
+		Entry: "classes.dex",
+		Types: []model.Type{
+			{Descriptor: "Ljava/lang/Object;"},
+			{Descriptor: parentDesc},
+			{Descriptor: subDesc},
+			{Descriptor: callerDesc},
+			{Descriptor: "V"},
+			{Descriptor: "[Ljava/lang/String;"},
+			{Descriptor: "Ljava/lang/RuntimeException;"},
+		},
+		Protos: []model.Proto{
+			{ReturnType: "V"}, // 0: ()V
+			{ReturnType: "V", Parameters: []string{"[Ljava/lang/String;"}, ParameterTypes: []uint32{5}}, // 1: ([String;)V
+		},
+		Methods: []model.MethodID{
+			{Class: "Ljava/lang/Object;", Name: "<init>", ProtoIndex: 0},          // 0
+			{Class: parentDesc, Name: "<init>", ProtoIndex: 0},                    // 1
+			{Class: callerDesc, Name: "mayThrow", ProtoIndex: 0},                  // 2
+			{Class: callerDesc, Name: "make", ProtoIndex: 0},                      // 3
+			{Class: callerDesc, Name: "main", ProtoIndex: 1},                      // 4
+			{Class: "Ljava/lang/RuntimeException;", Name: "<init>", ProtoIndex: 0}, // 5
+		},
+	}
+	parent := model.Class{
+		Descriptor:  parentDesc,
+		Superclass:  "Ljava/lang/Object;",
+		AccessFlags: 0x0001,
+		DirectMethods: []model.EncodedMethod{{
+			MethodIndex: 1,
+			AccessFlags: 0x10001,
+			Method:      file.Methods[1],
+			Code: &model.Code{
+				RegistersSize: 1, InsSize: 1, OutsSize: 1,
+				Instructions: []uint16{0x1070, 0x0000, 0x0000, 0x000e},
+			},
+		}},
+	}
+	sub := model.Class{
+		Descriptor:  subDesc,
+		Superclass:  parentDesc,
+		AccessFlags: 0x0001,
+	}
+	catchAddr := uint32(6)
+	caller := model.Class{
+		Descriptor:  callerDesc,
+		Superclass:  "Ljava/lang/Object;",
+		AccessFlags: 0x0001,
+		DirectMethods: []model.EncodedMethod{
+			{
+				MethodIndex: 2,
+				AccessFlags: 0x0009,
+				Method:      file.Methods[2], // mayThrow(): throws new RuntimeException()
+				Code: &model.Code{
+					RegistersSize: 1, InsSize: 0, OutsSize: 1,
+					Instructions: []uint16{
+						0x0022, 0x0006, // new-instance v0, RuntimeException
+						0x1070, 0x0005, 0x0000, // invoke-direct {v0}, RuntimeException.<init>()V
+						0x0027, // throw v0
+					},
+				},
+			},
+			{
+				MethodIndex: 3,
+				AccessFlags: 0x0009,
+				Method:      file.Methods[3], // make(): allocate before try, catch exception, init after merge
+				Code: &model.Code{
+					RegistersSize: 2, InsSize: 0, OutsSize: 1,
+					Instructions: []uint16{
+						0x0022, 0x0002, // 0..1: new-instance v0, Lr8/TryChild;
+						0x0071, 0x0002, 0x0000, // 2..4: invoke-static {}, mayThrow()V
+						0x0228,                 // 5: goto +2 -> offset 7
+						0x010d,                 // 6: catch-all: move-exception v1
+						0x1070, 0x0000, 0x0000, // 7..9: invoke-direct {v0}, Object.<init>()V (R8 bypassed TryChild.<init>)
+						0x000e,                 // 10: return-void
+					},
+					Tries: []model.Try{{
+						StartAddress:     2,
+						InstructionCount: 3,
+						Handler:          model.CatchHandler{CatchAllAddress: &catchAddr},
+					}},
+				},
+			},
+			{
+				MethodIndex: 4,
+				AccessFlags: 0x0009,
+				Method:      file.Methods[4],
+				Code: &model.Code{
+					RegistersSize: 1, InsSize: 1, OutsSize: 0,
+					Instructions: []uint16{
+						0x0071, 0x0003, 0x0000, // invoke-static {}, make()V
+						0x000e,
+					},
+				},
+			},
+		},
+	}
+
+	app := &model.Application{Files: []*model.File{{
+		Entry:   "classes.dex",
+		Types:   file.Types,
+		Protos:  file.Protos,
+		Methods: file.Methods,
+		Classes: []model.Class{parent, sub, caller},
+	}}}
+
+	jarBytes, detailed, err := applicationToJarWithPolicy(app, FailureRecover)
+	if err != nil {
+		t.Fatalf("FailureRecover try/catch R8 init failed: %v", err)
+	}
+	if detailed.StubbedMethods != 0 {
+		t.Fatalf("expected 0 stubs, got %d (%+v)", detailed.StubbedMethods, detailed.Diagnostics)
+	}
+	verifyAllR8JarClasses(t, jarBytes, "r8.TryCaller")
+
+	// Negative test: allocation created INSIDE try after a potentially-throwing
+	// instruction must NOT propagate into catch.
+	negCatchAddr := uint32(7)
+	negMethod := &model.EncodedMethod{
+		MethodIndex: 3,
+		AccessFlags: 0x0009,
+		Method:      file.Methods[3],
+		Code: &model.Code{
+			RegistersSize: 2, InsSize: 0, OutsSize: 1,
+			Instructions: []uint16{
+				0x0071, 0x0002, 0x0000, // 0..2: invoke-static {}, mayThrow()V (throws BEFORE new-instance!)
+				0x0022, 0x0002,         // 3..4: new-instance v0, Lr8/TryChild;
+				0x0428,                 // 5..6? Wait: 0x0028 requires 1u goto+5:
+				0x010d,                 // 6: nop / catch target? Let's match exact offsets below
+			},
+		},
+	}
+	negMethod.Code.Instructions = []uint16{
+		0x0071, 0x0002, 0x0000, // 0..2: invoke-static {}, mayThrow()V
+		0x0022, 0x0002,         // 3..4: new-instance v0, Lr8/TryChild;
+		0x0528,                 // 5: goto +5 -> 10
+		0x0000,                 // 6: padding nop (inside try)
+		0x1070, 0x0000, 0x0000, // 7..9: catch handler: invoke-direct {v0}, Object.<init>()V
+		0x000e,                 // 10: return-void
+	}
+	negMethod.Code.Tries = []model.Try{{
+		StartAddress:     0,
+		InstructionCount: 5,
+		Handler:          model.CatchHandler{CatchAllAddress: &negCatchAddr},
+	}}
+	negInsns, err := ir.Decode(negMethod.Code, ir.Context{Entry: "classes.dex", Class: callerDesc, Method: "neg"})
+	if err != nil {
+		t.Fatalf("ir.Decode neg: %v", err)
+	}
+	hierarchy := map[string]*model.Class{
+		parentDesc: &app.Files[0].Classes[0],
+		subDesc:    &app.Files[0].Classes[1],
+		callerDesc: &app.Files[0].Classes[2],
+	}
+	if sites := findR8PatchSites(app.Files[0], &app.Files[0].Classes[2], negMethod, negInsns, false, hierarchy); len(sites) != 0 {
+		t.Fatalf("expected 0 patch sites when new-instance occurs inside try after throwing insn, got %+v", sites)
+	}
 }

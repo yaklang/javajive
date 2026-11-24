@@ -417,6 +417,10 @@ func applicationToJarWithPolicy(app *model.Application, policy FailurePolicy) ([
 			appendConversionDiagnostic(&detailed, diag)
 			detailed.Summary.Warnings++
 		}
+		for _, diag := range normalizeR8EnumDeclarations(app, hierarchy) {
+			appendConversionDiagnostic(&detailed, diag)
+			detailed.Summary.Warnings++
+		}
 	}
 	type classJob struct {
 		file  *model.File

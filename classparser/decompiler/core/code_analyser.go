@@ -4120,11 +4120,13 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			}
 		}
 		d.slotStoreTrace[slot] = slotStoreTraceInfo{offset: opcode.CurrentOffset, ref: ref}
-		if !(values.IsBooleanStackNarrowing(ref.Type(), value) && d.localWebHasNumericConsumer(opcode, value)) {
+		if ref != nil && !(values.IsBooleanStackNarrowing(ref.Type(), value) && d.localWebHasNumericConsumer(opcode, value)) {
+			statements.NewAssignStatement(ref, value, isFirst)
+		} else if ref == nil {
 			statements.NewAssignStatement(ref, value, isFirst)
 		}
 		d.opcodeIdToRef[opcode] = append(d.opcodeIdToRef[opcode], [2]any{ref, isFirst})
-		if !isFirst && runtimeStackSimulation.Size() > 0 {
+		if !isFirst && ref != nil && runtimeStackSimulation.Size() > 0 {
 			if op, proved := d.immediateLocalPostUpdate(opcode, ref, runtimeStackSimulation.Peek()); proved {
 				// Keep the original load's enumerable target: later source binding
 				// reconciliation must update this write as well as ordinary reads.
@@ -4151,9 +4153,11 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 				d.refToCreatingStore[ref] = opcode
 			}
 		}
-		attr := d.delRefUserAttr[ref.VarUid]
-		attr[1]++
-		d.delRefUserAttr[ref.VarUid] = attr
+		if ref != nil {
+			attr := d.delRefUserAttr[ref.VarUid]
+			attr[1]++
+			d.delRefUserAttr[ref.VarUid] = attr
+		}
 
 		if v, ok := value.(*values.CustomValue); ok {
 			if v.Flag == "exception" {
@@ -4354,10 +4358,21 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		classInfo := d.constantPoolGetter(int(Convert2bytesToInt(opcode.Data))).(*values.JavaClassValue).Type()
 		value := runtimeStackSimulation.Pop().(values.JavaValue)
 		instanceOf := values.NewOriginalInstanceOf(value, classInfo, int(opcode.CurrentOffset))
+		retain := d.FunctionContext != nil && d.FunctionContext.RetainUnprovedSource
 		if instanceOf == nil {
-			return fmt.Errorf("invalid original instanceof at PC %d", opcode.CurrentOffset)
-		}
-		if d.getenv("JDEC_INSTANCEOF_REPLACEVAR_OFF") == "1" {
+			if !retain {
+				return fmt.Errorf("invalid original instanceof at PC %d", opcode.CurrentOffset)
+			}
+			instanceOf = values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+				return fmt.Sprintf("%s instanceof %s", values.AssignmentOperand(value, funcCtx), classInfo.String(funcCtx))
+			}, func() types.JavaType {
+				return types.NewJavaPrimer(types.JavaBoolean)
+			})
+			instanceOf.Flag = "instanceof"
+			instanceOf.CapturesKnown = true
+			instanceOf.Captures = []values.JavaValue{value}
+			instanceOf.OriginPC, instanceOf.HasOriginPC = int(opcode.CurrentOffset), true
+		} else if d.getenv("JDEC_INSTANCEOF_REPLACEVAR_OFF") == "1" {
 			instanceOf = values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
 				return fmt.Sprintf("%s instanceof %s", values.AssignmentOperand(value, funcCtx), classInfo.String(funcCtx))
 			}, func() types.JavaType {
@@ -7057,7 +7072,7 @@ func (d *Decompiler) ParseStatement() error {
 						// constructors: allocation and initialization can both throw.
 						v.ConstructorCall = funcCallValue
 						skip = true
-					} else if len(funcCallValue.Arguments) == 0 && funcCallValue.ClassName != funcCtx.ClassName && !funcCtx.RetainImplicitConstructorCalls && !(d.HasDeferredIrreducibleControlFlow() && jdecenv.Get("JDEC_CTOR_POST_SUPER_DISPATCH_OFF") == "") {
+					} else if len(funcCallValue.Arguments) == 0 && !funcCtx.IsOwnClassOwner(funcCallValue.ClassName) && !funcCtx.RetainImplicitConstructorCalls && !(d.HasDeferredIrreducibleControlFlow() && jdecenv.Get("JDEC_CTOR_POST_SUPER_DISPATCH_OFF") == "") {
 						// An implicit no-argument super call is inserted by javac.
 						// A this() delegation is not: it executes another constructor
 						// and must retain that initialization and its effects.

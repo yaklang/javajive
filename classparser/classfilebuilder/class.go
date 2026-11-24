@@ -14,7 +14,9 @@ const (
 	// VersionJava7 supports invokedynamic, method handles/types, and StackMapTable.
 	VersionJava7 uint16 = 51
 	// VersionJava8 is required for static and default interface methods.
-	VersionJava8   uint16 = 52
+	VersionJava8 uint16 = 52
+	// VersionJava9 is required for private interface methods.
+	VersionJava9   uint16 = 53
 	highestVersion uint16 = 65
 )
 

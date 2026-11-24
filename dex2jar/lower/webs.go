@@ -21,8 +21,10 @@ type webPolyKey struct {
 
 func categoryMaskBit(kind ir.CategoryKind, alloc uint32, desc string) (narrowBit uint8, isWide bool) {
 	switch kind {
-	case ir.Int, ir.Bits32:
+	case ir.Int:
 		return ir.PolyZeroInt, false
+	case ir.Bits32:
+		return 0, false
 	case ir.Float:
 		return ir.PolyZeroFloat, false
 	case ir.Reference, ir.Uninitialized:
@@ -970,7 +972,7 @@ func (l *methodLowerer) assignWebs() bool {
 		}
 		for _, idx := range block.Instructions {
 			insn := &l.method.Instructions[idx]
-			if insn.Opcode < 0x12 || insn.Opcode > 0x15 || insn.Literal != 0 || len(insn.Regs) == 0 {
+			if insn.Opcode < 0x12 || insn.Opcode > 0x15 || len(insn.Regs) == 0 {
 				continue
 			}
 			r := insn.Regs[0]
@@ -978,7 +980,9 @@ func (l *methodLowerer) assignWebs() bool {
 				continue
 			}
 			defCat := l.definitionCategoryAt(idx, r)
-			if defCat.Kind != ir.Null || defCat.Allocation != 0 {
+			isUntypedZero := insn.Literal == 0 && defCat.Kind == ir.Null && defCat.Allocation == 0
+			isBits32 := defCat.Kind == ir.Bits32
+			if !isUntypedZero && !isBits32 {
 				continue
 			}
 			var k ir.CategoryKind
@@ -988,6 +992,9 @@ func (l *methodLowerer) assignWebs() bool {
 				}
 			} else {
 				k = l.pinnedZeroKind[r]
+			}
+			if isBits32 && k != ir.Int && k != ir.Float {
+				continue
 			}
 			if k != ir.Unknown {
 				if l.webZeroKind == nil {

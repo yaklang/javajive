@@ -50,8 +50,8 @@ func (l *methodLowerer) validateInvokes() error {
 		}
 		switch instruction.Opcode {
 		case 0x6f, 0x75:
-			if !l.isSuperclass(callee.Class) {
-				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("invoke-super target %q is not a superclass of %q", callee.Class, l.class.Descriptor))
+			if _, _, ok := resolveInvokeSuperTarget(l.class, callee.Class, l.classIndex()); !ok {
+				return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("invoke-super target %q is not a superclass or superinterface of %q", callee.Class, l.class.Descriptor))
 			}
 		case 0x70, 0x76:
 			if callee.Class != l.class.Descriptor {
@@ -537,34 +537,95 @@ func (l *methodLowerer) validateFusedConstructor(instruction *ir.Instruction, al
 	return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("constructor receiver v%d is not an alias of its fused new-instance allocation", instruction.Regs[0]))
 }
 
-// isSuperclass reports whether target is an ancestor of the current class.
-// Invoke-super may name an inherited method declared further up the chain than
-// the direct superclass. A type declared outside the application counts as an
-// ancestor: its hierarchy is not in the DEX, and the input was verified against
-// the platform classpath. An application target must be reached through the
-// declared superclass chain, because a platform ancestor cannot extend an
-// application class.
-func (l *methodLowerer) isSuperclass(target string) bool {
-	if target == l.class.Superclass {
-		return true
+// implementsInterfaceTransitively reports whether startDesc equals targetDesc
+// or inherits targetDesc through declared superinterfaces or superclasses in
+// index. targetDesc may be an external platform interface absent from index.
+func implementsInterfaceTransitively(startDesc, targetDesc string, index map[string]*model.Class) bool {
+	if startDesc == "" || targetDesc == "" || targetDesc == "Ljava/lang/Object;" {
+		return false
 	}
-	index := l.classIndex()
-	if _, ok := index[target]; !ok {
-		return true
-	}
-	visited := map[string]bool{}
-	for current := l.class.Superclass; current != "" && !visited[current]; {
-		visited[current] = true
-		if current == target {
+	queue := []string{startDesc}
+	visited := map[string]bool{startDesc: true}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur == targetDesc {
 			return true
 		}
-		class, ok := index[current]
-		if !ok {
-			return false
+		cls, ok := index[cur]
+		if !ok || cls == nil {
+			continue
 		}
-		current = class.Superclass
+		for _, iface := range cls.Interfaces {
+			if iface != "" && !visited[iface] {
+				visited[iface] = true
+				queue = append(queue, iface)
+			}
+		}
+		if cls.Superclass != "" && cls.Superclass != "Ljava/lang/Object;" && !visited[cls.Superclass] {
+			visited[cls.Superclass] = true
+			queue = append(queue, cls.Superclass)
+		}
 	}
 	return false
+}
+
+// resolveInvokeSuperTarget resolves a DEX invoke-super target descriptor to the
+// legal JVM INVOKESPECIAL owner descriptor and constant-pool kind. Under
+// JVMS 4.9.2 / 6.5, invoke-super targeting an indirect superinterface must be
+// retargeted to either the direct superclass (Classref) or a direct
+// superinterface (InterfaceMethodref, Java 8+), while Kotlin -Xjvm-default=all
+// static bridges on an interface may target the interface itself.
+func resolveInvokeSuperTarget(class *model.Class, calleeClass string, index map[string]*model.Class) (targetDesc string, isInterface bool, ok bool) {
+	if class == nil || calleeClass == "" {
+		return "", false, false
+	}
+	// Rule 0: Kotlin -Xjvm-default=all static bridges ($jd) invoke methods on the current interface itself.
+	if class.AccessFlags&dexInterface != 0 && calleeClass == class.Descriptor {
+		return calleeClass, true, true
+	}
+	// Rule 1: Direct or transitive superclass chain in index.
+	if class.AccessFlags&dexInterface == 0 {
+		if calleeClass == class.Superclass {
+			return calleeClass, false, true
+		}
+		visited := map[string]bool{}
+		for current := class.Superclass; current != "" && !visited[current]; {
+			visited[current] = true
+			if current == calleeClass {
+				return calleeClass, false, true
+			}
+			parent, inIndex := index[current]
+			if !inIndex || parent == nil {
+				break
+			}
+			current = parent.Superclass
+		}
+	}
+	// Rule 2: Direct superinterface.
+	for _, iface := range class.Interfaces {
+		if iface == calleeClass {
+			return calleeClass, true, true
+		}
+	}
+	// Rule 3: Indirect superinterface via direct superclass or direct superinterface.
+	if class.AccessFlags&dexInterface == 0 && class.Superclass != "" && class.Superclass != "Ljava/lang/Object;" {
+		if implementsInterfaceTransitively(class.Superclass, calleeClass, index) {
+			return class.Superclass, false, true
+		}
+	}
+	for _, iface := range class.Interfaces {
+		if implementsInterfaceTransitively(iface, calleeClass, index) {
+			return iface, true, true
+		}
+	}
+	// Rule 4: Type declared outside the application hierarchy (platform classpath):
+	// its hierarchy is not in the DEX, and verified DEX inputs guarantee it is an
+	// ancestor when not already resolved through an application type above.
+	if _, inIndex := index[calleeClass]; !inIndex {
+		return calleeClass, false, true
+	}
+	return "", false, false
 }
 
 // blockOfInstruction returns the index of the block containing an instruction.

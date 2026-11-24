@@ -412,7 +412,8 @@ func matchEnumArrayPacket(
 	}
 	sawArray := false
 	filled := make([]bool, len(constants))
-	for _, idx := range seq {
+	for i := 0; i < len(seq); i++ {
+		idx := seq[i]
 		ins := &insns[idx]
 		op := ins.Opcode
 		switch {
@@ -447,6 +448,27 @@ func matchEnumArrayPacket(
 			sawArray = true
 			clearReg(ins.Regs[0])
 			arrRegs[ins.Regs[0]] = true
+		case op == 0x24 || op == 0x25:
+			if sawArray || i+1 >= len(seq) || int(ins.Index) >= len(file.Types) || file.Types[ins.Index].Descriptor != arrDesc {
+				return nil, false
+			}
+			next := &insns[seq[i+1]]
+			if next.Opcode != 0x0c || len(ins.Regs) != len(constants) {
+				return nil, false
+			}
+			for elemIdx, reg := range ins.Regs {
+				cName, hasConst := constInReg[reg]
+				if !hasConst || cName != constants[elemIdx] {
+					return nil, false
+				}
+			}
+			sawArray = true
+			for k := range filled {
+				filled[k] = true
+			}
+			clearReg(next.Regs[0])
+			arrRegs[next.Regs[0]] = true
+			i++
 		case op == 0x62:
 			if int(ins.Index) >= len(file.Fields) {
 				return nil, false
@@ -1005,6 +1027,11 @@ func resolvePureConstArg(paramDesc string, val pureConstVal) (canonicalConstArg,
 	}
 }
 
+type hoistedConstVal struct {
+	val     pureConstVal
+	sources []int
+}
+
 func (l *methodLowerer) detectCanonicalEnumClinitConstSpans() {
 	if !isCanonicalEnumClass(l.class) || l.encoded.Method.Name != "<clinit>" {
 		return
@@ -1024,22 +1051,97 @@ func (l *methodLowerer) detectCanonicalEnumClinitConstSpans() {
 		if !blk.Reachable {
 			continue
 		}
+		blockVals := make(map[uint16]hoistedConstVal)
+		consumedHoistedPos := make(map[int]bool)
+
+		updateBlockVals := func(pos, idx int) {
+			if l.fusedNoLocals[idx] {
+				_, defs := l.method.EffectsAt(idx)
+				for _, r := range defs {
+					delete(blockVals, r)
+				}
+				return
+			}
+			ins := &l.method.Instructions[idx]
+			op := ins.Opcode
+			switch {
+			case op == 0x00:
+			case op >= 0x12 && op <= 0x15:
+				blockVals[ins.Regs[0]] = hoistedConstVal{
+					val:     pureConstVal{kind: pure32Bits, bits: ins.Literal},
+					sources: []int{pos},
+				}
+			case op >= 0x16 && op <= 0x19:
+				blockVals[ins.Regs[0]] = hoistedConstVal{
+					val:     pureConstVal{kind: pure64Bits, bits: ins.Literal},
+					sources: []int{pos},
+				}
+				delete(blockVals, ins.Regs[0]+1)
+			case (op == 0x1a || op == 0x1b) && int(ins.Index) < len(l.file.Strings):
+				blockVals[ins.Regs[0]] = hoistedConstVal{
+					val:     pureConstVal{kind: pureString, text: l.file.Strings[ins.Index]},
+					sources: []int{pos},
+				}
+			case op == 0x1c && int(ins.Index) < len(l.file.Types):
+				blockVals[ins.Regs[0]] = hoistedConstVal{
+					val:     pureConstVal{kind: pureClass, text: l.file.Types[ins.Index].Descriptor},
+					sources: []int{pos},
+				}
+			case (op >= 0x01 && op <= 0x03) || (op >= 0x07 && op <= 0x09):
+				dst, src := ins.Regs[0], ins.Regs[1]
+				if hv, ok := blockVals[src]; ok {
+					srcs := make([]int, len(hv.sources)+1)
+					copy(srcs, hv.sources)
+					srcs[len(hv.sources)] = pos
+					blockVals[dst] = hoistedConstVal{val: hv.val, sources: srcs}
+				} else {
+					delete(blockVals, dst)
+				}
+			case op >= 0x04 && op <= 0x06:
+				dst, src := ins.Regs[0], ins.Regs[1]
+				if hv, ok := blockVals[src]; ok && hv.val.kind == pure64Bits {
+					srcs := make([]int, len(hv.sources)+1)
+					copy(srcs, hv.sources)
+					srcs[len(hv.sources)] = pos
+					blockVals[dst] = hoistedConstVal{val: hv.val, sources: srcs}
+					delete(blockVals, dst+1)
+				} else {
+					delete(blockVals, dst)
+					delete(blockVals, dst+1)
+				}
+			default:
+				_, defs := l.method.EffectsAt(idx)
+				for _, r := range defs {
+					delete(blockVals, r)
+				}
+			}
+		}
+
 		for pos := 0; pos < len(blk.Instructions); pos++ {
 			startIdx := blk.Instructions[pos]
 			if l.fusedNoLocals[startIdx] || (pos == 0 && len(blk.Predecessors) > 0) {
+				updateBlockVals(pos, startIdx)
 				continue
 			}
 			startInsn := &l.method.Instructions[startIdx]
 			if startInsn.Opcode != 0x22 || int(startInsn.Index) >= len(l.file.Types) {
+				updateBlockVals(pos, startIdx)
 				continue
 			}
 			allocDesc := l.file.Types[startInsn.Index].Descriptor
 			if !l.isEnumSelfOrSubclass(allocDesc) {
+				updateBlockVals(pos, startIdx)
 				continue
 			}
 			allocReg := startInsn.Regs[0]
-			vals := make(map[uint16]pureConstVal)
+			vals := make(map[uint16]hoistedConstVal, len(blockVals))
+			for r, hv := range blockVals {
+				if r != allocReg {
+					vals[r] = hv
+				}
+			}
 
+			committed := false
 			for k := pos + 1; k < len(blk.Instructions); k++ {
 				idx := blk.Instructions[k]
 				if l.fusedNoLocals[idx] {
@@ -1054,30 +1156,30 @@ func (l *methodLowerer) detectCanonicalEnumClinitConstSpans() {
 					if ins.Regs[0] == allocReg {
 						goto nextStart
 					}
-					vals[ins.Regs[0]] = pureConstVal{kind: pure32Bits, bits: ins.Literal}
+					vals[ins.Regs[0]] = hoistedConstVal{val: pureConstVal{kind: pure32Bits, bits: ins.Literal}}
 				case op >= 0x16 && op <= 0x19:
 					if ins.Regs[0] == allocReg || ins.Regs[0]+1 == allocReg {
 						goto nextStart
 					}
-					vals[ins.Regs[0]] = pureConstVal{kind: pure64Bits, bits: ins.Literal}
+					vals[ins.Regs[0]] = hoistedConstVal{val: pureConstVal{kind: pure64Bits, bits: ins.Literal}}
 					delete(vals, ins.Regs[0]+1)
 				case op == 0x1a || op == 0x1b:
 					if ins.Regs[0] == allocReg || int(ins.Index) >= len(l.file.Strings) {
 						goto nextStart
 					}
-					vals[ins.Regs[0]] = pureConstVal{kind: pureString, text: l.file.Strings[ins.Index]}
+					vals[ins.Regs[0]] = hoistedConstVal{val: pureConstVal{kind: pureString, text: l.file.Strings[ins.Index]}}
 				case op == 0x1c:
 					if ins.Regs[0] == allocReg || int(ins.Index) >= len(l.file.Types) {
 						goto nextStart
 					}
-					vals[ins.Regs[0]] = pureConstVal{kind: pureClass, text: l.file.Types[ins.Index].Descriptor}
+					vals[ins.Regs[0]] = hoistedConstVal{val: pureConstVal{kind: pureClass, text: l.file.Types[ins.Index].Descriptor}}
 				case (op >= 0x01 && op <= 0x03) || (op >= 0x07 && op <= 0x09):
 					dst, src := ins.Regs[0], ins.Regs[1]
 					if dst == allocReg || src == allocReg {
 						goto nextStart
 					}
-					if v, ok := vals[src]; ok {
-						vals[dst] = v
+					if hv, ok := vals[src]; ok {
+						vals[dst] = hv
 					} else {
 						delete(vals, dst)
 					}
@@ -1086,8 +1188,8 @@ func (l *methodLowerer) detectCanonicalEnumClinitConstSpans() {
 					if dst == allocReg || dst+1 == allocReg || src == allocReg || src+1 == allocReg {
 						goto nextStart
 					}
-					if v, ok := vals[src]; ok && v.kind == pure64Bits {
-						vals[dst] = v
+					if hv, ok := vals[src]; ok && hv.val.kind == pure64Bits {
+						vals[dst] = hv
 						delete(vals, dst+1)
 					} else {
 						delete(vals, dst)
@@ -1104,6 +1206,7 @@ func (l *methodLowerer) detectCanonicalEnumClinitConstSpans() {
 					}
 					regPos := 1
 					args := make([]canonicalConstArg, 0, len(calleeProto.Parameters))
+					var spanHoisted []int
 					validArgs := true
 					for _, pDesc := range calleeProto.Parameters {
 						words := descriptorWords(pDesc)
@@ -1111,17 +1214,18 @@ func (l *methodLowerer) detectCanonicalEnumClinitConstSpans() {
 							validArgs = false
 							break
 						}
-						v, ok := vals[ins.Regs[regPos]]
+						hv, ok := vals[ins.Regs[regPos]]
 						if !ok {
 							validArgs = false
 							break
 						}
-						arg, ok := resolvePureConstArg(pDesc, v)
+						arg, ok := resolvePureConstArg(pDesc, hv.val)
 						if !ok {
 							validArgs = false
 							break
 						}
 						args = append(args, arg)
+						spanHoisted = append(spanHoisted, hv.sources...)
 						regPos += words
 					}
 					if !validArgs || regPos != len(ins.Regs) {
@@ -1190,6 +1294,13 @@ func (l *methodLowerer) detectCanonicalEnumClinitConstSpans() {
 						if p > pos {
 							l.canonicalClinitConstSkip[pIdx] = true
 						}
+						_, defs := l.method.EffectsAt(pIdx)
+						for _, r := range defs {
+							delete(blockVals, r)
+						}
+					}
+					for _, hp := range spanHoisted {
+						consumedHoistedPos[hp] = true
 					}
 					l.canonicalClinitConsts[startIdx] = &canonicalEnumConstSpan{
 						startIdx:  startIdx,
@@ -1199,12 +1310,51 @@ func (l *methodLowerer) detectCanonicalEnumClinitConstSpans() {
 						fieldName: fieldName,
 					}
 					pos = endPos
+					committed = true
 					goto nextStart
 				default:
 					goto nextStart
 				}
 			}
 		nextStart:
+			if !committed {
+				updateBlockVals(pos, startIdx)
+			}
+		}
+
+		if len(consumedHoistedPos) > 0 {
+			hPositions := make([]int, 0, len(consumedHoistedPos))
+			for hp := range consumedHoistedPos {
+				hPositions = append(hPositions, hp)
+			}
+			sort.Slice(hPositions, func(i, j int) bool { return hPositions[i] > hPositions[j] })
+			for _, hp := range hPositions {
+				hIdx := blk.Instructions[hp]
+				if l.fusedNoLocals[hIdx] {
+					continue
+				}
+				hInsn := &l.method.Instructions[hIdx]
+				overlapsTry := false
+				for _, t := range l.method.Code.Tries {
+					tStart := t.StartAddress
+					tEnd := t.StartAddress + uint32(t.InstructionCount)
+					if tStart < hInsn.End() && tEnd > hInsn.Offset {
+						overlapsTry = true
+						break
+					}
+				}
+				if overlapsTry || !l.clinitFusedSpanRegsDeadAfter(bIdx, hp, hp) {
+					continue
+				}
+				if l.fusedNoLocals == nil {
+					l.fusedNoLocals = make(map[int]bool)
+				}
+				if l.canonicalClinitConstSkip == nil {
+					l.canonicalClinitConstSkip = make(map[int]bool)
+				}
+				l.fusedNoLocals[hIdx] = true
+				l.canonicalClinitConstSkip[hIdx] = true
+			}
 		}
 	}
 }
