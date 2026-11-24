@@ -341,21 +341,33 @@ func analyzeCategories(method *Method, file *model.File, allocations []Allocatio
 		}
 	}
 	liveIn, liveOut := computeLiveness(method, usedBeforeDef, definedIn)
-	for handlerIndex := range method.Blocks {
-		if !method.Blocks[handlerIndex].Handler {
-			continue
-		}
-		for _, instructionIndex := range method.Blocks[handlerIndex].Protected {
-			blockIndex := blockOfInstruction[instructionIndex]
-			for register := range liveIn[handlerIndex] {
-				usedBeforeDef[blockIndex][register] = true
+	for pass := 0; pass <= len(method.Blocks)+1; pass++ {
+		changed := false
+		for handlerIndex := range method.Blocks {
+			if !method.Blocks[handlerIndex].Handler {
+				continue
 			}
-			for register := range usedBeforeDef[handlerIndex] {
-				usedBeforeDef[blockIndex][register] = true
+			for _, instructionIndex := range method.Blocks[handlerIndex].Protected {
+				blockIndex := blockOfInstruction[instructionIndex]
+				for register := range liveIn[handlerIndex] {
+					if !usedBeforeDef[blockIndex][register] {
+						usedBeforeDef[blockIndex][register] = true
+						changed = true
+					}
+				}
+				for register := range usedBeforeDef[handlerIndex] {
+					if !usedBeforeDef[blockIndex][register] {
+						usedBeforeDef[blockIndex][register] = true
+						changed = true
+					}
+				}
 			}
 		}
+		if !changed {
+			break
+		}
+		liveIn, liveOut = computeLiveness(method, usedBeforeDef, definedIn)
 	}
-	liveIn, liveOut = computeLiveness(method, usedBeforeDef, definedIn)
 	// propagate holds the registers whose category must be merged at the join:
 	// everything read before a local definition plus everything that stays live
 	// across the block without being redefined.

@@ -548,7 +548,7 @@ func (l *methodLowerer) isSuperclass(target string) bool {
 	if target == l.class.Superclass {
 		return true
 	}
-	index := classHierarchy(l.file)
+	index := l.classIndex()
 	if _, ok := index[target]; !ok {
 		return true
 	}

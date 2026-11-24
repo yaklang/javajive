@@ -331,11 +331,11 @@ func TestExternalUnsupportedDEXVersion040(t *testing.T) {
 		t.Fatalf("inspect 040 status = %q, want complete", report040.Status)
 	}
 
-	data[4], data[5], data[6], data[7] = '0', '4', '1', 0
-	if _, _, err := dex2jar.DexToJar(data, dex2jar.Options{}); err == nil || !strings.Contains(err.Error(), `unsupported DEX version "041"`) {
+	data[4], data[5], data[6], data[7] = '0', '4', '2', 0
+	if _, _, err := dex2jar.DexToJar(data, dex2jar.Options{}); err == nil || !strings.Contains(err.Error(), `unsupported DEX version "042"`) {
 		t.Fatalf("DexToJar error = %v", err)
 	}
-	report := inspect.AnalyzeWithOptions(data, "version-041.dex", inspect.Options{Disassembly: false})
+	report := inspect.AnalyzeWithOptions(data, "version-042.dex", inspect.Options{Disassembly: false})
 	if report.Status != inspect.StatusPartial {
 		t.Fatalf("inspect status = %q, want partial", report.Status)
 	}

@@ -623,3 +623,30 @@ func TestBuildRejectsIncompleteInput(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildNestedTryCatchPropagatesHandlerLivenessFixpoint(t *testing.T) {
+	hInner := uint32(5)
+	hOuter := uint32(7)
+	in := fixture([]uint16{
+		0x011a, 0x0000, // 0..1: const-string v1, "hello"
+		0x0128,         // 2: goto +1 -> 3
+		0x0012,         // 3: const/4 v0, #0 (inner try start)
+		0x0027,         // 4: throw v0
+		0x000d,         // 5: move-exception v0 (H_inner, also inside outer try)
+		0x0027,         // 6: throw v0
+		0x000d,         // 7: move-exception v0 (H_outer)
+		0x0111,         // 8: return-object v1
+	}, 2, 0, model.Proto{ReturnType: "Ljava/lang/String;"}, dexAccessStatic)
+	in.Method.Code.Tries = []model.Try{
+		{StartAddress: 3, InstructionCount: 2, Handler: model.CatchHandler{CatchAllAddress: &hInner}},
+		{StartAddress: 5, InstructionCount: 2, Handler: model.CatchHandler{CatchAllAddress: &hOuter}},
+	}
+	method, err := Build(in)
+	if err != nil {
+		t.Fatalf("Build() failed across nested try/catch handler chain: %v", err)
+	}
+	returnIdx := len(method.Instructions) - 1
+	if method.CategoryAt(returnIdx, 1).Kind != Reference {
+		t.Fatalf("v1 category at return-object = %v, want Reference", method.CategoryAt(returnIdx, 1))
+	}
+}

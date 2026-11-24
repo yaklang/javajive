@@ -163,7 +163,7 @@ func TestParseDEXRejectsUnsupportedFirstSliceData(t *testing.T) {
 			},
 			offset:  4,
 			op:      "header",
-			message: `unsupported DEX version "036"; supported versions are 035, 037, 038, 039, and 040`,
+			message: `unsupported DEX version "036"; supported versions are 035, 037, 038, 039, 040, and 041`,
 		},
 		{
 			name: "version 039 without map evidence",
@@ -181,7 +181,7 @@ func TestParseDEXRejectsUnsupportedFirstSliceData(t *testing.T) {
 			},
 			offset:  4,
 			op:      "header",
-			message: `unsupported DEX version "034"; supported versions are 035, 037, 038, 039, and 040`,
+			message: `unsupported DEX version "034"; supported versions are 035, 037, 038, 039, 040, and 041`,
 		},
 	}
 	for _, test := range tests {
@@ -632,5 +632,133 @@ func TestParseDEXRejectsOversizedInput(t *testing.T) {
 	var diagnostic *report.Diagnostic
 	if !errors.As(err, &diagnostic) || !strings.Contains(err.Error(), "exceeds limit") {
 		t.Fatalf("diagnostic = %#v, err = %v", diagnostic, err)
+	}
+}
+
+func buildDEX041Single(descriptor string) []byte {
+	stringsTable := []string{descriptor, "Ljava/lang/Object;"}
+	const (
+		headerSizeV041 = 0x78
+		stringIDsOff   = headerSizeV041
+		typeIDsOff     = stringIDsOff + 8
+		classDefsOff   = typeIDsOff + 8
+		strStart       = classDefsOff + 32
+	)
+	data := make([]byte, strStart)
+	strOffs := make([]uint32, len(stringsTable))
+	for i, s := range stringsTable {
+		strOffs[i] = uint32(len(data))
+		data = append(data, byte(len(s)))
+		data = append(data, s...)
+		data = append(data, 0)
+	}
+	for len(data)%4 != 0 {
+		data = append(data, 0)
+	}
+	mapOff := len(data)
+	data = append(data, make([]byte, 4+5*12)...)
+	items := []struct {
+		t uint16
+		n uint32
+		o uint32
+	}{
+		{0x0000, 1, 0},
+		{0x0001, 2, stringIDsOff},
+		{0x0002, 2, typeIDsOff},
+		{0x0006, 1, classDefsOff},
+		{0x1000, 1, uint32(mapOff)},
+	}
+	putU32(data, mapOff, uint32(len(items)))
+	for i, it := range items {
+		p := mapOff + 4 + i*12
+		binary.LittleEndian.PutUint16(data[p:p+2], it.t)
+		putU32(data, p+4, it.n)
+		putU32(data, p+8, it.o)
+	}
+	total := uint32(len(data))
+	copy(data[:8], "dex\n041\x00")
+	putU32(data, 32, total)
+	putU32(data, 36, headerSizeV041)
+	putU32(data, 40, 0x12345678)
+	putU32(data, 52, uint32(mapOff))
+	putU32(data, 56, 2)
+	putU32(data, 60, stringIDsOff)
+	putU32(data, 64, 2)
+	putU32(data, 68, typeIDsOff)
+	putU32(data, 96, 1)
+	putU32(data, 100, classDefsOff)
+	putU32(data, 112, total)
+	putU32(data, 116, 0)
+	for i, off := range strOffs {
+		putU32(data, stringIDsOff+i*4, off)
+		putU32(data, typeIDsOff+i*4, uint32(i))
+	}
+	putU32(data, classDefsOff, 0)
+	putU32(data, classDefsOff+4, 1)
+	putU32(data, classDefsOff+8, 1)
+	putU32(data, classDefsOff+16, ^uint32(0))
+	refreshDEXIntegrity(data)
+	return data
+}
+
+func buildDEX041TwoSection(desc0, desc1 string) []byte {
+	const headerSizeV041 = 0x78
+	s0 := buildDEX041Single(desc0)
+	s1 := buildDEX041Single(desc1)
+	sec0Len := uint32(len(s0))
+	total := sec0Len + uint32(len(s1))
+	out := make([]byte, total)
+	copy(out[:sec0Len], s0)
+	copy(out[sec0Len:], s1)
+	putU32(out, 112, total)
+	b := int(sec0Len)
+	putU32(out, b+112, total)
+	putU32(out, b+116, sec0Len)
+	for _, hdrField := range []int{52, 60, 68, 100} {
+		orig := binary.LittleEndian.Uint32(out[b+hdrField : b+hdrField+4])
+		putU32(out, b+hdrField, orig+sec0Len)
+	}
+	for _, slot := range []int{0, 4} {
+		orig := binary.LittleEndian.Uint32(out[b+headerSizeV041+slot : b+headerSizeV041+slot+4])
+		putU32(out, b+headerSizeV041+slot, orig+sec0Len)
+	}
+	mapOff := int(binary.LittleEndian.Uint32(out[b+52 : b+56]))
+	count := int(binary.LittleEndian.Uint32(out[mapOff : mapOff+4]))
+	for i := 0; i < count; i++ {
+		offPos := mapOff + 4 + i*12 + 8
+		orig := binary.LittleEndian.Uint32(out[offPos : offPos+4])
+		putU32(out, offPos, orig+sec0Len)
+	}
+	sig0 := sha1.Sum(out[32:sec0Len])
+	copy(out[12:32], sig0[:])
+	putU32(out, 8, adler32.Checksum(out[12:sec0Len]))
+	sig1 := sha1.Sum(out[b+32:])
+	copy(out[b+12:b+32], sig1[:])
+	putU32(out, b+8, adler32.Checksum(out[b+12:]))
+	return out
+}
+
+func TestParseDEXContainerBoundsAndSections(t *testing.T) {
+	if _, err := ParseDEXContainerWithOptions(make([]byte, 64), "large.dex", Options{MaxDEXSize: 8}); err == nil || !strings.Contains(err.Error(), "exceeds limit") {
+		t.Fatalf("ParseDEXContainerWithOptions oversized error = %v", err)
+	}
+	container := buildDEX041TwoSection("Lexample/C0;", "Lexample/C1;")
+	files, err := ParseDEXContainer(container, "classes.dex")
+	if err != nil {
+		t.Fatalf("ParseDEXContainer: %v", err)
+	}
+	if len(files) != 2 || files[0].Entry != "classes.dex" || files[1].Entry != "classes.dex#1" {
+		t.Fatalf("unexpected container files = %#v", files)
+	}
+	sources := []DEXSource{{Entry: "classes.dex", Data: container}}
+	if _, err := parseDEXSources(sources, Options{MaxDEXFiles: 1}, true); err == nil || !strings.Contains(err.Error(), "exceeds limit") {
+		t.Fatalf("parseDEXSources maxDEXFiles across sections error = %v", err)
+	}
+	dupContainer := buildDEX041TwoSection("Lexample/Dup;", "Lexample/Dup;")
+	if _, _, err := ParseApplicationWithOptions(dupContainer, "classes.dex", Options{}); err != nil {
+		t.Fatalf("ParseApplicationWithOptions identical class across non-strict container: %v", err)
+	}
+	if _, _, err := ParseApplicationWithOptions(buildAPK(t, []zipEntry{{name: "classes.dex", data: dupContainer}}), "dup.apk", Options{}); err == nil || !strings.Contains(err.Error(), "already defined") {
+		t.Fatalf("strict APK duplicate across container sections error = %v", err)
 	}
 }

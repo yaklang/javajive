@@ -53,6 +53,23 @@ type JarFS struct {
 	archive              *archiveFSState
 	declarationResolver  func(string) ([]byte, bool)
 	retainUnprovedSource bool
+	envSnapshot          map[string]string
+}
+
+// SetEnvSnapshot binds a read-only process environment snapshot for archive
+// decompilation so workers do not re-enter os.Getenv per class/expression.
+func (z *JarFS) SetEnvSnapshot(snap map[string]string) {
+	if z != nil {
+		z.envSnapshot = snap
+	}
+}
+
+// EnvSnapshot returns the environment snapshot configured on this JarFS.
+func (z *JarFS) EnvSnapshot() map[string]string {
+	if z == nil {
+		return nil
+	}
+	return z.envSnapshot
 }
 
 // SetRetainUnprovedSource keeps original members when a javac source certificate
@@ -196,7 +213,11 @@ func NewJarFSWithOptions(zipFs *filesys.ZipFS, recursiveParse bool) *JarFS {
 // fall back to the exact per-class behavior.
 func (z *JarFS) decompileClassOutcome(name string, data []byte) (outcome ClassDecompileOutcome, err error) {
 	if _, bound := jdecenv.Current(); !bound {
-		err = jdecenv.Run(jdecenv.CaptureProcess(), func() error {
+		snap := z.envSnapshot
+		if snap == nil {
+			snap = jdecenv.CaptureProcess()
+		}
+		err = jdecenv.Run(snap, func() error {
 			var inner error
 			outcome, inner = z.decompileClassOutcome(name, data)
 			return inner
@@ -275,6 +296,9 @@ func (z *JarFS) decompileClassOutcomeBound(name string, data []byte, work **work
 	d.options.sourceConstructorLowering = z.sourceConstructorLowering
 	d.options.sourceLambdaMetadata = z.sourceLambdaMetadata
 	d.options.RetainUnprovedSource = z.retainUnprovedSource
+	if z.envSnapshot != nil {
+		d.options.EnvSnapshot = z.envSnapshot
+	}
 	if path.Clean(name) == cf.GetClassName()+".class" {
 		d.nativeMemberLookup = z.nativeMemberLookup
 	}
@@ -653,6 +677,7 @@ func (z *JarFS) getNestedJarFS(jarPath string) (*filesys.UnifiedFS, error) {
 	nestedJarFS.maxAnalysisUpdates = z.maxAnalysisUpdates
 	nestedJarFS.sourceCompiler = z.sourceCompiler
 	nestedJarFS.retainUnprovedSource = z.retainUnprovedSource
+	nestedJarFS.envSnapshot = z.envSnapshot
 	nestedJarFS.declarationResolver = z.declarationResolver
 	if z.archive != nil && z.archive.active {
 		nestedJarFS.archive = z.archive.nestedState()
@@ -753,6 +778,7 @@ type ExpandedZipFS struct {
 	zipFS                *filesys.ZipFS // optional container (zip root); nil for local directories
 	recursiveParse       bool
 	retainUnprovedSource bool
+	envSnapshot          map[string]string
 	maxAnalysisUpdates   int
 	jarCache             *utils.SafeMapWithKey[string, *filesys.UnifiedFS]
 	zipCache             *utils.SafeMapWithKey[string, *filesys.ZipFS]
@@ -823,6 +849,7 @@ func (e *ExpandedZipFS) GetJarFS(jarPath string) (*filesys.UnifiedFS, error) {
 
 	jarFS := NewJarFSWithOptions(zipFS, e.recursiveParse)
 	jarFS.retainUnprovedSource = e.retainUnprovedSource
+	jarFS.envSnapshot = e.envSnapshot
 	jarFS.maxAnalysisUpdates = e.maxAnalysisUpdates
 	jarFS.declarationResolver = e.archiveDeclarationResolver(jarPath)
 	if e.archive != nil && e.archive.active {
@@ -997,6 +1024,9 @@ func (e *ExpandedZipFS) ReadFile(name string) ([]byte, error) {
 	}
 	d := NewClassObjectDumper(cf)
 	d.options.RetainUnprovedSource = e.retainUnprovedSource
+	if e.envSnapshot != nil {
+		d.options.EnvSnapshot = e.envSnapshot
+	}
 	d.options.MaxAnalysisUpdates = e.maxAnalysisUpdates
 	d.Work = largeMethodWorkBudget(e.maxAnalysisUpdates)
 	logical := cf.GetClassName() + ".class"

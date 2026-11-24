@@ -82,11 +82,11 @@ func TestParseDEX040SyntheticMethodHandleCallSiteAndVersion041Rejection(t *testi
 		t.Fatalf("DEX 040 parsed = %#v", parsed040.Header.Version)
 	}
 
-	v041 := append([]byte(nil), raw...)
-	copy(v041[4:8], "041\x00")
-	resign(v041)
-	if _, err := Parse(v041, "classes.dex"); err == nil || !strings.Contains(err.Error(), `unsupported DEX version "041"`) {
-		t.Fatalf("Parse(DEX 041) error = %v, want unsupported DEX version 041", err)
+	v042 := append([]byte(nil), raw...)
+	copy(v042[4:8], "042\x00")
+	resign(v042)
+	if _, err := Parse(v042, "classes.dex"); err == nil || !strings.Contains(err.Error(), `unsupported DEX version "042"`) {
+		t.Fatalf("Parse(DEX 042) error = %v, want unsupported DEX version 042", err)
 	}
 
 	// Mutate first method_handle_item handle_type to invalid 0x0009.

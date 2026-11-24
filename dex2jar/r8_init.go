@@ -102,7 +102,7 @@ func r8PatchMethod(
 		op := insns[i].Opcode
 		if (op == 0x70 || op == 0x76) && int(insns[i].Index) < len(f.Methods) {
 			callee := f.Methods[insns[i].Index]
-			if callee.Name == "<init>" && callee.Class != c.Descriptor {
+			if callee.Name == "<init>" {
 				hasCandidate = true
 				break
 			}
@@ -216,6 +216,7 @@ func findR8PatchSites(
 	numBlocks := len(blockStarts)
 	blockInsns := make([][]int, numBlocks)
 	succs := make([][]int, numBlocks)
+	excSuccs := make([][]int, numBlocks)
 	curBlock := -1
 	for i := range insns {
 		if b, ok := blockByOffset[insns[i].Offset]; ok {
@@ -246,6 +247,30 @@ func findR8PatchSites(
 		isUncond := (op >= 0x28 && op <= 0x2a) || (op >= 0x0e && op <= 0x11) || op == 0x27
 		if !isUncond && b+1 < numBlocks {
 			succs[b] = append(succs[b], b+1)
+		}
+		if len(m.Code.Tries) > 0 {
+			seenExc := make(map[int]bool)
+			for _, idx := range blockInsns[b] {
+				off := insns[idx].Offset
+				for ti := range m.Code.Tries {
+					tr := &m.Code.Tries[ti]
+					if off < tr.StartAddress || off >= tr.StartAddress+uint32(tr.InstructionCount) {
+						continue
+					}
+					for _, h := range tr.Handler.Handlers {
+						if hb, ok := blockByOffset[h.Address]; ok && !seenExc[hb] {
+							seenExc[hb] = true
+							excSuccs[b] = append(excSuccs[b], hb)
+						}
+					}
+					if tr.Handler.CatchAllAddress != nil {
+						if hb, ok := blockByOffset[*tr.Handler.CatchAllAddress]; ok && !seenExc[hb] {
+							seenExc[hb] = true
+							excSuccs[b] = append(excSuccs[b], hb)
+						}
+					}
+				}
+			}
 		}
 	}
 
@@ -344,6 +369,18 @@ func findR8PatchSites(
 			if changed && !inQueue[succ] {
 				inQueue[succ] = true
 				queue = append(queue, succ)
+			}
+		}
+		// Exception handlers start with no uninitialized local allocations from the
+		// try body because any protected instruction in the block may throw.
+		for _, exc := range excSuccs[b] {
+			if !visited[exc] || len(in[exc]) > 0 {
+				visited[exc] = true
+				in[exc] = make(regState)
+				if !inQueue[exc] {
+					inQueue[exc] = true
+					queue = append(queue, exc)
+				}
 			}
 		}
 	}
@@ -448,6 +485,8 @@ func platformClassAcceptsCtor(desc string, proto model.Proto) bool {
 		return sig == "(Ljava/lang/Object;)V" || sig == "(Ljava/lang/String;Ljava/lang/Throwable;)V"
 	case "Ljava/lang/LinkageError;":
 		return sig == "(Ljava/lang/String;)V" || sig == "(Ljava/lang/String;Ljava/lang/Throwable;)V"
+	case "Ljava/lang/Enum;":
+		return sig == "(Ljava/lang/String;I)V"
 	case "Ljava/lang/NullPointerException;",
 		"Ljava/lang/IndexOutOfBoundsException;",
 		"Ljava/lang/ClassCastException;",

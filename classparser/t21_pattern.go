@@ -1,6 +1,7 @@
 package javaclassparser
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"sync"
@@ -229,7 +230,7 @@ func reconstructPatternMethod(c *ClassObjectDumper, m *MemberInfo, name, desc st
 
 func methodHasTypeSwitch(obj *ClassObject, m *MemberInfo) bool {
 	code := methodCodeBytes(m)
-	if len(code) == 0 {
+	if len(code) == 0 || bytes.IndexByte(code, byte(core.OP_INVOKEDYNAMIC)) < 0 {
 		return false
 	}
 	d := core.NewDecompiler(code, func(id int) values.JavaValue {

@@ -2824,9 +2824,13 @@ func placeCrossScopeDeclarations(block *[]statements.Statement, reused map[*util
 			texts[i] = t
 			allMatch[i] = !ok
 		}
+		nameByID := make(map[*utils.VariableId]string, len(ids))
+		for _, id := range ids {
+			nameByID[id] = refByID[id].String(&class_context.ClassContext{})
+		}
 		sort.SliceStable(ids, func(i, j int) bool {
-			ni := refByID[ids[i]].String(&class_context.ClassContext{})
-			nj := refByID[ids[j]].String(&class_context.ClassContext{})
+			ni := nameByID[ids[i]]
+			nj := nameByID[ids[j]]
 			if ni != nj {
 				return ni < nj
 			}
@@ -2843,7 +2847,7 @@ func placeCrossScopeDeclarations(block *[]statements.Statement, reused map[*util
 		var hoisted []statements.Statement
 		for _, id := range ids {
 			ref := refByID[id]
-			name := ref.String(&class_context.ClassContext{})
+			name := nameByID[id]
 			if name == "" || !generatedLocalNameRe.MatchString(name) {
 				continue
 			}

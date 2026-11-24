@@ -1,6 +1,7 @@
 package jarwar
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/yaklang/javajive/classparser"
 	"github.com/yaklang/javajive/internal/filesys"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"github.com/yaklang/javajive/internal/log"
 	"github.com/yaklang/javajive/internal/utils"
 )
@@ -122,19 +124,37 @@ func (j *JarWar) DumpToLocalFileSystem(dir string) error {
 	}
 
 	workers := runtime.GOMAXPROCS(0)
-	if workers > 8 {
-		workers = 8
+	if workers > 16 {
+		workers = 16
 	}
 	if workers < 1 {
 		workers = 1
 	}
-	if len(tasks) <= 1 || workers == 1 {
-		for _, task := range tasks {
-			if err := j.executeDumpTask(dir, task); err != nil {
-				return fmt.Errorf("archive file system dump failed: %w", err)
-			}
+	snap, bound := jdecenv.Current()
+	liveEnv := bound && snap == nil
+	if !bound {
+		snap = jdecenv.CaptureProcess()
+	}
+	if !liveEnv && j.fs != nil {
+		prevSnap := j.fs.EnvSnapshot()
+		j.fs.SetEnvSnapshot(snap)
+		defer j.fs.SetEnvSnapshot(prevSnap)
+	}
+	runWithEnv := func(fn func() error) error {
+		if liveEnv {
+			return jdecenv.RunLive(fn)
 		}
-		return nil
+		return jdecenv.Run(snap, fn)
+	}
+	if len(tasks) <= 1 || workers == 1 {
+		return runWithEnv(func() error {
+			for _, task := range tasks {
+				if err := j.executeDumpTask(dir, task); err != nil {
+					return fmt.Errorf("archive file system dump failed: %w", err)
+				}
+			}
+			return nil
+		})
 	}
 	if workers > len(tasks) {
 		workers = len(tasks)
@@ -149,24 +169,26 @@ func (j *JarWar) DumpToLocalFileSystem(dir string) error {
 	for w := 0; w < workers; w++ {
 		go func() {
 			defer wg.Done()
-			for {
-				if failed.Load() {
-					return
-				}
-				idx := int(nextIdx.Add(1) - 1)
-				if idx >= len(tasks) {
-					return
-				}
-				if err := j.executeDumpTask(dir, tasks[idx]); err != nil {
-					errMu.Lock()
-					if firstErr == nil {
-						firstErr = err
+			_ = runWithEnv(func() error {
+				for {
+					if failed.Load() {
+						return nil
 					}
-					errMu.Unlock()
-					failed.Store(true)
-					return
+					idx := int(nextIdx.Add(1) - 1)
+					if idx >= len(tasks) {
+						return nil
+					}
+					if err := j.executeDumpTask(dir, tasks[idx]); err != nil {
+						errMu.Lock()
+						if firstErr == nil {
+							firstErr = err
+						}
+						errMu.Unlock()
+						failed.Store(true)
+						return nil
+					}
 				}
-			}
+			})
 		}()
 	}
 	wg.Wait()
@@ -265,15 +287,6 @@ func (j *JarWar) collectDumpTasks(root, directory string, tasks *[]dumpTask) err
 
 func (j *JarWar) executeDumpTask(root string, task dumpTask) error {
 	if task.isClass {
-		originalRaw, err := j.fs.ReadRawFile(task.entryPath)
-		if err != nil {
-			if j.bestEffort {
-				log.Warnf("read archive entry %q failed: %v", task.entryPath, err)
-				j.recordFailedFile(task.visiblePath)
-				return nil
-			}
-			return fmt.Errorf("read archive entry %q: %w", task.entryPath, err)
-		}
 		decompiled, err := j.fs.ReadFile(task.entryPath)
 		if err != nil {
 			j.recordFailedFile(task.visiblePath)
@@ -291,9 +304,13 @@ func (j *JarWar) executeDumpTask(root string, task dumpTask) error {
 			}
 			return fmt.Errorf("write archive entry %q: %w", task.entryPath, err)
 		}
-		lines := strings.Count(string(decompiled), "\n") + 1
+		var origSize int64
+		if info, statErr := j.fs.Stat(task.entryPath); statErr == nil {
+			origSize = info.Size()
+		}
+		lines := bytes.Count(decompiled, []byte{'\n'}) + 1
 		log.Infof("Decompiled [%v] - Original size: %d bytes, Decompiled size: %d bytes, Lines of code: %d",
-			task.visiblePath, len(originalRaw), len(decompiled), lines)
+			task.visiblePath, origSize, len(decompiled), lines)
 		return nil
 	}
 

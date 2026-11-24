@@ -56,10 +56,10 @@ var requiredSuites = []suite{
 	{Group: "algorithm", Package: "./internal/jdecenv", Tests: 13, TestHash: "51ee508a5994d7763fb87e1d2d9cf78a345237af650479b650dbf055625082ad"},
 	{Group: "algorithm", Package: "./internal/filesys", Tests: 9, TestHash: "f6485392fe079ab59aafa635aca0d9bbe00b7af50334a7c1362396d883d82e31"},
 
-	{Group: "dex", Package: "./dex2jar", Tests: 53, TestHash: "2a03f0535d09f2cd91335bc7525c51cf1ec16b61e25d7ce406c657f630216e88", Exclude: []string{"TestAcceptedCorpusJVMOracle", "TestCoverageBaselineContract", "TestStrictAcceptedDEXRoundtripGate"}},
-	{Group: "dex", Package: "./dex2jar/input", Tests: 25, TestHash: "6c3d9f03eab44176f1ad0e882252f2ef4f9593ef71f6d6cb71e61ef7c57cbe92"},
-	{Group: "dex", Package: "./dex2jar/ir", Tests: 43, TestHash: "1a8c256ed990bb96db287b1be2fa7f11786bbc5d30eadafd8db2376e3878a508"},
-	{Group: "dex", Package: "./dex2jar/lower", Tests: 69, TestHash: "5888019ab13bbc1b21370309b6061ae3c00652421c1fd6be5dbbe77cdc0b8378", Exclude: []string{
+	{Group: "dex", Package: "./dex2jar", Tests: 60, TestHash: "872cc1380e93ab380f5da85d8231abb28df10a248e1d39e15796967215c5e1e1", Exclude: []string{"TestAcceptedCorpusJVMOracle", "TestCoverageBaselineContract", "TestStrictAcceptedDEXRoundtripGate"}},
+	{Group: "dex", Package: "./dex2jar/input", Tests: 26, TestHash: "b974a1539b8c46470a6d35d2fda2cb0043e3ad9839891e5d9386932dd8fed700"},
+	{Group: "dex", Package: "./dex2jar/ir", Tests: 44, TestHash: "58bac4920bbeed0102deaf4ddb1db2f6d7fc99c0f4e7d74f1dc1a6d791e445ed"},
+	{Group: "dex", Package: "./dex2jar/lower", Tests: 72, TestHash: "e47dd65c8c01b4842bb2e425995075f94e507ed63b78315be50f7fc7ba4ac28f", Exclude: []string{
 		"TestClassParsesVerifiesAndExecutes", "TestIntArrayPathVerifiesAndExecutes", "TestUnsupportedStubsVerifyAndThrow", "TestThisDelegationVerifiesAndExecutes",
 		"TestLowerEmitsMetadataAttributes", "TestLowerFilledNewArrayAndNarrowArrayElements", "TestLowerEmitsAnnotationDefaultForReflection", "TestLowerEmitsClassMetadataAndArrayOwnerInvoke", "TestLowerMovesPreDelegationFieldStoreAfterSuper", "TestLowerInterleavedAllocationKeepsArgumentOrder", "TestLowerCapturesDeferredStoreValueBeforeReassignment",
 		"TestRecoverFailsClosedForUnsupportedStaticInitializer", "TestRecoverClassVerifiesWithoutInitialization", "TestRecoverChildFirstInterfaceShellsVerifyOnJVM",
@@ -67,7 +67,7 @@ var requiredSuites = []suite{
 	}},
 	{Group: "dex", Package: "./dex2jar/report", Tests: 7, TestHash: "6121738f00eca84495e4795ebdd9887db39a8ff30f761bd307bfb7bf0eed2081"},
 	{Group: "dex", Package: "./inspect", Tests: 14, TestHash: "cd4f7f82cabeb7f10478e2b345c28aa2352d1e08396d8ade41e1c581d267e263"},
-	{Group: "dex", Package: "./internal/dexparser", Tests: 9, TestHash: "9567235f4694850a14ba388d79bb5bf908773c23d114e048fdf1d2495af9747c"},
+	{Group: "dex", Package: "./internal/dexparser", Tests: 11, TestHash: "815065c8f3bb0f139701f0b7207771f543930d82528c0f69cd56750313ac85fe"},
 	{Group: "dex", Package: "./internal/inputkind", Tests: 6, TestHash: "b1aeb5061859deadc6a597d2b2feb84cd8ebeb199b08006adbfc86e63838a6fa"},
 	{Group: "dex", Package: "./internal/mutf8", Tests: 6, TestHash: "f176fe43927c9dff4e9f378419d80c0d889d67e93aa568f3250e7edc8dd3ad72"},
 	{Group: "dex", Package: "./internal/zipx", Tests: 3, TestHash: "773ae48e36e49359aa27baf6364ba5c4712e6586e7235db6d628c14e568714a7"},

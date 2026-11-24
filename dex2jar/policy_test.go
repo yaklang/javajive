@@ -104,9 +104,9 @@ func TestConversionPolicyRejectsUnknownPolicyAndMissingFile(t *testing.T) {
 
 func TestBestEffortRejectsUnsupportedDEXVersion(t *testing.T) {
 	data := make([]byte, 0x70)
-	copy(data, []byte("dex\n041\x00"))
+	copy(data, []byte("dex\n042\x00"))
 	jar, detailed, err := DexToJarWithOptions(data, ConvertOptions{Policy: FailureStubUnsupportedMethods})
-	if err == nil || !strings.Contains(err.Error(), `unsupported DEX version "041"`) {
+	if err == nil || !strings.Contains(err.Error(), `unsupported DEX version "042"`) {
 		t.Fatalf("DexToJarWithOptions error = %v", err)
 	}
 	if jar != nil || detailed.Status != "failed" {
@@ -129,14 +129,14 @@ func TestApplicationBestEffortDoesNotStubMalformedMethod(t *testing.T) {
 	}
 }
 
-func TestApplicationRecoverEmitsClassShellAndDiagnostics(t *testing.T) {
+func TestApplicationRecoverKeepsTranslatedMethodsAndDiagnostics(t *testing.T) {
 	app := policyFixture()
 	app.Files[0].Classes[0].DirectMethods[1].Code.Instructions = []uint16{0x00ff}
 	jar, detailed, err := applicationToJarWithPolicy(app, FailureRecover)
 	if err != nil {
 		t.Fatalf("recover conversion: %v", err)
 	}
-	if detailed.Status != "partial" || detailed.StubbedClasses != 1 || detailed.StubbedMethods != 2 || detailed.Summary.Warnings == 0 {
+	if detailed.Status != "partial" || detailed.StubbedClasses != 0 || detailed.StubbedMethods != 1 || detailed.Summary.TranslatedMethods != 1 || detailed.Summary.Warnings != 1 {
 		t.Fatalf("detailed = %#v", detailed)
 	}
 	reader, err := zip.NewReader(bytes.NewReader(jar), int64(len(jar)))
@@ -160,12 +160,48 @@ func TestApplicationRecoverEmitsClassShellAndDiagnostics(t *testing.T) {
 	if len(entries["example/Policy.class"]) == 0 || len(entries["META-INF/javajive/diagnostics.json"]) == 0 {
 		t.Fatalf("entries = %#v", entries)
 	}
-	if !bytes.Contains(entries["example/Policy.class"], []byte("JavaJiveRecovery")) || !bytes.Contains(entries["META-INF/javajive/diagnostics.json"], []byte("class.body_recovery")) {
+	if !bytes.Contains(entries["example/Policy.class"], []byte("JavaJiveRecovery")) || !bytes.Contains(entries["META-INF/javajive/diagnostics.json"], []byte("method.body_stubbed")) {
 		t.Fatal("recovery evidence is missing from class or JAR diagnostics")
 	}
 	second, secondReport, err := applicationToJarWithPolicy(app, FailureRecover)
 	if err != nil || !bytes.Equal(second, jar) || !reflect.DeepEqual(secondReport, detailed) {
 		t.Fatalf("recover output is nondeterministic: err=%v reports=%#v/%#v", err, detailed, secondReport)
+	}
+}
+
+func TestApplicationRecoverEmitsClassShellWhenAllConcreteMethodsFail(t *testing.T) {
+	app := policyFixture()
+	class := &app.Files[0].Classes[0]
+	// Remove ok() so the only concrete method fails and escalates to a class shell.
+	class.DirectMethods = class.DirectMethods[1:]
+	class.DirectMethods[0].Code.Instructions = []uint16{0x00ff}
+	jar, detailed, err := applicationToJarWithPolicy(app, FailureRecover)
+	if err != nil {
+		t.Fatalf("recover conversion: %v", err)
+	}
+	if detailed.Status != "partial" || detailed.StubbedClasses != 1 || detailed.StubbedMethods != 1 || detailed.Summary.TranslatedMethods != 0 || detailed.Summary.Warnings == 0 {
+		t.Fatalf("detailed = %#v", detailed)
+	}
+	reader, err := zip.NewReader(bytes.NewReader(jar), int64(len(jar)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := make(map[string][]byte)
+	for _, file := range reader.File {
+		stream, openErr := file.Open()
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		var body bytes.Buffer
+		_, copyErr := body.ReadFrom(stream)
+		stream.Close()
+		if copyErr != nil {
+			t.Fatal(copyErr)
+		}
+		entries[file.Name] = body.Bytes()
+	}
+	if !bytes.Contains(entries["example/Policy.class"], []byte("JavaJiveRecovery")) || !bytes.Contains(entries["META-INF/javajive/diagnostics.json"], []byte("class.body_recovery")) {
+		t.Fatal("class shell recovery evidence is missing from class or JAR diagnostics")
 	}
 }
 
@@ -200,7 +236,7 @@ func TestApplicationRecoverKeepsGoodClassesAroundBadClass(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recover conversion: %v", err)
 	}
-	if detailed.Status != "partial" || detailed.AttemptedClasses != 3 || detailed.StubbedClasses != 1 {
+	if detailed.Status != "partial" || detailed.AttemptedClasses != 3 || detailed.StubbedClasses != 0 || detailed.StubbedMethods != 1 || detailed.Summary.TranslatedMethods != 3 {
 		t.Fatalf("detailed = %#v", detailed)
 	}
 	reader, err := zip.NewReader(bytes.NewReader(jar), int64(len(jar)))
@@ -338,6 +374,91 @@ func TestConversionDiagnosticsAreBoundedAndExplicitlyTruncated(t *testing.T) {
 	second, secondDiagnostics, err := encodeConversionDiagnostics(Report{Warnings: len(input)}, input)
 	if err != nil || !bytes.Equal(payload, second) || !reflect.DeepEqual(diagnostics, secondDiagnostics) {
 		t.Fatalf("bounded diagnostics are nondeterministic: %v", err)
+	}
+}
+
+func TestConversionDiagnosticsPrioritizeHigherSeverityBeforeSynthesizedCtor(t *testing.T) {
+	input := make([]ConversionDiagnostic, 0, maxConversionDiagnostics+100)
+	for i := 0; i < 600; i++ {
+		input = append(input, ConversionDiagnostic{
+			Entry:      "classes.dex",
+			Class:      fmt.Sprintf("Lexample/C%d;", i),
+			Method:     "<init>",
+			Descriptor: "()V",
+			Category:   "recovery",
+			Action:     "synthesize_ctor",
+			Code:       "r8.ctor_synthesized",
+			Severity:   "warning",
+			Message:    "synthesized forwarding constructor",
+		})
+	}
+	input = append(input,
+		ConversionDiagnostic{Entry: "classes.dex", Class: "Lexample/BadMethod;", Method: "m", Category: "recovery", Action: "stub_method", Code: "method.body_stubbed", Severity: "warning", Message: "method failed"},
+		ConversionDiagnostic{Entry: "classes.dex", Class: "Lexample/BadClass;", Category: "recovery", Action: "stub_class", Code: "class.body_recovery", Severity: "warning", Message: "class failed"},
+		ConversionDiagnostic{Entry: "classes.dex", Class: "Lexample/MinimalClass;", Category: "recovery", Action: "stub_class_minimal", Code: "class.minimal_recovery", Severity: "warning", Message: "minimal failed"},
+	)
+
+	_, diagnostics, err := encodeConversionDiagnostics(Report{Warnings: len(input)}, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diagnostics) != maxConversionDiagnostics {
+		t.Fatalf("len(diagnostics) = %d, want %d", len(diagnostics), maxConversionDiagnostics)
+	}
+	if diagnostics[0].Code != "class.minimal_recovery" || diagnostics[1].Code != "class.body_recovery" || diagnostics[2].Code != "method.body_stubbed" {
+		t.Fatalf("top diagnostics not severity-prioritized: %#v", diagnostics[:4])
+	}
+	if diagnostics[len(diagnostics)-1].Code != "diagnostics.truncated" {
+		t.Fatalf("last = %#v, want diagnostics.truncated", diagnostics[len(diagnostics)-1])
+	}
+}
+
+func TestApplicationRecoverDiagnosticsSingleTruncationAndCollectionPriority(t *testing.T) {
+	var detailed DetailedReport
+	for i := 0; i < maxConversionDiagnostics+80; i++ {
+		appendConversionDiagnostic(&detailed, ConversionDiagnostic{
+			Class:    fmt.Sprintf("Lr8/C%d;", i),
+			Category: "recovery",
+			Action:   "synthesize_ctor",
+			Code:     "r8.ctor_synthesized",
+			Stage:    "lower",
+			Severity: "info",
+			Message:  "synthesized ctor",
+		})
+	}
+	appendConversionDiagnostic(&detailed, ConversionDiagnostic{
+		Class:      "Lapp/Partial;",
+		Method:     "broken",
+		Descriptor: "()V",
+		Category:   "recovery",
+		Action:     "stub_method",
+		Code:       "method.body_stubbed",
+		Stage:      "lower",
+		Severity:   "warning",
+		Message:    "method body stubbed",
+	})
+
+	_, diagnostics, err := encodeConversionDiagnosticsWithOmitted(Report{Warnings: detailed.diagnosticsOmitted + len(detailed.Diagnostics)}, detailed.Diagnostics, detailed.diagnosticsOmitted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diagnostics) != maxConversionDiagnostics {
+		t.Fatalf("len(diagnostics) = %d, want %d", len(diagnostics), maxConversionDiagnostics)
+	}
+	if diagnostics[0].Code != "method.body_stubbed" {
+		t.Fatalf("diagnostics[0] = %#v, want method.body_stubbed prioritized over r8.ctor_synthesized", diagnostics[0])
+	}
+	truncCount := 0
+	for _, d := range diagnostics {
+		if d.Code == "diagnostics.truncated" {
+			truncCount++
+		}
+	}
+	if truncCount != 1 {
+		t.Fatalf("diagnostics.truncated count = %d, want exactly 1", truncCount)
+	}
+	if diagnostics[len(diagnostics)-1].Code != "diagnostics.truncated" {
+		t.Fatalf("last diagnostic = %#v, want diagnostics.truncated", diagnostics[len(diagnostics)-1])
 	}
 }
 

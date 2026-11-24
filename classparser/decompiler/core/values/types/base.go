@@ -1,6 +1,8 @@
 package types
 
 import (
+	"strings"
+
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 )
 
@@ -73,6 +75,39 @@ func (j *JavaTypeWrap) ResetTypeRef(t JavaType) {
 	j.javaTypeRef = t.GetJavaTypeRef()
 }
 func (j *JavaTypeWrap) ResetType(t JavaType) {
+	switch jt := j.javaType.(type) {
+	case *JavaPrimer:
+		if jt.Name == JavaVoid {
+			j.javaType = t.RawType()
+			return
+		}
+		if jt.Name != JavaInteger {
+			return
+		}
+		if tp, ok := t.RawType().(*JavaPrimer); ok {
+			if tp.Name == JavaBoolean {
+				j.javaType = tp
+			}
+			return
+		}
+		if tc, ok := t.RawType().(*JavaClass); ok {
+			if !tc.signatureVariable && tc.Name != JavaBoolean && !strings.HasSuffix(tc.Name, "."+JavaBoolean) {
+				return
+			}
+		}
+		if t.String(&class_context.ClassContext{}) == JavaBoolean {
+			j.javaType = t.RawType()
+		}
+		return
+	case *JavaArrayType:
+		return
+	case *JavaClass:
+		if !jt.signatureVariable &&
+			jt.Name != JavaInteger && !strings.HasSuffix(jt.Name, "."+JavaInteger) &&
+			jt.Name != JavaVoid && !strings.HasSuffix(jt.Name, "."+JavaVoid) {
+			return
+		}
+	}
 	if j.String(&class_context.ClassContext{}) == JavaInteger && t.String(&class_context.ClassContext{}) == JavaBoolean {
 		j.javaType = t.RawType()
 	}

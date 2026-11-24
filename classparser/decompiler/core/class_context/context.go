@@ -12,7 +12,6 @@ import (
 
 	"github.com/yaklang/javajive/internal/funk"
 	"github.com/yaklang/javajive/internal/jdecenv"
-	"github.com/yaklang/javajive/internal/log"
 	"github.com/yaklang/javajive/internal/omap"
 	"github.com/yaklang/javajive/internal/utils"
 	"github.com/yaklang/javajive/internal/workbudget"
@@ -1103,12 +1102,11 @@ func binaryNestedNameToSource(className string) (string, bool) {
 }
 
 func SplitPackageClassName(s string) (string, string) {
-	splits := strings.Split(s, ".")
-	if len(splits) > 0 {
-		return strings.Join(splits[:len(splits)-1], "."), splits[len(splits)-1]
+	idx := strings.LastIndexByte(s, '.')
+	if idx < 0 {
+		return "", s
 	}
-	log.Errorf("split package name and class name failed: %v", s)
-	return "", ""
+	return s[:idx], s[idx+1:]
 }
 
 // CloneForRetry isolates mutable source-rendering state. Resolver functions and the

@@ -156,11 +156,20 @@ func Get(key string) string {
 	if !hasBind() {
 		return os.Getenv(key)
 	}
-	// Fast path for the overwhelmingly common case: no active snapshot
-	// overrides this key and the process environment does not define it.
-	// Every possible frame (closed snapshot, live sentinel, or no binding)
-	// then yields "", so gid()/runtime.Stack parsing is unnecessary. A key
-	// that IS overridden still takes the full goroutine-local path.
+	if g := currentG(); g != nil {
+		if v, ok := byGid.Load(uint64(uintptr(g))); ok {
+			st := v.(stack)
+			if len(st) > 0 {
+				if snap := st[len(st)-1].snap; snap != nil {
+					return snap[key]
+				}
+				return os.Getenv(key)
+			}
+		}
+		return os.Getenv(key)
+	}
+	// Fallback for architectures where currentG() == nil (!amd64 && !arm64):
+	// avoid runtime.Stack parsing when no live snapshot overrides this key.
 	if strings.HasPrefix(key, "JDEC_") && !activeKey(key) && os.Getenv(key) == "" {
 		return ""
 	}

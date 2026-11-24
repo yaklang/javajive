@@ -59,6 +59,21 @@ func ParseDEXWithOptions(data []byte, entry string, options Options) (*model.Fil
 	})
 }
 
+func ParseDEXContainer(data []byte, entry string) ([]*model.File, error) {
+	return ParseDEXContainerWithOptions(data, entry, Options{})
+}
+
+func ParseDEXContainerWithOptions(data []byte, entry string, options Options) ([]*model.File, error) {
+	limit := options.maxDEXSize()
+	if int64(len(data)) > limit {
+		return nil, report.New(entry, "", "", 0, "input", fmt.Errorf("DEX size %d exceeds limit %d", len(data), limit))
+	}
+	return dexparser.ParseContainerWithOptions(data, entry, dexparser.ParseOptions{
+		TolerateSignatureMismatch:       options.TolerateSignatureMismatch,
+		TolerateOrphanAnnotationDefault: options.TolerateOrphanAnnotationDefault,
+	})
+}
+
 func ParseAPK(data []byte) (*model.Application, error) {
 	return ParseAPKWithOptions(data, Options{})
 }

@@ -541,6 +541,16 @@ func (m *Method) Code() *Code {
 	return m.code
 }
 
+// ResetCode replaces any previously emitted bytecode, handlers, and debug
+// attributes on a concrete method with a fresh empty Code assembler bound to the
+// same constant pool. Abstract and native methods remain unchanged.
+func (m *Method) ResetCode() {
+	if m == nil || m.code == nil {
+		return
+	}
+	m.code = newCode(m.code.pool)
+}
+
 // Bytes assembles and serializes the complete classfile.
 func (c *Class) Bytes() ([]byte, error) {
 	if c == nil {

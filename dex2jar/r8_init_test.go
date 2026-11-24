@@ -536,3 +536,265 @@ func TestR8InitPlatformExceptionHierarchyChains(t *testing.T) {
 	}
 	verifyAllR8JarClasses(t, jarBytes, "r8.ExCaller")
 }
+
+func TestR8InitCatchBlockAllocationSynthesizesCtorWithoutLeakingTryUninit(t *testing.T) {
+	const (
+		parentDesc = "Lr8/CatchParent;"
+		childDesc  = "Lr8/CatchChild;"
+		callerDesc = "Lr8/CatchCaller;"
+	)
+	file := &model.File{
+		Entry: "classes.dex",
+		Types: []model.Type{
+			{Descriptor: "Ljava/lang/Object;"},  // 0
+			{Descriptor: parentDesc},            // 1
+			{Descriptor: childDesc},             // 2
+			{Descriptor: callerDesc},            // 3
+			{Descriptor: "V"},                   // 4
+			{Descriptor: "[Ljava/lang/String;"}, // 5
+		},
+		Protos: []model.Proto{
+			{ReturnType: "V"}, // 0: ()V
+			{ReturnType: "V", Parameters: []string{"[Ljava/lang/String;"}, ParameterTypes: []uint32{5}}, // 1: ([String;)V
+		},
+		Methods: []model.MethodID{
+			{Class: "Ljava/lang/Object;", Name: "<init>", ProtoIndex: 0}, // 0
+			{Class: parentDesc, Name: "<init>", ProtoIndex: 0},           // 1
+			{Class: callerDesc, Name: "main", ProtoIndex: 1},             // 2
+		},
+	}
+	parent := model.Class{
+		Descriptor:  parentDesc,
+		Superclass:  "Ljava/lang/Object;",
+		AccessFlags: 0x0001,
+		DirectMethods: []model.EncodedMethod{{
+			MethodIndex: 1,
+			AccessFlags: 0x10001,
+			Method:      file.Methods[1],
+			Code: &model.Code{
+				RegistersSize: 1, InsSize: 1, OutsSize: 1,
+				Instructions: []uint16{
+					0x1070, 0x0000, 0x0000, // invoke-direct {v0}, Object.<init>()V
+					0x000e,
+				},
+			},
+		}},
+	}
+	child := model.Class{
+		Descriptor:  childDesc,
+		Superclass:  parentDesc,
+		AccessFlags: 0x0001,
+	}
+	catchAddr := uint32(5)
+	caller := model.Class{
+		Descriptor:  callerDesc,
+		Superclass:  "Ljava/lang/Object;",
+		AccessFlags: 0x0001,
+		DirectMethods: []model.EncodedMethod{{
+			MethodIndex: 2,
+			AccessFlags: 0x0009,
+			Method:      file.Methods[2],
+			Code: &model.Code{
+				RegistersSize: 3, InsSize: 1, OutsSize: 1,
+				Instructions: []uint16{
+					0x0222, 0x0001, // 0..1: new-instance v2, CatchParent (uninit in try block only)
+					0x0012,         // 2: const/4 v0, #0
+					0x0027,         // 3: throw v0 (triggers NPE into catch-all)
+					0x000e,         // 4: return-void
+					0x000d,         // 5: move-exception v0
+					0x0122, 0x0002, // 6..7: new-instance v1, CatchChild
+					0x1070, 0x0001, 0x0001, // 8..10: invoke-direct {v1}, CatchParent.<init>()V
+					0x000e, // 11: return-void
+				},
+				Tries: []model.Try{{
+					StartAddress:     0,
+					InstructionCount: 4,
+					Handler:          model.CatchHandler{CatchAllAddress: &catchAddr},
+				}},
+			},
+		}},
+	}
+	app := &model.Application{Files: []*model.File{{
+		Entry:   "classes.dex",
+		Types:   file.Types,
+		Protos:  file.Protos,
+		Methods: file.Methods,
+		Classes: []model.Class{parent, child, caller},
+	}}}
+
+	jarBytes, detailed, err := applicationToJarWithPolicy(app, FailureRecover)
+	if err != nil {
+		t.Fatalf("FailureRecover catch-block R8 ctor synthesis failed: %v", err)
+	}
+	if detailed.StubbedMethods != 0 {
+		t.Fatalf("expected 0 stubs, got %d (%+v)", detailed.StubbedMethods, detailed.Diagnostics)
+	}
+	verifyAllR8JarClasses(t, jarBytes, "r8.CatchCaller")
+}
+
+func TestR8InitSuperclassMethodAllocatingSubclass(t *testing.T) {
+	const (
+		baseDesc  = "Lr8/BaseFactory;"
+		childDesc = "Lr8/SubItem;"
+	)
+	file := &model.File{
+		Entry: "classes.dex",
+		Types: []model.Type{
+			{Descriptor: "Ljava/lang/Object;"},  // 0
+			{Descriptor: baseDesc},              // 1
+			{Descriptor: childDesc},             // 2
+			{Descriptor: "V"},                   // 3
+			{Descriptor: "[Ljava/lang/String;"}, // 4
+		},
+		Protos: []model.Proto{
+			{ReturnType: "V"},       // 0: ()V
+			{ReturnType: baseDesc},  // 1: ()Lr8/BaseFactory;
+			{ReturnType: "V", Parameters: []string{"[Ljava/lang/String;"}, ParameterTypes: []uint32{4}}, // 2: ([String;)V
+		},
+		Methods: []model.MethodID{
+			{Class: "Ljava/lang/Object;", Name: "<init>", ProtoIndex: 0}, // 0
+			{Class: baseDesc, Name: "<init>", ProtoIndex: 0},             // 1
+			{Class: baseDesc, Name: "createChild", ProtoIndex: 1},        // 2
+			{Class: baseDesc, Name: "main", ProtoIndex: 2},               // 3
+		},
+	}
+	base := model.Class{
+		Descriptor:  baseDesc,
+		Superclass:  "Ljava/lang/Object;",
+		AccessFlags: 0x0001,
+		DirectMethods: []model.EncodedMethod{
+			{
+				MethodIndex: 1,
+				AccessFlags: 0x10001,
+				Method:      file.Methods[1],
+				Code: &model.Code{
+					RegistersSize: 1, InsSize: 1, OutsSize: 1,
+					Instructions: []uint16{
+						0x1070, 0x0000, 0x0000, // invoke-direct {v0}, Object.<init>()V
+						0x000e,
+					},
+				},
+			},
+			{
+				MethodIndex: 2,
+				AccessFlags: 0x0009,
+				Method:      file.Methods[2],
+				Code: &model.Code{
+					RegistersSize: 1, InsSize: 0, OutsSize: 1,
+					Instructions: []uint16{
+						0x0022, 0x0002, // new-instance v0, Lr8/SubItem;
+						0x1070, 0x0001, 0x0000, // invoke-direct {v0}, BaseFactory.<init>()V (callee.Class == c.Descriptor)
+						0x0011, // return-object v0
+					},
+				},
+			},
+			{
+				MethodIndex: 3,
+				AccessFlags: 0x0009,
+				Method:      file.Methods[3],
+				Code: &model.Code{
+					RegistersSize: 1, InsSize: 1, OutsSize: 0,
+					Instructions: []uint16{
+						0x0071, 0x0002, 0x0000, // invoke-static {}, createChild()BaseFactory
+						0x000e,
+					},
+				},
+			},
+		},
+	}
+	child := model.Class{
+		Descriptor:  childDesc,
+		Superclass:  baseDesc,
+		AccessFlags: 0x0001,
+	}
+	app := &model.Application{Files: []*model.File{{
+		Entry:   "classes.dex",
+		Types:   file.Types,
+		Protos:  file.Protos,
+		Methods: file.Methods,
+		Classes: []model.Class{base, child},
+	}}}
+
+	jarBytes, detailed, err := applicationToJarWithPolicy(app, FailureRecover)
+	if err != nil {
+		t.Fatalf("FailureRecover superclass factory failed: %v", err)
+	}
+	if detailed.StubbedMethods != 0 {
+		t.Fatalf("expected 0 stubs, got %d (%+v)", detailed.StubbedMethods, detailed.Diagnostics)
+	}
+	verifyAllR8JarClasses(t, jarBytes, "r8.BaseFactory")
+}
+
+func TestR8InitEnumPlatformSuperclassCtor(t *testing.T) {
+	const enumDesc = "Lr8/Color;"
+	file := &model.File{
+		Entry:   "classes.dex",
+		Strings: []string{"RED"},
+		Types: []model.Type{
+			{Descriptor: "Ljava/lang/Enum;"},    // 0
+			{Descriptor: enumDesc},              // 1
+			{Descriptor: "Ljava/lang/String;"},  // 2
+			{Descriptor: "I"},                   // 3
+			{Descriptor: "V"},                   // 4
+			{Descriptor: "[Ljava/lang/String;"}, // 5
+		},
+		Protos: []model.Proto{
+			{ReturnType: "V"}, // 0: ()V
+			{ReturnType: "V", Parameters: []string{"Ljava/lang/String;", "I"}, ParameterTypes: []uint32{2, 3}}, // 1: (String, I)V
+			{ReturnType: "V", Parameters: []string{"[Ljava/lang/String;"}, ParameterTypes: []uint32{5}},        // 2: ([String;)V
+		},
+		Methods: []model.MethodID{
+			{Class: "Ljava/lang/Enum;", Name: "<init>", ProtoIndex: 1}, // 0
+			{Class: enumDesc, Name: "<clinit>", ProtoIndex: 0},         // 1
+			{Class: enumDesc, Name: "main", ProtoIndex: 2},             // 2
+		},
+	}
+	color := model.Class{
+		Descriptor:  enumDesc,
+		Superclass:  "Ljava/lang/Enum;",
+		AccessFlags: 0x4011,
+		DirectMethods: []model.EncodedMethod{
+			{
+				MethodIndex: 1,
+				AccessFlags: 0x10008,
+				Method:      file.Methods[1],
+				Code: &model.Code{
+					RegistersSize: 3, InsSize: 0, OutsSize: 3,
+					Instructions: []uint16{
+						0x0022, 0x0001, // new-instance v0, Lr8/Color;
+						0x011a, 0x0000, // const-string v1, "RED"
+						0x0212,         // const/4 v2, #0
+						0x3070, 0x0000, 0x0210, // invoke-direct {v0, v1, v2}, Enum.<init>(String, I)V
+						0x000e,
+					},
+				},
+			},
+			{
+				MethodIndex: 2,
+				AccessFlags: 0x0009,
+				Method:      file.Methods[2],
+				Code: &model.Code{
+					RegistersSize: 1, InsSize: 1, OutsSize: 0,
+					Instructions:  []uint16{0x000e},
+				},
+			},
+		},
+	}
+	app := &model.Application{Files: []*model.File{{
+		Entry:   "classes.dex",
+		Strings: file.Strings,
+		Types:   file.Types,
+		Protos:  file.Protos,
+		Methods: file.Methods,
+		Classes: []model.Class{color},
+	}}}
+
+	jarBytes, detailed, err := applicationToJarWithPolicy(app, FailureRecover)
+	if err != nil {
+		t.Fatalf("FailureRecover Enum.<init> chain failed: %v", err)
+	}
+	if detailed.StubbedMethods != 0 {
+		t.Fatalf("expected 0 stubs, got %d (%+v)", detailed.StubbedMethods, detailed.Diagnostics)
+	}
+	verifyAllR8JarClasses(t, jarBytes, "r8.Color")
+}

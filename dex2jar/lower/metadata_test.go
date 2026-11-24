@@ -981,3 +981,112 @@ func TestLowerAcceptsDeferredStoreDominatingBranch(t *testing.T) {
 		t.Fatalf("parse generated class: %v", err)
 	}
 }
+
+func TestLowerCrossDEXInvokeSuperUsesClassOptionsHierarchy(t *testing.T) {
+	const child, mid, base = "Ldex/Child;", "Ldex/Mid;", "Ldex/Base;"
+	protos := []model.Proto{{ReturnType: "V"}}
+	methods := []model.MethodID{
+		{Class: child, Name: "<init>", ProtoIndex: 0},
+		{Class: base, Name: "ping", ProtoIndex: 0},
+		{Class: child, Name: "callSuper", ProtoIndex: 0},
+	}
+	// Put Child and Base in file, while intermediate Mid lives only in ClassOptions.Hierarchy.
+	file := &model.File{
+		Entry:   "classes.dex",
+		Types:   []model.Type{{Descriptor: child}, {Descriptor: base}},
+		Protos:  protos,
+		Methods: methods,
+		Classes: []model.Class{
+			{
+				Descriptor:  child,
+				Superclass:  mid,
+				AccessFlags: dexPublic,
+				DirectMethods: []model.EncodedMethod{
+					{
+						AccessFlags: dexPublic | dexConstructor,
+						Method:      methods[0],
+						Code: &model.Code{RegistersSize: 1, InsSize: 1, OutsSize: 1, Instructions: []uint16{
+							0x1070, 0x0000, 0x0000,
+							0x000e,
+						}},
+					},
+					{
+						AccessFlags: dexPublic,
+						Method:      methods[2],
+						Code: &model.Code{RegistersSize: 1, InsSize: 1, OutsSize: 1, Instructions: []uint16{
+							0x106f, 0x0001, 0x0000, // invoke-super {v0}, Ldex/Base;.ping()V
+							0x000e,
+						}},
+					},
+				},
+			},
+			{Descriptor: base, Superclass: "Ljava/lang/Object;", AccessFlags: dexPublic},
+		},
+	}
+	hierarchy := map[string]*model.Class{
+		child: &file.Classes[0],
+		mid:   {Descriptor: mid, Superclass: base, AccessFlags: dexPublic},
+		base:  &file.Classes[1],
+	}
+	raw, err := ClassWithOptions(file, &file.Classes[0], ClassOptions{Hierarchy: hierarchy})
+	if err != nil {
+		t.Fatalf("ClassWithOptions cross-DEX invoke-super failed: %v", err)
+	}
+	if _, err := javaclassparser.Parse(raw); err != nil {
+		t.Fatalf("parse generated class: %v", err)
+	}
+}
+
+func TestLowerExternalPlatformSubclassAndFinalPlatformRejection(t *testing.T) {
+	const (
+		stubAPI      = "Landroid/text/SegmentFinder;"
+		extSub       = "Landroid/text/GraphemeClusterSegmentFinder;"
+		callerDesc   = "Ldex/Caller;"
+		appTarget    = "Ldex/AppTarget;"
+	)
+	makeCase := func(expectedType, actualType string, expectedInApp bool) error {
+		file := &model.File{
+			Entry: "classes.dex",
+			Types: []model.Type{{Descriptor: callerDesc}, {Descriptor: actualType}, {Descriptor: expectedType}},
+			Protos: []model.Proto{
+				{ReturnType: "V", Parameters: []string{actualType}, ParameterTypes: []uint32{1}},
+				{ReturnType: "V", Parameters: []string{expectedType}, ParameterTypes: []uint32{2}},
+			},
+			Methods: []model.MethodID{
+				{Class: callerDesc, Name: "accept", ProtoIndex: 0},
+				{Class: "Ldex/Sink;", Name: "consume", ProtoIndex: 1},
+			},
+			Classes: []model.Class{{
+				Descriptor:  callerDesc,
+				Superclass:  "Ljava/lang/Object;",
+				AccessFlags: dexPublic,
+				DirectMethods: []model.EncodedMethod{{
+					AccessFlags: dexPublic | dexStatic,
+					Method:      model.MethodID{Class: callerDesc, Name: "accept", ProtoIndex: 0},
+					Code: &model.Code{RegistersSize: 1, InsSize: 1, OutsSize: 1, Instructions: []uint16{
+						0x1071, 0x0001, 0x0000, // invoke-static {v0}, Ldex/Sink;.consume(expectedType)V
+						0x000e,
+					}},
+				}},
+			}},
+		}
+		if expectedInApp {
+			file.Classes = append(file.Classes, model.Class{
+				Descriptor:  expectedType,
+				Superclass:  "Ljava/lang/Object;",
+				AccessFlags: dexPublic,
+			})
+		}
+		_, err := Class(file, &file.Classes[0])
+		return err
+	}
+
+	if err := makeCase(stubAPI, extSub, true); err != nil {
+		t.Fatalf("external platform subclass for bundled platform API stub rejected: %v", err)
+	}
+	for _, badActual := range []string{"Ljava/lang/Object;", "Ljava/lang/String;"} {
+		if err := makeCase(appTarget, badActual, true); err == nil || !strings.Contains(err.Error(), "not provably assignable") {
+			t.Fatalf("%s -> %s error = %v, want not provably assignable", badActual, appTarget, err)
+		}
+	}
+}

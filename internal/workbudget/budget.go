@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // Counter names match the T22/T23 production contract.
@@ -172,13 +173,14 @@ type Budget struct {
 	used    map[Counter]int64
 	nesting map[Counter]int64
 	err     error
+	failed  atomic.Bool
 }
 
 func New(ctx context.Context, limits Limits) *Budget {
 	return &Budget{
 		ctx:     ctx,
 		limits:  limits,
-		used:    map[Counter]int64{},
+		used:    make(map[Counter]int64, 8),
 		nesting: map[Counter]int64{},
 	}
 }
@@ -200,8 +202,19 @@ func (b *Budget) Context() context.Context {
 	return b.ctx
 }
 
+func (b *Budget) setErrLocked(err error) error {
+	if err != nil && b.err == nil {
+		b.err = err
+		b.failed.Store(true)
+	}
+	return b.err
+}
+
 func (b *Budget) Err() error {
 	if b == nil {
+		return nil
+	}
+	if !b.failed.Load() {
 		return nil
 	}
 	b.mu.Lock()
@@ -240,9 +253,7 @@ func (b *Budget) checkCancelLocked() error {
 	}
 	if err := b.ctx.Err(); err != nil {
 		fail := &Error{Kind: KindCanceled, Err: err}
-		if b.err == nil {
-			b.err = fail
-		}
+		b.setErrLocked(fail)
 		return fail
 	}
 	return nil
@@ -257,14 +268,16 @@ func (b *Budget) CheckContext(ctx context.Context) error {
 		}
 		return nil
 	}
+	if !b.failed.Load() && (b.ctx == nil || b.ctx.Err() == nil) && (ctx == nil || ctx.Err() == nil) {
+		return nil
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if err := b.checkCancelLocked(); err != nil {
 		return err
 	}
 	if ctx != nil && ctx.Err() != nil {
-		b.err = &Error{Kind: KindCanceled, Err: ctx.Err()}
-		return b.err
+		return b.setErrLocked(&Error{Kind: KindCanceled, Err: ctx.Err()})
 	}
 	return nil
 }
@@ -307,6 +320,9 @@ func (b *Budget) Charge(c Counter, n int64) error {
 	if b == nil {
 		return nil
 	}
+	if n <= 0 && !b.failed.Load() && (b.ctx == nil || b.ctx.Err() == nil) {
+		return nil
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.err != nil {
@@ -337,35 +353,61 @@ func (b *Budget) ChargeMany(cost map[Counter]int64) error {
 }
 
 func (b *Budget) chargeLocked(c Counter, n int64, aggregate bool) error {
-	return b.chargeManyLocked(map[Counter]int64{c: n}, aggregate)
+	if n <= 0 {
+		return nil
+	}
+	limit := b.limits.limitFor(c)
+	if overflowOrExceed(b.used[c], n, limit) {
+		return b.setErrLocked(exceedError(c, b.used[c], n, limit))
+	}
+	if aggregate && overflowOrExceed(b.used[CounterRequestWork], n, b.limits.MaxRequestWork) {
+		return b.setErrLocked(exceedError(CounterRequestWork, b.used[CounterRequestWork], n, b.limits.MaxRequestWork))
+	}
+	if !aggregate || c != CounterRequestWork {
+		b.used[c] += n
+	}
+	if aggregate {
+		b.used[CounterRequestWork] += n
+	}
+	return nil
 }
 
 func (b *Budget) chargeManyLocked(cost map[Counter]int64, aggregate bool) error {
-	keys := make([]Counter, 0, len(cost))
+	var keyBuf [16]Counter
+	keys := keyBuf[:0]
 	for c, n := range cost {
 		if n > 0 {
 			keys = append(keys, c)
 		}
 	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	if len(keys) <= len(keyBuf) {
+		for i := 1; i < len(keys); i++ {
+			k := keys[i]
+			j := i - 1
+			for j >= 0 && keys[j] > k {
+				keys[j+1] = keys[j]
+				j--
+			}
+			keys[j+1] = k
+		}
+	} else {
+		sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	}
 	total := int64(0)
 	for _, c := range keys {
 		n := cost[c]
 		if overflowOrExceed(b.used[c], n, b.limits.limitFor(c)) {
-			b.err = exceedError(c, b.used[c], n, b.limits.limitFor(c))
-			return b.err
+			return b.setErrLocked(exceedError(c, b.used[c], n, b.limits.limitFor(c)))
 		}
 		if aggregate {
 			if total > math.MaxInt64-n {
-				b.err = exceedError(CounterRequestWork, total, n, b.limits.MaxRequestWork)
-				return b.err
+				return b.setErrLocked(exceedError(CounterRequestWork, total, n, b.limits.MaxRequestWork))
 			}
 			total += n
 		}
 	}
 	if aggregate && overflowOrExceed(b.used[CounterRequestWork], total, b.limits.MaxRequestWork) {
-		b.err = exceedError(CounterRequestWork, b.used[CounterRequestWork], total, b.limits.MaxRequestWork)
-		return b.err
+		return b.setErrLocked(exceedError(CounterRequestWork, b.used[CounterRequestWork], total, b.limits.MaxRequestWork))
 	}
 	for _, c := range keys {
 		if !aggregate || c != CounterRequestWork {
@@ -407,9 +449,7 @@ func (b *Budget) CheckOutput(total int64) error {
 	if overflowOrExceed(0, total, limit) {
 		fail := exceedError(CounterOutputBytes, 0, total, limit)
 		fail.Used = total
-		if b.err == nil {
-			b.err = fail
-		}
+		b.setErrLocked(fail)
 		return fail
 	}
 	return nil
@@ -462,9 +502,7 @@ func (b *Budget) CheckAlloc(n int64) error {
 	if overflowOrExceed(0, n, limit) {
 		fail := exceedError(CounterIntermediateBytes, 0, n, limit)
 		fail.Used = n
-		if b.err == nil {
-			b.err = fail
-		}
+		b.setErrLocked(fail)
 		return fail
 	}
 	if n > b.used[CounterIntermediateBytes] {
@@ -536,7 +574,7 @@ func (b *Budget) RejectUnboundedRender() error {
 		Limit:   b.limits.MaxOutputBytes,
 		Err:     errors.New("opaque renderer has no pre-allocation output bound"),
 	}
-	b.err = fail
+	b.setErrLocked(fail)
 	return fail
 }
 
@@ -565,7 +603,7 @@ func (b *Budget) FailRender(err error) error {
 		Limit:   b.limits.MaxOutputBytes,
 		Err:     fmt.Errorf("bounded renderer failed: %w", err),
 	}
-	b.err = fail
+	b.setErrLocked(fail)
 	return fail
 }
 
@@ -592,7 +630,7 @@ func (b *Budget) FailOutputOverflow() error {
 		return b.err
 	}
 	fail.Limit = b.limits.MaxOutputBytes
-	b.err = fail
+	b.setErrLocked(fail)
 	return fail
 }
 
@@ -676,9 +714,7 @@ func (b *Budget) CheckDepth(c Counter, depth int64) error {
 	limit := b.limits.limitFor(c)
 	if limit > 0 && depth > limit {
 		fail := &Error{Kind: KindResource, Counter: c, Used: depth, Limit: limit}
-		if b.err == nil {
-			b.err = fail
-		}
+		b.setErrLocked(fail)
 		return fail
 	}
 	if depth > b.used[c] {
@@ -704,9 +740,7 @@ func (b *Budget) Enter(c Counter) error {
 	limit := b.limits.limitFor(c)
 	if limit > 0 && next > limit {
 		fail := &Error{Kind: KindResource, Counter: c, Used: next, Limit: limit}
-		if b.err == nil {
-			b.err = fail
-		}
+		b.setErrLocked(fail)
 		return fail
 	}
 	b.nesting[c] = next
@@ -753,9 +787,7 @@ func (b *Budget) CheckArchiveEntryBytes(n int64) error {
 	if overflowOrExceed(0, n, limit) {
 		fail := exceedError(CounterArchiveEntryBytes, 0, n, limit)
 		fail.Used = n
-		if b.err == nil {
-			b.err = fail
-		}
+		b.setErrLocked(fail)
 		return fail
 	}
 	if n > b.used[CounterArchiveEntryBytes] {

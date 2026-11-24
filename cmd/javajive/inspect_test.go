@@ -46,10 +46,10 @@ func TestCmdInspectExternalAcceptedDEX038EmitsCompleteJSON(t *testing.T) {
 	}
 }
 
-func TestCmdInspectRejectedDEX041StillEmitsPartialJSON(t *testing.T) {
+func TestCmdInspectRejectedDEX042StillEmitsPartialJSON(t *testing.T) {
 	data := make([]byte, 0x70)
-	copy(data, []byte("dex\n041\x00"))
-	fixture := filepath.Join(t.TempDir(), "v041.dex")
+	copy(data, []byte("dex\n042\x00"))
+	fixture := filepath.Join(t.TempDir(), "v042.dex")
 	if err := os.WriteFile(fixture, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestCmdInspectRejectedDEX041StillEmitsPartialJSON(t *testing.T) {
 		t.Fatalf("report = %#v", report)
 	}
 	for _, diagnostic := range report.Diagnostics {
-		if !strings.Contains(diagnostic.Message, `unsupported DEX version "041"`) {
+		if !strings.Contains(diagnostic.Message, `unsupported DEX version "042"`) {
 			t.Fatalf("unexpected diagnostic = %#v", diagnostic)
 		}
 	}

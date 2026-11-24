@@ -17,12 +17,14 @@ import (
 )
 
 const (
-	headerSize       = 0x70
-	maxEncodedDepth  = 64
-	maxVariableBytes = 5
+	headerSize           = 0x70
+	headerSizeV041       = 0x78
+	maxContainerSections = 256
+	maxEncodedDepth      = 64
+	maxVariableBytes     = 5
 )
 
-var supportedDEXVersions = map[string]bool{"035": true, "037": true, "038": true, "039": true, "040": true}
+var supportedDEXVersions = map[string]bool{"035": true, "037": true, "038": true, "039": true, "040": true, "041": true}
 
 // ParseOptions controls recoverable validation exceptions during DEX parsing.
 // Zero-value ParseOptions enforces strict integrity and metadata membership.
@@ -50,65 +52,144 @@ func Parse(data []byte, entry string) (*model.File, error) {
 	return ParseWithOptions(data, entry, ParseOptions{})
 }
 
-// ParseWithOptions decodes a DEX file while applying explicit recovery
-// tolerances when configured.
+// ParseWithOptions decodes a single DEX file while applying explicit recovery
+// tolerances when configured. Multi-section DEX 041 containers require
+// ParseContainerWithOptions.
 func ParseWithOptions(data []byte, entry string, options ParseOptions) (*model.File, error) {
+	files, err := ParseContainerWithOptions(data, entry, options)
+	if err != nil {
+		return nil, err
+	}
+	if len(files) > 1 {
+		return nil, report.New(entry, "", "", 0, "header", fmt.Errorf("DEX 041 container has %d sections; use container parser", len(files)))
+	}
+	return files[0], nil
+}
+
+// ParseContainer decodes a standalone DEX file or multi-section DEX 041 container.
+func ParseContainer(data []byte, entry string) ([]*model.File, error) {
+	return ParseContainerWithOptions(data, entry, ParseOptions{})
+}
+
+// ParseContainerWithOptions decodes a standalone DEX file or multi-section DEX
+// 041 container while applying explicit recovery tolerances when configured.
+func ParseContainerWithOptions(data []byte, entry string, options ParseOptions) ([]*model.File, error) {
+	if len(data) >= 8 && string(data[:4]) == "dex\n" && string(data[4:7]) == "041" && data[7] == 0 {
+		return parseContainer041(data, entry, options)
+	}
 	p := &parser{data: data, entry: entry, options: options}
-	return p.parse()
+	file, err := p.parseSection(0, uint64(len(data)), false)
+	if err != nil {
+		return nil, err
+	}
+	return []*model.File{file}, nil
+}
+
+func parseContainer041(data []byte, entry string, options ParseOptions) ([]*model.File, error) {
+	var files []*model.File
+	off := uint64(0)
+	for sectionIdx := 0; off < uint64(len(data)); sectionIdx++ {
+		if sectionIdx >= maxContainerSections {
+			return nil, report.New(entry, "", "", int64(off), "header", fmt.Errorf("DEX 041 container section count exceeds limit %d", maxContainerSections))
+		}
+		secEntry := entry
+		if sectionIdx > 0 {
+			secEntry = fmt.Sprintf("%s#%d", entry, sectionIdx)
+		}
+		p := &parser{data: data, entry: secEntry, options: options}
+		file, err := p.parseSection(off, uint64(len(data)), true)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, file)
+		off += uint64(file.Header.FileSize)
+	}
+	if len(files) == 0 {
+		return nil, report.New(entry, "", "", 0, "header", fmt.Errorf("truncated: have %d bytes, need %d", len(data), headerSizeV041))
+	}
+	return files, nil
 }
 
 func (p *parser) fail(off int, op, format string, args ...any) error {
 	return report.New(p.entry, p.class, p.method, int64(off), op, fmt.Errorf(format, args...))
 }
 
-func (p *parser) parse() (*model.File, error) {
-	if len(p.data) < headerSize {
-		return nil, p.fail(0, "header", "truncated: have %d bytes, need %d", len(p.data), headerSize)
+func (p *parser) parseSection(off, totalLen uint64, is041 bool) (*model.File, error) {
+	needHdr := headerSize
+	if is041 {
+		needHdr = headerSizeV041
 	}
-	if string(p.data[:4]) != "dex\n" || p.data[7] != 0 || p.data[4] < '0' || p.data[4] > '9' || p.data[5] < '0' || p.data[5] > '9' || p.data[6] < '0' || p.data[6] > '9' {
-		return nil, p.fail(0, "header", "invalid DEX magic")
+	base := int(off)
+	if totalLen < off || totalLen-off < uint64(needHdr) {
+		have := uint64(0)
+		if totalLen > off {
+			have = totalLen - off
+		}
+		return nil, p.fail(base, "header", "truncated: have %d bytes, need %d", have, needHdr)
 	}
-	version := string(p.data[4:7])
+	if string(p.data[base:base+4]) != "dex\n" || p.data[base+7] != 0 || p.data[base+4] < '0' || p.data[base+4] > '9' || p.data[base+5] < '0' || p.data[base+5] > '9' || p.data[base+6] < '0' || p.data[base+6] > '9' {
+		return nil, p.fail(base, "header", "invalid DEX magic")
+	}
+	version := string(p.data[base+4 : base+7])
+	if is041 && version != "041" {
+		return nil, p.fail(base+4, "header", "DEX 041 container section has unexpected version %q", version)
+	}
 	if !supportedDEXVersions[version] {
-		return nil, p.fail(4, "header", "unsupported DEX version %q; supported versions are 035, 037, 038, 039, and 040", version)
+		return nil, p.fail(base+4, "header", "unsupported DEX version %q; supported versions are 035, 037, 038, 039, 040, and 041", version)
 	}
 	h := model.Header{
 		Version:       version,
-		Checksum:      binary.LittleEndian.Uint32(p.data[8:12]),
-		FileSize:      binary.LittleEndian.Uint32(p.data[32:36]),
-		HeaderSize:    binary.LittleEndian.Uint32(p.data[36:40]),
-		EndianTag:     binary.LittleEndian.Uint32(p.data[40:44]),
-		MapOffset:     binary.LittleEndian.Uint32(p.data[52:56]),
-		StringIDsSize: binary.LittleEndian.Uint32(p.data[56:60]),
-		StringIDsOff:  binary.LittleEndian.Uint32(p.data[60:64]),
-		TypeIDsSize:   binary.LittleEndian.Uint32(p.data[64:68]),
-		TypeIDsOff:    binary.LittleEndian.Uint32(p.data[68:72]),
-		ProtoIDsSize:  binary.LittleEndian.Uint32(p.data[72:76]),
-		ProtoIDsOff:   binary.LittleEndian.Uint32(p.data[76:80]),
-		FieldIDsSize:  binary.LittleEndian.Uint32(p.data[80:84]),
-		FieldIDsOff:   binary.LittleEndian.Uint32(p.data[84:88]),
-		MethodIDsSize: binary.LittleEndian.Uint32(p.data[88:92]),
-		MethodIDsOff:  binary.LittleEndian.Uint32(p.data[92:96]),
-		ClassDefsSize: binary.LittleEndian.Uint32(p.data[96:100]),
-		ClassDefsOff:  binary.LittleEndian.Uint32(p.data[100:104]),
-		DataSize:      binary.LittleEndian.Uint32(p.data[104:108]),
-		DataOff:       binary.LittleEndian.Uint32(p.data[108:112]),
+		Checksum:      binary.LittleEndian.Uint32(p.data[base+8 : base+12]),
+		FileSize:      binary.LittleEndian.Uint32(p.data[base+32 : base+36]),
+		HeaderSize:    binary.LittleEndian.Uint32(p.data[base+36 : base+40]),
+		EndianTag:     binary.LittleEndian.Uint32(p.data[base+40 : base+44]),
+		MapOffset:     binary.LittleEndian.Uint32(p.data[base+52 : base+56]),
+		StringIDsSize: binary.LittleEndian.Uint32(p.data[base+56 : base+60]),
+		StringIDsOff:  binary.LittleEndian.Uint32(p.data[base+60 : base+64]),
+		TypeIDsSize:   binary.LittleEndian.Uint32(p.data[base+64 : base+68]),
+		TypeIDsOff:    binary.LittleEndian.Uint32(p.data[base+68 : base+72]),
+		ProtoIDsSize:  binary.LittleEndian.Uint32(p.data[base+72 : base+76]),
+		ProtoIDsOff:   binary.LittleEndian.Uint32(p.data[base+76 : base+80]),
+		FieldIDsSize:  binary.LittleEndian.Uint32(p.data[base+80 : base+84]),
+		FieldIDsOff:   binary.LittleEndian.Uint32(p.data[base+84 : base+88]),
+		MethodIDsSize: binary.LittleEndian.Uint32(p.data[base+88 : base+92]),
+		MethodIDsOff:  binary.LittleEndian.Uint32(p.data[base+92 : base+96]),
+		ClassDefsSize: binary.LittleEndian.Uint32(p.data[base+96 : base+100]),
+		ClassDefsOff:  binary.LittleEndian.Uint32(p.data[base+100 : base+104]),
+		DataSize:      binary.LittleEndian.Uint32(p.data[base+104 : base+108]),
+		DataOff:       binary.LittleEndian.Uint32(p.data[base+108 : base+112]),
 	}
-	copy(h.Signature[:], p.data[12:32])
-	if h.HeaderSize != headerSize {
-		return nil, p.fail(36, "header", "header_size=%d, want %d", h.HeaderSize, headerSize)
+	copy(h.Signature[:], p.data[base+12:base+32])
+	wantHdr := uint32(headerSize)
+	if version == "041" {
+		wantHdr = headerSizeV041
+		h.ContainerSize = binary.LittleEndian.Uint32(p.data[base+112 : base+116])
+		h.HeaderOffset = binary.LittleEndian.Uint32(p.data[base+116 : base+120])
+	}
+	if h.HeaderSize != wantHdr {
+		return nil, p.fail(base+36, "header", "header_size=%d, want %d", h.HeaderSize, wantHdr)
 	}
 	if h.EndianTag != 0x12345678 {
-		return nil, p.fail(40, "header", "unsupported endian_tag %#x", h.EndianTag)
+		return nil, p.fail(base+40, "header", "unsupported endian_tag %#x", h.EndianTag)
 	}
-	if uint64(h.FileSize) != uint64(len(p.data)) {
-		return nil, p.fail(32, "header", "file_size=%d, actual=%d", h.FileSize, len(p.data))
+	if version == "041" {
+		if uint64(h.ContainerSize) != totalLen {
+			return nil, p.fail(base+112, "header", "container_size=%d, actual=%d", h.ContainerSize, totalLen)
+		}
+		if uint64(h.HeaderOffset) != off {
+			return nil, p.fail(base+116, "header", "header_offset=%d, want %d", h.HeaderOffset, off)
+		}
+		if h.FileSize < wantHdr || off+uint64(h.FileSize) > totalLen {
+			return nil, p.fail(base+32, "header", "file_size=%d exceeds remaining container %d", h.FileSize, totalLen-off)
+		}
+	} else if uint64(h.FileSize) != totalLen {
+		return nil, p.fail(base+32, "header", "file_size=%d, actual=%d", h.FileSize, totalLen)
 	}
 	if err := p.rangeCheck(h.DataOff, h.DataSize, "data section"); err != nil {
 		return nil, err
 	}
 	if version != "035" && h.MapOffset == 0 {
-		return nil, p.fail(52, "header", "DEX version %q requires map_list evidence for feature admission", version)
+		return nil, p.fail(base+52, "header", "DEX version %q requires map_list evidence for feature admission", version)
 	}
 	p.file = &model.File{Entry: p.entry, Header: h}
 	if h.MapOffset != 0 {
@@ -144,14 +225,15 @@ func (p *parser) parse() (*model.File, error) {
 	if err := p.checkAnnotationMethodMembership(); err != nil {
 		return nil, err
 	}
-	wantChecksum := adler32.Checksum(p.data[12:])
+	secEnd := int(off + uint64(h.FileSize))
+	wantChecksum := adler32.Checksum(p.data[base+12 : secEnd])
 	if h.Checksum != wantChecksum {
-		return nil, p.fail(8, "header checksum", "Adler-32 checksum=%08x, computed=%08x", h.Checksum, wantChecksum)
+		return nil, p.fail(base+8, "header checksum", "Adler-32 checksum=%08x, computed=%08x", h.Checksum, wantChecksum)
 	}
-	wantSignature := sha1.Sum(p.data[32:])
+	wantSignature := sha1.Sum(p.data[base+32 : secEnd])
 	if !bytes.Equal(h.Signature[:], wantSignature[:]) {
 		if !p.options.TolerateSignatureMismatch {
-			return nil, p.fail(12, "header signature", "SHA-1 signature mismatch")
+			return nil, p.fail(base+12, "header signature", "SHA-1 signature mismatch")
 		}
 		p.file.ParseWarnings = append(p.file.ParseWarnings, model.ParseWarning{
 			Entry:   p.entry,
