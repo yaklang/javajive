@@ -233,33 +233,38 @@ func methodHasTypeSwitch(obj *ClassObject, m *MemberInfo) bool {
 	if len(code) == 0 || bytes.IndexByte(code, byte(core.OP_INVOKEDYNAMIC)) < 0 {
 		return false
 	}
-	d := core.NewDecompiler(code, func(id int) values.JavaValue {
-		return GetValueFromCP(obj.ConstantPool, id)
-	})
-	d.ConstantPoolInvokeDynamicInfo = func(index int) (uint16, string, string) {
-		constant := obj.ConstantPool[index-1]
-		switch ret := constant.(type) {
-		case *ConstantInvokeDynamicInfo:
-			n, ds := getNameAndType(obj.ConstantPool, ret.NameAndTypeIndex)
-			return ret.BootstrapMethodAttrIndex, n, ds
-		default:
-			return 0, "", ""
+	var bms []*BootstrapMethod
+	for _, a := range obj.Attributes {
+		if b, ok := a.(*BootstrapMethodsAttribute); ok && b != nil {
+			bms = b.BootstrapMethods
+			break
 		}
 	}
-	attachBootstrap(d, obj)
-	if err := d.ParseOpcode(); err != nil {
+	if len(bms) == 0 {
 		return false
 	}
-	for _, op := range d.Opcodes() {
+	ops, err := core.DecodeOpcodesReadOnly(code)
+	if err != nil {
+		return false
+	}
+	for _, op := range ops {
 		if op == nil || op.Instr == nil || op.Instr.OpCode != core.OP_INVOKEDYNAMIC || len(op.Data) < 2 {
 			continue
 		}
-		index, name, _ := d.ConstantPoolInvokeDynamicInfo(int(core.Convert2bytesToInt(op.Data)))
+		cpIdx := int(core.Convert2bytesToInt(op.Data))
+		if cpIdx <= 0 || cpIdx > len(obj.ConstantPool) {
+			continue
+		}
+		ind, ok := obj.ConstantPool[cpIdx-1].(*ConstantInvokeDynamicInfo)
+		if !ok || ind == nil {
+			continue
+		}
+		name, _ := getNameAndType(obj.ConstantPool, ind.NameAndTypeIndex)
 		if name != "typeSwitch" {
 			continue
 		}
-		if int(index) >= 0 && int(index) < len(d.BootstrapMethods) && d.BootstrapMethods[index] != nil {
-			if mem, ok := d.BootstrapMethods[index].Ref.(*values.JavaClassMember); ok && mem != nil {
+		if int(ind.BootstrapMethodAttrIndex) >= 0 && int(ind.BootstrapMethodAttrIndex) < len(bms) && bms[ind.BootstrapMethodAttrIndex] != nil {
+			if mem, ok := GetValueFromCP(obj.ConstantPool, int(bms[ind.BootstrapMethodAttrIndex].BootstrapMethodRef)).(*values.JavaClassMember); ok && mem != nil {
 				id, err := core.IdentityFromMember(mem)
 				if err == nil && id.Equal(core.IdentityTypeSwitch) {
 					return true

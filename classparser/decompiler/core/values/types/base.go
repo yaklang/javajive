@@ -25,10 +25,15 @@ type JavaTypeWrap struct {
 	*javaTypeRef
 }
 
+type javaTypeWrapAlloc struct {
+	wrap JavaTypeWrap
+	ref  javaTypeRef
+}
+
 func (j *JavaTypeWrap) Copy() JavaType {
-	return &JavaTypeWrap{
-		javaTypeRef: &javaTypeRef{j.javaType},
-	}
+	a := &javaTypeWrapAlloc{ref: javaTypeRef{j.javaType}}
+	a.wrap.javaTypeRef = &a.ref
+	return &a.wrap
 }
 func (j *JavaTypeWrap) ArrayDim() int {
 	v, ok := j.javaType.(*JavaArrayType)
@@ -116,9 +121,9 @@ func (j *JavaTypeWrap) ResetType(t JavaType) {
 	}
 }
 func newJavaTypeWrap(t javaType) *JavaTypeWrap {
-	return &JavaTypeWrap{
-		javaTypeRef: &javaTypeRef{t},
-	}
+	a := &javaTypeWrapAlloc{ref: javaTypeRef{t}}
+	a.wrap.javaTypeRef = &a.ref
+	return &a.wrap
 }
 
 type javaType interface {

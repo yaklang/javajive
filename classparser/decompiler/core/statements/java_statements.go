@@ -2606,14 +2606,17 @@ func narrowingInitCast(slotType types.JavaType, valueType types.JavaType) string
 	if slotType == nil || valueType == nil {
 		return ""
 	}
-	slotStr := slotType.RawType().String(&class_context.ClassContext{})
-	valStr := valueType.RawType().String(&class_context.ClassContext{})
-	if valStr != "int" {
+	vp, ok := valueType.RawType().(*types.JavaPrimer)
+	if !ok || vp.Name != types.JavaInteger {
 		return ""
 	}
-	switch slotStr {
-	case "char", "byte", "short":
-		return slotStr
+	sp, ok := slotType.RawType().(*types.JavaPrimer)
+	if !ok {
+		return ""
+	}
+	switch sp.Name {
+	case types.JavaChar, types.JavaByte, types.JavaShort:
+		return sp.Name
 	}
 	return ""
 }

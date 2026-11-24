@@ -32,6 +32,7 @@ type JarWar struct {
 	// 存储反编译失败的文件列表
 	failedDecompiledFiles map[string]struct{}
 	failedFilesLock       sync.RWMutex
+	createdDirs           sync.Map
 }
 
 func NewFromJarFS(fs *javaclassparser.JarFS) (*JarWar, error) {
@@ -305,7 +306,7 @@ func (j *JarWar) executeDumpTask(root string, task dumpTask) error {
 			}
 			return fmt.Errorf("decompile archive entry %q: %w", task.entryPath, err)
 		}
-		if err := writeFlatFile(root, task.outPath, decompiled); err != nil {
+		if err := j.writeFlatFile(root, task.outPath, decompiled); err != nil {
 			if j.bestEffort {
 				log.Warnf("write archive entry %q failed: %v", task.entryPath, err)
 				j.recordFailedFile(task.visiblePath)
@@ -313,13 +314,15 @@ func (j *JarWar) executeDumpTask(root string, task dumpTask) error {
 			}
 			return fmt.Errorf("write archive entry %q: %w", task.entryPath, err)
 		}
-		var origSize int64
-		if info, statErr := j.fs.Stat(task.entryPath); statErr == nil {
-			origSize = info.Size()
+		if log.Enabled(log.InfoLevel) {
+			var origSize int64
+			if info, statErr := j.fs.Stat(task.entryPath); statErr == nil {
+				origSize = info.Size()
+			}
+			lines := bytes.Count(decompiled, []byte{'\n'}) + 1
+			log.Infof("Decompiled [%v] - Original size: %d bytes, Decompiled size: %d bytes, Lines of code: %d",
+				task.visiblePath, origSize, len(decompiled), lines)
 		}
-		lines := bytes.Count(decompiled, []byte{'\n'}) + 1
-		log.Infof("Decompiled [%v] - Original size: %d bytes, Decompiled size: %d bytes, Lines of code: %d",
-			task.visiblePath, origSize, len(decompiled), lines)
 		return nil
 	}
 
@@ -332,7 +335,7 @@ func (j *JarWar) executeDumpTask(root string, task dumpTask) error {
 		}
 		return fmt.Errorf("read archive entry %q: %w", task.entryPath, err)
 	}
-	if err := writeFlatFile(root, task.outPath, raw); err != nil {
+	if err := j.writeFlatFile(root, task.outPath, raw); err != nil {
 		if j.bestEffort {
 			log.Warnf("write archive entry %q failed: %v", task.entryPath, err)
 			j.recordFailedFile(task.visiblePath)
@@ -343,7 +346,7 @@ func (j *JarWar) executeDumpTask(root string, task dumpTask) error {
 	return nil
 }
 
-func writeFlatFile(root, name string, data []byte) error {
+func (j *JarWar) writeFlatFile(root, name string, data []byte) error {
 	target, err := SafeJoin(root, name)
 	if err != nil {
 		return err
@@ -352,10 +355,23 @@ func writeFlatFile(root, name string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(parent, 0o755); err != nil {
-		return err
+	if j == nil {
+		if err := os.MkdirAll(parent, 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0o644)
+	}
+	if _, ok := j.createdDirs.Load(parent); !ok {
+		if err := os.MkdirAll(parent, 0o755); err != nil {
+			return err
+		}
+		j.createdDirs.Store(parent, struct{}{})
 	}
 	return os.WriteFile(target, data, 0o644)
+}
+
+func writeFlatFile(root, name string, data []byte) error {
+	return (*JarWar)(nil).writeFlatFile(root, name, data)
 }
 
 func sanitizeBestEffortClassPath(rel string) string {

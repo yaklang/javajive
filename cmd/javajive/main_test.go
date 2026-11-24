@@ -5,12 +5,14 @@ import (
 	"bytes"
 	"flag"
 	"io"
+	stdlog "log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/yaklang/javajive/internal/jimagefixture"
+	"github.com/yaklang/javajive/internal/log"
 )
 
 func TestCmdDexToJarHelp(t *testing.T) {
@@ -157,5 +159,64 @@ func TestCmdDecompileAnalysisBudget(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(outDir, "InvisibleAnnoSeed.java")); err != nil {
 		t.Fatalf("directory output missing: %v", err)
+	}
+}
+
+func TestCmdLogFlags(t *testing.T) {
+	dexFixture := filepath.Join("..", "..", "dex2jar", "testdata", "accept", "arithmetic.dex")
+	prevLevel := log.GetLevel()
+	prevOut := stdlog.Writer()
+	defer func() {
+		log.SetLevel(prevLevel)
+		stdlog.SetOutput(prevOut)
+	}()
+
+	var logBuf bytes.Buffer
+	stdlog.SetOutput(&logBuf)
+
+	jarOut := filepath.Join(t.TempDir(), "out.jar")
+	if err := cmdDexToJar([]string{"-q", "-o", jarOut, dexFixture}); err != nil {
+		t.Fatalf("cmdDexToJar -q: %v", err)
+	}
+	if log.GetLevel() != prevLevel {
+		t.Fatalf("log level leaked after cmdDexToJar -q: got %v, want %v", log.GetLevel(), prevLevel)
+	}
+	if logBuf.Len() != 0 {
+		t.Fatalf("expected no log output under -q, got %q", logBuf.String())
+	}
+
+	logBuf.Reset()
+	srcOut := filepath.Join(t.TempDir(), "src")
+	if err := cmdDecompile([]string{"--log-level=warn", "-o", srcOut, dexFixture}); err != nil {
+		t.Fatalf("cmdDecompile --log-level=warn: %v", err)
+	}
+	if strings.Contains(logBuf.String(), "[INFO]") || strings.Contains(logBuf.String(), "[DEBUG]") {
+		t.Fatalf("expected info/debug logs suppressed at warn level, got %q", logBuf.String())
+	}
+
+	logBuf.Reset()
+	quietSrcOut := filepath.Join(t.TempDir(), "quiet-src")
+	if err := cmdDecompile([]string{"--log-level", "quiet", "-o", quietSrcOut, dexFixture}); err != nil {
+		t.Fatalf("cmdDecompile --log-level quiet: %v", err)
+	}
+	if logBuf.Len() != 0 {
+		t.Fatalf("expected empty log output under --log-level quiet, got %q", logBuf.String())
+	}
+
+	if err := cmdDecompile([]string{"--quiet", "--log-level=info", dexFixture}); err == nil ||
+		!strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected mutual exclusion error, got %v", err)
+	}
+	if err := cmdDecompile([]string{"--log-level=invalid", dexFixture}); err == nil ||
+		!strings.Contains(err.Error(), "invalid log level") {
+		t.Fatalf("expected invalid log level error, got %v", err)
+	}
+	if err := cmdDexToJar([]string{"--log-level=nope", "-o", filepath.Join(t.TempDir(), "bad.jar"), dexFixture}); err == nil ||
+		!strings.Contains(err.Error(), "invalid log level") {
+		t.Fatalf("cmdDexToJar invalid log level error = %v", err)
+	}
+	if err := cmdJImageToJar([]string{"--quiet", "--log-level=warn", "-o", filepath.Join(t.TempDir(), "bad.jar"), dexFixture}); err == nil ||
+		!strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("cmdJImageToJar mutual exclusion error = %v", err)
 	}
 }

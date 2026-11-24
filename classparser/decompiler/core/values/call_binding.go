@@ -18,7 +18,33 @@ func bindingType(t types.JavaType) string {
 	if n := witnessRawClassName(t); n != "" {
 		return "L" + strings.ReplaceAll(n, ".", "/") + ";"
 	}
-	return map[string]string{"byte": "B", "char": "C", "double": "D", "float": "F", "int": "I", "long": "J", "short": "S", "boolean": "Z", "void": "V"}[t.String(&dummyTypeCtx)]
+	var prim string
+	if p, ok := t.RawType().(*types.JavaPrimer); ok {
+		prim = p.Name
+	} else {
+		prim = t.String(&dummyTypeCtx)
+	}
+	switch prim {
+	case "byte":
+		return "B"
+	case "char":
+		return "C"
+	case "double":
+		return "D"
+	case "float":
+		return "F"
+	case "int":
+		return "I"
+	case "long":
+		return "J"
+	case "short":
+		return "S"
+	case "boolean":
+		return "Z"
+	case "void":
+		return "V"
+	}
+	return ""
 }
 
 // planCallBinding runs before text rendering. A widening cast changes javac's

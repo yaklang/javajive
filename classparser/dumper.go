@@ -280,6 +280,32 @@ type ClassObjectDumper struct {
 	archiveDeclarationResolver func(internalName string) ([]byte, bool)
 	// Java8 inner source bodies cannot declare static helper methods.
 	sourceInnerClassBody bool
+	readOnlyCodeOps      map[*CodeAttribute][]*core.OpCode
+}
+
+// readOnlyCodeOpcodes decodes and caches read-only opcodes per CodeAttribute
+// for proof passes that inspect bytecode without building statements. Callers
+// must never mutate the returned slice or its OpCode elements.
+func (c *ClassObjectDumper) readOnlyCodeOpcodes(code *CodeAttribute) ([]*core.OpCode, error) {
+	if code == nil {
+		return nil, fmt.Errorf("nil code attribute")
+	}
+	if c != nil && c.readOnlyCodeOps != nil {
+		if ops, ok := c.readOnlyCodeOps[code]; ok {
+			return ops, nil
+		}
+	}
+	ops, err := core.DecodeOpcodesReadOnly(code.Code)
+	if err != nil {
+		return nil, err
+	}
+	if c != nil {
+		if c.readOnlyCodeOps == nil {
+			c.readOnlyCodeOps = make(map[*CodeAttribute][]*core.OpCode, 8)
+		}
+		c.readOnlyCodeOps[code] = ops
+	}
+	return ops, nil
 }
 
 func (c *ClassObjectDumper) GetConstructorMethodName() string {

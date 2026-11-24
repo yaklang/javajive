@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -391,7 +391,7 @@ func (b *Budget) chargeManyLocked(cost map[Counter]int64, aggregate bool) error 
 			keys[j+1] = k
 		}
 	} else {
-		sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+		slices.Sort(keys)
 	}
 	total := int64(0)
 	for _, c := range keys {

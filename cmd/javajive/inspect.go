@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 
 	artifactinspect "github.com/yaklang/javajive/inspect"
 )
@@ -19,15 +18,21 @@ func cmdInspectTo(args []string, stdout io.Writer) error {
 	fs := newFlagSet("inspect")
 	fs.SetOutput(io.Discard)
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: javajive inspect INPUT --format json [--disassembly=false]")
+		fmt.Fprintln(os.Stderr, "usage: javajive inspect INPUT --format json [-q|--quiet] [--log-level level] [--disassembly=false]")
 		fmt.Fprintln(os.Stderr, "Read-only inventory and best-effort analysis of Java archives, JDK runtime images, and Android containers.")
 		fs.PrintDefaults()
 	}
 	format := fs.String("format", "json", "report format (json)")
 	disassembly := fs.Bool("disassembly", true, "include per-instruction DEX disassembly; disable for very large applications")
+	logOpts := bindLogFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	_, restoreLog, err := applyLogFlags(logOpts)
+	if err != nil {
+		return err
+	}
+	defer restoreLog()
 	if fs.NArg() != 1 {
 		return fmt.Errorf("inspect requires exactly one input path\nusage: javajive inspect INPUT --format json")
 	}
@@ -45,24 +50,29 @@ func cmdInspectTo(args []string, stdout io.Writer) error {
 }
 
 // flag.FlagSet stops parsing at the first positional argument. Normalize the
-// documented INPUT --format json spelling while retaining ordinary flag-first
-// syntax and letting FlagSet produce all validation errors.
+// documented INPUT --format json [flags...] spelling while retaining ordinary
+// flag-first syntax and letting FlagSet produce all validation errors.
 func normalizeInspectArgs(args []string) []string {
-	if len(args) < 2 || len(args[0]) == 0 || args[0][0] == '-' {
+	if len(args) < 2 || len(args[0]) == 0 || args[0][0] == '-' || len(args[1]) == 0 || args[1][0] != '-' {
 		return args
 	}
-	if args[1] != "--format" && args[1] != "-format" && len(args) == 2 {
-		return args
-	}
-	if args[1] == "--format" || args[1] == "-format" {
-		if len(args) < 3 {
-			return args
+	flags := make([]string, 0, len(args))
+	pos := []string{args[0]}
+	for i := 1; i < len(args); i++ {
+		tok := args[i]
+		if tok == "--" {
+			pos = append(pos, args[i:]...)
+			break
 		}
-		out := []string{args[1], args[2], args[0]}
-		return append(out, args[3:]...)
+		if len(tok) == 0 || tok[0] != '-' {
+			pos = append(pos, tok)
+			continue
+		}
+		flags = append(flags, tok)
+		if (tok == "--format" || tok == "-format" || tok == "--log-level" || tok == "-log-level") && i+1 < len(args) {
+			flags = append(flags, args[i+1])
+			i++
+		}
 	}
-	if len(args) == 2 && (strings.HasPrefix(args[1], "--format=") || strings.HasPrefix(args[1], "-format=")) {
-		return []string{args[1], args[0]}
-	}
-	return args
+	return append(flags, pos...)
 }

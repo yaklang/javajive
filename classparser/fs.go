@@ -526,16 +526,75 @@ func (z *JarFS) Stat(name string) (fs.FileInfo, error) {
 	}, nil
 }
 
+type archiveSuffixEntry struct {
+	ext   string
+	slash string
+	bang  string
+}
+
 var (
-	archiveFileSuffixes    = []string{".jar", ".war", ".ear", ".aar", ".par", ".jmod", ".zip"}
+	archiveFileSuffixes = []string{".jar", ".war", ".ear", ".aar", ".par", ".jmod", ".zip"}
+	archiveSuffixTable  = []archiveSuffixEntry{
+		{".jar", ".jar/", ".jar!"},
+		{".war", ".war/", ".war!"},
+		{".ear", ".ear/", ".ear!"},
+		{".aar", ".aar/", ".aar!"},
+		{".par", ".par/", ".par!"},
+		{".jmod", ".jmod/", ".jmod!"},
+		{".zip", ".zip/", ".zip!"},
+	}
 	jarLikeArchiveSuffixes = []string{".jar", ".war", ".ear", ".aar", ".par", ".jmod"}
 )
 
+func hasFoldASCIISuffix(s, lowerSuffix string) bool {
+	if len(s) < len(lowerSuffix) {
+		return false
+	}
+	tail := s[len(s)-len(lowerSuffix):]
+	for i := 0; i < len(lowerSuffix); i++ {
+		c := tail[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != lowerSuffix[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func indexFoldASCII(s, lowerSub string) int {
+	n := len(lowerSub)
+	if n == 0 {
+		return 0
+	}
+	if len(s) < n {
+		return -1
+	}
+	limit := len(s) - n
+	for i := 0; i <= limit; i++ {
+		matched := true
+		for j := 0; j < n; j++ {
+			c := s[i+j]
+			if c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			if c != lowerSub[j] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return i
+		}
+	}
+	return -1
+}
+
 func isArchiveFile(path string) bool {
 	path = normalizeArchivePath(path)
-	lowerPath := strings.ToLower(path)
 	for _, ext := range archiveFileSuffixes {
-		if strings.HasSuffix(lowerPath, ext) {
+		if hasFoldASCIISuffix(path, ext) {
 			return true
 		}
 	}
@@ -544,9 +603,8 @@ func isArchiveFile(path string) bool {
 
 func isArchivePath(name string) bool {
 	name = normalizeArchivePath(name)
-	lowerPath := strings.ToLower(name)
-	for _, ext := range archiveFileSuffixes {
-		if strings.Contains(lowerPath, ext+"/") || strings.Contains(lowerPath, ext+"!") {
+	for _, e := range archiveSuffixTable {
+		if indexFoldASCII(name, e.slash) >= 0 || indexFoldASCII(name, e.bang) >= 0 {
 			return true
 		}
 	}
@@ -555,11 +613,12 @@ func isArchivePath(name string) bool {
 
 func parseArchivePath(fullPath string) (archivePath, internalPath string, ok bool) {
 	fullPath = normalizeArchivePath(fullPath)
-	lowerPath := strings.ToLower(fullPath)
-
-	for _, ext := range archiveFileSuffixes {
-		if strings.Contains(lowerPath, ext+"/") || strings.Contains(lowerPath, ext+"!") {
-			return parseJarOrZipPath(fullPath, ext)
+	for _, e := range archiveSuffixTable {
+		if idx := indexFoldASCII(fullPath, e.slash); idx >= 0 {
+			return fullPath[:idx+len(e.ext)], strings.TrimPrefix(fullPath[idx+len(e.slash):], "/"), true
+		}
+		if idx := indexFoldASCII(fullPath, e.bang); idx >= 0 {
+			return fullPath[:idx+len(e.ext)], strings.TrimPrefix(fullPath[idx+len(e.bang):], "/"), true
 		}
 	}
 	return "", "", false
@@ -567,33 +626,12 @@ func parseArchivePath(fullPath string) (archivePath, internalPath string, ok boo
 
 func isJarLikeArchivePath(path string) bool {
 	path = normalizeArchivePath(path)
-	lowerPath := strings.ToLower(path)
 	for _, ext := range jarLikeArchiveSuffixes {
-		if strings.HasSuffix(lowerPath, ext) {
+		if hasFoldASCIISuffix(path, ext) {
 			return true
 		}
 	}
 	return false
-}
-
-func parseJarOrZipPath(fullPath, ext string) (archivePath, internalPath string, ok bool) {
-	extWithSlash := ext + "/"
-	extWithBang := ext + "!"
-
-	idx := strings.Index(fullPath, extWithSlash)
-	if idx == -1 {
-		bangIdx := strings.Index(fullPath, extWithBang)
-		if bangIdx == -1 {
-			return "", "", false
-		}
-		archivePath = fullPath[:bangIdx+len(ext)]
-		internalPath = strings.TrimPrefix(fullPath[bangIdx+len(extWithBang):], "/")
-		return archivePath, internalPath, true
-	}
-
-	archivePath = fullPath[:idx+len(ext)]
-	internalPath = strings.TrimPrefix(fullPath[idx+len(extWithSlash):], "/")
-	return archivePath, internalPath, true
 }
 
 func normalizeArchivePath(name string) string {
@@ -604,7 +642,7 @@ func normalizeArchivePath(name string) string {
 	// Preserve absoluteness: the outermost archive of a nested path (e.g.
 	// "/abs/app.war/WEB-INF/lib/foo.jar/Foo.class") is a real on-disk path that
 	// must keep its leading slash so the host filesystem can open it. Archive
-	// internal entries are slash-trimmed separately in parseJarOrZipPath, and
+	// internal entries are slash-trimmed separately in parseArchivePath, and
 	// Windows drive paths ("C:/...") have no leading slash, so this only restores
 	// the root slash for genuine Unix-absolute paths.
 	isAbs := strings.HasPrefix(name, "/")

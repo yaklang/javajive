@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/yaklang/javajive/internal/funk"
 	"github.com/yaklang/javajive/internal/jdecenv"
 	"github.com/yaklang/javajive/internal/omap"
 	"github.com/yaklang/javajive/internal/utils"
@@ -750,6 +749,9 @@ func SafeIdentifier(name string) string {
 	if name == "" {
 		return "__"
 	}
+	if isASCIIJavaIdentFast(name) {
+		return name
+	}
 	var b strings.Builder
 	for i, r := range name {
 		bits := java21IdentifierBits(r)
@@ -833,11 +835,27 @@ func SafePackageSegment(seg string) string {
 	return out
 }
 
+func isASCIIJavaPackageFast(pkg string) bool {
+	start := 0
+	for i := 0; i <= len(pkg); i++ {
+		if i == len(pkg) || pkg[i] == '.' {
+			if !isASCIIJavaIdentFast(pkg[start:i]) {
+				return false
+			}
+			start = i + 1
+		}
+	}
+	return true
+}
+
 // SafePackageName sanitizes each dot-separated segment of a package name for
 // Java source emission while preserving valid ASCII and Unicode packages.
 func SafePackageName(pkg string) string {
 	if pkg == "" {
 		return ""
+	}
+	if isASCIIJavaPackageFast(pkg) {
+		return pkg
 	}
 	if !strings.ContainsRune(pkg, '.') {
 		return SafePackageSegment(pkg)
@@ -947,6 +965,9 @@ func (f *ClassContext) Import(name string) {
 	if className != "*" {
 		className = SafeIdentifier(className)
 	}
+	if f.KeySet.Has(className) {
+		return
+	}
 	// One simple name can only bind one type per compilation unit (JLS 7.5.1).
 	// When the reference inventory proved that another owner must take that
 	// name -- its own qualified spelling is illegal -- this owner must not
@@ -957,16 +978,13 @@ func (f *ClassContext) Import(name string) {
 			return
 		}
 	}
-	if f.KeySet.Has(className) {
-		return
-	}
 	key, ok := f.BuildInLibsMap.Get(pkg)
 	if ok {
 		if slices.Contains(key, className) || slices.Contains(key, "*") {
 			return
 		}
 	}
-	f.BuildInLibsMap.Set(pkg, append(f.BuildInLibsMap.GetMust(pkg), className))
+	f.BuildInLibsMap.Set(pkg, append(key, className))
 	f.KeySet.Add(className)
 }
 
@@ -1107,13 +1125,15 @@ func (f *ClassContext) ShortTypeName(name string) string {
 			dotted = src
 		}
 	}
-	safePkg := SafePackageName(pkg)
-	first := strings.SplitN(dotted, ".", 2)[0]
+	first := dotted
+	if idx := strings.IndexByte(dotted, '.'); idx >= 0 {
+		first = dotted[:idx]
+	}
 	if f.LexicalTypeNames[first] || f.IsTypeParam(first) {
 		// A qualified class identity and a same-spelled formal are different
 		// declarations. Keep the class qualified where shortening would bind
 		// to the formal; bare type-variable inputs returned above stay bare.
-		return safePkg + "." + dotted
+		return SafePackageName(pkg) + "." + dotted
 	}
 	if pkg == f.PackageName || pkg == "java.lang" {
 		// A same-package (or java.lang) type is normally reachable by its bare simple name with no
@@ -1127,7 +1147,7 @@ func (f *ClassContext) ShortTypeName(name string) string {
 			if pkg == f.PackageName && f.packageNameObscured() {
 				return dotted
 			}
-			return safePkg + "." + dotted
+			return SafePackageName(pkg) + "." + dotted
 		}
 		// Runtime lowering can introduce a platform owner absent from the
 		// original CP. Check its declaration identity too, rather than relying
@@ -1138,7 +1158,7 @@ func (f *ClassContext) ShortTypeName(name string) string {
 				own = strings.ReplaceAll(f.PackageName, ".", "/") + "/" + className
 			}
 			if declaration, known := f.InvocationMetadata(own); known && declaration.Name == own {
-				return safePkg + "." + dotted
+				return SafePackageName(pkg) + "." + dotted
 			}
 		}
 		return dotted
@@ -1152,21 +1172,21 @@ func (f *ClassContext) ShortTypeName(name string) string {
 			f.Import(name)
 			return dotted
 		}
-		return safePkg + "." + dotted
+		return SafePackageName(pkg) + "." + dotted
 	}
 	if f.SamePkgFQNames != nil && f.SamePkgFQNames[className] && f.packageNameObscured() {
-		return safePkg + "." + dotted
+		return SafePackageName(pkg) + "." + dotted
 	}
 	f.Import(name)
 	if f.BuildInLibsMap == nil {
 		f.BuildInLibsMap = omap.NewEmptyOrderedMap[string, []string]()
 	}
 	libs := f.BuildInLibsMap.GetMust(pkg)
-	if len(libs) > 0 && (funk.Contains(libs, className) || libs[0] == "*") {
+	if len(libs) > 0 && (slices.Contains(libs, className) || libs[0] == "*") {
 		return dotted
 	}
 	//f.BuildInLibsMap.Set(pkg, append(f.BuildInLibsMap.GetMust(pkg), className))
-	return safePkg + "." + dotted
+	return SafePackageName(pkg) + "." + dotted
 }
 
 // binaryNestedNameToSource converts a binary nested class simple name (Outer$Inner$Deeper) into its

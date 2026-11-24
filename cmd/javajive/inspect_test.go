@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	artifactinspect "github.com/yaklang/javajive/inspect"
+	"github.com/yaklang/javajive/internal/log"
 )
 
 func TestCmdInspectAcceptedFixtureJSON(t *testing.T) {
@@ -43,6 +44,34 @@ func TestCmdInspectExternalAcceptedDEX038EmitsCompleteJSON(t *testing.T) {
 	}
 	if report.Status != artifactinspect.StatusComplete || len(report.Diagnostics) != 0 {
 		t.Fatalf("report = %#v", report)
+	}
+}
+
+func TestCmdInspectLogFlags(t *testing.T) {
+	fixture := filepath.Join("..", "..", "dex2jar", "testdata", "accept", "arithmetic.dex")
+	prev := log.GetLevel()
+	defer log.SetLevel(prev)
+
+	var stdout bytes.Buffer
+	if err := cmdInspectTo([]string{fixture, "--format", "json", "--quiet"}, &stdout); err != nil {
+		t.Fatalf("cmdInspectTo --quiet: %v", err)
+	}
+	if log.GetLevel() != prev {
+		t.Fatalf("log level leaked after cmdInspectTo --quiet: got %v, want %v", log.GetLevel(), prev)
+	}
+	stdout.Reset()
+	if err := cmdInspectTo([]string{"-q", "--format=json", fixture}, &stdout); err != nil {
+		t.Fatalf("cmdInspectTo -q: %v", err)
+	}
+	stdout.Reset()
+	if err := cmdInspectTo([]string{fixture, "--log-level", "warn", "--format", "json"}, &stdout); err != nil {
+		t.Fatalf("cmdInspectTo --log-level warn: %v", err)
+	}
+	if err := cmdInspectTo([]string{fixture, "--quiet", "--log-level=info"}, &stdout); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected mutual exclusion error, got %v", err)
+	}
+	if err := cmdInspectTo([]string{"--log-level=bogus", fixture}, &stdout); err == nil || !strings.Contains(err.Error(), "invalid log level") {
+		t.Fatalf("expected invalid log level error, got %v", err)
 	}
 }
 
