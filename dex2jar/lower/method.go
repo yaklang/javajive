@@ -169,6 +169,21 @@ func (l *methodLowerer) lower() error {
 	l.detectCanonicalEnumClinitConstSpans()
 	for _, block := range l.method.Blocks {
 		l.markLabel(l.labels[block.Start])
+		if !block.Reachable {
+			for _, index := range block.Instructions {
+				instruction := &l.method.Instructions[index]
+				startLabel := l.addressLabels[instruction.Offset]
+				if startLabel != nil && startLabel != l.labels[block.Start] {
+					l.markLabel(startLabel)
+				} else if startLabel == nil {
+					startLabel = l.code.NewLabel()
+					l.markLabel(startLabel)
+				}
+				l.insnStartLabel[index] = startLabel
+				l.insnEndLabel[index] = startLabel
+			}
+			continue
+		}
 		for _, index := range block.Instructions {
 			instruction := &l.method.Instructions[index]
 			// A deferred store still owns its address: debug data may reference
@@ -759,9 +774,10 @@ func (l *methodLowerer) emitHandlerTrampolines() {
 	l.handlerTrampolines = make(map[uint32]*classfilebuilder.Label)
 	first := make(map[uint32]byte, len(l.method.Blocks))
 	for _, block := range l.method.Blocks {
-		if len(block.Instructions) > 0 {
-			first[block.Start] = l.method.Instructions[block.Instructions[0]].Opcode
+		if !block.Reachable || len(block.Instructions) == 0 {
+			continue
 		}
+		first[block.Start] = l.method.Instructions[block.Instructions[0]].Opcode
 	}
 	for _, try := range l.method.Code.Tries {
 		addresses := make([]uint32, 0, len(try.Handler.Handlers)+1)
@@ -1034,25 +1050,45 @@ func (l *methodLowerer) emitInstruction(index int) error {
 	case instruction.Opcode == 0x11:
 		l.load(instruction.Regs[0]).Emit(classfilebuilder.ARETURN)
 	case instruction.Opcode >= 0x12 && instruction.Opcode <= 0x15:
-		if instruction.Literal == 0 {
-			if defCat := l.definitionCategory(instruction.Regs[0]); defCat.Kind == ir.Null {
-				stored := false
-				for _, entry := range []struct {
-					lk classfilebuilder.LocalKind
-					op classfilebuilder.Opcode
-				}{
-					{classfilebuilder.RefLocal, classfilebuilder.ACONST_NULL},
-					{classfilebuilder.IntLocal, classfilebuilder.ICONST_0},
-					{classfilebuilder.FloatLocal, classfilebuilder.FCONST_0},
-				} {
-					if slot, ok := l.slotIfCompanion(l.index, instruction.Regs[0], entry.lk, true); ok {
-						l.code.Emit(entry.op).Store(entry.lk, slot)
-						stored = true
-					}
+		rawDef := l.definitionCategoryAt(l.index, instruction.Regs[0])
+		defCat := l.definitionCategory(instruction.Regs[0])
+		if instruction.Literal == 0 && (defCat.Kind == ir.Null || rawDef.Kind == ir.Null) {
+			stored := false
+			for _, entry := range []struct {
+				lk classfilebuilder.LocalKind
+				op classfilebuilder.Opcode
+			}{
+				{classfilebuilder.RefLocal, classfilebuilder.ACONST_NULL},
+				{classfilebuilder.IntLocal, classfilebuilder.ICONST_0},
+				{classfilebuilder.FloatLocal, classfilebuilder.FCONST_0},
+			} {
+				if slot, ok := l.slotIfCompanion(l.index, instruction.Regs[0], entry.lk, true); ok {
+					l.code.Emit(entry.op).Store(entry.lk, slot)
+					stored = true
 				}
-				if stored {
-					return nil
+			}
+			if stored {
+				return nil
+			}
+		} else if defCat.Kind == ir.Bits32 || rawDef.Kind == ir.Bits32 {
+			stored := false
+			if slot, ok := l.slotIfCompanion(l.index, instruction.Regs[0], classfilebuilder.IntLocal, true); ok {
+				if err := l.pushInt(int32(instruction.Literal)); err != nil {
+					return methodDiagnostic(l.method.Context, instruction, "", err)
 				}
+				l.code.Store(classfilebuilder.IntLocal, slot)
+				stored = true
+			}
+			if slot, ok := l.slotIfCompanion(l.index, instruction.Regs[0], classfilebuilder.FloatLocal, true); ok {
+				constant, err := l.builder.Pool().Float(uint32(int32(instruction.Literal)))
+				if err != nil {
+					return methodDiagnostic(l.method.Context, instruction, "", err)
+				}
+				l.code.LDC(constant).Store(classfilebuilder.FloatLocal, slot)
+				stored = true
+			}
+			if stored {
+				return nil
 			}
 		}
 		if err := l.pushDexInt(instruction.Regs[0], int32(instruction.Literal)); err != nil {
@@ -1192,6 +1228,31 @@ func (l *methodLowerer) emitMove(instruction *ir.Instruction) error {
 				l.registerDescriptor[dst] = l.registerDescriptor[src]
 			}
 			return nil
+		} else if rawSrc.Kind == ir.Bits32 {
+			dst, src := instruction.Regs[0], instruction.Regs[1]
+			hasDstPoly := false
+			for _, lk := range []classfilebuilder.LocalKind{classfilebuilder.IntLocal, classfilebuilder.FloatLocal} {
+				if _, ok := l.slotIfCompanion(l.index, dst, lk, true); ok {
+					hasDstPoly = true
+					break
+				}
+			}
+			srcResolvedLK := localKind(l.resolvedUseCategoryAt(l.index, src).Kind)
+			if hasDstPoly {
+				for _, lk := range []classfilebuilder.LocalKind{classfilebuilder.IntLocal, classfilebuilder.FloatLocal} {
+					dstSlot, ok := l.slotIfCompanion(l.index, dst, lk, true)
+					if !ok {
+						continue
+					}
+					if err := l.emitBits32Copy(instruction, src, dstSlot, lk, srcResolvedLK); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+			dstLK := localKind(kind)
+			dstSlot := l.storeSlotAt(l.index, dst, dstLK)
+			return l.emitBits32Copy(instruction, src, dstSlot, dstLK, srcResolvedLK)
 		}
 	}
 	l.load(instruction.Regs[1])
@@ -1200,6 +1261,47 @@ func (l *methodLowerer) emitMove(instruction *ir.Instruction) error {
 		l.registerDescriptor[instruction.Regs[0]] = l.registerDescriptor[instruction.Regs[1]]
 	}
 	return nil
+}
+
+func (l *methodLowerer) emitBits32Copy(instruction *ir.Instruction, src, dstSlot uint16, dstLK, srcResolvedLK classfilebuilder.LocalKind) error {
+	if srcSlot, srcOK := l.slotIfCompanion(l.index, src, dstLK, false); srcOK {
+		l.code.Load(dstLK, srcSlot).Store(dstLK, dstSlot)
+		return nil
+	}
+	if srcResolvedLK == dstLK {
+		l.code.Load(dstLK, l.loadSlotAt(l.index, src, dstLK)).Store(dstLK, dstSlot)
+		return nil
+	}
+	if dstLK == classfilebuilder.FloatLocal {
+		srcSlot, ok := l.slotIfCompanion(l.index, src, classfilebuilder.IntLocal, false)
+		if !ok && srcResolvedLK == classfilebuilder.IntLocal {
+			srcSlot = l.loadSlotAt(l.index, src, classfilebuilder.IntLocal)
+			ok = true
+		}
+		if ok {
+			conv, err := l.builder.Pool().Methodref("java/lang/Float", "intBitsToFloat", "(I)F")
+			if err != nil {
+				return methodDiagnostic(l.method.Context, instruction, "", err)
+			}
+			l.code.Load(classfilebuilder.IntLocal, srcSlot).CP(classfilebuilder.INVOKESTATIC, conv).Store(classfilebuilder.FloatLocal, dstSlot)
+			return nil
+		}
+	} else if dstLK == classfilebuilder.IntLocal {
+		srcSlot, ok := l.slotIfCompanion(l.index, src, classfilebuilder.FloatLocal, false)
+		if !ok && srcResolvedLK == classfilebuilder.FloatLocal {
+			srcSlot = l.loadSlotAt(l.index, src, classfilebuilder.FloatLocal)
+			ok = true
+		}
+		if ok {
+			conv, err := l.builder.Pool().Methodref("java/lang/Float", "floatToRawIntBits", "(F)I")
+			if err != nil {
+				return methodDiagnostic(l.method.Context, instruction, "", err)
+			}
+			l.code.Load(classfilebuilder.FloatLocal, srcSlot).CP(classfilebuilder.INVOKESTATIC, conv).Store(classfilebuilder.IntLocal, dstSlot)
+			return nil
+		}
+	}
+	return methodDiagnostic(l.method.Context, instruction, "", fmt.Errorf("cannot copy 32-bit value from v%d (%d) to %d", src, srcResolvedLK, dstLK))
 }
 
 // emitWideReturn returns the category-2 value the method prototype declares.
@@ -2045,7 +2147,23 @@ func (l *methodLowerer) emitInvoke(index int, instruction *ir.Instruction) error
 	if err != nil {
 		return methodDiagnostic(l.method.Context, instruction, "", err)
 	}
-	owner, err := memberOwnerName(callee.Class)
+	targetDesc := callee.Class
+	useInterfaceRef := false
+	if instruction.Opcode == 0x6f || instruction.Opcode == 0x75 {
+		if resolved, isIface, ok := resolveInvokeSuperTarget(l.class, callee.Class, l.classIndex()); ok {
+			targetDesc = resolved
+			useInterfaceRef = isIface
+		}
+	} else if (instruction.Opcode == 0x70 || instruction.Opcode == 0x76) && callee.Name != "<init>" && l.class.AccessFlags&dexInterface != 0 {
+		useInterfaceRef = true
+	} else if isStaticInvoke(instruction.Opcode) {
+		if callee.Class == l.class.Descriptor {
+			useInterfaceRef = l.class.AccessFlags&dexInterface != 0
+		} else if target, ok := l.classIndex()[callee.Class]; ok && target.AccessFlags&dexInterface != 0 {
+			useInterfaceRef = true
+		}
+	}
+	owner, err := memberOwnerName(targetDesc)
 	if err != nil {
 		return methodDiagnostic(l.method.Context, instruction, "", err)
 	}
@@ -2067,7 +2185,12 @@ func (l *methodLowerer) emitInvoke(index int, instruction *ir.Instruction) error
 		}
 		l.code.InvokeInterface(constant)
 	} else {
-		constant, err := l.builder.Pool().Methodref(owner, callee.Name, descriptor)
+		var constant uint16
+		if useInterfaceRef {
+			constant, err = l.builder.Pool().InterfaceMethodref(owner, callee.Name, descriptor)
+		} else {
+			constant, err = l.builder.Pool().Methodref(owner, callee.Name, descriptor)
+		}
 		if err != nil {
 			return methodDiagnostic(l.method.Context, instruction, "", err)
 		}
@@ -2316,11 +2439,11 @@ func (l *methodLowerer) lowerBootstrapArg(value model.EncodedValue) (uint16, err
 
 func (l *methodLowerer) resolvedDefCategoryAt(index int, register uint16) ir.Category {
 	category := l.definitionCategoryAt(index, register)
-	if category.Kind == ir.Null && category.Allocation == 0 {
-		if k, ok := l.webZeroKind[index]; ok {
+	if (category.Kind == ir.Null && category.Allocation == 0) || category.Kind == ir.Bits32 {
+		if k, ok := l.webZeroKind[index]; ok && (category.Kind != ir.Bits32 || k == ir.Int || k == ir.Float) {
 			return ir.Category{Kind: k}
 		}
-		if k, ok := l.resolvedZeroKindForUse(index, register, true); ok {
+		if k, ok := l.resolvedZeroKindForUse(index, register, true); ok && (category.Kind != ir.Bits32 || k == ir.Int || k == ir.Float) {
 			return ir.Category{Kind: k}
 		}
 	}
@@ -2329,8 +2452,8 @@ func (l *methodLowerer) resolvedDefCategoryAt(index int, register uint16) ir.Cat
 
 func (l *methodLowerer) resolvedUseCategoryAt(index int, register uint16) ir.Category {
 	category := l.method.CategoryAt(index, register)
-	if category.Kind == ir.Null && category.Allocation == 0 {
-		if k, ok := l.resolvedZeroKindForUse(index, register, false); ok {
+	if (category.Kind == ir.Null && category.Allocation == 0) || category.Kind == ir.Bits32 {
+		if k, ok := l.resolvedZeroKindForUse(index, register, false); ok && (category.Kind != ir.Bits32 || k == ir.Int || k == ir.Float) {
 			return ir.Category{Kind: k}
 		}
 	}
@@ -2491,6 +2614,10 @@ func (l *methodLowerer) loadAs(register uint16, expected classfilebuilder.LocalK
 			return l.code.Load(expected, l.loadSlotAt(l.index, register, expected))
 		}
 		return l.code.Emit(zeroOpcodeForLocalKind(expected))
+	} else if rawCat.Kind == ir.Bits32 && (expected == classfilebuilder.IntLocal || expected == classfilebuilder.FloatLocal) {
+		if slot, ok := l.slotIfCompanion(l.index, register, expected, false); ok {
+			return l.code.Load(expected, slot)
+		}
 	}
 	kind := l.resolvedUseCategoryAt(l.index, register).Kind
 	if kind != ir.Null {

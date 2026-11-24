@@ -11,13 +11,14 @@ import (
 
 const (
 	r8DexPublic      = uint32(0x0001)
+	r8DexPrivate     = uint32(0x0002)
 	r8DexStatic      = uint32(0x0008)
+	r8DexFinal       = uint32(0x0010)
 	r8DexInterface   = uint32(0x0200)
 	r8DexSynthetic   = uint32(0x1000)
+	r8DexEnum        = uint32(0x4000)
 	r8DexConstructor = uint32(0x10000)
 )
-
-const thisAliasSentinel = "<this>"
 
 // synthesizeR8InlinedConstructors restores empty forwarding constructors that
 // R8/ProGuard stripped and bypassed by rewriting `new-instance Sub; invoke Object.<init>`
@@ -102,7 +103,7 @@ func r8PatchMethod(
 		op := insns[i].Opcode
 		if (op == 0x70 || op == 0x76) && int(insns[i].Index) < len(f.Methods) {
 			callee := f.Methods[insns[i].Index]
-			if callee.Name == "<init>" && callee.Class != c.Descriptor {
+			if callee.Name == "<init>" {
 				hasCandidate = true
 				break
 			}
@@ -123,7 +124,7 @@ func r8PatchMethod(
 		if int(site.offset)+1 >= len(m.Code.Instructions) {
 			continue
 		}
-		resolvedProto, extraNulls, ok := ensureForwardingCtorChain(site.desiredTarget, site.callee.Class, site.proto, fileByClass, hierarchy, fileEntry, synthesized, diags)
+		resolvedProto, extraNulls, ok := ensureForwardingCtorChain(c.Descriptor, site.desiredTarget, site.callee.Class, site.proto, fileByClass, hierarchy, fileEntry, synthesized, diags)
 		if !ok {
 			continue
 		}
@@ -248,8 +249,42 @@ func findR8PatchSites(
 			succs[b] = append(succs[b], b+1)
 		}
 	}
+	insnExcHandlers := make([][]int, len(insns))
+	if len(m.Code.Tries) > 0 {
+		for idx := range insns {
+			off := insns[idx].Offset
+			var seen map[int]bool
+			for ti := range m.Code.Tries {
+				tr := &m.Code.Tries[ti]
+				if off < tr.StartAddress || off >= tr.StartAddress+uint32(tr.InstructionCount) {
+					continue
+				}
+				addHandler := func(addr uint32) {
+					if hb, ok := blockByOffset[addr]; ok {
+						if seen == nil {
+							seen = make(map[int]bool)
+						}
+						if !seen[hb] {
+							seen[hb] = true
+							insnExcHandlers[idx] = append(insnExcHandlers[idx], hb)
+						}
+					}
+				}
+				for _, h := range tr.Handler.Handlers {
+					addHandler(h.Address)
+				}
+				if tr.Handler.CatchAllAddress != nil {
+					addHandler(*tr.Handler.CatchAllAddress)
+				}
+			}
+		}
+	}
 
-	type regState map[uint16]string
+	type r8AllocTag struct {
+		allocID int    // -1 for thisAliasSentinel, >= 1 for new-instance instruction index + 1
+		desc    string // allocation class descriptor (empty for thisAliasSentinel)
+	}
+	type regState map[uint16]r8AllocTag
 	cloneState := func(s regState) regState {
 		out := make(regState, len(s))
 		for k, v := range s {
@@ -282,7 +317,7 @@ func findR8PatchSites(
 	visited := make([]bool, numBlocks)
 	in[0] = make(regState)
 	if isCtor {
-		in[0][m.Code.RegistersSize-m.Code.InsSize] = thisAliasSentinel
+		in[0][m.Code.RegistersSize-m.Code.InsSize] = r8AllocTag{allocID: -1}
 	}
 	visited[0] = true
 
@@ -290,22 +325,43 @@ func findR8PatchSites(
 	inQueue := make([]bool, numBlocks)
 	inQueue[0] = true
 
-	transferInsn := func(ins *ir.Instruction, state regState) {
+	propagateToBlock := func(target int, src regState) {
+		var next regState
+		changed := false
+		if !visited[target] {
+			visited[target] = true
+			next = cloneState(src)
+			changed = true
+		} else {
+			next = intersectState(in[target], src)
+			changed = !statesEqual(in[target], next)
+		}
+		in[target] = next
+		if changed && !inQueue[target] {
+			inQueue[target] = true
+			queue = append(queue, target)
+		}
+	}
+
+	transferInsn := func(idx int, ins *ir.Instruction, state regState) {
 		op := ins.Opcode
 		switch {
 		case op == 0x22 && len(ins.Regs) > 0 && int(ins.Index) < len(f.Types):
-			state[ins.Regs[0]] = f.Types[ins.Index].Descriptor
+			state[ins.Regs[0]] = r8AllocTag{
+				allocID: idx + 1,
+				desc:    f.Types[ins.Index].Descriptor,
+			}
 		case ((op >= 0x07 && op <= 0x09) || (op >= 0x01 && op <= 0x03)) && len(ins.Regs) >= 2:
-			if v, ok := state[ins.Regs[1]]; ok && v != "" {
+			if v, ok := state[ins.Regs[1]]; ok && v.allocID != 0 {
 				state[ins.Regs[0]] = v
 			} else {
 				delete(state, ins.Regs[0])
 			}
 		case (op == 0x70 || op == 0x76) && len(ins.Regs) > 0 && int(ins.Index) < len(f.Methods) && f.Methods[ins.Index].Name == "<init>":
 			recv := ins.Regs[0]
-			if state[recv] == thisAliasSentinel {
+			if tag, ok := state[recv]; ok && tag.allocID != 0 {
 				for k, v := range state {
-					if v == thisAliasSentinel {
+					if v.allocID == tag.allocID {
 						delete(state, k)
 					}
 				}
@@ -327,24 +383,16 @@ func findR8PatchSites(
 		inQueue[b] = false
 		st := cloneState(in[b])
 		for _, idx := range blockInsns[b] {
-			transferInsn(&insns[idx], st)
+			// Propagate pre-instruction allocation state to every exception handler
+			// protecting this instruction so allocations live prior to a try block
+			// survive into catch paths when never overwritten or initialized inside.
+			for _, exc := range insnExcHandlers[idx] {
+				propagateToBlock(exc, st)
+			}
+			transferInsn(idx, &insns[idx], st)
 		}
 		for _, succ := range succs[b] {
-			var next regState
-			changed := false
-			if !visited[succ] {
-				visited[succ] = true
-				next = cloneState(st)
-				changed = true
-			} else {
-				next = intersectState(in[succ], st)
-				changed = !statesEqual(in[succ], next)
-			}
-			in[succ] = next
-			if changed && !inQueue[succ] {
-				inQueue[succ] = true
-				queue = append(queue, succ)
-			}
+			propagateToBlock(succ, st)
 		}
 	}
 
@@ -363,12 +411,12 @@ func findR8PatchSites(
 					recv := ins.Regs[0]
 					tag := st[recv]
 					var desired string
-					if isCtor && tag == thisAliasSentinel {
+					if isCtor && tag.allocID == -1 {
 						if callee.Class != c.Descriptor && callee.Class != c.Superclass && isProperAncestor(c.Superclass, callee.Class, hierarchy) {
 							desired = c.Superclass
 						}
-					} else if tag != "" && tag != thisAliasSentinel && tag != callee.Class && isProperAncestor(tag, callee.Class, hierarchy) {
-						desired = tag
+					} else if tag.allocID > 0 && tag.desc != "" && tag.desc != callee.Class && isProperAncestor(tag.desc, callee.Class, hierarchy) {
+						desired = tag.desc
 					}
 					if desired != "" {
 						sites = append(sites, r8PatchSite{
@@ -380,7 +428,7 @@ func findR8PatchSites(
 					}
 				}
 			}
-			transferInsn(ins, st)
+			transferInsn(idx, ins, st)
 		}
 	}
 	return sites
@@ -448,6 +496,8 @@ func platformClassAcceptsCtor(desc string, proto model.Proto) bool {
 		return sig == "(Ljava/lang/Object;)V" || sig == "(Ljava/lang/String;Ljava/lang/Throwable;)V"
 	case "Ljava/lang/LinkageError;":
 		return sig == "(Ljava/lang/String;)V" || sig == "(Ljava/lang/String;Ljava/lang/Throwable;)V"
+	case "Ljava/lang/Enum;":
+		return sig == "(Ljava/lang/String;I)V"
 	case "Ljava/lang/NullPointerException;",
 		"Ljava/lang/IndexOutOfBoundsException;",
 		"Ljava/lang/ClassCastException;",
@@ -494,6 +544,7 @@ func isProperAncestor(subDesc, ancDesc string, hierarchy map[string]*model.Class
 }
 
 func ensureForwardingCtorChain(
+	callerDesc string,
 	desiredTarget string,
 	ancTarget string,
 	origProto model.Proto,
@@ -660,9 +711,13 @@ func ensureForwardingCtorChain(
 			w0 := uint16(callWords<<8) | 0x76
 			words = []uint16{w0, superWord, 0x0000, 0x000e}
 		}
+		ctorAccess := r8DexPublic | r8DexSynthetic | r8DexConstructor
+		if callerDesc == cls.Descriptor && cls.AccessFlags&r8DexEnum != 0 && cls.AccessFlags&r8DexFinal != 0 && cls.Superclass == "Ljava/lang/Enum;" {
+			ctorAccess = r8DexPrivate | r8DexConstructor
+		}
 		cls.DirectMethods = append(cls.DirectMethods, model.EncodedMethod{
 			MethodIndex: selfIdx,
-			AccessFlags: r8DexPublic | r8DexSynthetic | r8DexConstructor,
+			AccessFlags: ctorAccess,
 			Method:      tf.Methods[selfIdx],
 			Code: &model.Code{
 				RegistersSize:  uint16(selfInsWords),

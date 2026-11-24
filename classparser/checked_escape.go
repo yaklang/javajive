@@ -303,8 +303,8 @@ func (c *ClassObjectDumper) methodNeedsCheckedEscapeAllProof(code *CodeAttribute
 		return false, fmt.Errorf("unknown caller Exceptions metadata")
 	}
 	provider := c.FuncCtx.InvocationMetadata
-	decoder := core.NewDecompiler(code.Code, func(index int) values.JavaValue { return GetValueFromCP(c.ConstantPool, index) })
-	if err := decoder.ParseOpcode(); err != nil {
+	rawOps, err := c.readOnlyCodeOpcodes(code)
+	if err != nil {
 		return false, err
 	}
 	delegatePC := constructorDelegationPC(body)
@@ -319,7 +319,7 @@ func (c *ClassObjectDumper) methodNeedsCheckedEscapeAllProof(code *CodeAttribute
 	// its exact raw prefix only when complete declaration metadata proves all
 	// checked exceptions are already declared by this caller. The implicit
 	// Java super() still runs first, preserving its effects and failures.
-	ops := decoder.Opcodes()
+	ops := rawOps
 	if len(ops) > 0 && ops[0] != nil && ops[0].Instr != nil && ops[0].Instr.OpCode == core.OP_START {
 		ops = ops[1:]
 	}
@@ -359,7 +359,7 @@ func (c *ClassObjectDumper) methodNeedsCheckedEscapeAllProof(code *CodeAttribute
 		}
 	}
 	permittedThrows := map[int]bool{}
-	for _, op := range decoder.Opcodes() {
+	for _, op := range rawOps {
 		if op != nil && op.Instr != nil && op.Instr.OpCode == core.OP_ATHROW {
 			pc := int(op.CurrentOffset)
 			if name := thrownTypes[pc]; name != "" {
@@ -372,7 +372,7 @@ func (c *ClassObjectDumper) methodNeedsCheckedEscapeAllProof(code *CodeAttribute
 		}
 	}
 	absorbing := typedAbsorbingHandlers(body, permittedThrows)
-	for _, op := range decoder.Opcodes() {
+	for _, op := range rawOps {
 		if op == nil || op.Instr == nil {
 			continue
 		}

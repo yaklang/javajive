@@ -1,7 +1,6 @@
 package types
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
@@ -35,7 +34,17 @@ type JavaArrayType struct {
 }
 
 func (j *JavaArrayType) String(funcCtx *class_context.ClassContext) string {
-	return fmt.Sprintf("%s%s", j.JavaType.String(funcCtx), strings.Repeat("[]", j.Dimension))
+	base := j.JavaType.String(funcCtx)
+	switch j.Dimension {
+	case 0:
+		return base
+	case 1:
+		return base + "[]"
+	case 2:
+		return base + "[][]"
+	default:
+		return base + strings.Repeat("[]", j.Dimension)
+	}
 }
 
 func (j *JavaArrayType) IsJavaType() {
@@ -93,8 +102,7 @@ func (j *JavaClass) String(funcCtx *class_context.ClassContext) string {
 	if j.signatureVariable {
 		return class_context.SafeIdentifier(j.Name)
 	}
-	name := funcCtx.ShortTypeName(j.Name)
-	return fmt.Sprintf("%s", name)
+	return funcCtx.ShortTypeName(j.Name)
 }
 
 // NewJavaTypeVariable retains an explicitly known formal-reference role.
@@ -178,7 +186,7 @@ func (j *JavaWildcardType) String(funcCtx *class_context.ClassContext) string {
 	if j.Bound == nil {
 		return "?"
 	}
-	return fmt.Sprintf("? %s %s", j.Variant, j.Bound.String(funcCtx))
+	return "? " + j.Variant + " " + j.Bound.String(funcCtx)
 }
 
 // A wildcard type argument is frequently stored RAW (unwrapped) in JavaParameterizedType.TypeArgs

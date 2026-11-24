@@ -17,13 +17,17 @@ func ArchiveOptionsFrom(opts DecompileOptions) filesys.ArchiveOptions {
 		MaxArchiveDepth:      opts.Limits.MaxArchiveDepth,
 	}
 	work := opts.Work
-	if work == nil {
+	var budget *filesys.ArchiveBudget
+	if work == nil && (opts.Context != nil || opts.Limits != (Limits{})) {
 		work = workbudget.New(opts.Context, opts.Limits)
+	}
+	if work != nil {
+		budget = filesys.WrapWorkBudget(work, lim)
 	}
 	return filesys.ArchiveOptions{
 		Limits:        lim,
 		Work:          work,
-		Budget:        filesys.WrapWorkBudget(work, lim),
+		Budget:        budget,
 		Context:       opts.Context,
 		TargetRelease: opts.TargetRelease,
 		SafeArchive:   true,

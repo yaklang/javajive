@@ -56,6 +56,8 @@ type Header struct {
 	ClassDefsOff  uint32
 	DataSize      uint32
 	DataOff       uint32
+	ContainerSize uint32
+	HeaderOffset  uint32
 }
 
 type Type struct {

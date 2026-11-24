@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	artifactinspect "github.com/yaklang/javajive/inspect"
+	"github.com/yaklang/javajive/internal/log"
 )
 
 func TestCmdInspectAcceptedFixtureJSON(t *testing.T) {
@@ -46,10 +47,38 @@ func TestCmdInspectExternalAcceptedDEX038EmitsCompleteJSON(t *testing.T) {
 	}
 }
 
-func TestCmdInspectRejectedDEX041StillEmitsPartialJSON(t *testing.T) {
+func TestCmdInspectLogFlags(t *testing.T) {
+	fixture := filepath.Join("..", "..", "dex2jar", "testdata", "accept", "arithmetic.dex")
+	prev := log.GetLevel()
+	defer log.SetLevel(prev)
+
+	var stdout bytes.Buffer
+	if err := cmdInspectTo([]string{fixture, "--format", "json", "--quiet"}, &stdout); err != nil {
+		t.Fatalf("cmdInspectTo --quiet: %v", err)
+	}
+	if log.GetLevel() != prev {
+		t.Fatalf("log level leaked after cmdInspectTo --quiet: got %v, want %v", log.GetLevel(), prev)
+	}
+	stdout.Reset()
+	if err := cmdInspectTo([]string{"-q", "--format=json", fixture}, &stdout); err != nil {
+		t.Fatalf("cmdInspectTo -q: %v", err)
+	}
+	stdout.Reset()
+	if err := cmdInspectTo([]string{fixture, "--log-level", "warn", "--format", "json"}, &stdout); err != nil {
+		t.Fatalf("cmdInspectTo --log-level warn: %v", err)
+	}
+	if err := cmdInspectTo([]string{fixture, "--quiet", "--log-level=info"}, &stdout); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected mutual exclusion error, got %v", err)
+	}
+	if err := cmdInspectTo([]string{"--log-level=bogus", fixture}, &stdout); err == nil || !strings.Contains(err.Error(), "invalid log level") {
+		t.Fatalf("expected invalid log level error, got %v", err)
+	}
+}
+
+func TestCmdInspectRejectedDEX042StillEmitsPartialJSON(t *testing.T) {
 	data := make([]byte, 0x70)
-	copy(data, []byte("dex\n041\x00"))
-	fixture := filepath.Join(t.TempDir(), "v041.dex")
+	copy(data, []byte("dex\n042\x00"))
+	fixture := filepath.Join(t.TempDir(), "v042.dex")
 	if err := os.WriteFile(fixture, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +94,7 @@ func TestCmdInspectRejectedDEX041StillEmitsPartialJSON(t *testing.T) {
 		t.Fatalf("report = %#v", report)
 	}
 	for _, diagnostic := range report.Diagnostics {
-		if !strings.Contains(diagnostic.Message, `unsupported DEX version "041"`) {
+		if !strings.Contains(diagnostic.Message, `unsupported DEX version "042"`) {
 			t.Fatalf("unexpected diagnostic = %#v", diagnostic)
 		}
 	}

@@ -414,7 +414,37 @@ func (d *Decompiler) CountFieldStores() (map[string]int, error) {
 	return counts, nil
 }
 
+// DecodeOpcodesReadOnly decodes raw JVM bytecode into an immutable slice of
+// OpCode descriptors (prefixed with OP_START) without allocating Decompiler
+// state or offset lookup maps. Callers must not mutate the returned opcodes.
+func DecodeOpcodesReadOnly(bytecodes []byte) ([]*OpCode, error) {
+	opcodes, _, _, err := decodeOpcodes(bytecodes, false)
+	return opcodes, err
+}
+
 func (d *Decompiler) ParseOpcode() (err error) {
+	defer func() {
+		if len(d.opCodes) > 0 {
+			d.RootOpCode = d.opCodes[0]
+		}
+	}()
+	d.jsrInlined = false
+	d.opcodeOffsetsSealed = false
+	d.opcodeByOffset = nil
+	d.ambiguousOffsets = nil
+	d.opcodeCodeLength = len(d.bytecodes)
+	opcodes, offsetToIndex, id, err := decodeOpcodes(d.bytecodes, true)
+	if err != nil {
+		return err
+	}
+	d.offsetToOpcodeIndex = offsetToIndex
+	d.CurrentId = id
+	d.opCodes = opcodes
+	d.rebuildOpcodeOffsetsByID()
+	return nil
+}
+
+func decodeOpcodes(bytecodes []byte, trackOffsets bool) (opcodes []*OpCode, offsetToIndex map[uint16]int, nextID int, err error) {
 	defer func() {
 		if e := recover(); e != nil {
 			if os.Getenv("DEC_PANIC_STACK") != "" {
@@ -424,44 +454,36 @@ func (d *Decompiler) ParseOpcode() (err error) {
 			}
 		}
 	}()
-	defer func() {
-		if len(d.opCodes) > 0 {
-			d.RootOpCode = d.opCodes[0]
-		}
-	}()
 	// Capacity hint: every opcode consumes at least one bytecode byte, and the
 	// shortest instructions are 1-2 bytes, so len(bytecodes)/2 closely tracks the
 	// real opcode count for typical code while bounding the worst case. Pre-sizing
 	// the slice and offset maps avoids the repeated grow/rehash garbage that made
 	// ParseOpcode the single largest core allocator.
-	if len(d.bytecodes) == 0 || len(d.bytecodes) > 65535 {
-		return fmt.Errorf("invalid Code length %d", len(d.bytecodes))
+	if len(bytecodes) == 0 || len(bytecodes) > 65535 {
+		return nil, nil, 0, fmt.Errorf("invalid Code length %d", len(bytecodes))
 	}
-	d.jsrInlined = false
-	d.opcodeOffsetsSealed = false
-	d.opcodeByOffset = nil
-	d.ambiguousOffsets = nil
-	d.opcodeCodeLength = len(d.bytecodes)
-	sizeHint := len(d.bytecodes)/2 + 8
-	opcodes := make([]*OpCode, 0, sizeHint)
+	sizeHint := len(bytecodes)/2 + 8
+	opcodes = make([]*OpCode, 0, sizeHint)
 	opcodes = append(opcodes, &OpCode{Instr: &Instruction{OpCode: OP_START}})
-	offsetToIndex := make(map[uint16]int, sizeHint)
-	reader := NewJavaByteCodeReader(d.bytecodes)
+	if trackOffsets {
+		offsetToIndex = make(map[uint16]int, sizeHint)
+	}
+	reader := NewJavaByteCodeReader(bytecodes)
 	id := 1
 	isWide := false
 	var wideOffset uint16
 	for {
-		b, err := reader.ReadByte()
-		if err != nil {
+		b, readErr := reader.ReadByte()
+		if readErr != nil {
 			break
 		}
 		current := reader.CurrentPos - 1
 		instr, ok := InstrInfos[int(b)]
 		if !ok {
-			return fmt.Errorf("unknow op: %x", b)
+			return nil, nil, 0, fmt.Errorf("unknow op: %x", b)
 		}
 		if isWide && !LocalAccessOf(instr.OpCode).Wide {
-			return fmt.Errorf("invalid wide opcode %#x at PC %d", instr.OpCode, wideOffset)
+			return nil, nil, 0, fmt.Errorf("invalid wide opcode %#x at PC %d", instr.OpCode, wideOffset)
 		}
 		if instr.OpCode == OP_WIDE {
 			isWide = true
@@ -478,22 +500,19 @@ func (d *Decompiler) ParseOpcode() (err error) {
 		if v, ok := OpFactories[instr.HandleName]; ok {
 			factory = v
 		}
-		err = factory(reader, opcode)
-		if err != nil {
-			return err
+		if facErr := factory(reader, opcode); facErr != nil {
+			return nil, nil, 0, facErr
 		}
 		opcodes = append(opcodes, opcode)
-		offsetToIndex[opcode.CurrentOffset] = len(opcodes) - 1
+		if trackOffsets {
+			offsetToIndex[opcode.CurrentOffset] = len(opcodes) - 1
+		}
 		id++
 	}
 	if isWide {
-		return fmt.Errorf("truncated wide at PC %d", wideOffset)
+		return nil, nil, 0, fmt.Errorf("truncated wide at PC %d", wideOffset)
 	}
-	d.offsetToOpcodeIndex = offsetToIndex
-	d.CurrentId = id
-	d.opCodes = opcodes
-	d.rebuildOpcodeOffsetsByID()
-	return nil
+	return opcodes, offsetToIndex, id, nil
 }
 
 // rebuildOpcodeOffsetsByID indexes offsets by stable opcode Id. Slice order can
@@ -4120,11 +4139,13 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			}
 		}
 		d.slotStoreTrace[slot] = slotStoreTraceInfo{offset: opcode.CurrentOffset, ref: ref}
-		if !(values.IsBooleanStackNarrowing(ref.Type(), value) && d.localWebHasNumericConsumer(opcode, value)) {
+		if ref != nil && !(values.IsBooleanStackNarrowing(ref.Type(), value) && d.localWebHasNumericConsumer(opcode, value)) {
+			statements.NewAssignStatement(ref, value, isFirst)
+		} else if ref == nil {
 			statements.NewAssignStatement(ref, value, isFirst)
 		}
 		d.opcodeIdToRef[opcode] = append(d.opcodeIdToRef[opcode], [2]any{ref, isFirst})
-		if !isFirst && runtimeStackSimulation.Size() > 0 {
+		if !isFirst && ref != nil && runtimeStackSimulation.Size() > 0 {
 			if op, proved := d.immediateLocalPostUpdate(opcode, ref, runtimeStackSimulation.Peek()); proved {
 				// Keep the original load's enumerable target: later source binding
 				// reconciliation must update this write as well as ordinary reads.
@@ -4151,9 +4172,11 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 				d.refToCreatingStore[ref] = opcode
 			}
 		}
-		attr := d.delRefUserAttr[ref.VarUid]
-		attr[1]++
-		d.delRefUserAttr[ref.VarUid] = attr
+		if ref != nil {
+			attr := d.delRefUserAttr[ref.VarUid]
+			attr[1]++
+			d.delRefUserAttr[ref.VarUid] = attr
+		}
 
 		if v, ok := value.(*values.CustomValue); ok {
 			if v.Flag == "exception" {
@@ -4354,10 +4377,21 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		classInfo := d.constantPoolGetter(int(Convert2bytesToInt(opcode.Data))).(*values.JavaClassValue).Type()
 		value := runtimeStackSimulation.Pop().(values.JavaValue)
 		instanceOf := values.NewOriginalInstanceOf(value, classInfo, int(opcode.CurrentOffset))
+		retain := d.FunctionContext != nil && d.FunctionContext.RetainUnprovedSource
 		if instanceOf == nil {
-			return fmt.Errorf("invalid original instanceof at PC %d", opcode.CurrentOffset)
-		}
-		if d.getenv("JDEC_INSTANCEOF_REPLACEVAR_OFF") == "1" {
+			if !retain {
+				return fmt.Errorf("invalid original instanceof at PC %d", opcode.CurrentOffset)
+			}
+			instanceOf = values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+				return fmt.Sprintf("%s instanceof %s", values.AssignmentOperand(value, funcCtx), classInfo.String(funcCtx))
+			}, func() types.JavaType {
+				return types.NewJavaPrimer(types.JavaBoolean)
+			})
+			instanceOf.Flag = "instanceof"
+			instanceOf.CapturesKnown = true
+			instanceOf.Captures = []values.JavaValue{value}
+			instanceOf.OriginPC, instanceOf.HasOriginPC = int(opcode.CurrentOffset), true
+		} else if d.getenv("JDEC_INSTANCEOF_REPLACEVAR_OFF") == "1" {
 			instanceOf = values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
 				return fmt.Sprintf("%s instanceof %s", values.AssignmentOperand(value, funcCtx), classInfo.String(funcCtx))
 			}, func() types.JavaType {
@@ -7057,7 +7091,7 @@ func (d *Decompiler) ParseStatement() error {
 						// constructors: allocation and initialization can both throw.
 						v.ConstructorCall = funcCallValue
 						skip = true
-					} else if len(funcCallValue.Arguments) == 0 && funcCallValue.ClassName != funcCtx.ClassName && !funcCtx.RetainImplicitConstructorCalls && !(d.HasDeferredIrreducibleControlFlow() && jdecenv.Get("JDEC_CTOR_POST_SUPER_DISPATCH_OFF") == "") {
+					} else if len(funcCallValue.Arguments) == 0 && !funcCtx.IsOwnClassOwner(funcCallValue.ClassName) && !funcCtx.RetainImplicitConstructorCalls && !(d.HasDeferredIrreducibleControlFlow() && jdecenv.Get("JDEC_CTOR_POST_SUPER_DISPATCH_OFF") == "") {
 						// An implicit no-argument super call is inserted by javac.
 						// A this() delegation is not: it executes another constructor
 						// and must retain that initialization and its effects.

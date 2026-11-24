@@ -140,6 +140,259 @@ func (l *methodLowerer) definitionCategoryAt(index int, register uint16) ir.Cate
 	return l.method.CategoryAt(index, register)
 }
 
+// knownPlatformSuperclass maps common public JDK and Android SDK runtime
+// classes to their public concrete single-inheritance superclass so Java 7+
+// StackMapTable frame merging and subtype checks resolve without a runtime jar.
+var knownPlatformSuperclass = map[string]string{
+	// JDK Throwable hierarchy
+	"java/lang/Exception":                            "java/lang/Throwable",
+	"java/lang/Error":                                "java/lang/Throwable",
+	"java/lang/RuntimeException":                     "java/lang/Exception",
+	"java/lang/ReflectiveOperationException":         "java/lang/Exception",
+	"java/io/IOException":                            "java/lang/Exception",
+	"java/lang/ClassNotFoundException":               "java/lang/ReflectiveOperationException",
+	"java/lang/IllegalAccessException":               "java/lang/ReflectiveOperationException",
+	"java/lang/InstantiationException":               "java/lang/ReflectiveOperationException",
+	"java/lang/NoSuchFieldException":                 "java/lang/ReflectiveOperationException",
+	"java/lang/NoSuchMethodException":                "java/lang/ReflectiveOperationException",
+	"java/lang/reflect/InvocationTargetException":    "java/lang/ReflectiveOperationException",
+	"java/lang/InterruptedException":                 "java/lang/Exception",
+	"java/lang/CloneNotSupportedException":           "java/lang/Exception",
+	"java/security/GeneralSecurityException":         "java/lang/Exception",
+	"java/util/concurrent/TimeoutException":          "java/lang/Exception",
+	"java/util/concurrent/ExecutionException":        "java/lang/Exception",
+	"java/text/ParseException":                       "java/lang/Exception",
+	"java/net/URISyntaxException":                    "java/lang/Exception",
+	"java/sql/SQLException":                          "java/lang/Exception",
+	"java/util/prefs/BackingStoreException":          "java/lang/Exception",
+	"java/io/FileNotFoundException":                  "java/io/IOException",
+	"java/io/EOFException":                           "java/io/IOException",
+	"java/io/UTFDataFormatException":                 "java/io/IOException",
+	"java/io/CharConversionException":                "java/io/IOException",
+	"java/io/UnsupportedEncodingException":           "java/io/IOException",
+	"java/io/InterruptedIOException":                 "java/io/IOException",
+	"java/net/MalformedURLException":                 "java/io/IOException",
+	"java/net/SocketException":                       "java/io/IOException",
+	"java/net/UnknownHostException":                  "java/io/IOException",
+	"javax/net/ssl/SSLException":                     "java/io/IOException",
+	"java/util/zip/ZipException":                     "java/io/IOException",
+	"java/net/SocketTimeoutException":                "java/io/InterruptedIOException",
+	"java/net/BindException":                         "java/net/SocketException",
+	"java/net/ConnectException":                      "java/net/SocketException",
+	"java/net/NoRouteToHostException":                "java/net/SocketException",
+	"java/util/jar/JarException":                     "java/util/zip/ZipException",
+	"javax/net/ssl/SSLHandshakeException":            "javax/net/ssl/SSLException",
+	"javax/net/ssl/SSLKeyException":                  "javax/net/ssl/SSLException",
+	"javax/net/ssl/SSLPeerUnverifiedException":       "javax/net/ssl/SSLException",
+	"javax/net/ssl/SSLProtocolException":             "javax/net/ssl/SSLException",
+	"java/lang/NullPointerException":                 "java/lang/RuntimeException",
+	"java/lang/IllegalArgumentException":             "java/lang/RuntimeException",
+	"java/lang/IllegalStateException":                "java/lang/RuntimeException",
+	"java/lang/IndexOutOfBoundsException":            "java/lang/RuntimeException",
+	"java/lang/UnsupportedOperationException":        "java/lang/RuntimeException",
+	"java/lang/ClassCastException":                   "java/lang/RuntimeException",
+	"java/lang/ArithmeticException":                  "java/lang/RuntimeException",
+	"java/lang/SecurityException":                    "java/lang/RuntimeException",
+	"java/lang/EnumConstantNotPresentException":      "java/lang/RuntimeException",
+	"java/lang/TypeNotPresentException":              "java/lang/RuntimeException",
+	"java/lang/ArrayStoreException":                  "java/lang/RuntimeException",
+	"java/lang/NegativeArraySizeException":           "java/lang/RuntimeException",
+	"java/lang/IllegalMonitorStateException":         "java/lang/RuntimeException",
+	"java/util/NoSuchElementException":               "java/lang/RuntimeException",
+	"java/util/ConcurrentModificationException":      "java/lang/RuntimeException",
+	"java/util/MissingResourceException":             "java/lang/RuntimeException",
+	"java/util/EmptyStackException":                  "java/lang/RuntimeException",
+	"java/util/concurrent/RejectedExecutionException": "java/lang/RuntimeException",
+	"java/util/concurrent/CompletionException":       "java/lang/RuntimeException",
+	"java/nio/BufferOverflowException":               "java/lang/RuntimeException",
+	"java/nio/BufferUnderflowException":              "java/lang/RuntimeException",
+	"java/io/UncheckedIOException":                   "java/lang/RuntimeException",
+	"java/time/DateTimeException":                    "java/lang/RuntimeException",
+	"java/lang/NumberFormatException":                "java/lang/IllegalArgumentException",
+	"java/util/regex/PatternSyntaxException":         "java/lang/IllegalArgumentException",
+	"java/nio/charset/IllegalCharsetNameException":   "java/lang/IllegalArgumentException",
+	"java/nio/charset/UnsupportedCharsetException":   "java/lang/IllegalArgumentException",
+	"java/lang/ArrayIndexOutOfBoundsException":       "java/lang/IndexOutOfBoundsException",
+	"java/lang/StringIndexOutOfBoundsException":      "java/lang/IndexOutOfBoundsException",
+	"java/util/concurrent/CancellationException":     "java/lang/IllegalStateException",
+	"java/lang/AssertionError":                       "java/lang/Error",
+	"java/lang/LinkageError":                         "java/lang/Error",
+	"java/lang/VirtualMachineError":                  "java/lang/Error",
+	"java/lang/ThreadDeath":                          "java/lang/Error",
+	"java/lang/ExceptionInInitializerError":          "java/lang/LinkageError",
+	"java/lang/NoClassDefFoundError":                 "java/lang/LinkageError",
+	"java/lang/ClassFormatError":                     "java/lang/LinkageError",
+	"java/lang/IncompatibleClassChangeError":         "java/lang/LinkageError",
+	"java/lang/UnsatisfiedLinkError":                 "java/lang/LinkageError",
+	"java/lang/VerifyError":                          "java/lang/LinkageError",
+	"java/lang/BootstrapMethodError":                 "java/lang/LinkageError",
+	"java/lang/AbstractMethodError":                  "java/lang/IncompatibleClassChangeError",
+	"java/lang/IllegalAccessError":                   "java/lang/IncompatibleClassChangeError",
+	"java/lang/InstantiationError":                   "java/lang/IncompatibleClassChangeError",
+	"java/lang/NoSuchFieldError":                     "java/lang/IncompatibleClassChangeError",
+	"java/lang/NoSuchMethodError":                    "java/lang/IncompatibleClassChangeError",
+	"java/lang/OutOfMemoryError":                     "java/lang/VirtualMachineError",
+	"java/lang/StackOverflowError":                   "java/lang/VirtualMachineError",
+	"java/lang/InternalError":                        "java/lang/VirtualMachineError",
+	"java/lang/UnknownError":                         "java/lang/VirtualMachineError",
+
+	// JDK Number subclasses (DoubleAccumulator/Adder skip package-private Striped64)
+	"java/lang/Byte":                                 "java/lang/Number",
+	"java/lang/Short":                                "java/lang/Number",
+	"java/lang/Integer":                              "java/lang/Number",
+	"java/lang/Long":                                 "java/lang/Number",
+	"java/lang/Float":                                "java/lang/Number",
+	"java/lang/Double":                               "java/lang/Number",
+	"java/math/BigInteger":                           "java/lang/Number",
+	"java/math/BigDecimal":                           "java/lang/Number",
+	"java/util/concurrent/atomic/AtomicInteger":      "java/lang/Number",
+	"java/util/concurrent/atomic/AtomicLong":         "java/lang/Number",
+	"java/util/concurrent/atomic/DoubleAccumulator":  "java/lang/Number",
+	"java/util/concurrent/atomic/DoubleAdder":        "java/lang/Number",
+	"java/util/concurrent/atomic/LongAccumulator":    "java/lang/Number",
+	"java/util/concurrent/atomic/LongAdder":          "java/lang/Number",
+
+	// JDK I/O, NIO, Net, Collections, References
+	"java/io/FilterInputStream":                      "java/io/InputStream",
+	"java/io/BufferedInputStream":                    "java/io/FilterInputStream",
+	"java/io/DataInputStream":                        "java/io/FilterInputStream",
+	"java/io/ByteArrayInputStream":                   "java/io/InputStream",
+	"java/io/FileInputStream":                        "java/io/InputStream",
+	"java/io/FilterOutputStream":                     "java/io/OutputStream",
+	"java/io/BufferedOutputStream":                   "java/io/FilterOutputStream",
+	"java/io/DataOutputStream":                       "java/io/FilterOutputStream",
+	"java/io/PrintStream":                            "java/io/FilterOutputStream",
+	"java/io/ByteArrayOutputStream":                  "java/io/OutputStream",
+	"java/io/FileOutputStream":                       "java/io/OutputStream",
+	"java/io/BufferedReader":                         "java/io/Reader",
+	"java/io/InputStreamReader":                      "java/io/Reader",
+	"java/io/StringReader":                           "java/io/Reader",
+	"java/io/BufferedWriter":                         "java/io/Writer",
+	"java/io/OutputStreamWriter":                     "java/io/Writer",
+	"java/io/PrintWriter":                            "java/io/Writer",
+	"java/io/StringWriter":                           "java/io/Writer",
+	"java/nio/ByteBuffer":                            "java/nio/Buffer",
+	"java/nio/CharBuffer":                            "java/nio/Buffer",
+	"java/nio/ShortBuffer":                           "java/nio/Buffer",
+	"java/nio/IntBuffer":                             "java/nio/Buffer",
+	"java/nio/LongBuffer":                            "java/nio/Buffer",
+	"java/nio/FloatBuffer":                           "java/nio/Buffer",
+	"java/nio/DoubleBuffer":                          "java/nio/Buffer",
+	"java/nio/MappedByteBuffer":                      "java/nio/ByteBuffer",
+	"java/net/HttpURLConnection":                     "java/net/URLConnection",
+	"javax/net/ssl/HttpsURLConnection":               "java/net/HttpURLConnection",
+	"java/util/AbstractList":                         "java/util/AbstractCollection",
+	"java/util/AbstractSequentialList":               "java/util/AbstractList",
+	"java/util/AbstractSet":                          "java/util/AbstractCollection",
+	"java/util/AbstractQueue":                        "java/util/AbstractCollection",
+	"java/util/ArrayList":                            "java/util/AbstractList",
+	"java/util/Vector":                               "java/util/AbstractList",
+	"java/util/Stack":                                "java/util/Vector",
+	"java/util/LinkedList":                           "java/util/AbstractSequentialList",
+	"java/util/HashSet":                              "java/util/AbstractSet",
+	"java/util/LinkedHashSet":                        "java/util/HashSet",
+	"java/util/TreeSet":                              "java/util/AbstractSet",
+	"java/util/EnumSet":                              "java/util/AbstractSet",
+	"java/util/PriorityQueue":                        "java/util/AbstractQueue",
+	"java/util/ArrayDeque":                           "java/util/AbstractCollection",
+	"java/util/HashMap":                              "java/util/AbstractMap",
+	"java/util/LinkedHashMap":                        "java/util/HashMap",
+	"java/util/TreeMap":                              "java/util/AbstractMap",
+	"java/util/WeakHashMap":                          "java/util/AbstractMap",
+	"java/util/IdentityHashMap":                      "java/util/AbstractMap",
+	"java/util/EnumMap":                              "java/util/AbstractMap",
+	"java/util/concurrent/ConcurrentHashMap":         "java/util/AbstractMap",
+	"java/lang/ref/WeakReference":                    "java/lang/ref/Reference",
+	"java/lang/ref/SoftReference":                    "java/lang/ref/Reference",
+	"java/lang/ref/PhantomReference":                 "java/lang/ref/Reference",
+
+	// Android Context, View, Widget, Drawable, and Exception hierarchies
+	"android/content/ContextWrapper":                 "android/content/Context",
+	"android/view/ContextThemeWrapper":               "android/content/ContextWrapper",
+	"android/app/Activity":                           "android/view/ContextThemeWrapper",
+	"android/app/Service":                            "android/content/ContextWrapper",
+	"android/app/IntentService":                      "android/app/Service",
+	"android/app/Application":                        "android/content/ContextWrapper",
+	"android/app/backup/BackupAgent":                 "android/content/ContextWrapper",
+	"android/view/ViewGroup":                         "android/view/View",
+	"android/view/SurfaceView":                       "android/view/View",
+	"android/view/TextureView":                       "android/view/View",
+	"android/view/ViewStub":                          "android/view/View",
+	"android/widget/TextView":                        "android/view/View",
+	"android/widget/Button":                          "android/widget/TextView",
+	"android/widget/EditText":                        "android/widget/TextView",
+	"android/widget/CompoundButton":                  "android/widget/Button",
+	"android/widget/CheckBox":                        "android/widget/CompoundButton",
+	"android/widget/RadioButton":                     "android/widget/CompoundButton",
+	"android/widget/Switch":                          "android/widget/CompoundButton",
+	"android/widget/ToggleButton":                    "android/widget/CompoundButton",
+	"android/widget/ImageView":                       "android/view/View",
+	"android/widget/ImageButton":                     "android/widget/ImageView",
+	"android/widget/ProgressBar":                     "android/view/View",
+	"android/widget/AbsSeekBar":                      "android/widget/ProgressBar",
+	"android/widget/SeekBar":                         "android/widget/AbsSeekBar",
+	"android/widget/FrameLayout":                     "android/view/ViewGroup",
+	"android/widget/LinearLayout":                    "android/view/ViewGroup",
+	"android/widget/RelativeLayout":                  "android/view/ViewGroup",
+	"android/widget/AdapterView":                     "android/view/ViewGroup",
+	"android/widget/AbsoluteLayout":                  "android/view/ViewGroup",
+	"android/widget/Toolbar":                         "android/view/ViewGroup",
+	"android/widget/ScrollView":                      "android/widget/FrameLayout",
+	"android/widget/HorizontalScrollView":            "android/widget/FrameLayout",
+	"android/widget/AbsListView":                     "android/widget/AdapterView",
+	"android/widget/AbsSpinner":                      "android/widget/AdapterView",
+	"android/widget/ListView":                        "android/widget/AbsListView",
+	"android/widget/GridView":                        "android/widget/AbsListView",
+	"android/widget/Spinner":                         "android/widget/AbsSpinner",
+	"android/webkit/WebView":                         "android/widget/AbsoluteLayout",
+	"android/widget/RadioGroup":                      "android/widget/LinearLayout",
+	"android/widget/TableLayout":                     "android/widget/LinearLayout",
+	"android/widget/TableRow":                        "android/widget/LinearLayout",
+	"android/graphics/drawable/BitmapDrawable":       "android/graphics/drawable/Drawable",
+	"android/graphics/drawable/ColorDrawable":        "android/graphics/drawable/Drawable",
+	"android/graphics/drawable/GradientDrawable":     "android/graphics/drawable/Drawable",
+	"android/graphics/drawable/LayerDrawable":        "android/graphics/drawable/Drawable",
+	"android/graphics/drawable/DrawableContainer":    "android/graphics/drawable/Drawable",
+	"android/graphics/drawable/ShapeDrawable":        "android/graphics/drawable/Drawable",
+	"android/graphics/drawable/VectorDrawable":       "android/graphics/drawable/Drawable",
+	"android/graphics/drawable/DrawableWrapper":      "android/graphics/drawable/Drawable",
+	"android/graphics/drawable/RippleDrawable":       "android/graphics/drawable/LayerDrawable",
+	"android/graphics/drawable/TransitionDrawable":   "android/graphics/drawable/LayerDrawable",
+	"android/graphics/drawable/StateListDrawable":    "android/graphics/drawable/DrawableContainer",
+	"android/graphics/drawable/AnimationDrawable":    "android/graphics/drawable/DrawableContainer",
+	"android/graphics/drawable/LevelListDrawable":    "android/graphics/drawable/DrawableContainer",
+	"android/graphics/drawable/AnimatedStateListDrawable": "android/graphics/drawable/StateListDrawable",
+	"android/util/AndroidException":                        "java/lang/Exception",
+	"android/os/RemoteException":                           "android/util/AndroidException",
+	"android/os/DeadObjectException":                       "android/os/RemoteException",
+	"android/os/TransactionTooLargeException":              "android/os/RemoteException",
+	"android/content/pm/PackageManager$NameNotFoundException": "android/util/AndroidException",
+	"android/content/IntentSender$SendIntentException":     "android/util/AndroidException",
+	"android/content/OperationApplicationException":        "java/lang/Exception",
+	"android/util/AndroidRuntimeException":                 "java/lang/RuntimeException",
+	"android/os/BadParcelableException":                    "android/util/AndroidRuntimeException",
+	"android/content/ActivityNotFoundException":            "java/lang/RuntimeException",
+	"android/database/SQLException":                        "java/lang/RuntimeException",
+	"android/database/sqlite/SQLiteException":              "android/database/SQLException",
+	"android/view/InflateException":                        "java/lang/RuntimeException",
+	"android/content/res/Resources$NotFoundException":      "java/lang/RuntimeException",
+}
+
+func (l *methodLowerer) superclassInternal(internalName string) (string, bool) {
+	if c, ok := l.classIndex()["L"+internalName+";"]; ok {
+		if c.Superclass == "" {
+			return "", false
+		}
+		superInternal, err := objectInternalName(c.Superclass)
+		if err != nil {
+			return "", false
+		}
+		return superInternal, true
+	}
+	sup, ok := knownPlatformSuperclass[internalName]
+	return sup, ok
+}
+
 func (l *methodLowerer) commonVerifyClass(a, b string) string {
 	if a == b {
 		return a
@@ -150,38 +403,29 @@ func (l *methodLowerer) commonVerifyClass(a, b string) string {
 	if strings.HasPrefix(a, "[") || strings.HasPrefix(b, "[") {
 		return "java/lang/Object"
 	}
-	index := l.classIndex()
 	ancestorsA := map[string]bool{a: true}
-	cur := "L" + a + ";"
+	cur := a
 	for step := 0; step < maxAssignabilityDepth; step++ {
-		c, ok := index[cur]
-		if !ok || c.Superclass == "" {
-			break
-		}
-		superInternal, err := objectInternalName(c.Superclass)
-		if err != nil {
+		superInternal, ok := l.superclassInternal(cur)
+		if !ok {
 			break
 		}
 		ancestorsA[superInternal] = true
-		cur = c.Superclass
+		cur = superInternal
 	}
 	if ancestorsA[b] {
 		return b
 	}
-	cur = "L" + b + ";"
+	cur = b
 	for step := 0; step < maxAssignabilityDepth; step++ {
-		c, ok := index[cur]
-		if !ok || c.Superclass == "" {
-			break
-		}
-		superInternal, err := objectInternalName(c.Superclass)
-		if err != nil {
+		superInternal, ok := l.superclassInternal(cur)
+		if !ok {
 			break
 		}
 		if ancestorsA[superInternal] {
 			return superInternal
 		}
-		cur = c.Superclass
+		cur = superInternal
 	}
 	return "java/lang/Object"
 }
@@ -193,21 +437,16 @@ func (l *methodLowerer) isVerifySubtype(sub, sup string) bool {
 	if sub == "" || sup == "" || strings.HasPrefix(sub, "[") || strings.HasPrefix(sup, "[") {
 		return false
 	}
-	index := l.classIndex()
-	cur := "L" + sub + ";"
+	cur := sub
 	for step := 0; step < maxAssignabilityDepth; step++ {
-		c, ok := index[cur]
-		if !ok || c.Superclass == "" {
-			break
-		}
-		superInternal, err := objectInternalName(c.Superclass)
-		if err != nil {
+		superInternal, ok := l.superclassInternal(cur)
+		if !ok {
 			break
 		}
 		if superInternal == sup {
 			return true
 		}
-		cur = c.Superclass
+		cur = superInternal
 	}
 	return false
 }
@@ -251,18 +490,17 @@ func (l *methodLowerer) isProvablyThrowable(internalName string) bool {
 		internalName == "java/lang/RuntimeException" || internalName == "java/lang/Error" {
 		return true
 	}
-	index := l.classIndex()
-	cur := "L" + internalName + ";"
+	cur := internalName
 	for step := 0; step < maxAssignabilityDepth; step++ {
-		c, ok := index[cur]
-		if !ok || c.Superclass == "" {
+		sup, ok := l.superclassInternal(cur)
+		if !ok {
 			break
 		}
-		if c.Superclass == "Ljava/lang/Throwable;" || c.Superclass == "Ljava/lang/Exception;" ||
-			c.Superclass == "Ljava/lang/RuntimeException;" || c.Superclass == "Ljava/lang/Error;" {
+		if sup == "java/lang/Throwable" || sup == "java/lang/Exception" ||
+			sup == "java/lang/RuntimeException" || sup == "java/lang/Error" {
 			return true
 		}
-		cur = c.Superclass
+		cur = sup
 	}
 	return false
 }
@@ -466,6 +704,41 @@ func (l *methodLowerer) transferSlotFrame(blockIdx, insnIdx int, frame slotFrame
 				}
 				setSlot(frame, dstSlot, vt)
 				return
+			} else if rawSrc.Kind == ir.Bits32 {
+				dst, src := insn.Regs[0], insn.Regs[1]
+				srcResolvedLK := localKind(l.resolvedUseCategoryAt(insnIdx, src).Kind)
+				setBits32Slot := func(dstSlot uint16, dstLK classfilebuilder.LocalKind) {
+					vt := classfilebuilder.VerificationType{Tag: verifyTagForLocalKind(dstLK)}
+					if srcSlot, srcOK := l.slotIfCompanion(insnIdx, src, dstLK, false); srcOK {
+						if int(srcSlot) < len(frame) && frame[srcSlot].vt.Tag != classfilebuilder.VerifyTop {
+							vt = frame[srcSlot].vt
+						}
+					} else if srcResolvedLK == dstLK {
+						srcSlot := int(l.loadSlotAt(insnIdx, src, dstLK))
+						if srcSlot >= 0 && srcSlot < len(frame) && frame[srcSlot].vt.Tag != classfilebuilder.VerifyTop {
+							vt = frame[srcSlot].vt
+						}
+					}
+					setSlot(frame, int(dstSlot), vt)
+				}
+				hasDstPoly := false
+				for _, lk := range []classfilebuilder.LocalKind{classfilebuilder.IntLocal, classfilebuilder.FloatLocal} {
+					if _, ok := l.slotIfCompanion(insnIdx, dst, lk, true); ok {
+						hasDstPoly = true
+						break
+					}
+				}
+				if hasDstPoly {
+					for _, lk := range []classfilebuilder.LocalKind{classfilebuilder.IntLocal, classfilebuilder.FloatLocal} {
+						if dstSlot, ok := l.slotIfCompanion(insnIdx, dst, lk, true); ok {
+							setBits32Slot(dstSlot, lk)
+						}
+					}
+					return
+				}
+				dstLK := localKind(kind)
+				setBits32Slot(l.storeSlotAt(insnIdx, dst, dstLK), dstLK)
+				return
 			}
 		}
 		srcCat := l.resolvedUseCategoryAt(insnIdx, insn.Regs[1])
@@ -490,14 +763,32 @@ func (l *methodLowerer) transferSlotFrame(blockIdx, insnIdx int, frame slotFrame
 		setSlot(frame, dstSlot, classfilebuilder.VerificationType{Tag: classfilebuilder.VerifyObject, Class: catchCls})
 
 	case insn.Opcode >= 0x12 && insn.Opcode <= 0x15:
+		rawDef := l.definitionCategoryAt(insnIdx, insn.Regs[0])
 		defCat := l.resolvedDefCategoryAt(insnIdx, insn.Regs[0])
-		if defCat.Kind == ir.Null && insn.Literal == 0 {
+		if (defCat.Kind == ir.Null || rawDef.Kind == ir.Null) && insn.Literal == 0 {
 			stored := false
 			for _, entry := range []struct {
 				lk  classfilebuilder.LocalKind
 				tag classfilebuilder.VerifyTag
 			}{
 				{classfilebuilder.RefLocal, classfilebuilder.VerifyNull},
+				{classfilebuilder.IntLocal, classfilebuilder.VerifyInt},
+				{classfilebuilder.FloatLocal, classfilebuilder.VerifyFloat},
+			} {
+				if slot, ok := l.slotIfCompanion(insnIdx, insn.Regs[0], entry.lk, true); ok {
+					setSlot(frame, int(slot), classfilebuilder.VerificationType{Tag: entry.tag})
+					stored = true
+				}
+			}
+			if stored {
+				return
+			}
+		} else if defCat.Kind == ir.Bits32 || rawDef.Kind == ir.Bits32 {
+			stored := false
+			for _, entry := range []struct {
+				lk  classfilebuilder.LocalKind
+				tag classfilebuilder.VerifyTag
+			}{
 				{classfilebuilder.IntLocal, classfilebuilder.VerifyInt},
 				{classfilebuilder.FloatLocal, classfilebuilder.VerifyFloat},
 			} {
@@ -865,6 +1156,9 @@ func (l *methodLowerer) emitStackMapTable(state *stackMapState) error {
 
 	blockEmitsBytes := make([]bool, numBlocks)
 	for b, block := range l.method.Blocks {
+		if !block.Reachable {
+			continue
+		}
 		for _, insnIdx := range block.Instructions {
 			if store, ok := deferred[insnIdx]; ok {
 				if !store.direct {
@@ -900,25 +1194,43 @@ func (l *methodLowerer) emitStackMapTable(state *stackMapState) error {
 		}
 	}
 
+	resolveBlock := func(b int) int {
+		for k := b; k < numBlocks; k++ {
+			if blockEmitsBytes[k] {
+				return k
+			}
+		}
+		return -1
+	}
+
 	targetBlocks := make([]bool, numBlocks)
-	for _, insn := range l.method.Instructions {
-		if isBranchOpcode(insn.Opcode) && insn.Target >= 0 {
-			if tb, ok := blockByStart[uint32(insn.Target)]; ok {
-				targetBlocks[tb] = true
-			}
-		} else if insn.Opcode == 0x2b || insn.Opcode == 0x2c {
-			if tb, ok := blockByStart[insn.End()]; ok {
-				targetBlocks[tb] = true
-			}
-			for _, t := range insn.Targets {
-				if tb, ok := blockByStart[uint32(t)]; ok {
+	for _, block := range l.method.Blocks {
+		if !block.Reachable {
+			continue
+		}
+		for _, idx := range block.Instructions {
+			insn := l.method.Instructions[idx]
+			if isBranchOpcode(insn.Opcode) && insn.Target >= 0 {
+				if tb, ok := blockByStart[uint32(insn.Target)]; ok {
 					targetBlocks[tb] = true
+				}
+			} else if insn.Opcode == 0x2b || insn.Opcode == 0x2c {
+				if tb, ok := blockByStart[insn.End()]; ok {
+					targetBlocks[tb] = true
+				}
+				for _, t := range insn.Targets {
+					if tb, ok := blockByStart[uint32(t)]; ok {
+						targetBlocks[tb] = true
+					}
 				}
 			}
 		}
 	}
 	handlerBlocks := make([]bool, numBlocks)
 	for b, block := range l.method.Blocks {
+		if !block.Reachable {
+			continue
+		}
 		if _, isHandler := catchClassByAddr[block.Start]; isHandler {
 			handlerBlocks[b] = true
 			if _, hasTrampoline := l.handlerTrampolines[block.Start]; hasTrampoline {
@@ -929,7 +1241,9 @@ func (l *methodLowerer) emitStackMapTable(state *stackMapState) error {
 		if len(block.Instructions) > 0 && b+1 < numBlocks {
 			lastOp := l.method.Instructions[block.Instructions[len(block.Instructions)-1]].Opcode
 			if lastOp == 0x27 || (lastOp >= 0x0e && lastOp <= 0x11) || (lastOp >= 0x28 && lastOp <= 0x2c) {
-				targetBlocks[b+1] = true
+				if next := resolveBlock(b + 1); next >= 0 {
+					targetBlocks[next] = true
+				}
 			}
 		}
 	}
@@ -940,17 +1254,9 @@ func (l *methodLowerer) emitStackMapTable(state *stackMapState) error {
 	}
 	resolvedLocals := make([]slotFrame, numBlocks)
 	resolvedVisited := make([]bool, numBlocks)
-	resolveBlock := func(b int) int {
-		for k := b; k < numBlocks; k++ {
-			if blockEmitsBytes[k] {
-				return k
-			}
-		}
-		return -1
-	}
 
 	for b := 0; b < numBlocks; b++ {
-		if !targetBlocks[b] && !handlerBlocks[b] {
+		if !l.method.Blocks[b].Reachable || (!targetBlocks[b] && !handlerBlocks[b]) {
 			continue
 		}
 		frame := in[b]

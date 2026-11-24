@@ -10,10 +10,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yaklang/javajive/dex2jar/input"
@@ -117,12 +121,28 @@ func appendConversionDiagnostic(detailed *DetailedReport, diagnostic ConversionD
 		return
 	}
 	detailed.diagnosticsOmitted++
+	newPrio := diagnosticPriority(diagnostic)
+	limit := maxConversionDiagnostics - 1
+	if len(detailed.Diagnostics) >= limit {
+		worstIdx := -1
+		worstPrio := newPrio
+		for i := limit - 1; i >= 0; i-- {
+			if prio := diagnosticPriority(detailed.Diagnostics[i]); prio > worstPrio {
+				worstPrio = prio
+				worstIdx = i
+			}
+		}
+		if worstIdx >= 0 {
+			copy(detailed.Diagnostics[worstIdx:limit-1], detailed.Diagnostics[worstIdx+1:limit])
+			detailed.Diagnostics[limit-1] = diagnostic
+		}
+	}
 	truncated := ConversionDiagnostic{
 		Category: "recovery", Action: "drop_attribute", Code: "diagnostics.truncated",
 		Kind: "resource_limit", Scope: "container", Stage: "collect", Severity: "warning",
 		Message: fmt.Sprintf("%d additional conversion diagnostics were omitted to keep collection bounded", detailed.diagnosticsOmitted),
 	}
-	if len(detailed.Diagnostics) == maxConversionDiagnostics-1 {
+	if len(detailed.Diagnostics) == limit {
 		detailed.Diagnostics = append(detailed.Diagnostics, truncated)
 		return
 	}
@@ -397,7 +417,22 @@ func applicationToJarWithPolicy(app *model.Application, policy FailurePolicy) ([
 			appendConversionDiagnostic(&detailed, diag)
 			detailed.Summary.Warnings++
 		}
+		for _, diag := range normalizeR8EnumDeclarations(app, hierarchy) {
+			appendConversionDiagnostic(&detailed, diag)
+			detailed.Summary.Warnings++
+		}
 	}
+	type classJob struct {
+		file  *model.File
+		class *model.Class
+		name  string
+	}
+	type classJobResult struct {
+		result   lower.ClassResult
+		err      error
+		panicVal any
+	}
+	jobs := make([]classJob, 0, len(hierarchy))
 	for _, file := range app.Files {
 		if file == nil {
 			return nil, detailed, errors.New("dex2jar: application contains a nil DEX file")
@@ -433,15 +468,81 @@ func applicationToJarWithPolicy(app *model.Application, policy FailurePolicy) ([
 				return nil, detailed, err
 			}
 			seen[name] = file.Entry
-
-			result, err := lower.ClassWithPolicy(file, class, lower.ClassOptions{FileValidated: true, Hierarchy: hierarchy}, lowerPolicy)
-			if err != nil {
-				detailed.Summary.Classes = len(converted)
-				appendConversionDiagnostic(&detailed, diagnosticFromError(err, "failed", ""))
-				return nil, detailed, err
-			}
-			converted = append(converted, convertedClass{file: file, class: class, name: name, result: result})
+			jobs = append(jobs, classJob{file: file, class: class, name: name})
 		}
+	}
+	results := make([]classJobResult, len(jobs))
+	runClassJob := func(job classJob) (res classJobResult) {
+		defer func() {
+			if r := recover(); r != nil {
+				res.panicVal = r
+			}
+		}()
+		res.result, res.err = lower.ClassWithPolicy(job.file, job.class, lower.ClassOptions{FileValidated: true, Hierarchy: hierarchy}, lowerPolicy)
+		return res
+	}
+	if len(jobs) == 1 {
+		results[0] = runClassJob(jobs[0])
+	} else if len(jobs) > 1 {
+		workers := runtime.GOMAXPROCS(0)
+		if workers > 16 {
+			workers = 16
+		}
+		if workers < 1 {
+			workers = 1
+		}
+		if workers > len(jobs) {
+			workers = len(jobs)
+		}
+		var nextIdx atomic.Int64
+		var firstFailIdx atomic.Int64
+		firstFailIdx.Store(math.MaxInt64)
+		recordFirstFail := func(idx int64) {
+			for {
+				cur := firstFailIdx.Load()
+				if idx >= cur {
+					return
+				}
+				if firstFailIdx.CompareAndSwap(cur, idx) {
+					return
+				}
+			}
+		}
+		var wg sync.WaitGroup
+		wg.Add(workers)
+		for w := 0; w < workers; w++ {
+			go func() {
+				defer wg.Done()
+				for {
+					idx := int(nextIdx.Add(1) - 1)
+					if idx >= len(jobs) {
+						return
+					}
+					if policy != FailureRecover && int64(idx) >= firstFailIdx.Load() {
+						return
+					}
+					res := runClassJob(jobs[idx])
+					results[idx] = res
+					if (res.panicVal != nil || res.err != nil) && policy != FailureRecover {
+						recordFirstFail(int64(idx))
+					}
+				}
+			}()
+		}
+		wg.Wait()
+	}
+	for i, job := range jobs {
+		res := results[i]
+		if res.panicVal != nil {
+			panic(res.panicVal)
+		}
+		if res.err != nil {
+			detailed.AttemptedClasses = i + 1
+			detailed.Summary.Classes = i
+			appendConversionDiagnostic(&detailed, diagnosticFromError(res.err, "failed", ""))
+			return nil, detailed, res.err
+		}
+		converted = append(converted, convertedClass{file: job.file, class: job.class, name: job.name, result: res.result})
 	}
 	if policy == FailureRecover {
 		if err := recoverMinimalDependencies(converted, hierarchy); err != nil {
@@ -484,7 +585,7 @@ func applicationToJarWithPolicy(app *model.Application, policy FailurePolicy) ([
 		for _, stub := range result.StubbedMethods {
 			stubs[stub.Method+"\x00"+stub.Descriptor] = true
 			detailed.StubbedMethods++
-			if !result.ClassStubbed {
+			if !result.ClassStubbed && !recoveredMethods[stub.Method+"\x00"+stub.Descriptor] {
 				detailed.Summary.Warnings++
 			}
 			if !recoveredMethods[stub.Method+"\x00"+stub.Descriptor] {
@@ -509,7 +610,7 @@ func applicationToJarWithPolicy(app *model.Application, policy FailurePolicy) ([
 	}
 
 	if len(detailed.Diagnostics) > 0 {
-		payload, diagnostics, marshalErr := encodeConversionDiagnostics(detailed.Summary, detailed.Diagnostics)
+		payload, diagnostics, marshalErr := encodeConversionDiagnosticsWithOmitted(detailed.Summary, detailed.Diagnostics, detailed.diagnosticsOmitted)
 		if marshalErr != nil {
 			return nil, detailed, fmt.Errorf("dex2jar: encode diagnostics: %w", marshalErr)
 		}
@@ -528,9 +629,41 @@ func applicationToJarWithPolicy(app *model.Application, policy FailurePolicy) ([
 	return jar, detailed, nil
 }
 
+func diagnosticPriority(d ConversionDiagnostic) int {
+	switch {
+	case d.Action == "failed" || d.Severity == "error" || d.Code == "class.minimal_recovery" || d.Action == "stub_class_minimal":
+		return 0
+	case d.Action == "stub_class" || d.Code == "class.body_recovery":
+		return 1
+	case d.Action == "stub_method" || d.Action == "stubbed" || d.Action == "stub_initializer" || d.Code == "method.body_stubbed" || d.Code == "method.unsupported_stub":
+		return 2
+	case d.Code == "diagnostics.truncated":
+		return 5
+	case d.Action == "drop_attribute" || d.Action == "ignore_header_signature":
+		return 3
+	case d.Action == "synthesize_ctor" || d.Code == "r8.ctor_synthesized":
+		return 4
+	default:
+		return 3
+	}
+}
+
 func encodeConversionDiagnostics(summary Report, input []ConversionDiagnostic) ([]byte, []ConversionDiagnostic, error) {
-	diagnostics := make([]ConversionDiagnostic, 0, min(len(input), maxConversionDiagnostics))
-	for _, diagnostic := range input {
+	return encodeConversionDiagnosticsWithOmitted(summary, input, 0)
+}
+
+func encodeConversionDiagnosticsWithOmitted(summary Report, input []ConversionDiagnostic, alreadyOmitted int) ([]byte, []ConversionDiagnostic, error) {
+	items := input
+	if alreadyOmitted > 0 && len(items) > 0 && items[len(items)-1].Code == "diagnostics.truncated" {
+		items = items[:len(items)-1]
+	}
+	ordered := append([]ConversionDiagnostic(nil), items...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return diagnosticPriority(ordered[i]) < diagnosticPriority(ordered[j])
+	})
+	totalInput := len(ordered) + alreadyOmitted
+	diagnostics := make([]ConversionDiagnostic, 0, min(len(ordered), maxConversionDiagnostics))
+	for _, diagnostic := range ordered {
 		diagnostic.Entry = sanitizeDiagnosticField(diagnostic.Entry)
 		diagnostic.Class = sanitizeDiagnosticField(diagnostic.Class)
 		diagnostic.Method = sanitizeDiagnosticField(diagnostic.Method)
@@ -551,16 +684,16 @@ func encodeConversionDiagnostics(summary Report, input []ConversionDiagnostic) (
 			break
 		}
 	}
-	truncated := len(diagnostics) < len(input)
-	appendTruncation := func(omitted int) {
+	omitted := totalInput - len(diagnostics)
+	appendTruncation := func(count int) {
 		diagnostics = append(diagnostics, ConversionDiagnostic{
 			Category: "recovery", Action: "drop_attribute", Code: "diagnostics.truncated",
 			Kind: "resource_limit", Scope: "container", Stage: "write", Severity: "warning",
-			Message: fmt.Sprintf("%d diagnostics were omitted to keep META-INF/javajive/diagnostics.json bounded", omitted),
+			Message: fmt.Sprintf("%d diagnostics were omitted to keep META-INF/javajive/diagnostics.json bounded", count),
 		})
 	}
-	if truncated {
-		appendTruncation(len(input) - len(diagnostics))
+	if omitted > 0 {
+		appendTruncation(omitted)
 	}
 	marshal := func() ([]byte, error) {
 		payload, err := json.MarshalIndent(struct {
@@ -591,7 +724,7 @@ func encodeConversionDiagnostics(summary Report, input []ConversionDiagnostic) (
 			kept = 0
 		}
 		diagnostics = diagnostics[:kept]
-		appendTruncation(len(input) - kept)
+		appendTruncation(totalInput - kept)
 	}
 }
 

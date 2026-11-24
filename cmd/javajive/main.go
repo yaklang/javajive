@@ -82,7 +82,7 @@ Run "javajive <command> -h" for command-specific options.
 func cmdDecompile(args []string) error {
 	fs := newFlagSet("decompile")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "usage: javajive decompile [-o out] [-analysis-budget N] [--structured] [--retain-unproved] [--best-effort | --stub-methods-only] <file|dir>")
+		fmt.Fprintln(fs.Output(), "usage: javajive decompile [-o out] [-q|--quiet] [--log-level level] [-analysis-budget N] [--structured] [--retain-unproved] [--best-effort | --stub-methods-only] <file|dir>")
 		fmt.Fprintln(fs.Output(), "Decompile .class, Java archives (.jar/.war/.ear/.aar/.par/.jmod/.zip), JDK runtime images (.jimage / lib/modules), DEX/APK/APKS/XAPK/APKM/AAB, or a directory of .class files.")
 		fmt.Fprintln(fs.Output(), "Android containers and DEX default to <input>.src; --structured applies to Java archives and JImage.")
 		fmt.Fprintln(fs.Output(), "--best-effort applies full DEX/Android recovery (and retains unproved R8 source); --stub-methods-only keeps the narrower recognized-method policy.")
@@ -94,9 +94,15 @@ func cmdDecompile(args []string) error {
 	retainUnproved := fs.Bool("retain-unproved", false, "retain readable source when R8/obfuscation strips javac proof metadata")
 	bestEffort := fs.Bool("best-effort", false, "for DEX/Android: recover method/class failures and emit a traceable partial result")
 	stubMethodsOnly := fs.Bool("stub-methods-only", false, "for DEX/Android: only stub recognized unsupported methods")
+	logOpts := bindLogFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	suppressSummary, restoreLog, err := applyLogFlags(logOpts)
+	if err != nil {
+		return err
+	}
+	defer restoreLog()
 	if *budget < 0 {
 		return fmt.Errorf("-analysis-budget must be non-negative")
 	}
@@ -143,8 +149,10 @@ func cmdDecompile(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "decompiled %s input %q -> %q (status=%s, %d warnings)\n",
-			kind, input, dst, detailed.Status, detailed.Summary.Warnings)
+		if !suppressSummary {
+			fmt.Fprintf(os.Stderr, "decompiled %s input %q -> %q (status=%s, %d warnings)\n",
+				kind, input, dst, detailed.Status, detailed.Summary.Warnings)
+		}
 		return nil
 	}
 
@@ -166,18 +174,22 @@ func cmdDecompile(args []string) error {
 			if err != nil {
 				return err
 			}
-			if *structured {
-				fmt.Fprintf(os.Stderr, "decompiled %s archive %q -> %q (%d entries, %d nested archives)\n",
-					kind, input, dst, len(report.Entries), len(report.Archives))
-			} else {
-				fmt.Fprintf(os.Stderr, "decompiled %s archive %q -> %q\n", kind, input, dst)
+			if !suppressSummary {
+				if *structured {
+					fmt.Fprintf(os.Stderr, "decompiled %s archive %q -> %q (%d entries, %d nested archives)\n",
+						kind, input, dst, len(report.Entries), len(report.Archives))
+				} else {
+					fmt.Fprintf(os.Stderr, "decompiled %s archive %q -> %q\n", kind, input, dst)
+				}
 			}
 			return nil
 		}
 		if err := jj.DecompileArchiveWithAnalysisBudget(input, dst, *budget); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "decompiled %s archive %q -> %q\n", kind, input, dst)
+		if !suppressSummary {
+			fmt.Fprintf(os.Stderr, "decompiled %s archive %q -> %q\n", kind, input, dst)
+		}
 		return nil
 	}
 
@@ -255,7 +267,7 @@ func decompileDir(dir, out string, budget int, retainUnproved bool) error {
 func cmdDexToJar(args []string) error {
 	fs := newFlagSet("dex2jar")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "usage: javajive dex2jar -o output.jar [--best-effort | --stub-methods-only] input.dex|input.apk|input.apks|input.xapk|input.apkm|input.aab")
+		fmt.Fprintln(fs.Output(), "usage: javajive dex2jar -o output.jar [-q|--quiet] [--log-level level] [--best-effort | --stub-methods-only] input.dex|input.apk|input.apks|input.xapk|input.apkm|input.aab")
 		fmt.Fprintln(fs.Output(), "Convert the supported DEX subset in a DEX/APK/APKS/XAPK/APKM/AAB input to a deterministic JAR.")
 		fmt.Fprintln(fs.Output(), "--best-effort adds class-shell recovery; --stub-methods-only only stubs recognized unsupported methods. Input and resource failures still abort.")
 		fs.PrintDefaults()
@@ -263,9 +275,15 @@ func cmdDexToJar(args []string) error {
 	out := fs.String("o", "", "output JAR path (required)")
 	bestEffort := fs.Bool("best-effort", false, "recover method/class failures and emit a traceable partial JAR")
 	stubMethodsOnly := fs.Bool("stub-methods-only", false, "only stub recognized unsupported methods")
+	logOpts := bindLogFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	suppressSummary, restoreLog, err := applyLogFlags(logOpts)
+	if err != nil {
+		return err
+	}
+	defer restoreLog()
 	if fs.NArg() != 1 || *out == "" {
 		return fmt.Errorf("dex2jar requires -o <output.jar> and one input path\nusage: javajive dex2jar -o output.jar [--best-effort | --stub-methods-only] input.dex|input.apk|input.apks|input.xapk|input.apkm|input.aab")
 	}
@@ -286,9 +304,11 @@ func cmdDexToJar(args []string) error {
 	if err != nil {
 		return err
 	}
-	report := detailed.Summary
-	fmt.Fprintf(os.Stderr, "converted %s %q -> %q (status=%s, %d DEX files, %d classes, %d/%d methods translated, %d warnings)\n",
-		kind, fs.Arg(0), *out, detailed.Status, report.DEXFiles, report.Classes, report.TranslatedMethods, report.Methods, report.Warnings)
+	if !suppressSummary {
+		report := detailed.Summary
+		fmt.Fprintf(os.Stderr, "converted %s %q -> %q (status=%s, %d DEX files, %d classes, %d/%d methods translated, %d warnings)\n",
+			kind, fs.Arg(0), *out, detailed.Status, report.DEXFiles, report.Classes, report.TranslatedMethods, report.Methods, report.Warnings)
+	}
 	return nil
 }
 

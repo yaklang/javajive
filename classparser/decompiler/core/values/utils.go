@@ -100,6 +100,9 @@ func branchConditionView(condition JavaValue) JavaValue {
 }
 func UnpackSoltValue(value JavaValue) JavaValue {
 	if ref, ok := value.(*SlotValue); ok {
+		if ref == nil {
+			return nil
+		}
 		return UnpackSoltValue(ref.GetValue())
 	}
 	return value

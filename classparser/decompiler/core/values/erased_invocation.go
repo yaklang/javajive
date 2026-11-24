@@ -216,7 +216,7 @@ func (f *FunctionCallExpression) planErasedInvocationProof(ctx *class_context.Cl
 			// `this` is the current generic declaration, even though its stack
 			// descriptor is raw. Only its own unshadowed formals can supply the
 			// identity substitution; arbitrary raw locals remain unresolved.
-			cs, _, known := invocationSignatureEvidence(ctx, strings.ReplaceAll(raw, ".", "/"))
+			cs, known := invocationClassSignature(ctx, strings.ReplaceAll(raw, ".", "/"))
 			owned := types.ClassFormalTypeParamNames(cs)
 			for _, name := range owned {
 				for _, shadow := range types.MethodFormalTypeParamNames(ctx.CurrentMethodSig) {
@@ -494,6 +494,25 @@ func (f *FunctionCallExpression) PlanErasedClassResultUse(ctx *class_context.Cla
 // Platform declaration Signatures belong to this proof's evidence scope. Do
 // not feed them into unrelated legacy generic inference, where unconstrained
 // captures could otherwise become non-denotable source types (e.g. ? super ?).
+func invocationClassSignature(ctx *class_context.ClassContext, name string) (string, bool) {
+	if ctx == nil {
+		return "", false
+	}
+	if ctx.SiblingClassSig != nil {
+		if cs, _, ok := ctx.SiblingClassSig(name); ok {
+			return cs, true
+		}
+	}
+	if ctx.InvocationMetadata == nil {
+		return "", false
+	}
+	meta, ok := ctx.InvocationMetadata(name)
+	if !ok || meta.Name != name || !meta.MembersComplete || !meta.ParentsComplete {
+		return "", false
+	}
+	return meta.Signature, true
+}
+
 func invocationSignatureEvidence(ctx *class_context.ClassContext, name string) (string, map[string]string, bool) {
 	if ctx == nil {
 		return "", nil, false
@@ -510,7 +529,7 @@ func invocationSignatureEvidence(ctx *class_context.ClassContext, name string) (
 	if !ok || meta.Name != name || !meta.MembersComplete || !meta.ParentsComplete {
 		return "", nil, false
 	}
-	m := map[string]string{}
+	m := make(map[string]string, len(meta.Methods))
 	for _, method := range meta.Methods {
 		m[class_context.MethodDescKey(method.Name, method.Desc)] = method.Signature
 	}

@@ -44,3 +44,29 @@ func TestStaticFieldSelectionRefusesAnObscuredTypeNamespace(t *testing.T) {
 		}
 	}
 }
+
+func TestIsOwnClassOwnerAndSanitizedStaticFieldSelection(t *testing.T) {
+	ctx := ClassContext{
+		ClassName: "androidx.compose.material3.ComposableSingletons$AppBarKt$lambda_1$1",
+	}
+	for _, owner := range []string{
+		"androidx/compose/material3/ComposableSingletons$AppBarKt$lambda-1$1",
+		"androidx.compose.material3.ComposableSingletons$AppBarKt$lambda-1$1",
+		"androidx.compose.material3.ComposableSingletons$AppBarKt$lambda_1$1",
+	} {
+		if !ctx.IsOwnClassOwner(owner) {
+			t.Fatalf("IsOwnClassOwner(%q) = false for sanitized ClassName %q", owner, ctx.ClassName)
+		}
+		if got := ctx.StaticFieldSelection(owner, "INSTANCE"); got != "INSTANCE" {
+			t.Fatalf("StaticFieldSelection(%q, INSTANCE) = %q, want unqualified INSTANCE", owner, got)
+		}
+	}
+
+	kwCtx := ClassContext{ClassName: "pkg.default_.Foo"}
+	if !kwCtx.IsOwnClassOwner("pkg/default/Foo") {
+		t.Fatal("IsOwnClassOwner should match sanitized keyword package segment")
+	}
+	if kwCtx.IsOwnClassOwner("pkg/other/Foo") {
+		t.Fatal("IsOwnClassOwner matched wrong owner")
+	}
+}

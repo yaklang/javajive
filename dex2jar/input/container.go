@@ -296,7 +296,7 @@ func parseDEXSources(sources []DEXSource, options Options, strictDuplicates bool
 			return nil, report.New(source.Entry, "", "", 0, "input", fmt.Errorf("total DEX size exceeds limit %d", options.maxTotalDEXSize()))
 		}
 		totalDEXSize += uint64(len(source.Data))
-		file, err := ParseDEXWithOptions(source.Data, source.Entry, options)
+		files, err := ParseDEXContainerWithOptions(source.Data, source.Entry, options)
 		// Parsed model data owns resolved values, not the original DEX byte slice.
 		// Drop the source reference promptly so multidex inputs can be reclaimed as
 		// parsing advances.
@@ -304,21 +304,26 @@ func parseDEXSources(sources []DEXSource, options Options, strictDuplicates bool
 		if err != nil {
 			return nil, err
 		}
-		kept := file.Classes[:0]
-		for index := range file.Classes {
-			class := &file.Classes[index]
-			if previous, exists := seen[class.Descriptor]; exists {
-				if !strictDuplicates && reflect.DeepEqual(previous, *class) {
-					continue
-				}
-				return nil, report.New(source.Entry, class.Descriptor, "", -1, "duplicate class", fmt.Errorf("descriptor already defined in %q", seenEntry[class.Descriptor]))
-			}
-			seen[class.Descriptor] = *class
-			seenEntry[class.Descriptor] = source.Entry
-			kept = append(kept, *class)
+		if len(app.Files)+len(files) > options.maxDEXFiles() {
+			return nil, report.New(source.Entry, "", "", -1, "input", fmt.Errorf("DEX file count %d exceeds limit %d", len(app.Files)+len(files), options.maxDEXFiles()))
 		}
-		file.Classes = kept
-		app.Files = append(app.Files, file)
+		for _, file := range files {
+			kept := file.Classes[:0]
+			for index := range file.Classes {
+				class := &file.Classes[index]
+				if previous, exists := seen[class.Descriptor]; exists {
+					if !strictDuplicates && reflect.DeepEqual(previous, *class) {
+						continue
+					}
+					return nil, report.New(file.Entry, class.Descriptor, "", -1, "duplicate class", fmt.Errorf("descriptor already defined in %q", seenEntry[class.Descriptor]))
+				}
+				seen[class.Descriptor] = *class
+				seenEntry[class.Descriptor] = file.Entry
+				kept = append(kept, *class)
+			}
+			file.Classes = kept
+			app.Files = append(app.Files, file)
+		}
 	}
 	return app, nil
 }

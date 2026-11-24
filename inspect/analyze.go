@@ -196,11 +196,40 @@ func AnalyzeWithOptions(data []byte, name string, options Options) Report {
 	switch report.Artifact.Magic {
 	case "dex":
 		report.Artifact.Format = "dex"
-		report.DEXFiles = append(report.DEXFiles, analyzeDEX(data, nil, DEXProvenance{
+		provenance := DEXProvenance{
 			Container: "standalone", Entry: "classes.dex", MultidexIndex: 1, Canonical: false,
-		}, options))
-		report.Status = report.DEXFiles[0].Status
-		report.Diagnostics = append(report.Diagnostics, report.DEXFiles[0].Diagnostics...)
+		}
+		files, parseErr := input.ParseDEXContainer(data, provenance.Entry)
+		if parseErr != nil {
+			dex := analyzeParsedDEX(data, nil, parseErr, nil, provenance, options)
+			report.DEXFiles = append(report.DEXFiles, dex)
+			report.Status = dex.Status
+			report.Diagnostics = append(report.Diagnostics, dex.Diagnostics...)
+			break
+		}
+		var hierarchy map[string]*model.Class
+		if len(files) > 1 {
+			hierarchy = make(map[string]*model.Class)
+			for _, parsed := range files {
+				for position := range parsed.Classes {
+					class := &parsed.Classes[position]
+					if _, exists := hierarchy[class.Descriptor]; !exists {
+						hierarchy[class.Descriptor] = class
+					}
+				}
+			}
+		}
+		for idx, parsed := range files {
+			secProv := provenance
+			secProv.Entry = parsed.Entry
+			secProv.MultidexIndex = idx + 1
+			dex := analyzeParsedDEX(data, parsed, nil, hierarchy, secProv, options)
+			report.DEXFiles = append(report.DEXFiles, dex)
+			report.Diagnostics = append(report.Diagnostics, dex.Diagnostics...)
+			if dex.Status != StatusComplete && report.Status == StatusComplete {
+				report.Status = dex.Status
+			}
+		}
 	case "jmod":
 		report.Artifact.Format = "jmod"
 		if len(data) <= inputkind.JMODHeaderSize {
@@ -308,17 +337,25 @@ func analyzeArchive(report *Report, data []byte, name string, forced inputkind.K
 	// analysis pass parsed them again; hierarchy and per-class verdicts can share
 	// the same immutable model.File.
 	hierarchy := make(map[string]*model.Class)
-	parsedSources := make([]parsedDEXSource, len(sources))
-	for index, source := range sources {
-		parsed, parseErr := input.ParseDEX(source.Data, source.Entry)
-		parsedSources[index] = parsedDEXSource{source: source, file: parsed, err: parseErr}
+	parsedSources := make([]parsedDEXSource, 0, len(sources))
+	for _, source := range sources {
+		files, parseErr := input.ParseDEXContainer(source.Data, source.Entry)
 		if parseErr != nil {
+			parsedSources = append(parsedSources, parsedDEXSource{source: source, err: parseErr})
 			continue
 		}
-		for position := range parsed.Classes {
-			class := &parsed.Classes[position]
-			if _, exists := hierarchy[class.Descriptor]; !exists {
-				hierarchy[class.Descriptor] = class
+		for secIdx, parsed := range files {
+			secSource := source
+			secSource.Entry = parsed.Entry
+			if len(files) > 1 && secIdx > 0 {
+				secSource.Canonical = false
+			}
+			parsedSources = append(parsedSources, parsedDEXSource{source: secSource, file: parsed})
+			for position := range parsed.Classes {
+				class := &parsed.Classes[position]
+				if _, exists := hierarchy[class.Descriptor]; !exists {
+					hierarchy[class.Descriptor] = class
+				}
 			}
 		}
 	}
@@ -490,11 +527,6 @@ type parsedDEXSource struct {
 	source input.DEXSource
 	file   *model.File
 	err    error
-}
-
-func analyzeDEX(data []byte, hierarchy map[string]*model.Class, provenance DEXProvenance, options Options) DEXFile {
-	parsed, err := input.ParseDEX(data, provenance.Entry)
-	return analyzeParsedDEX(data, parsed, err, hierarchy, provenance, options)
 }
 
 func analyzeParsedDEX(data []byte, parsed *model.File, parseErr error, hierarchy map[string]*model.Class, provenance DEXProvenance, options Options) DEXFile {

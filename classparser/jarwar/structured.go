@@ -11,6 +11,7 @@ import (
 	javaclassparser "github.com/yaklang/javajive/classparser"
 	"github.com/yaklang/javajive/internal/filesys"
 	"github.com/yaklang/javajive/internal/inputkind"
+	"github.com/yaklang/javajive/internal/jdecenv"
 )
 
 const (
@@ -41,6 +42,14 @@ func decompileArchiveStructured(from, to string, options ArchiveOptions) (Archiv
 	decompiler := javaclassparser.NewJarFS(zipFS)
 	decompiler.SetAnalysisBudget(options.MaxAnalysisUpdates)
 	decompiler.SetRetainUnprovedSource(options.RetainUnprovedSource)
+	snap, bound := jdecenv.Current()
+	liveEnv := bound && snap == nil
+	if !bound {
+		snap = jdecenv.CaptureProcess()
+	}
+	if !liveEnv {
+		decompiler.SetEnvSnapshot(snap)
+	}
 	decompilerOwner, err := NewFromJarFS(decompiler)
 	if err != nil {
 		_ = zipFS.Close()
@@ -52,7 +61,15 @@ func decompileArchiveStructured(from, to string, options ArchiveOptions) (Archiv
 	if options.RetainUnprovedSource {
 		usedFold = make(map[string]int)
 	}
-	exportErr := exportStructuredArchive(to, zipFS, decompiler, "", 0, options.MaxAnalysisUpdates, options.RetainUnprovedSource, usedFold, &report)
+	var exportErr error
+	runStructured := func() error {
+		return exportStructuredArchive(to, zipFS, decompiler, "", 0, options.MaxAnalysisUpdates, options.RetainUnprovedSource, usedFold, &report)
+	}
+	if liveEnv {
+		exportErr = jdecenv.RunLive(runStructured)
+	} else {
+		exportErr = jdecenv.Run(snap, runStructured)
+	}
 	closeErr := decompilerOwner.Close()
 	if exportErr != nil {
 		return ArchiveReport{}, exportErr
@@ -165,6 +182,9 @@ func exportNestedArchive(root string, parentZip *filesys.ZipFS, entryPath, paren
 	nestedDecompiler := javaclassparser.NewJarFS(nestedZip)
 	nestedDecompiler.SetAnalysisBudget(maxAnalysisUpdates)
 	nestedDecompiler.SetRetainUnprovedSource(retainUnproved)
+	if snap, ok := jdecenv.Current(); ok && snap != nil {
+		nestedDecompiler.SetEnvSnapshot(snap)
+	}
 	if err := exportStructuredArchive(root, nestedZip, nestedDecompiler, provenance, depth, maxAnalysisUpdates, retainUnproved, usedFold, report); err != nil {
 		return err
 	}
@@ -196,7 +216,11 @@ func exportStructuredFile(root string, decompiler *javaclassparser.JarFS, entryP
 	}
 	outputPath := path.Join(outputRoot, outputEntry)
 	if retainUnproved {
-		outputPath = disambiguateCaseFoldPath(sanitizeBestEffortPath(outputPath), usedFold)
+		sanitized := sanitizeBestEffortPath(outputPath)
+		if kind == "source" {
+			sanitized = sanitizeBestEffortClassPath(outputPath)
+		}
+		outputPath = disambiguateCaseFoldPath(sanitized, usedFold)
 	} else if err := reserveStructuredOutput(report, outputPath); err != nil {
 		return err
 	}

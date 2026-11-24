@@ -6,10 +6,19 @@ type JavaPrimer struct {
 	Name string
 }
 
+type javaPrimerAlloc struct {
+	wrap   JavaTypeWrap
+	ref    javaTypeRef
+	primer JavaPrimer
+}
+
 func NewJavaPrimer(name string) JavaType {
-	return newJavaTypeWrap(&JavaPrimer{
-		Name: name,
-	})
+	a := &javaPrimerAlloc{
+		primer: JavaPrimer{Name: name},
+	}
+	a.ref.javaType = &a.primer
+	a.wrap.javaTypeRef = &a.ref
+	return &a.wrap
 }
 
 var (

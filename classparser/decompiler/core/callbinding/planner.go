@@ -4,8 +4,11 @@ package callbinding
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 )
 
 type Kind uint8
@@ -122,8 +125,11 @@ func FamilyOf(w Witness, p Provider) (Family, error) {
 				f.Target = &mc
 			}
 		}
-		parents := append([]string(nil), c.Parents...)
-		sort.Strings(parents)
+		parents := c.Parents
+		if len(parents) > 1 {
+			parents = append([]string(nil), c.Parents...)
+			sort.Strings(parents)
+		}
 		for _, s := range parents {
 			if e := walk(s); e != nil {
 				return e
@@ -141,9 +147,13 @@ func FamilyOf(w Witness, p Provider) (Family, error) {
 	// Positive evidence of competitors is valid even with incomplete ancestors.
 	compete := false
 	for _, m := range f.Methods {
+		if m.Desc == w.Desc {
+			continue
+		}
 		ps, _, _ := Descriptor(m.Desc)
-		if strings.Join(ps, ",") != strings.Join(want, ",") {
+		if !slices.Equal(ps, want) {
 			compete = true
+			break
 		}
 	}
 	if compete {
@@ -154,8 +164,46 @@ func FamilyOf(w Witness, p Provider) (Family, error) {
 	return f, nil
 }
 
+type cachedDescriptor struct {
+	params []string
+	ret    string
+}
+
+const maxCachedDescriptors = 2048
+
+var (
+	descriptorCache      sync.Map // string -> cachedDescriptor
+	descriptorCacheCount atomic.Int64
+)
+
 // Descriptor parses ordinary JVM descriptors without accepting trailing junk.
 func Descriptor(s string) ([]string, string, error) {
+	if cached, ok := descriptorCache.Load(s); ok {
+		entry := cached.(cachedDescriptor)
+		return entry.params, entry.ret, nil
+	}
+	ps, ret, err := parseDescriptor(s)
+	if err == nil && descriptorCacheCount.Load() < maxCachedDescriptors {
+		if len(ps) > 0 {
+			ps = ps[:len(ps):len(ps)]
+		}
+		if _, loaded := descriptorCache.LoadOrStore(s, cachedDescriptor{params: ps, ret: ret}); !loaded {
+			descriptorCacheCount.Add(1)
+		}
+	}
+	return ps, ret, err
+}
+
+func isPrimitiveDescriptorByte(c byte) bool {
+	switch c {
+	case 'B', 'C', 'D', 'F', 'I', 'J', 'S', 'Z':
+		return true
+	default:
+		return false
+	}
+}
+
+func parseDescriptor(s string) ([]string, string, error) {
 	bad := func() ([]string, string, error) { return nil, "", fmt.Errorf("invalid method descriptor %q", s) }
 	if len(s) < 3 || s[0] != '(' {
 		return bad()
@@ -184,7 +232,7 @@ func Descriptor(s string) ([]string, string, error) {
 				return "", false
 			}
 			i += k + 1
-		} else if !strings.ContainsRune("BCDFIJSZ", rune(c)) && !(c == 'V' && allowVoid && dim == 0) {
+		} else if !isPrimitiveDescriptorByte(c) && !(c == 'V' && allowVoid && dim == 0) {
 			return "", false
 		}
 		return s[start:i], true

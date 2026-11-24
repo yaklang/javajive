@@ -1,6 +1,7 @@
 package jarwar
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path"
@@ -11,7 +12,9 @@ import (
 	"sync/atomic"
 
 	"github.com/yaklang/javajive/classparser"
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/internal/filesys"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"github.com/yaklang/javajive/internal/log"
 	"github.com/yaklang/javajive/internal/utils"
 )
@@ -29,6 +32,7 @@ type JarWar struct {
 	// 存储反编译失败的文件列表
 	failedDecompiledFiles map[string]struct{}
 	failedFilesLock       sync.RWMutex
+	createdDirs           sync.Map
 }
 
 func NewFromJarFS(fs *javaclassparser.JarFS) (*JarWar, error) {
@@ -122,19 +126,37 @@ func (j *JarWar) DumpToLocalFileSystem(dir string) error {
 	}
 
 	workers := runtime.GOMAXPROCS(0)
-	if workers > 8 {
-		workers = 8
+	if workers > 16 {
+		workers = 16
 	}
 	if workers < 1 {
 		workers = 1
 	}
-	if len(tasks) <= 1 || workers == 1 {
-		for _, task := range tasks {
-			if err := j.executeDumpTask(dir, task); err != nil {
-				return fmt.Errorf("archive file system dump failed: %w", err)
-			}
+	snap, bound := jdecenv.Current()
+	liveEnv := bound && snap == nil
+	if !bound {
+		snap = jdecenv.CaptureProcess()
+	}
+	if !liveEnv && j.fs != nil {
+		prevSnap := j.fs.EnvSnapshot()
+		j.fs.SetEnvSnapshot(snap)
+		defer j.fs.SetEnvSnapshot(prevSnap)
+	}
+	runWithEnv := func(fn func() error) error {
+		if liveEnv {
+			return jdecenv.RunLive(fn)
 		}
-		return nil
+		return jdecenv.Run(snap, fn)
+	}
+	if len(tasks) <= 1 || workers == 1 {
+		return runWithEnv(func() error {
+			for _, task := range tasks {
+				if err := j.executeDumpTask(dir, task); err != nil {
+					return fmt.Errorf("archive file system dump failed: %w", err)
+				}
+			}
+			return nil
+		})
 	}
 	if workers > len(tasks) {
 		workers = len(tasks)
@@ -149,24 +171,26 @@ func (j *JarWar) DumpToLocalFileSystem(dir string) error {
 	for w := 0; w < workers; w++ {
 		go func() {
 			defer wg.Done()
-			for {
-				if failed.Load() {
-					return
-				}
-				idx := int(nextIdx.Add(1) - 1)
-				if idx >= len(tasks) {
-					return
-				}
-				if err := j.executeDumpTask(dir, tasks[idx]); err != nil {
-					errMu.Lock()
-					if firstErr == nil {
-						firstErr = err
+			_ = runWithEnv(func() error {
+				for {
+					if failed.Load() {
+						return nil
 					}
-					errMu.Unlock()
-					failed.Store(true)
-					return
+					idx := int(nextIdx.Add(1) - 1)
+					if idx >= len(tasks) {
+						return nil
+					}
+					if err := j.executeDumpTask(dir, tasks[idx]); err != nil {
+						errMu.Lock()
+						if firstErr == nil {
+							firstErr = err
+						}
+						errMu.Unlock()
+						failed.Store(true)
+						return nil
+					}
 				}
-			}
+			})
 		}()
 	}
 	wg.Wait()
@@ -186,7 +210,14 @@ func (j *JarWar) recordFailedFile(visiblePath string) {
 }
 
 func (j *JarWar) bestEffortOutputPath(rel string) string {
-	sanitized := sanitizeBestEffortPath(rel)
+	return j.bestEffortDisambiguate(sanitizeBestEffortPath(rel))
+}
+
+func (j *JarWar) bestEffortClassOutputPath(rel string) string {
+	return j.bestEffortDisambiguate(sanitizeBestEffortClassPath(rel))
+}
+
+func (j *JarWar) bestEffortDisambiguate(sanitized string) string {
 	j.failedFilesLock.Lock()
 	defer j.failedFilesLock.Unlock()
 	if j.writtenFold == nil {
@@ -225,13 +256,10 @@ func (j *JarWar) collectDumpTasks(root, directory string, tasks *[]dumpTask) err
 				}
 				return fmt.Errorf("resolve archive directory %q: %w", entryPath, joinErr)
 			}
-			if mkdirErr := os.MkdirAll(target, 0o755); mkdirErr != nil {
-				if j.bestEffort {
-					log.Warnf("create archive directory %q failed: %v", entryPath, mkdirErr)
-					j.recordFailedFile(entryPath)
-					continue
+			if !j.bestEffort {
+				if mkdirErr := os.MkdirAll(target, 0o755); mkdirErr != nil {
+					return fmt.Errorf("create archive directory %q: %w", entryPath, mkdirErr)
 				}
-				return fmt.Errorf("create archive directory %q: %w", entryPath, mkdirErr)
 			}
 			if walkErr := j.collectDumpTasks(root, entryPath, tasks); walkErr != nil {
 				return walkErr
@@ -251,7 +279,11 @@ func (j *JarWar) collectDumpTasks(root, directory string, tasks *[]dumpTask) err
 			outPath = strings.TrimSuffix(actualPath, ".class") + ".java"
 		}
 		if j.bestEffort {
-			outPath = j.bestEffortOutputPath(outPath)
+			if isClass {
+				outPath = j.bestEffortClassOutputPath(outPath)
+			} else {
+				outPath = j.bestEffortOutputPath(outPath)
+			}
 		}
 		*tasks = append(*tasks, dumpTask{
 			visiblePath: entryPath,
@@ -265,15 +297,6 @@ func (j *JarWar) collectDumpTasks(root, directory string, tasks *[]dumpTask) err
 
 func (j *JarWar) executeDumpTask(root string, task dumpTask) error {
 	if task.isClass {
-		originalRaw, err := j.fs.ReadRawFile(task.entryPath)
-		if err != nil {
-			if j.bestEffort {
-				log.Warnf("read archive entry %q failed: %v", task.entryPath, err)
-				j.recordFailedFile(task.visiblePath)
-				return nil
-			}
-			return fmt.Errorf("read archive entry %q: %w", task.entryPath, err)
-		}
 		decompiled, err := j.fs.ReadFile(task.entryPath)
 		if err != nil {
 			j.recordFailedFile(task.visiblePath)
@@ -283,7 +306,7 @@ func (j *JarWar) executeDumpTask(root string, task dumpTask) error {
 			}
 			return fmt.Errorf("decompile archive entry %q: %w", task.entryPath, err)
 		}
-		if err := writeFlatFile(root, task.outPath, decompiled); err != nil {
+		if err := j.writeFlatFile(root, task.outPath, decompiled); err != nil {
 			if j.bestEffort {
 				log.Warnf("write archive entry %q failed: %v", task.entryPath, err)
 				j.recordFailedFile(task.visiblePath)
@@ -291,9 +314,15 @@ func (j *JarWar) executeDumpTask(root string, task dumpTask) error {
 			}
 			return fmt.Errorf("write archive entry %q: %w", task.entryPath, err)
 		}
-		lines := strings.Count(string(decompiled), "\n") + 1
-		log.Infof("Decompiled [%v] - Original size: %d bytes, Decompiled size: %d bytes, Lines of code: %d",
-			task.visiblePath, len(originalRaw), len(decompiled), lines)
+		if log.Enabled(log.InfoLevel) {
+			var origSize int64
+			if info, statErr := j.fs.Stat(task.entryPath); statErr == nil {
+				origSize = info.Size()
+			}
+			lines := bytes.Count(decompiled, []byte{'\n'}) + 1
+			log.Infof("Decompiled [%v] - Original size: %d bytes, Decompiled size: %d bytes, Lines of code: %d",
+				task.visiblePath, origSize, len(decompiled), lines)
+		}
 		return nil
 	}
 
@@ -306,7 +335,7 @@ func (j *JarWar) executeDumpTask(root string, task dumpTask) error {
 		}
 		return fmt.Errorf("read archive entry %q: %w", task.entryPath, err)
 	}
-	if err := writeFlatFile(root, task.outPath, raw); err != nil {
+	if err := j.writeFlatFile(root, task.outPath, raw); err != nil {
 		if j.bestEffort {
 			log.Warnf("write archive entry %q failed: %v", task.entryPath, err)
 			j.recordFailedFile(task.visiblePath)
@@ -317,7 +346,7 @@ func (j *JarWar) executeDumpTask(root string, task dumpTask) error {
 	return nil
 }
 
-func writeFlatFile(root, name string, data []byte) error {
+func (j *JarWar) writeFlatFile(root, name string, data []byte) error {
 	target, err := SafeJoin(root, name)
 	if err != nil {
 		return err
@@ -326,10 +355,54 @@ func writeFlatFile(root, name string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(parent, 0o755); err != nil {
-		return err
+	if j == nil {
+		if err := os.MkdirAll(parent, 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0o644)
+	}
+	if _, ok := j.createdDirs.Load(parent); !ok {
+		if err := os.MkdirAll(parent, 0o755); err != nil {
+			return err
+		}
+		j.createdDirs.Store(parent, struct{}{})
 	}
 	return os.WriteFile(target, data, 0o644)
+}
+
+func writeFlatFile(root, name string, data []byte) error {
+	return (*JarWar)(nil).writeFlatFile(root, name, data)
+}
+
+func sanitizeBestEffortClassPath(rel string) string {
+	slash := strings.ReplaceAll(filepath.ToSlash(rel), "\\", "/")
+	slash = strings.TrimPrefix(slash, "./")
+	prefix := ""
+	rest := slash
+	if idx := strings.LastIndex(slash, "!/"); idx >= 0 {
+		prefix = sanitizeBestEffortPath(slash[:idx+2])
+		rest = slash[idx+2:]
+	}
+	parts := strings.Split(rest, "/")
+	for i := 0; i < len(parts)-1; i++ {
+		seg := parts[i]
+		if seg == "" || seg == "." || seg == ".." || isBestEffortContainerSegment(seg, i == 0 && prefix == "") {
+			continue
+		}
+		parts[i] = class_context.SafePackageSegment(seg)
+	}
+	return prefix + sanitizeBestEffortPath(strings.Join(parts, "/"))
+}
+
+func isBestEffortContainerSegment(seg string, allowStructuredRoot bool) bool {
+	if allowStructuredRoot && seg == structuredSourcesRoot {
+		return true
+	}
+	switch strings.ToUpper(seg) {
+	case "WEB-INF", "BOOT-INF", "META-INF":
+		return true
+	}
+	return isArchiveName(seg)
 }
 
 func sanitizeBestEffortPath(rel string) string {

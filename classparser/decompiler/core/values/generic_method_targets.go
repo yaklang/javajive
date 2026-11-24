@@ -254,7 +254,7 @@ func (f *FunctionCallExpression) genericMethodSignatureQuery(ctx *class_context.
 		// A non-generic owner can still declare generic methods. Its exact
 		// descriptor is sufficient; a raw GENERIC owner must remain erased.
 		if owner, ok := types.RawClassFQN(f.Object.Type()); ok {
-			if sig, _, known := invocationSignatureEvidence(ctx, strings.ReplaceAll(owner, ".", "/")); known && len(types.ClassFormalTypeParamNames(sig)) == 0 {
+			if sig, known := invocationClassSignature(ctx, strings.ReplaceAll(owner, ".", "/")); known && len(types.ClassFormalTypeParamNames(sig)) == 0 {
 				raw = owner
 			}
 		}
@@ -307,7 +307,7 @@ func (f *FunctionCallExpression) RetainFunctionalReturnSignature(ctx *class_cont
 		return
 	}
 	if f.IsStatic {
-		ownerSig, _, _ := invocationSignatureEvidence(ctx, strings.ReplaceAll(f.ClassName, ".", "/"))
+		ownerSig, _ := invocationClassSignature(ctx, strings.ReplaceAll(f.ClassName, ".", "/"))
 		if javaTypeMentionsNames(ret, types.ClassFormalTypeParamNames(ownerSig)) {
 			return
 		}

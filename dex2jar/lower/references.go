@@ -473,6 +473,50 @@ func classHierarchy(file *model.File) map[string]*model.Class {
 // hierarchies cannot stall translation.
 const maxAssignabilityDepth = 32
 
+func isPlatformDescriptor(desc string) bool {
+	for _, prefix := range []string{
+		"Landroid/",
+		"Ldalvik/",
+		"Ljava/",
+		"Ljavax/",
+		"Lj$/",
+		"Lorg/xml/",
+		"Lorg/w3c/",
+		"Lorg/json/",
+		"Lorg/apache/http/",
+	} {
+		if strings.HasPrefix(desc, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func isKnownFinalPlatformDescriptor(desc string) bool {
+	switch desc {
+	case "Ljava/lang/Object;",
+		"Ljava/lang/String;",
+		"Ljava/lang/Class;",
+		"Ljava/lang/Boolean;",
+		"Ljava/lang/Byte;",
+		"Ljava/lang/Character;",
+		"Ljava/lang/Short;",
+		"Ljava/lang/Integer;",
+		"Ljava/lang/Long;",
+		"Ljava/lang/Float;",
+		"Ljava/lang/Double;",
+		"Ljava/lang/Void;",
+		"Ljava/lang/StringBuilder;",
+		"Ljava/lang/StringBuffer;",
+		"Ljava/lang/Math;",
+		"Ljava/lang/StrictMath;",
+		"Ljava/lang/System;":
+		return true
+	default:
+		return false
+	}
+}
+
 func (l *methodLowerer) provablyAssignable(actual, expected string) bool {
 	if actual == nullDescriptor || actual == expected || expected == "Ljava/lang/Object;" {
 		return true
@@ -519,6 +563,13 @@ func (l *methodLowerer) provablyAssignable(actual, expected string) bool {
 		// Under JVMS §4.10.1.2 verification assignability, every object reference
 		// is assignable to an interface type (runtime invokeinterface / checkcast
 		// enforces implementation).
+		return true
+	}
+	if _, actualInApp := index[actual]; !actualInApp && expectedClass.AccessFlags&dexFinal == 0 &&
+		isPlatformDescriptor(expected) && !isKnownFinalPlatformDescriptor(actual) {
+		// Actual is an external class outside the DEX hierarchy (for example an
+		// Android platform subclass extending a bundled non-final API stub class);
+		// the DEX file lacks external superclass edges to disprove assignability.
 		return true
 	}
 	// The expected type is declared in this application, so the declared

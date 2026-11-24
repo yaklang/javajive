@@ -14,7 +14,9 @@ const (
 	// VersionJava7 supports invokedynamic, method handles/types, and StackMapTable.
 	VersionJava7 uint16 = 51
 	// VersionJava8 is required for static and default interface methods.
-	VersionJava8   uint16 = 52
+	VersionJava8 uint16 = 52
+	// VersionJava9 is required for private interface methods.
+	VersionJava9   uint16 = 53
 	highestVersion uint16 = 65
 )
 
@@ -539,6 +541,16 @@ func (m *Method) Code() *Code {
 		return nil
 	}
 	return m.code
+}
+
+// ResetCode replaces any previously emitted bytecode, handlers, and debug
+// attributes on a concrete method with a fresh empty Code assembler bound to the
+// same constant pool. Abstract and native methods remain unchanged.
+func (m *Method) ResetCode() {
+	if m == nil || m.code == nil {
+		return
+	}
+	m.code = newCode(m.code.pool)
 }
 
 // Bytes assembles and serializes the complete classfile.

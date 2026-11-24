@@ -314,12 +314,14 @@ func analyzeCategories(method *Method, file *model.File, allocations []Allocatio
 	// the successors, otherwise the value would arrive untyped.
 	usedBeforeDef := make([]map[uint16]bool, len(method.Blocks))
 	definedIn := make([]map[uint16]bool, len(method.Blocks))
+	firstDefPos := make([]map[uint16]int, len(method.Blocks))
 	for index := range usedBeforeDef {
 		usedBeforeDef[index] = make(map[uint16]bool)
 		definedIn[index] = make(map[uint16]bool)
+		firstDefPos[index] = make(map[uint16]int)
 	}
 	for blockIndex, block := range method.Blocks {
-		for _, instructionIndex := range block.Instructions {
+		for pos, instructionIndex := range block.Instructions {
 			uses, defs := method.EffectsAt(instructionIndex)
 			for _, register := range uses {
 				if !definedIn[blockIndex][register] {
@@ -327,35 +329,56 @@ func analyzeCategories(method *Method, file *model.File, allocations []Allocatio
 				}
 			}
 			for _, register := range defs {
-				definedIn[blockIndex][register] = true
+				if !definedIn[blockIndex][register] {
+					definedIn[blockIndex][register] = true
+					firstDefPos[blockIndex][register] = pos
+				}
 			}
 		}
 	}
 	// A throwing instruction exposes the register file to its handler, so every
-	// register the handler needs is live in the protected block. The handler's
-	// live-in set depends on liveness, so compute it once and refresh.
+	// register the handler needs before being killed locally is live at entry
+	// of the protected block. A prior intra-block definition (firstDef < throwPos)
+	// supplies the pre-state seen by protectedStates without pulling from block entry.
 	blockOfInstruction := make([]int, len(method.Instructions))
+	posInBlock := make([]int, len(method.Instructions))
 	for blockIndex := range method.Blocks {
-		for _, instructionIndex := range method.Blocks[blockIndex].Instructions {
+		for pos, instructionIndex := range method.Blocks[blockIndex].Instructions {
 			blockOfInstruction[instructionIndex] = blockIndex
+			posInBlock[instructionIndex] = pos
 		}
 	}
 	liveIn, liveOut := computeLiveness(method, usedBeforeDef, definedIn)
-	for handlerIndex := range method.Blocks {
-		if !method.Blocks[handlerIndex].Handler {
-			continue
-		}
-		for _, instructionIndex := range method.Blocks[handlerIndex].Protected {
-			blockIndex := blockOfInstruction[instructionIndex]
-			for register := range liveIn[handlerIndex] {
-				usedBeforeDef[blockIndex][register] = true
+	for pass := 0; pass <= len(method.Blocks)+1; pass++ {
+		changed := false
+		for handlerIndex := range method.Blocks {
+			if !method.Blocks[handlerIndex].Handler {
+				continue
 			}
-			for register := range usedBeforeDef[handlerIndex] {
-				usedBeforeDef[blockIndex][register] = true
+			for _, instructionIndex := range method.Blocks[handlerIndex].Protected {
+				blockIndex := blockOfInstruction[instructionIndex]
+				throwPos := posInBlock[instructionIndex]
+				for register := range liveIn[handlerIndex] {
+					firstDef, hasDef := firstDefPos[blockIndex][register]
+					if (!hasDef || throwPos <= firstDef) && !usedBeforeDef[blockIndex][register] {
+						usedBeforeDef[blockIndex][register] = true
+						changed = true
+					}
+				}
+				for register := range usedBeforeDef[handlerIndex] {
+					firstDef, hasDef := firstDefPos[blockIndex][register]
+					if (!hasDef || throwPos <= firstDef) && !usedBeforeDef[blockIndex][register] {
+						usedBeforeDef[blockIndex][register] = true
+						changed = true
+					}
+				}
 			}
 		}
+		if !changed {
+			break
+		}
+		liveIn, liveOut = computeLiveness(method, usedBeforeDef, definedIn)
 	}
-	liveIn, liveOut = computeLiveness(method, usedBeforeDef, definedIn)
 	// propagate holds the registers whose category must be merged at the join:
 	// everything read before a local definition plus everything that stays live
 	// across the block without being redefined.

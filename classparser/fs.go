@@ -53,6 +53,23 @@ type JarFS struct {
 	archive              *archiveFSState
 	declarationResolver  func(string) ([]byte, bool)
 	retainUnprovedSource bool
+	envSnapshot          map[string]string
+}
+
+// SetEnvSnapshot binds a read-only process environment snapshot for archive
+// decompilation so workers do not re-enter os.Getenv per class/expression.
+func (z *JarFS) SetEnvSnapshot(snap map[string]string) {
+	if z != nil {
+		z.envSnapshot = snap
+	}
+}
+
+// EnvSnapshot returns the environment snapshot configured on this JarFS.
+func (z *JarFS) EnvSnapshot() map[string]string {
+	if z == nil {
+		return nil
+	}
+	return z.envSnapshot
 }
 
 // SetRetainUnprovedSource keeps original members when a javac source certificate
@@ -196,7 +213,11 @@ func NewJarFSWithOptions(zipFs *filesys.ZipFS, recursiveParse bool) *JarFS {
 // fall back to the exact per-class behavior.
 func (z *JarFS) decompileClassOutcome(name string, data []byte) (outcome ClassDecompileOutcome, err error) {
 	if _, bound := jdecenv.Current(); !bound {
-		err = jdecenv.Run(jdecenv.CaptureProcess(), func() error {
+		snap := z.envSnapshot
+		if snap == nil {
+			snap = jdecenv.CaptureProcess()
+		}
+		err = jdecenv.Run(snap, func() error {
 			var inner error
 			outcome, inner = z.decompileClassOutcome(name, data)
 			return inner
@@ -275,6 +296,9 @@ func (z *JarFS) decompileClassOutcomeBound(name string, data []byte, work **work
 	d.options.sourceConstructorLowering = z.sourceConstructorLowering
 	d.options.sourceLambdaMetadata = z.sourceLambdaMetadata
 	d.options.RetainUnprovedSource = z.retainUnprovedSource
+	if z.envSnapshot != nil {
+		d.options.EnvSnapshot = z.envSnapshot
+	}
 	if path.Clean(name) == cf.GetClassName()+".class" {
 		d.nativeMemberLookup = z.nativeMemberLookup
 	}
@@ -502,16 +526,75 @@ func (z *JarFS) Stat(name string) (fs.FileInfo, error) {
 	}, nil
 }
 
+type archiveSuffixEntry struct {
+	ext   string
+	slash string
+	bang  string
+}
+
 var (
-	archiveFileSuffixes    = []string{".jar", ".war", ".ear", ".aar", ".par", ".jmod", ".zip"}
+	archiveFileSuffixes = []string{".jar", ".war", ".ear", ".aar", ".par", ".jmod", ".zip"}
+	archiveSuffixTable  = []archiveSuffixEntry{
+		{".jar", ".jar/", ".jar!"},
+		{".war", ".war/", ".war!"},
+		{".ear", ".ear/", ".ear!"},
+		{".aar", ".aar/", ".aar!"},
+		{".par", ".par/", ".par!"},
+		{".jmod", ".jmod/", ".jmod!"},
+		{".zip", ".zip/", ".zip!"},
+	}
 	jarLikeArchiveSuffixes = []string{".jar", ".war", ".ear", ".aar", ".par", ".jmod"}
 )
 
+func hasFoldASCIISuffix(s, lowerSuffix string) bool {
+	if len(s) < len(lowerSuffix) {
+		return false
+	}
+	tail := s[len(s)-len(lowerSuffix):]
+	for i := 0; i < len(lowerSuffix); i++ {
+		c := tail[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != lowerSuffix[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func indexFoldASCII(s, lowerSub string) int {
+	n := len(lowerSub)
+	if n == 0 {
+		return 0
+	}
+	if len(s) < n {
+		return -1
+	}
+	limit := len(s) - n
+	for i := 0; i <= limit; i++ {
+		matched := true
+		for j := 0; j < n; j++ {
+			c := s[i+j]
+			if c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			if c != lowerSub[j] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return i
+		}
+	}
+	return -1
+}
+
 func isArchiveFile(path string) bool {
 	path = normalizeArchivePath(path)
-	lowerPath := strings.ToLower(path)
 	for _, ext := range archiveFileSuffixes {
-		if strings.HasSuffix(lowerPath, ext) {
+		if hasFoldASCIISuffix(path, ext) {
 			return true
 		}
 	}
@@ -520,9 +603,8 @@ func isArchiveFile(path string) bool {
 
 func isArchivePath(name string) bool {
 	name = normalizeArchivePath(name)
-	lowerPath := strings.ToLower(name)
-	for _, ext := range archiveFileSuffixes {
-		if strings.Contains(lowerPath, ext+"/") || strings.Contains(lowerPath, ext+"!") {
+	for _, e := range archiveSuffixTable {
+		if indexFoldASCII(name, e.slash) >= 0 || indexFoldASCII(name, e.bang) >= 0 {
 			return true
 		}
 	}
@@ -531,11 +613,12 @@ func isArchivePath(name string) bool {
 
 func parseArchivePath(fullPath string) (archivePath, internalPath string, ok bool) {
 	fullPath = normalizeArchivePath(fullPath)
-	lowerPath := strings.ToLower(fullPath)
-
-	for _, ext := range archiveFileSuffixes {
-		if strings.Contains(lowerPath, ext+"/") || strings.Contains(lowerPath, ext+"!") {
-			return parseJarOrZipPath(fullPath, ext)
+	for _, e := range archiveSuffixTable {
+		if idx := indexFoldASCII(fullPath, e.slash); idx >= 0 {
+			return fullPath[:idx+len(e.ext)], strings.TrimPrefix(fullPath[idx+len(e.slash):], "/"), true
+		}
+		if idx := indexFoldASCII(fullPath, e.bang); idx >= 0 {
+			return fullPath[:idx+len(e.ext)], strings.TrimPrefix(fullPath[idx+len(e.bang):], "/"), true
 		}
 	}
 	return "", "", false
@@ -543,33 +626,12 @@ func parseArchivePath(fullPath string) (archivePath, internalPath string, ok boo
 
 func isJarLikeArchivePath(path string) bool {
 	path = normalizeArchivePath(path)
-	lowerPath := strings.ToLower(path)
 	for _, ext := range jarLikeArchiveSuffixes {
-		if strings.HasSuffix(lowerPath, ext) {
+		if hasFoldASCIISuffix(path, ext) {
 			return true
 		}
 	}
 	return false
-}
-
-func parseJarOrZipPath(fullPath, ext string) (archivePath, internalPath string, ok bool) {
-	extWithSlash := ext + "/"
-	extWithBang := ext + "!"
-
-	idx := strings.Index(fullPath, extWithSlash)
-	if idx == -1 {
-		bangIdx := strings.Index(fullPath, extWithBang)
-		if bangIdx == -1 {
-			return "", "", false
-		}
-		archivePath = fullPath[:bangIdx+len(ext)]
-		internalPath = strings.TrimPrefix(fullPath[bangIdx+len(extWithBang):], "/")
-		return archivePath, internalPath, true
-	}
-
-	archivePath = fullPath[:idx+len(ext)]
-	internalPath = strings.TrimPrefix(fullPath[idx+len(extWithSlash):], "/")
-	return archivePath, internalPath, true
 }
 
 func normalizeArchivePath(name string) string {
@@ -580,7 +642,7 @@ func normalizeArchivePath(name string) string {
 	// Preserve absoluteness: the outermost archive of a nested path (e.g.
 	// "/abs/app.war/WEB-INF/lib/foo.jar/Foo.class") is a real on-disk path that
 	// must keep its leading slash so the host filesystem can open it. Archive
-	// internal entries are slash-trimmed separately in parseJarOrZipPath, and
+	// internal entries are slash-trimmed separately in parseArchivePath, and
 	// Windows drive paths ("C:/...") have no leading slash, so this only restores
 	// the root slash for genuine Unix-absolute paths.
 	isAbs := strings.HasPrefix(name, "/")
@@ -653,6 +715,7 @@ func (z *JarFS) getNestedJarFS(jarPath string) (*filesys.UnifiedFS, error) {
 	nestedJarFS.maxAnalysisUpdates = z.maxAnalysisUpdates
 	nestedJarFS.sourceCompiler = z.sourceCompiler
 	nestedJarFS.retainUnprovedSource = z.retainUnprovedSource
+	nestedJarFS.envSnapshot = z.envSnapshot
 	nestedJarFS.declarationResolver = z.declarationResolver
 	if z.archive != nil && z.archive.active {
 		nestedJarFS.archive = z.archive.nestedState()
@@ -753,6 +816,7 @@ type ExpandedZipFS struct {
 	zipFS                *filesys.ZipFS // optional container (zip root); nil for local directories
 	recursiveParse       bool
 	retainUnprovedSource bool
+	envSnapshot          map[string]string
 	maxAnalysisUpdates   int
 	jarCache             *utils.SafeMapWithKey[string, *filesys.UnifiedFS]
 	zipCache             *utils.SafeMapWithKey[string, *filesys.ZipFS]
@@ -823,6 +887,7 @@ func (e *ExpandedZipFS) GetJarFS(jarPath string) (*filesys.UnifiedFS, error) {
 
 	jarFS := NewJarFSWithOptions(zipFS, e.recursiveParse)
 	jarFS.retainUnprovedSource = e.retainUnprovedSource
+	jarFS.envSnapshot = e.envSnapshot
 	jarFS.maxAnalysisUpdates = e.maxAnalysisUpdates
 	jarFS.declarationResolver = e.archiveDeclarationResolver(jarPath)
 	if e.archive != nil && e.archive.active {
@@ -997,6 +1062,9 @@ func (e *ExpandedZipFS) ReadFile(name string) ([]byte, error) {
 	}
 	d := NewClassObjectDumper(cf)
 	d.options.RetainUnprovedSource = e.retainUnprovedSource
+	if e.envSnapshot != nil {
+		d.options.EnvSnapshot = e.envSnapshot
+	}
 	d.options.MaxAnalysisUpdates = e.maxAnalysisUpdates
 	d.Work = largeMethodWorkBudget(e.maxAnalysisUpdates)
 	logical := cf.GetClassName() + ".class"

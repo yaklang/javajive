@@ -109,8 +109,8 @@ func emitClassShell(file *model.File, class *model.Class, options ClassOptions, 
 		return ClassResult{}, classDiagnostic(file, class, "class recovery", err)
 	}
 	builder := classfilebuilder.NewClass(className, superName, access)
-	if interfaceNeedsJava8(class) {
-		builder.SetVersion(classfilebuilder.VersionJava8)
+	if version := interfaceMinVersion(class); version > classfilebuilder.VersionJava5 {
+		builder.SetVersion(version)
 	}
 	if err := addShellInterfaces(class, builder); err != nil {
 		return ClassResult{}, classDiagnostic(file, class, "class recovery", err)

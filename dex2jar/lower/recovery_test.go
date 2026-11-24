@@ -451,3 +451,93 @@ func TestRecoverChildFirstInterfaceShellsVerifyOnJVM(t *testing.T) {
 		t.Fatalf("child-first interface verification: err=%v output=%s", runErr, output)
 	}
 }
+
+func TestRecoverMethodLevelStubKeepsConcreteSiblingAndVerifiesOnJVM(t *testing.T) {
+	const owner = "Ldex/PartialMethod;"
+	file := &model.File{
+		Entry: "classes.dex",
+		Protos: []model.Proto{
+			{ReturnType: "V"}, // 0: <init>()V
+			{ReturnType: "I"}, // 1: ()I
+			{ReturnType: "V"}, // 2: bad()V
+		},
+	}
+	class := &model.Class{
+		Descriptor: owner, Superclass: "Ljava/lang/Object;", AccessFlags: dexPublic,
+		DirectMethods: []model.EncodedMethod{
+			{
+				// Broken constructor (missing super.<init>()) gets stubbed at method level
+				AccessFlags: dexPublic | dexConstructor,
+				Method:      model.MethodID{Class: owner, Name: "<init>", ProtoIndex: 0},
+				Code:        &model.Code{RegistersSize: 1, InsSize: 1, Instructions: []uint16{0x000e}},
+			},
+			{
+				// Good static method returns 42 (const/16 v0, 42; return v0)
+				AccessFlags: dexPublic | dexStatic,
+				Method:      model.MethodID{Class: owner, Name: "answer", ProtoIndex: 1},
+				Code:        &model.Code{RegistersSize: 1, InsSize: 0, Instructions: []uint16{0x0013, 42, 0x000f}},
+			},
+		},
+		VirtualMethods: []model.EncodedMethod{
+			{
+				// Broken instance method gets stubbed at method level
+				AccessFlags: dexPublic,
+				Method:      model.MethodID{Class: owner, Name: "broken", ProtoIndex: 2},
+				Code:        &model.Code{RegistersSize: 1, InsSize: 1, Instructions: []uint16{0x00ff}},
+			},
+		},
+	}
+	result, err := ClassWithPolicy(file, class, ClassOptions{}, Recover)
+	if err != nil {
+		t.Fatalf("ClassWithPolicy Recover: %v", err)
+	}
+	if result.ClassStubbed || result.ClassMinimal || len(result.StubbedMethods) != 2 || len(result.Recoveries) != 2 {
+		t.Fatalf("unexpected method-level recovery result: %#v", result)
+	}
+	parsed, err := javaclassparser.Parse(result.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := parsed.Dump()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(source, "// javajive recovery:") || !strings.Contains(source, "method.body_stubbed") {
+		t.Fatalf("recovery comment missing:\n%s", source)
+	}
+
+	java, javaErr := exec.LookPath("java")
+	javac, javacErr := exec.LookPath("javac")
+	if javaErr == nil && javacErr == nil {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "dex", "PartialMethod.class")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, result.Bytes, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		driver := filepath.Join(dir, "Driver.java")
+		driverSrc := `public class Driver {
+    public static void main(String[] args) {
+        if (dex.PartialMethod.answer() != 42) {
+            throw new AssertionError("expected answer() == 42");
+        }
+        try {
+            new dex.PartialMethod();
+            throw new AssertionError("expected stubbed constructor to throw");
+        } catch (UnsupportedOperationException expected) {
+        }
+    }
+}`
+		if err := os.WriteFile(driver, []byte(driverSrc), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.Command(javac, "-cp", dir, driver).CombinedOutput(); err != nil {
+			t.Fatalf("javac: %v\n%s", err, out)
+		}
+		if out, err := exec.Command(java, "-Xverify:all", "-cp", dir, "Driver").CombinedOutput(); err != nil {
+			t.Fatalf("java -Xverify:all: %v\n%s", err, out)
+		}
+	}
+}

@@ -963,7 +963,643 @@ func fixEnumClinitIllegalNew(body string) string {
 	// commonly materializes the array in a temporary and then assigns that
 	// local, so match the assignment rather than only `new Enum[]{...}`.
 	body = enumValuesAssignRe.ReplaceAllString(body, "")
+	body = foldDexSpilledEnumClinitBlocks(body)
 	return body
+}
+
+var (
+	dexEnumVarRe       = regexp.MustCompile(`^var[0-9]+(?:_[0-9]+)*$`)
+	dexEnumConstNameRe = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$]*$`)
+	dexEnumNewRHSRe    = regexp.MustCompile(`^new ([A-Za-z0-9_.$]+)\((.*)\)$`)
+	dexEnumIntLitRe    = regexp.MustCompile(`^[0-9]+$`)
+	dexEnumStrLitRe    = regexp.MustCompile(`^"([A-Za-z_$][A-Za-z0-9_$]*)"$`)
+)
+
+func foldDexSpilledEnumClinitBlocks(body string) string {
+	if !strings.Contains(body, "enum ") || !strings.Contains(body, "static") {
+		return body
+	}
+	type clinitSpan struct{ start, end int }
+	var spans []clinitSpan
+	pos := 0
+	for pos < len(body) {
+		rel := strings.Index(body[pos:], "static")
+		if rel < 0 {
+			break
+		}
+		at := pos + rel
+		start, end, ok := enumClinitBlockBounds(body, at)
+		if !ok || start < pos {
+			pos = at + len("static")
+			continue
+		}
+		if len(spans) == 0 || spans[len(spans)-1].start != start {
+			spans = append(spans, clinitSpan{start, end})
+		}
+		pos = end
+	}
+	if len(spans) == 0 {
+		return body
+	}
+
+	type enumConstantRewrite struct{ name, args string }
+	var allRewrites []enumConstantRewrite
+	// Apply block edits from right to left so earlier byte spans stay stable.
+	for i := len(spans) - 1; i >= 0; i-- {
+		sp := spans[i]
+		replaced, rewrites := foldDexSpilledEnumClinitBlock(body, sp.start, sp.end)
+		if replaced != body[sp.start:sp.end] {
+			body = body[:sp.start] + replaced + body[sp.end:]
+		}
+		for _, rw := range rewrites {
+			allRewrites = append(allRewrites, enumConstantRewrite{rw.name, rw.args})
+		}
+	}
+	for _, rw := range allRewrites {
+		body, _ = patchEnumConstantArgs(body, rw.name, rw.args)
+	}
+	return body
+}
+
+type enumConstantPayloadRewrite struct {
+	name, args string
+}
+
+type dexPendingEnumNew struct {
+	lineIdx       int
+	hasTypeDecl   bool
+	declPrefix    string
+	constName     string
+	payloadArgs   []string
+	hasPayload    bool
+	consumedLines []int
+}
+
+type dexMatchedEnumTemp struct {
+	varName     string
+	hasTypeDecl bool
+	declPrefix  string
+	constName   string
+	indent      string
+}
+
+type dexBlockLineMeta struct {
+	startInBlock int
+	endInBlock   int
+	indent       string
+	hasAssign    bool
+	isPureDef    bool
+	lhsVar       string
+	hasTypeDecl  bool
+	declPrefix   string
+	rhs          string
+}
+
+func foldDexSpilledEnumClinitBlock(fullBody string, blockStart, blockEnd int) (string, []enumConstantPayloadRewrite) {
+	block := fullBody[blockStart:blockEnd]
+	rawLines := strings.SplitAfter(block, "\n")
+	if len(rawLines) < 3 {
+		return block, nil
+	}
+
+	// Map byte offsets in block to line indices (skip header at 0 and closing `}` at len-1).
+	lineStarts := make([]int, len(rawLines))
+	off := 0
+	for i, l := range rawLines {
+		lineStarts[i] = off
+		off += len(l)
+	}
+
+	metas := make([]dexBlockLineMeta, len(rawLines))
+	nonPureAssigned := make(map[string]bool)
+	pureVal := make(map[string]string)
+	pendingNew := make(map[string]*dexPendingEnumNew)
+	matchedTemp := make(map[int]*dexMatchedEnumTemp)
+	removed := make([]bool, len(rawLines))
+	var rewrites []enumConstantPayloadRewrite
+
+	clearTracking := func() {
+		pureVal = make(map[string]string)
+		pendingNew = make(map[string]*dexPendingEnumNew)
+	}
+
+	resolvePayload := func(lineIdx int, indent string, rawPayload []string) (string, []int, bool) {
+		if len(rawPayload) == 0 {
+			return "", nil, true
+		}
+		allPure := true
+		pureResolved := make([]string, len(rawPayload))
+		for i, arg := range rawPayload {
+			tokens := enumLocalTokens(arg)
+			if len(tokens) == 0 {
+				pureResolved[i] = strings.TrimSpace(arg)
+				continue
+			}
+			cur := arg
+			okArg := true
+			for _, tok := range tokens {
+				val, known := pureVal[tok]
+				if !known {
+					okArg = false
+					break
+				}
+				cur = replaceEnumIdentifier(cur, tok, val)
+			}
+			if !okArg {
+				allPure = false
+				break
+			}
+			pureResolved[i] = strings.TrimSpace(cur)
+		}
+		if allPure {
+			return strings.Join(pureResolved, ", "), nil, true
+		}
+
+		// Fall back to existing contiguous/immediate stack-spill payload resolution
+		// only when every consumed span lands cleanly on surviving lines before lineIdx.
+		beforeByte := blockStart + lineStarts[lineIdx]
+		var consumed []enumSourceRange
+		var renderedArgs []string
+		directArgs, directRemovals, hadDirect, directOK := expandEnumClinitDirectArgumentLocals(fullBody, blockStart, blockEnd, beforeByte, indent, rawPayload)
+		if directOK && hadDirect {
+			renderedArgs = directArgs
+			consumed = directRemovals
+		} else {
+			for _, arg := range rawPayload {
+				rendered, more, ok := expandEnumClinitLocals(fullBody, blockStart, blockEnd, beforeByte, indent, arg, map[string]bool{})
+				if !ok {
+					return "", nil, false
+				}
+				renderedArgs = append(renderedArgs, rendered)
+				consumed = append(consumed, more...)
+			}
+		}
+		var lineIndices []int
+		for _, r := range consumed {
+			foundIdx := -1
+			for li := 1; li < lineIdx; li++ {
+				absStart := blockStart + lineStarts[li]
+				absEnd := absStart + len(rawLines[li])
+				if r.start >= absStart && r.end <= absEnd && !removed[li] {
+					foundIdx = li
+					break
+				}
+			}
+			if foundIdx < 0 {
+				return "", nil, false
+			}
+			lineIndices = append(lineIndices, foundIdx)
+		}
+		return strings.Join(renderedArgs, ", "), lineIndices, true
+	}
+
+	depth := 0
+	for i := 1; i < len(rawLines)-1; i++ {
+		raw := rawLines[i]
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		delta, okBraces := enumLineBraceDelta(trimmed)
+		if !okBraces || depth != 0 || delta != 0 {
+			depth += delta
+			clearTracking()
+			// Be conservative: any local assigned inside nested control flow might
+			// have non-pure/reassigned uses; mark mentioned generated locals unsafe to delete.
+			for _, tok := range enumAllIdentTokens(trimmed) {
+				if dexEnumVarRe.MatchString(tok) {
+					nonPureAssigned[tok] = true
+				}
+			}
+			continue
+		}
+
+		indent := enumLineIndent(raw, 0)
+		metas[i] = dexBlockLineMeta{
+			startInBlock: lineStarts[i],
+			endInBlock:   lineStarts[i] + len(raw),
+			indent:       indent,
+		}
+
+		lhsTarget, hasTypeDecl, declPrefix, rhs, isAssign := parseTopLevelEnumAssign(trimmed)
+		if !isAssign {
+			for _, tok := range enumAllIdentTokens(trimmed) {
+				delete(pendingNew, tok)
+			}
+			continue
+		}
+
+		isGenVar := dexEnumVarRe.MatchString(lhsTarget)
+		// Any expression/statement reading a pending enum temp invalidates direct forwarding
+		// except `CONST = varTmp;` (handled below) or pure alias copy `T varCopy = varTmp;`.
+		if m := dexEnumNewRHSRe.FindStringSubmatch(rhs); m != nil {
+			args := splitTopLevelArgs(m[2])
+			for _, tok := range enumAllIdentTokens(rhs) {
+				delete(pendingNew, tok)
+			}
+			if len(args) >= 2 {
+				strName, okName := resolveSpilledEnumConstName(args[0], pureVal)
+				okOrd := resolveSpilledEnumOrdinal(args[1], pureVal)
+				if okName && okOrd && (!isGenVar || !hasEnumConstantDeclBefore(fullBody, blockStart, strName)) {
+					if !isGenVar && strName == lhsTarget && hasEnumConstantDeclBefore(fullBody, blockStart, lhsTarget) {
+						payloadStr, consumedLines, okPayload := resolvePayload(i, indent, args[2:])
+						if okPayload {
+							if len(args) > 2 {
+								rewrites = append(rewrites, enumConstantPayloadRewrite{name: lhsTarget, args: payloadStr})
+							}
+							removed[i] = true
+							for _, cl := range consumedLines {
+								removed[cl] = true
+							}
+							continue
+						}
+					}
+				} else if isGenVar && okName && okOrd && hasEnumConstantDeclBefore(fullBody, blockStart, strName) {
+					payloadStr, consumedLines, okPayload := resolvePayload(i, indent, args[2:])
+					if okPayload {
+						delete(pureVal, lhsTarget)
+						pendingNew[lhsTarget] = &dexPendingEnumNew{
+							lineIdx:       i,
+							hasTypeDecl:   hasTypeDecl,
+							declPrefix:    declPrefix,
+							constName:     strName,
+							payloadArgs:   []string{payloadStr},
+							hasPayload:    len(args) > 2,
+							consumedLines: consumedLines,
+						}
+						metas[i].hasAssign = true
+						metas[i].lhsVar = lhsTarget
+						metas[i].hasTypeDecl = hasTypeDecl
+						metas[i].declPrefix = declPrefix
+						metas[i].rhs = rhs
+						continue
+					}
+				}
+			}
+			if isGenVar {
+				delete(pureVal, lhsTarget)
+				delete(pendingNew, lhsTarget)
+				nonPureAssigned[lhsTarget] = true
+			}
+			continue
+		}
+
+		// Check `CONST = varTmp;`
+		if !isGenVar && !hasTypeDecl && dexEnumVarRe.MatchString(rhs) && hasEnumConstantDeclBefore(fullBody, blockStart, lhsTarget) {
+			if p, ok := pendingNew[rhs]; ok && p.constName == lhsTarget {
+				delete(pendingNew, rhs)
+				removed[i] = true
+				for _, cl := range p.consumedLines {
+					removed[cl] = true
+				}
+				if p.hasPayload && len(p.payloadArgs) > 0 {
+					rewrites = append(rewrites, enumConstantPayloadRewrite{name: lhsTarget, args: p.payloadArgs[0]})
+				}
+				matchedTemp[p.lineIdx] = &dexMatchedEnumTemp{
+					varName:     rhs,
+					hasTypeDecl: p.hasTypeDecl,
+					declPrefix:  p.declPrefix,
+					constName:   lhsTarget,
+					indent:      metas[p.lineIdx].indent,
+				}
+				continue
+			}
+			// Reached unknown/unmatched write using pending new -> invalidate it.
+			delete(pendingNew, rhs)
+			continue
+		}
+
+		// Ordinary assignment to a generated local or non-enum target.
+		isPureCopyOfVar := isGenVar && dexEnumVarRe.MatchString(rhs)
+		if !isPureCopyOfVar {
+			for _, tok := range enumAllIdentTokens(rhs) {
+				delete(pendingNew, tok)
+			}
+		}
+		if !isGenVar {
+			continue
+		}
+		delete(pendingNew, lhsTarget)
+		metas[i].hasAssign = true
+		metas[i].lhsVar = lhsTarget
+		metas[i].hasTypeDecl = hasTypeDecl
+		metas[i].declPrefix = declPrefix
+		metas[i].rhs = rhs
+		if isEnumPureLiteral(rhs) {
+			pureVal[lhsTarget] = rhs
+			metas[i].isPureDef = true
+		} else if isPureCopyOfVar {
+			if v, ok := pureVal[rhs]; ok {
+				pureVal[lhsTarget] = v
+			} else {
+				delete(pureVal, lhsTarget)
+			}
+			metas[i].isPureDef = true
+		} else {
+			delete(pureVal, lhsTarget)
+			nonPureAssigned[lhsTarget] = true
+		}
+	}
+
+	// Fixed-point dead pure-local elimination inside static {}.
+	// A matched EnumType varTmp = new EnumType(...) reads nothing once lowered to
+	// `EnumType varTmp = CONST;`, and can be deleted iff `varTmp` has zero reads.
+	changed := true
+	for changed {
+		changed = false
+		readVars := make(map[string]bool)
+		for i := 1; i < len(rawLines)-1; i++ {
+			if removed[i] {
+				continue
+			}
+			if matchedTemp[i] != nil {
+				// Rewrites to `[Type ]varTmp = CONST;` -> reads only enum constant (not generated locals).
+				continue
+			}
+			m := metas[i]
+			if m.hasAssign && m.lhsVar != "" {
+				for _, tok := range enumAllIdentTokens(m.rhs) {
+					if dexEnumVarRe.MatchString(tok) {
+						readVars[tok] = true
+					}
+				}
+				continue
+			}
+			for _, tok := range enumAllIdentTokens(rawLines[i]) {
+				if dexEnumVarRe.MatchString(tok) {
+					readVars[tok] = true
+				}
+			}
+		}
+		for i := 1; i < len(rawLines)-1; i++ {
+			if removed[i] {
+				continue
+			}
+			if mt := matchedTemp[i]; mt != nil {
+				if !nonPureAssigned[mt.varName] && !readVars[mt.varName] {
+					removed[i] = true
+					changed = true
+				}
+				continue
+			}
+			m := metas[i]
+			if m.hasAssign && m.isPureDef && m.lhsVar != "" && !nonPureAssigned[m.lhsVar] && !readVars[m.lhsVar] {
+				removed[i] = true
+				changed = true
+			}
+		}
+	}
+
+	var out strings.Builder
+	out.Grow(len(block))
+	for i, raw := range rawLines {
+		if removed[i] {
+			continue
+		}
+		if mt := matchedTemp[i]; mt != nil {
+			nl := ""
+			if strings.HasSuffix(raw, "\r\n") {
+				nl = "\r\n"
+			} else if strings.HasSuffix(raw, "\n") {
+				nl = "\n"
+			}
+			if mt.hasTypeDecl && mt.declPrefix != "" {
+				out.WriteString(mt.indent + mt.declPrefix + " " + mt.varName + " = " + mt.constName + ";" + nl)
+			} else {
+				out.WriteString(mt.indent + mt.varName + " = " + mt.constName + ";" + nl)
+			}
+			continue
+		}
+		out.WriteString(raw)
+	}
+	return out.String(), rewrites
+}
+
+func hasEnumConstantDeclBefore(body string, limit int, constName string) bool {
+	if limit > len(body) {
+		limit = len(body)
+	}
+	for lineStart := 0; lineStart < limit; {
+		lineEnd := strings.IndexByte(body[lineStart:limit], '\n')
+		if lineEnd < 0 {
+			lineEnd = limit
+		} else {
+			lineEnd += lineStart
+		}
+		trimmed := strings.TrimSpace(body[lineStart:lineEnd])
+		if strings.HasPrefix(trimmed, constName) {
+			pos := len(constName)
+			afterName := pos
+			for afterName < len(trimmed) && (trimmed[afterName] == ' ' || trimmed[afterName] == '\t') {
+				afterName++
+			}
+			if afterName == len(trimmed) || trimmed[afterName] == ',' || trimmed[afterName] == ';' || trimmed[afterName] == '(' || trimmed[afterName] == '{' {
+				return true
+			}
+		}
+		if lineEnd == limit {
+			break
+		}
+		lineStart = lineEnd + 1
+	}
+	return false
+}
+
+func parseTopLevelEnumAssign(trimmed string) (lhsName string, hasTypeDecl bool, declPrefix string, rhs string, ok bool) {
+	if !strings.HasSuffix(trimmed, ";") {
+		return "", false, "", "", false
+	}
+	stmt := strings.TrimSpace(trimmed[:len(trimmed)-1])
+	eq := -1
+	depth := 0
+	var quote byte
+	for i := 0; i < len(stmt); i++ {
+		ch := stmt[i]
+		if quote != 0 {
+			if ch == '\\' {
+				i++
+			} else if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+		if ch == '"' || ch == '\'' {
+			quote = ch
+			continue
+		}
+		switch ch {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			if depth > 0 {
+				depth--
+			}
+		case ';':
+			if depth == 0 {
+				return "", false, "", "", false
+			}
+		case '=':
+			if depth == 0 && eq < 0 && i > 0 && stmt[i-1] == ' ' && i+1 < len(stmt) && stmt[i+1] == ' ' {
+				eq = i
+			} else if depth == 0 && (i == 0 || (stmt[i-1] != '=' && stmt[i-1] != '!' && stmt[i-1] != '<' && stmt[i-1] != '>')) && (i+1 >= len(stmt) || stmt[i+1] != '=') {
+				// Reject compound operators like += or unspaced weird forms cleanly.
+				if eq < 0 {
+					return "", false, "", "", false
+				}
+			}
+		}
+	}
+	if eq <= 0 {
+		return "", false, "", "", false
+	}
+	lhs := strings.TrimSpace(stmt[:eq])
+	rhs = strings.TrimSpace(stmt[eq+1:])
+	if lhs == "" || rhs == "" || strings.ContainsAny(lhs, ".[]()") {
+		return "", false, "", "", false
+	}
+	// If lhs ends cleanly with an identifier preceded by space, it's `Type varName`.
+	if sp := strings.LastIndexAny(lhs, " \t"); sp >= 0 {
+		prefix := strings.TrimSpace(lhs[:sp])
+		name := strings.TrimSpace(lhs[sp+1:])
+		if prefix == "" || !dexEnumVarRe.MatchString(name) {
+			return "", false, "", "", false
+		}
+		return name, true, prefix, rhs, true
+	}
+	if !dexEnumConstNameRe.MatchString(lhs) {
+		return "", false, "", "", false
+	}
+	return lhs, false, "", rhs, true
+}
+
+func resolveSpilledEnumConstName(arg string, pureVal map[string]string) (string, bool) {
+	a := strings.TrimSpace(arg)
+	if dexEnumVarRe.MatchString(a) {
+		if v, ok := pureVal[a]; ok {
+			a = v
+		}
+	}
+	m := dexEnumStrLitRe.FindStringSubmatch(a)
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
+}
+
+func resolveSpilledEnumOrdinal(arg string, pureVal map[string]string) bool {
+	a := strings.TrimSpace(arg)
+	if dexEnumVarRe.MatchString(a) {
+		if v, ok := pureVal[a]; ok {
+			a = v
+		}
+	}
+	return dexEnumIntLitRe.MatchString(a)
+}
+
+func isEnumPureLiteral(rhs string) bool {
+	s := strings.TrimSpace(rhs)
+	if s == "" {
+		return false
+	}
+	if s == "null" || s == "true" || s == "false" || enumMovedNumber.MatchString(s) {
+		return true
+	}
+	if len(s) >= 2 && (s[0] == '"' || s[0] == '\'') && s[len(s)-1] == s[0] {
+		quote := s[0]
+		for i := 1; i < len(s)-1; i++ {
+			if s[i] == '\\' {
+				i++
+				if i >= len(s)-1 {
+					return false
+				}
+				continue
+			}
+			if s[i] == quote {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func enumLineBraceDelta(line string) (int, bool) {
+	delta := 0
+	var quote byte
+	for i := 0; i < len(line); i++ {
+		ch := line[i]
+		if quote != 0 {
+			if ch == '\\' {
+				i++
+			} else if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+		if ch == '/' && i+1 < len(line) && line[i+1] == '/' {
+			break
+		}
+		if ch == '/' && i+1 < len(line) && line[i+1] == '*' {
+			end := strings.Index(line[i+2:], "*/")
+			if end < 0 {
+				return 0, false
+			}
+			i += end + 3
+			continue
+		}
+		if ch == '"' || ch == '\'' {
+			quote = ch
+			continue
+		}
+		if ch == '{' {
+			delta++
+		} else if ch == '}' {
+			delta--
+		}
+	}
+	return delta, quote == 0
+}
+
+func enumAllIdentTokens(source string) []string {
+	var out []string
+	var quote byte
+	for i := 0; i < len(source); {
+		ch := source[i]
+		if quote != 0 {
+			if ch == '\\' {
+				i += 2
+				continue
+			}
+			if ch == quote {
+				quote = 0
+			}
+			i++
+			continue
+		}
+		if ch == '/' && i+1 < len(source) && source[i+1] == '/' {
+			if nl := strings.IndexByte(source[i:], '\n'); nl >= 0 {
+				i += nl + 1
+				continue
+			}
+			break
+		}
+		if ch == '"' || ch == '\'' {
+			quote = ch
+			i++
+			continue
+		}
+		if !isEnumIdentStart(ch) {
+			i++
+			continue
+		}
+		start := i
+		i++
+		for i < len(source) && isEnumIdentPart(source[i]) {
+			i++
+		}
+		out = append(out, source[start:i])
+	}
+	return out
 }
 
 var enumValuesAssignRe = regexp.MustCompile(`(?m)^[ \t]*\$VALUES[ \t]*=[ \t]*[^;\r\n]+;\r?\n?`)
