@@ -1088,96 +1088,103 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 	// would otherwise render with raw supertypes and fail to override the erased generic methods.
 	// Keyed by the raw dotted class name so it can be matched against each erased supertype below.
 	// Kill-switch: JDEC_GENERIC_SUPERS_OFF=1 restores the erased supertypes.
-	genericSuperByRaw := map[string]string{}
-	if c.getenv("JDEC_GENERIC_SUPERS_OFF") == "" {
-		for _, attr := range c.obj.Attributes {
-			sigAttr, ok := attr.(*SignatureAttribute)
-			if !ok {
-				continue
-			}
-			sigStr, err := c.obj.getUtf8(sigAttr.SignatureIndex)
-			if err != nil || sigStr == "" {
+	origSuperClassName := supperClassName
+	buildSuperHeader := func(superName string) (string, bool) {
+		genericSuperByRaw := map[string]string{}
+		hadGeneric := false
+		if c.getenv("JDEC_GENERIC_SUPERS_OFF") == "" {
+			for _, attr := range c.obj.Attributes {
+				sigAttr, ok := attr.(*SignatureAttribute)
+				if !ok {
+					continue
+				}
+				sigStr, err := c.obj.getUtf8(sigAttr.SignatureIndex)
+				if err != nil || sigStr == "" {
+					break
+				}
+				sup, sigIfaces := types.ParseClassSignatureSupers(sigStr)
+				recordGeneric := func(t types.JavaType) {
+					raw := genericSupertypeRawName(t)
+					if raw == "" {
+						return
+					}
+					rendered := t.String(funcCtx)
+					// Only override when the recovered type actually carries type arguments; a raw
+					// supertype in the signature adds nothing and must not shadow the erased name.
+					if strings.Contains(rendered, "<") {
+						genericSuperByRaw[raw] = rendered
+						hadGeneric = true
+					}
+				}
+				if sup != nil {
+					recordGeneric(sup)
+				}
+				for _, it := range sigIfaces {
+					recordGeneric(it)
+				}
 				break
 			}
-			sup, sigIfaces := types.ParseClassSignatureSupers(sigStr)
-			recordGeneric := func(t types.JavaType) {
-				raw := genericSupertypeRawName(t)
-				if raw == "" {
-					return
-				}
-				rendered := t.String(funcCtx)
-				// Only override when the recovered type actually carries type arguments; a raw
-				// supertype in the signature adds nothing and must not shadow the erased name.
-				if strings.Contains(rendered, "<") {
-					genericSuperByRaw[raw] = rendered
-				}
-			}
-			if sup != nil {
-				recordGeneric(sup)
-			}
-			for _, it := range sigIfaces {
-				recordGeneric(it)
-			}
-			break
 		}
-	}
 
-	superStr := ""
-	ifaces := c.obj.Interfaces
-	interfaceLists := make([]string, 0, len(ifaces)+1)
-	if supperClassName != "java.lang.Object" {
-		if isEnum && (supperClassName == "java.lang.Enum" || supperClassName == "Enum") {
-			supperClassName = ""
-			superStr = ""
-		} else {
-			funcCtx.Import(supperClassName)
-			rawSuper := supperClassName
-			supperClassName = funcCtx.ShortTypeName(supperClassName)
-			if generic, ok := genericSuperByRaw[rawSuper]; ok {
-				supperClassName = generic
-			}
-			if supperClassName != "" {
-				if !isEnum {
-					superStr += fmt.Sprintf(" extends %s", supperClassName)
-				} else {
-					interfaceLists = append(interfaceLists, supperClassName)
+		renderedSuper := ""
+		ifaces := c.obj.Interfaces
+		interfaceLists := make([]string, 0, len(ifaces)+1)
+		if superName != "" && superName != "java.lang.Object" {
+			if isEnum && (superName == "java.lang.Enum" || superName == "Enum") {
+				superName = ""
+				renderedSuper = ""
+			} else {
+				funcCtx.Import(superName)
+				rawSuper := superName
+				superName = funcCtx.ShortTypeName(superName)
+				if generic, ok := genericSuperByRaw[rawSuper]; ok {
+					superName = generic
+				}
+				if superName != "" {
+					if !isEnum {
+						renderedSuper += fmt.Sprintf(" extends %s", superName)
+					} else {
+						interfaceLists = append(interfaceLists, superName)
+					}
 				}
 			}
 		}
-	}
 
-	for _, u := range ifaces {
-		info, err := c.obj.getConstantInfo(u)
-		if err != nil {
-			continue
-		}
-		classInfo := info.(*ConstantClassInfo)
-		name, err := c.obj.getUtf8(classInfo.NameIndex)
-		if err != nil {
-			continue
-		}
-		rawIfaceName := strings.Replace(name, "/", ".", -1)
-		// An annotation type implicitly extends java.lang.annotation.Annotation; emitting it
-		// explicitly ("@interface M extends Annotation") is illegal Java, so drop it.
-		if isAnnotation && rawIfaceName == "java.lang.annotation.Annotation" {
-			continue
-		}
-		name = funcCtx.ShortTypeName(rawIfaceName)
-		if generic, ok := genericSuperByRaw[rawIfaceName]; ok {
-			name = generic
-		}
-		if name != "" {
-			interfaceLists = append(interfaceLists, name)
+		for _, u := range ifaces {
+			info, err := c.obj.getConstantInfo(u)
+			if err != nil {
+				continue
+			}
+			classInfo := info.(*ConstantClassInfo)
+			name, err := c.obj.getUtf8(classInfo.NameIndex)
+			if err != nil {
+				continue
+			}
+			rawIfaceName := strings.Replace(name, "/", ".", -1)
+			// An annotation type implicitly extends java.lang.annotation.Annotation; emitting it
+			// explicitly ("@interface M extends Annotation") is illegal Java, so drop it.
+			if isAnnotation && rawIfaceName == "java.lang.annotation.Annotation" {
+				continue
+			}
+			name = funcCtx.ShortTypeName(rawIfaceName)
+			if generic, ok := genericSuperByRaw[rawIfaceName]; ok {
+				name = generic
+			}
+			if name != "" {
+				interfaceLists = append(interfaceLists, name)
 
+			}
 		}
-	}
-	if len(interfaceLists) > 0 {
-		if isInterface {
-			superStr += fmt.Sprintf(" extends %s", strings.Join(interfaceLists, ", "))
-		} else {
-			superStr += fmt.Sprintf(" implements %s", strings.Join(interfaceLists, ", "))
+		if len(interfaceLists) > 0 {
+			if isInterface {
+				renderedSuper += fmt.Sprintf(" extends %s", strings.Join(interfaceLists, ", "))
+			} else {
+				renderedSuper += fmt.Sprintf(" implements %s", strings.Join(interfaceLists, ", "))
+			}
 		}
+		return renderedSuper, hadGeneric
 	}
+	superStr, hadGenericSuper := buildSuperHeader(origSuperClassName)
 
 	// Extract class-level type parameters from the Signature attribute so that
 	// fields/methods referencing type variables (e.g. `T value`) compile. A class
@@ -1233,6 +1240,7 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 	if c.nativeCaptureFields != nil {
 		classTypeParamNames = append(classTypeParamNames, c.nativeTypeParams...)
 	}
+	var unprovedDroppedFree []string
 	if c.nativeCaptureFields == nil && c.getenv("JDEC_INNER_TYPEVAR_OFF") == "" && len(classTypeParamNames) == 0 {
 		free := flattenedFreeTypeVariables(c.obj, classSigStr, c.getenv("JDEC_INNER_METHODPARAM_TYPEVAR_INJECT_OFF") == "")
 		// Variables are emitted in first-seen (supertype-then-field) order. The canonical enclosing order
@@ -1242,7 +1250,7 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 		// future cross-class integral rebuild.
 		//
 		// ENCLOSING-ARITY RECONCILIATION: a flattened NON-STATIC inner class's reference sites always
-		// carry the FULL enclosing formal-parameter set (javac encodes it as `LOuter<TK;TV;>.Inner;`,
+		// carry the FULL enclosing formal-parameter set (javac encodes it as `LOuter<TT;>.Inner;`,
 		// which parseSigClassType carries onto the flattened name), but the usage scan above only recovers
 		// the SUBSET the inner body actually mentions. So a class that uses K but not V is declared
 		// `Inner<K>` yet referenced `Inner<K, V>` (gson LinkedTreeMap$KeySet -> javac "wrong number of
@@ -1257,6 +1265,7 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 			if !c.options.RetainUnprovedSource || isRequestWorkError(projectionErr) {
 				return "", projectionErr
 			}
+			unprovedDroppedFree = free
 			methodScope = false
 			free = nil
 		}
@@ -1424,6 +1433,65 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 			}
 		}
 	}
+	if c.options.RetainUnprovedSource && c.getenv("JDEC_INNER_RAW_ERASE_OFF") == "" &&
+		c.nativeCaptureFields == nil && c.nativeOuterContext == nil &&
+		c.nativeMemberCurrent == nil && c.nativeMethodLocalCurrent == nil {
+		declaredClass := make(map[string]bool, len(classTypeParamNames))
+		for _, n := range classTypeParamNames {
+			declaredClass[n] = true
+		}
+		addUndeclared := func(n string) {
+			if n == "" || declaredClass[n] {
+				return
+			}
+			if rawEraseTypeVars == nil {
+				rawEraseTypeVars = map[string]bool{}
+			}
+			rawEraseTypeVars[n] = true
+		}
+		for _, n := range unprovedDroppedFree {
+			addUndeclared(n)
+		}
+		if classSigStr != "" {
+			if _, refs, valid := types.SignatureTypeVariableReferences(classSigStr); valid {
+				for _, n := range refs {
+					addUndeclared(n)
+				}
+			}
+		}
+		for _, field := range c.obj.Fields {
+			for _, fattr := range field.Attributes {
+				if sa, ok := fattr.(*SignatureAttribute); ok {
+					if fs, err := c.obj.getUtf8(sa.SignatureIndex); err == nil && fs != "" {
+						for _, n := range types.TypeVarRefsInFieldSig(fs) {
+							addUndeclared(n)
+						}
+					}
+					break
+				}
+			}
+		}
+		for _, method := range c.obj.Methods {
+			for _, mattr := range method.Attributes {
+				if sa, ok := mattr.(*SignatureAttribute); ok {
+					if ms, err := c.obj.getUtf8(sa.SignatureIndex); err == nil && ms != "" {
+						if formals, refs, valid := types.SignatureTypeVariableReferences(ms); valid {
+							local := make(map[string]bool, len(formals))
+							for _, f := range formals {
+								local[f] = true
+							}
+							for _, n := range refs {
+								if !local[n] {
+									addUndeclared(n)
+								}
+							}
+						}
+					}
+					break
+				}
+			}
+		}
+	}
 	// STANDALONE-ERASE companion of the raw-erase set: the same undeclarable enclosing variables, used
 	// as a STANDALONE type (`E nextEntry;`, `T output(K var0, V var1)`, `advanceTo(E var1)`), have no
 	// `<...>` to strip, so raw-erase cannot help and they render as undeclared bare names (javac
@@ -1447,7 +1515,10 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 		}
 		bounds, err := c.enclosingTypeParamErasures(rawEraseTypeVars)
 		if err != nil {
-			return "", err
+			if !c.options.RetainUnprovedSource || isRequestWorkError(err) {
+				return "", err
+			}
+			bounds = nil
 		}
 		standaloneEraseTypeVars = make(map[string]string, len(rawEraseTypeVars))
 		for name := range rawEraseTypeVars {
@@ -1465,6 +1536,9 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 		c.FuncCtx.TypeParams = classTypeParamNames
 		c.FuncCtx.RawEraseTypeVars = rawEraseTypeVars
 		c.FuncCtx.StandaloneEraseTypeVars = standaloneEraseTypeVars
+		if len(rawEraseTypeVars) > 0 && hadGenericSuper {
+			superStr, _ = buildSuperHeader(origSuperClassName)
+		}
 		// Own bounds are rendered only after hidden enclosing bindings have
 		// their proved source erasures. Rendering them during signature discovery
 		// leaves an out-of-scope outer variable in a physical member's class head.
@@ -1484,7 +1558,10 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 			force := map[string]string{}
 			bounds, err := c.enclosingTypeParamErasures(rawEraseTypeVars)
 			if err != nil {
-				return "", err
+				if !c.options.RetainUnprovedSource || isRequestWorkError(err) {
+					return "", err
+				}
+				bounds = nil
 			}
 			for name := range rawEraseTypeVars {
 				if !declaredHere[name] {
@@ -4230,6 +4307,7 @@ func (c *ClassObjectDumper) dumpMethodMemberWithSourceRequest(method *MemberInfo
 
 	var isVarArgs bool
 	var abstractMethod bool
+	var nativeMethod bool
 	accessFlagsVerbose = lo.Filter(accessFlagsVerbose, func(item string, index int) bool {
 		if item == "varargs" {
 			isVarArgs = true
@@ -4237,10 +4315,12 @@ func (c *ClassObjectDumper) dumpMethodMemberWithSourceRequest(method *MemberInfo
 		}
 		if item == "abstract" {
 			abstractMethod = true
+		} else if item == "native" {
+			nativeMethod = true
 		}
 		return true
 	})
-	_ = abstractMethod
+	bodylessMethod := abstractMethod || nativeMethod
 
 	accessFlags := accessFlagCode
 	// A private instance method is a nonvirtual target even on a subclass
@@ -5610,7 +5690,7 @@ func (c *ClassObjectDumper) dumpMethodMemberWithSourceRequest(method *MemberInfo
 	}
 	c.UnTab()
 
-	if paramsNewStr == "" && abstractMethod {
+	if paramsNewStr == "" && bodylessMethod {
 		paramList := []string{}
 		// fetch from method type
 		paramTypes := methodType.FunctionType().ParamTypes
@@ -5725,7 +5805,7 @@ func (c *ClassObjectDumper) dumpMethodMemberWithSourceRequest(method *MemberInfo
 		// is a default method and must carry the `default` keyword. A private interface
 		// method (Java 9+) has a body but is not a default method; `private default` is
 		// an illegal modifier combination.
-		if isInterfaceType && !abstractMethod && name != "<init>" && name != "<clinit>" &&
+		if isInterfaceType && !bodylessMethod && name != "<init>" && name != "<clinit>" &&
 			!strings.Contains(accessFlags, "static") && !strings.Contains(accessFlags, "private") {
 			methodSourceBuffer.Write([]byte("default "))
 		}
@@ -5785,6 +5865,8 @@ func (c *ClassObjectDumper) dumpMethodMemberWithSourceRequest(method *MemberInfo
 			// AnnotationDefault attribute we must re-emit its `default <value>` clause, otherwise
 			// any use site that omits the element fails javac ("missing a default value").
 			methodSourceBuffer.Write([]byte(c.annotationElementDefaultClause(method) + ";"))
+		} else if nativeMethod {
+			methodSourceBuffer.WriteByte(';')
 		} else if emitBridgeThisCall {
 			methodSourceBuffer.Write([]byte(fmt.Sprintf(" {\n%sthis();\n%s}",
 				strings.Repeat("\t", c.TabNumber()+1), strings.Repeat("\t", c.TabNumber()))))
@@ -13240,6 +13322,12 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 				continue
 			}
 		}
+		if c.options.RetainUnprovedSource && method.AccessFlags&StaticFlag == 0 &&
+			name != "<init>" && name != "<clinit>" &&
+			c.getenv("JDEC_R8_COVARIANT_BRIDGE_DEDUP_OFF") == "" &&
+			c.isStrippedCovariantBridge(method, name, descriptor) {
+			continue
+		}
 		// if name != "isSymlink" {
 		// 	continue
 		// }
@@ -13366,7 +13454,7 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 				!c.isOmittableDefaultCtor(descriptor, accessFlagsVerbose)
 			if isSynBridgeCtor || keepDeclaredCtor || res.initializerCode != "" || res.enumLambdaInitializer != nil {
 				// keep res as the empty-body constructor (faithful: empty body == implicit super())
-			} else if !slices.Contains(accessFlagsVerbose, "abstract") && !slices.Contains(accessFlagsVerbose, "annotation") && !slices.Contains(accessFlagsVerbose, "interface") && !slices.Contains(accessFlagsVerbose, "enum") {
+			} else if !slices.Contains(accessFlagsVerbose, "abstract") && !slices.Contains(accessFlagsVerbose, "native") && !slices.Contains(accessFlagsVerbose, "annotation") && !slices.Contains(accessFlagsVerbose, "interface") && !slices.Contains(accessFlagsVerbose, "enum") {
 				methodType, perr := types.ParseMethodDescriptor(descriptor)
 				descBroken := perr != nil || methodType == nil || methodType.FunctionType() == nil
 				isVoid := !descBroken && methodType.FunctionType().ReturnType.String(c.FuncCtx) == "void"

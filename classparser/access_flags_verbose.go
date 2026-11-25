@@ -122,8 +122,8 @@ func getMethodAccessFlagsVerbose(u uint16) ([]string, string) {
 		0x0800: "strictfp", // ACC_STRICT
 	}
 
-	isAbstract := false
-	isNative := false
+	isAbstract := u&0x0400 == 0x0400
+	isNative := u&0x0100 == 0x0100
 
 	for _, mask := range masks {
 		if u&mask == mask {
@@ -134,19 +134,19 @@ func getMethodAccessFlagsVerbose(u uint16) ([]string, string) {
 				if len(result) > 0 && (result[0] == "public" || result[0] == "private" || result[0] == "protected") {
 					continue
 				}
-			} else if mask == 0x0400 { // abstract
-				isAbstract = true
-			} else if mask == 0x0100 { // native
-				isNative = true
-			} else if mask == 0x0010 && (isAbstract || isNative) {
-				// abstract或native方法不能是final
+			} else if mask == 0x0010 && isAbstract {
+				// abstract 方法不能是 final（native 方法可以是 final，如 Object.getClass）
+				continue
+			} else if mask == 0x0100 && isAbstract {
+				// abstract 与 native 互斥
+				continue
+			} else if mask == 0x0800 && (isAbstract || isNative) {
+				// abstract 或 native 方法不能是 strictfp
 				continue
 			}
 
 			result = append(result, verbose)
 			if verbose == "varargs" {
-				continue
-			} else if verbose == "native" {
 				continue
 			}
 			target.WriteString(verbose)

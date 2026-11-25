@@ -12,11 +12,21 @@ func TestStubMethodNameSanitizedAsSafeIdentifier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read StubGenericSigSeed.class: %v", err)
 	}
+	obj, err := Parse(seed)
+	if err != nil {
+		t.Fatalf("parse StubGenericSigSeed.class: %v", err)
+	}
+	for _, m := range obj.Methods {
+		if n, _ := obj.getUtf8(m.NameIndex); n != "<init>" {
+			m.AccessFlags &^= 0x0100
+		}
+	}
+	nonNativeSeed := obj.Bytes()
 	target := []byte("\x01\x00\x07consume")
-	if !bytes.Contains(seed, target) {
+	if !bytes.Contains(nonNativeSeed, target) {
 		t.Fatalf("seed class missing expected Utf8 entry %q", target)
 	}
-	mutated := bytes.ReplaceAll(seed, target, []byte("\x01\x00\x07foo-bar"))
+	mutated := bytes.ReplaceAll(nonNativeSeed, target, []byte("\x01\x00\x07foo-bar"))
 
 	res, err := DecompileWithOptions(mutated, DecompileOptions{RetainUnprovedSource: true})
 	if err != nil {
