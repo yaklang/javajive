@@ -11,6 +11,18 @@ func (c *ClassObjectDumper) lambdaOriginalNestUsesClosed(method *MemberInfo, wor
 		return false
 	}
 	if hasOriginalNestAttribute(c.obj, "NestHost") || hasOriginalNestAttribute(c.obj, "NestMembers") {
+		allowRetainedUnclosed := func() bool {
+			if !c.options.RetainUnprovedSource {
+				return false
+			}
+			if work != nil && work.Err() != nil {
+				return false
+			}
+			if c.Work != nil && c.Work.Err() != nil {
+				return false
+			}
+			return true
+		}
 		var objects map[string]*ClassObject
 		if family := c.nativeMemberRoot; family != nil && !family.failed && family.modernNestObjects[c.obj.GetClassName()] == c.obj {
 			objects = family.modernNestObjects
@@ -18,11 +30,11 @@ func (c *ClassObjectDumper) lambdaOriginalNestUsesClosed(method *MemberInfo, wor
 			var closed bool
 			objects, closed = c.nativeModernNestOriginalScope()
 			if !closed {
-				return false
+				return allowRetainedUnclosed()
 			}
 		}
 		if !nativeLambdaBodyNestUsesClosed(c.obj, method, objects, work) {
-			return false
+			return allowRetainedUnclosed()
 		}
 	}
 	return true
