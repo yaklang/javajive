@@ -1199,24 +1199,49 @@ func (s *RewriteManager) Rewrite() error {
 		// methods catastrophically when applied globally (5->318), so it is gated behind aggressive
 		// mode: only a method that already failed conservatively takes the if-container path.
 		isAggrIf := s.Aggressive && inSet(ifSet, node)
+		preStructureTries := isTry && jdecenv.Get("JDEC_PRE_STRUCTURE_INNER_TRY_OFF") == ""
 		if isTry || isAggrIf {
-			body := s.containerBodyNodeSet(node)
-			for _, cand := range order[i+1:] {
-				if _, done := processed[cand]; done {
-					continue
+			var preStructureInner func(owner *core.Node, ownerIsTry bool, depth int) error
+			preStructureInner = func(owner *core.Node, ownerIsTry bool, depth int) error {
+				if depth > 32 {
+					return nil
 				}
-				if cand == node || !body[cand] || !inSet(ifSet, cand) {
-					continue
+				allowTry := ownerIsTry && preStructureTries
+				body := s.containerBodyNodeSet(owner)
+				for k := i + 1; k < len(order); k++ {
+					cand := order[k]
+					if _, done := processed[cand]; done || cand == owner || !body[cand] {
+						continue
+					}
+					candIsIf := inSet(ifSet, cand)
+					candIsTry := allowTry && inSet(trySet, cand)
+					if !candIsIf && !candIsTry {
+						continue
+					}
+					if candIsTry {
+						if err := preStructureInner(cand, true, depth+1); err != nil {
+							return err
+						}
+					} else if s.Aggressive {
+						if err := preStructureInner(cand, false, depth+1); err != nil {
+							return err
+						}
+					}
+					s.refreshDominatorsShared()
+					if err := nodeToRewriter[cand](s, cand); err != nil {
+						return err
+					}
+					processed[cand] = struct{}{}
+					s.refreshDominatorsShared()
+					body = s.containerBodyNodeSet(owner)
 				}
-				s.refreshDominatorsShared()
-				if err := IfRewriter(s, cand); err != nil {
-					return err
-				}
-				processed[cand] = struct{}{}
+				return nil
 			}
-			s.refreshDominatorsShared()
-			// IfRewriter may have changed statements or edges inside this
-			// container; loop answers collected before it are stale.
+			if err := preStructureInner(node, isTry, 0); err != nil {
+				return err
+			}
+			// Rewriter calls above may have changed statements or edges inside this
+			// container; loop answers collected before them are stale.
 			dropLoopCache()
 		}
 

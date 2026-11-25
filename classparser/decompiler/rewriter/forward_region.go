@@ -1043,20 +1043,38 @@ func sealOwnerForwardRegionArmExits(manager *RewriteManager, ifNode *core.Node) 
 			}
 		}
 		hasNormal := false
-		for _, e := range rawEdges {
-			if !isMethodExitTerminator(e.to) && !slices.Contains(armNodes, e.to) {
-				hasNormal = true
-				break
+		ownedByIfNode := make(map[*core.Node]bool, len(manager.forwardRegions[ifNode]))
+		for _, r := range manager.forwardRegions[ifNode] {
+			if r != nil && r.exit != nil {
+				ownedByIfNode[r.exit] = true
 			}
 		}
-		if !hasNormal {
+		distinctNonArmTargets := map[*core.Node]bool{}
+		hasOwnedTarget := false
+		for _, e := range rawEdges {
+			if slices.Contains(armNodes, e.to) {
+				continue
+			}
+			distinctNonArmTargets[e.to] = true
+			if ownedByIfNode[e.to] {
+				hasOwnedTarget = true
+			}
+			if !isMethodExitTerminator(e.to) {
+				hasNormal = true
+			}
+		}
+		includeAllExitTargets := !hasNormal && hasOwnedTarget && len(distinctNonArmTargets) >= 2
+		if !hasNormal && !includeAllExitTargets {
 			return nil, nil
 		}
 		var edges []forwardEdge
 		var targets []*core.Node
 		seenTargets := map[*core.Node]bool{}
 		for _, e := range rawEdges {
-			if (isMethodExitTerminator(e.to) && !forwardStops[e.to]) || slices.Contains(armNodes, e.to) {
+			if slices.Contains(armNodes, e.to) {
+				continue
+			}
+			if !includeAllExitTargets && isMethodExitTerminator(e.to) && !forwardStops[e.to] && !ownedByIfNode[e.to] {
 				continue
 			}
 			edges = append(edges, e)
@@ -1222,6 +1240,58 @@ func forwardStructuredAbruptMethodExit(st statements.Statement, depth int) bool 
 		}
 		return forwardStructuredAbruptMethodExit(lastStmt(s.IfBody), depth+1) &&
 			forwardStructuredAbruptMethodExit(lastStmt(s.ElseBody), depth+1)
+	case *statements.SwitchStatement:
+		if s == nil || len(s.Cases) == 0 {
+			return false
+		}
+		lastStmt := func(body []statements.Statement) statements.Statement {
+			for i := len(body) - 1; i >= 0; i-- {
+				if body[i] != nil {
+					return body[i]
+				}
+			}
+			return nil
+		}
+		hasDefault := false
+		pendingFallthrough := false
+		for _, item := range s.Cases {
+			if item == nil {
+				continue
+			}
+			if item.IsDefault {
+				hasDefault = true
+			}
+			if len(item.Body) == 0 {
+				pendingFallthrough = true
+				continue
+			}
+			pendingFallthrough = false
+			if !forwardStructuredAbruptMethodExit(lastStmt(item.Body), depth+1) {
+				return false
+			}
+		}
+		return hasDefault && !pendingFallthrough
+	case *statements.TryCatchStatement:
+		if s == nil || len(s.TryBody) == 0 {
+			return false
+		}
+		lastStmt := func(body []statements.Statement) statements.Statement {
+			for i := len(body) - 1; i >= 0; i-- {
+				if body[i] != nil {
+					return body[i]
+				}
+			}
+			return nil
+		}
+		if !forwardStructuredAbruptMethodExit(lastStmt(s.TryBody), depth+1) {
+			return false
+		}
+		for _, cb := range s.CatchBodies {
+			if !forwardStructuredAbruptMethodExit(lastStmt(cb), depth+1) {
+				return false
+			}
+		}
+		return true
 	default:
 		return false
 	}

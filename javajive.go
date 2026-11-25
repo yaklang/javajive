@@ -38,7 +38,7 @@ import (
 )
 
 // Version is the javajive library/CLI version.
-const Version = "0.12.2"
+const Version = "0.12.3"
 
 // HasEmbeddedJDKConstructorBundle reports whether this binary was compiled with
 // `-tags javajive_full_jdk` (embedding the 7.7 MiB JDK constructor classfile

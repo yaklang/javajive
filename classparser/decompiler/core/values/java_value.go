@@ -527,8 +527,9 @@ func NewRefMember(object JavaValue, member string, typ types.JavaType) *RefMembe
 }
 
 type JavaArrayMember struct {
-	Object JavaValue
-	Index  JavaValue
+	Object            JavaValue
+	Index             JavaValue
+	ExpectedArrayType types.JavaType
 	// A folded array access may throw. Region proofs use its decoded load/store
 	// PC rather than the PC of a surrounding expression or assignment.
 	OriginPC    int
@@ -543,6 +544,11 @@ func (j *JavaArrayMember) ReplaceVar(oldId *utils.VariableId, newId *utils.Varia
 
 func (j *JavaArrayMember) Type() types.JavaType {
 	ot := j.Object.Type()
+	if ot == nil || !ot.IsArray() {
+		if j.ExpectedArrayType != nil && j.ExpectedArrayType.IsArray() {
+			ot = j.ExpectedArrayType
+		}
+	}
 	if ot == nil {
 		return nil
 	}
@@ -557,6 +563,17 @@ func (j *JavaArrayMember) Type() types.JavaType {
 }
 func (j *JavaArrayMember) String(funcCtx *class_context.ClassContext) string {
 	obj := AssignmentOperand(j.Object, funcCtx)
+	if (j.Object == nil || j.Object.Type() == nil || !j.Object.Type().IsArray()) &&
+		j.ExpectedArrayType != nil && j.ExpectedArrayType.IsArray() {
+		alreadyArrayCast := false
+		if cast, ok := UnpackSoltValue(j.Object).(*CastExpression); ok && cast != nil &&
+			cast.TargetType != nil && cast.TargetType.IsArray() {
+			alreadyArrayCast = true
+		}
+		if !alreadyArrayCast {
+			return fmt.Sprintf("((%s)(%s))[%v]", j.ExpectedArrayType.String(funcCtx), obj, j.Index.String(funcCtx))
+		}
+	}
 	// A ternary used as an array indexee MUST be parenthesized: `?:` binds
 	// looser than `[]`, so `cond ? a : b[i]` parses as `cond ? a : (b[i])`
 	// (int[] vs int → "bad type in conditional expression"). Real hit:
@@ -570,6 +587,19 @@ func (j *JavaArrayMember) String(funcCtx *class_context.ClassContext) string {
 		}
 	}
 	return fmt.Sprintf("%s[%v]", obj, j.Index.String(funcCtx))
+}
+
+// NewTypedJavaArrayMember builds an array access that remembers its opcode-witnessed
+// array type even if the base local is later widened to java.lang.Object.
+func NewTypedJavaArrayMember(object JavaValue, index JavaValue, expectedArrayType types.JavaType) *JavaArrayMember {
+	if expectedArrayType != nil && expectedArrayType.IsArray() {
+		return &JavaArrayMember{
+			Object:            object,
+			Index:             index,
+			ExpectedArrayType: expectedArrayType,
+		}
+	}
+	return NewJavaArrayMember(object, index)
 }
 
 func NewJavaArrayMember(object JavaValue, index JavaValue) *JavaArrayMember {

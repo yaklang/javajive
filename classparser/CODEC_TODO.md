@@ -406,8 +406,6 @@ ON 基准 decErr: codec 19, gson 9, jsoup 19, snakeyaml 7, fastjson2 236。
 - 多数修复未配 `JDEC_*` kill-switch: 仅 JSR-01 与 NAME-03 有开关; 其余为窄条件判断、循环保护或 opt-in 选项。
 - `JDEC_CROSSPKG_IMPORT_OWNER_OFF` 在 465 个回归种子上无可观测差异; 唯一见证是 `javac` 夹具。
 - 旧证据目录已在 2026-10-29 清理中删除, 现行引用见 6.1 与 `docs/source-preparation-2b.md`。
-- `testdata/regression/nondeterministic_enum_structuring.class` 在基线 `origin/main` 与本分支都失败
-  (`original constant initialization is unproved: constant-specific declaration`), 因此
-  `TestDecompileSyntaxRegression` 本轮仍红; 见 `docs/source-preparation-2b.md` 的遗留失败段。
-- 全量 `go test ./classparser/` 在本机 28 分钟超时, 且需要 `javac8` 的对抗用例在只有 JDK 21 的
-  机器上失败 (`actual javac8 required`); 这是环境与基线问题, 不是本轮改动引入。
+- `rewriter/rewrite_var.go` 中的 `objectArgMethodWhitelist` 及文本正则安全判定已于 `v0.12.3` 退役, 由 `rewriter/ast_object_safety.go` 的 AST `*utils.VariableId` 身份安全分析取代。
+- `TestDecompileSyntaxRegression` 与基线 `main` (`22c242f0`) 持平: 存在 7 项历史 `.golden`/enum-regeneration 基线差异 (`BloomFilterStrategies`, `Dfp`, `LambdaImplicitSeed`, `PreferredAssumptionException`, `RawStreamLambdaSeed`, `ReturnLocalDeclSynthesis`, `nondeterministic_enum_structuring`), 非本轮改动引入。
+- 全量 `go test ./classparser/` 在本机 28 分钟超时, 且需要 `javac8` 的对抗用例在只有 JDK 21 的机器上失败 (`actual javac8 required`); 请通过 `go run ./tools/requiredci -check` 与 `-run corpus|algorithm|dex|contract` 运行门禁测试集。

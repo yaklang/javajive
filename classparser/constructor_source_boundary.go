@@ -10,6 +10,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
+	coreutils "github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
@@ -18,6 +19,15 @@ import (
 // constructor, descriptor, declaration of throws, or bytecode value graph.
 // Prefix effects are either kept behind a proved inert Object initialization or
 // evaluated in the first delegation argument, before any effect of the callee.
+type packedEscapedVar struct {
+	id         *coreutils.VariableId
+	name       string
+	typ        types.JavaType
+	typStr     string
+	isParam    bool
+	paramIndex int
+}
+
 type constructorSourceBoundary struct {
 	lowering             *sourceConstructorLoweringPlan
 	throwsReceipt        *constructorInvocationThrowsReceipt
@@ -35,6 +45,25 @@ type constructorSourceBoundary struct {
 	carrierFormals       []string
 	bridgeNames          map[int]string
 	helpers              []*dumpedMethods
+
+	// Pack-carrier state (Subcase D): packs multiple delegate arguments and any
+	// escaped prefix locals into Object[] via a private static helper, delegating
+	// via this(helper(params...), params...) to a private carrier constructor.
+	packCarrier          bool
+	packHelperName       string
+	packParamName        string
+	packMethod           *MemberInfo
+	packMethodType       *types.JavaFuncType
+	packTargetParamTypes []types.JavaType
+	packEscaped          []packedEscapedVar
+	packEscapedByID      map[*coreutils.VariableId]bool
+	packBranchDelegate   bool
+	packBranchDecls      string
+	packBranchBody       string
+	packBranchPrefix     []statements.Statement
+	packArmPosts         []packBranchArmPost
+	packArmSwitchNeeded  bool
+	packArmEmitReturn    bool
 }
 
 func constructorBoundaryValue(v values.JavaValue, allowed map[*values.JavaRef]bool, active map[values.JavaValue]bool, calls map[int]*values.FunctionCallExpression, remaining *int) bool {
@@ -129,6 +158,7 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 	// superclass is inferred to be inert or initialized here.
 	if p.delegate == nil && c.obj.GetSupperClassName() == "java/lang/Object" {
 		ops := decoder.Opcodes()
+		objectInitCount := 0
 		for i, op := range ops {
 			if i == 0 || op == nil || op.Instr == nil || op.Instr.OpCode != core.OP_INVOKESPECIAL || len(op.Data) < 2 {
 				continue
@@ -141,18 +171,29 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 			if !ok || member == nil || strings.ReplaceAll(member.Name, ".", "/") != "java/lang/Object" || member.Member != "<init>" || member.Description != "()V" {
 				continue
 			}
-			if p.pc >= 0 {
-				return nil, fmt.Errorf("ambiguous implicit constructor initialization")
+			objectInitCount++
+			if p.pc < 0 {
+				p.pc = int(op.CurrentOffset)
 			}
-			p.pc = int(op.CurrentOffset)
+		}
+		if objectInitCount >= 2 && (!c.options.RetainUnprovedSource || c.getenv("JDEC_CTOR_RETAIN_PREFIX_OFF") != "") {
+			return nil, fmt.Errorf("ambiguous implicit constructor initialization")
 		}
 		if p.pc >= 0 {
 			exceptions, known := exactInvocationExceptions(c.FuncCtx.InvocationMetadata, "java/lang/Object", "<init>", "()V")
 			if !known || len(exceptions) != 0 {
 				return nil, fmt.Errorf("implicit constructor requires complete inert Object declaration")
 			}
+			if objectInitCount >= 2 {
+				p.omitExplicitSuper = true
+			}
 			// Retain every prefix statement. Object initialization cannot invoke user
 			// code or initialize another class; the JVM already allocated this receiver.
+			return p, nil
+		}
+	}
+	if p.pc < 0 && p.delegate == nil && c.options.RetainUnprovedSource && c.getenv("JDEC_CTOR_RETAIN_PREFIX_OFF") == "" {
+		if c.planSwitchIfConstructorPackCarrier(p, body, code, method) {
 			return p, nil
 		}
 	}
@@ -255,6 +296,9 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 		return nil, err
 	}
 	if c.planRetainedConstructorPrefixFallback(p, code, method, postSuper) {
+		return p, nil
+	}
+	if c.fallbackOrPackCarrier(p, method, postSuper) {
 		return p, nil
 	}
 	return nil, err
@@ -699,6 +743,20 @@ func (p *constructorSourceBoundary) renderDelegation(ctx *class_context.ClassCon
 			return "", fmt.Errorf("foreign constructor invocation throws source receipt")
 		}
 		return p.throwsReceipt.render(ctx)
+	}
+	if p.packCarrier {
+		if p.delegate == nil || len(p.packTargetParamTypes) != len(p.delegate.Arguments) {
+			return "", fmt.Errorf("invalid pack carrier delegation")
+		}
+		unpacked := make([]string, len(p.packTargetParamTypes))
+		for i, pt := range p.packTargetParamTypes {
+			unpacked[i] = unpackFromObjectArray(p.packParamName, i, pt, ctx)
+		}
+		target := "super"
+		if strings.ReplaceAll(p.delegate.ClassName, ".", "/") == strings.ReplaceAll(ctx.ClassName, ".", "/") {
+			target = "this"
+		}
+		return target + "(" + strings.Join(unpacked, ",") + ")", nil
 	}
 	if p.carrier == "" {
 		return p.delegate.String(ctx), nil

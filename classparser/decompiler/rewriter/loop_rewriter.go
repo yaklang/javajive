@@ -546,7 +546,7 @@ func LoopRewriter(manager *RewriteManager, node *core.Node) error {
 			if slices.Contains(manager.DominatorMap[node], n) {
 				next = append(next, n)
 			} else {
-				if n != circleNode {
+				if n != circleNode && !circleSet.Has(n) {
 					endNodes = append(endNodes, n)
 				}
 			}
@@ -579,8 +579,12 @@ func LoopRewriter(manager *RewriteManager, node *core.Node) error {
 	//}
 	loopNode := manager.NewNode(doWhileSt)
 	manager.replaceStructuredNode(circleNode, loopNode)
+	bodySet := make(map[*core.Node]bool, len(bodyNodes))
+	for _, bn := range bodyNodes {
+		bodySet[bn] = true
+	}
 	endNodes = lo.Filter(endNodes, func(item *core.Node, index int) bool {
-		return !IsEndNode(item)
+		return !IsEndNode(item) && item != circleNode && item != loopNode && !bodySet[item]
 	})
 	for _, c := range NodeDeduplication(endNodes) {
 		loopNode.AddNext(c)

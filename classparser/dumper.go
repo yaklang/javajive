@@ -3647,6 +3647,85 @@ func (c *ClassObjectDumper) formatAnnotationElementValue(element *ElementValuePa
 	return valStr, nil
 }
 
+// annotationElementHasClassLiteral reports whether an annotation default value
+// contains a class-literal ('c') tag (directly or as an array element).
+func annotationElementHasClassLiteral(ev *ElementValuePairAttribute, depth int) bool {
+	if ev == nil || depth > 16 {
+		return false
+	}
+	if ev.Tag == 'c' {
+		return true
+	}
+	if ev.Tag == '[' {
+		if elems, ok := ev.Value.([]*ElementValuePairAttribute); ok {
+			for _, item := range elems {
+				if annotationElementHasClassLiteral(item, depth+1) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func annotationMethodHasClassLiteralDefault(method *MemberInfo) bool {
+	if method == nil {
+		return false
+	}
+	for _, attr := range method.Attributes {
+		if ad, ok := attr.(*AnnotationDefaultAttribute); ok && ad != nil {
+			if annotationElementHasClassLiteral(ad.DefaultValue, 0) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// eraseAnnotationClassWildcardBounds strips parameterized type arguments inside
+// a wildcard Class bound (`Class<? extends P<...>>` -> `Class<? extends P>`) when
+// paired with a raw `'c'` class literal AnnotationDefault so the default remains
+// assignable under JLS 9.6.1/9.7.
+func eraseAnnotationClassWildcardBounds(t types.JavaType) types.JavaType {
+	if t == nil {
+		return nil
+	}
+	eraseSingle := func(candidate types.JavaType) (types.JavaType, bool) {
+		pt, ok := types.AsParameterizedType(candidate)
+		if !ok || pt == nil || pt.RawClassName != "java.lang.Class" || len(pt.TypeArgs) != 1 || pt.TypeArgs[0] == nil {
+			return candidate, false
+		}
+		wc, ok := pt.TypeArgs[0].RawType().(*types.JavaWildcardType)
+		if !ok || wc == nil || wc.Variant != "extends" || wc.Bound == nil {
+			return candidate, false
+		}
+		boundPT, ok := types.AsParameterizedType(wc.Bound)
+		if !ok || boundPT == nil || boundPT.RawClassName == "" {
+			return candidate, false
+		}
+		return types.NewParameterizedType("java.lang.Class", []types.JavaType{
+			&types.JavaWildcardType{
+				Variant: "extends",
+				Bound:   types.NewJavaClass(boundPT.RawClassName),
+			},
+		}), true
+	}
+	if t.IsArray() {
+		dims := t.ArrayDim()
+		erased, changed := eraseSingle(t.ElementType())
+		if !changed || dims <= 0 {
+			return t
+		}
+		res := erased
+		for i := 0; i < dims; i++ {
+			res = types.NewJavaArrayType(res)
+		}
+		return res
+	}
+	erased, _ := eraseSingle(t)
+	return erased
+}
+
 // annotationElementDefaultClause returns the ` default <value>` suffix for an annotation element
 // method (an abstract method of an @interface) when it carries an AnnotationDefault attribute, or
 // "" otherwise. Without it javac rejects any use site that omits the element. Kill-switch:
@@ -4500,6 +4579,11 @@ func (c *ClassObjectDumper) dumpMethodMemberWithSourceRequest(method *MemberInfo
 		defer func() { c.FuncCtx.CurrentMethodSig = savedMethodSig }()
 	}
 	c.MethodType = methodType.FunctionType()
+	if c.options.RetainUnprovedSource && c.getenv("JDEC_ANNO_CLASS_WILDCARD_ERASURE_OFF") == "" &&
+		abstractMethod && slices.Contains(c.obj.AccessFlagsVerbose, "annotation") &&
+		annotationMethodHasClassLiteralDefault(method) {
+		c.MethodType.ReturnType = eraseAnnotationClassWildcardBounds(c.MethodType.ReturnType)
+	}
 	returnTypeStr := methodType.FunctionType().ReturnType.String(c.FuncCtx)
 	if lexical, known := c.nativeMemberImplicitFactoryResultSource(method, methodType.FunctionType().ReturnType); known {
 		returnTypeStr = lexical
@@ -5420,6 +5504,16 @@ func (c *ClassObjectDumper) dumpMethodMemberWithSourceRequest(method *MemberInfo
 							break
 						}
 					}
+					if constructorPlan != nil && constructorPlan.omitExplicitSuper {
+						if call, ok := values.UnpackSoltValue(ret.Expression).(*values.FunctionCallExpression); ok && call != nil &&
+							call.FunctionName == "<init>" && len(call.Arguments) == 0 &&
+							strings.ReplaceAll(call.ClassName, ".", "/") == "java/lang/Object" {
+							if recv, okR := values.UnpackSoltValue(call.Object).(*values.JavaRef); okR && recv != nil && (recv.IsThis || recv.IsThisAlias) {
+								statementStr = ""
+								break
+							}
+						}
+					}
 					statementStr = c.GetTabString() + statement.String(funcCtx) + ";"
 				case *statements.ForStatement:
 					datas := []string{}
@@ -5635,6 +5729,20 @@ func (c *ClassObjectDumper) dumpMethodMemberWithSourceRequest(method *MemberInfo
 					c.appendDiagnostic(DecompileDiagnostic{Code: "incomplete_control_flow", Method: name + desc, Message: "Artificial terminator inserted by compatibility recovery."})
 				}
 				statementCodes = append(statementCodes, fmt.Sprintf("%sthrow new RuntimeException(\"incomplete control flow\");\n", c.GetTabString()))
+			}
+			if constructorPlan != nil && constructorPlan.packCarrier {
+				if supperInvokeStr == "" && !constructorPlan.omitExplicitSuper {
+					delegationSource, err := constructorPlan.renderDelegation(funcCtx)
+					if err != nil {
+						return nil, err
+					}
+					supperInvokeStr = c.GetTabString() + delegationSource + ";\n"
+				}
+				escapedInitStr, okPack := constructorPlan.buildPackHelper(c, funcCtx, constructorPlan.packEscapedByID)
+				if !okPack {
+					return nil, fmt.Errorf("constructor pack carrier helper generation failed")
+				}
+				supperInvokeStr += escapedInitStr
 			}
 			if constructorPlan != nil {
 				c.constructorBoundaryHelpers = append(c.constructorBoundaryHelpers, constructorPlan.helpers...)
@@ -5859,6 +5967,21 @@ func (c *ClassObjectDumper) dumpMethodMemberWithSourceRequest(method *MemberInfo
 				exceptions = " throws " + extra
 			}
 		}
+	}
+	if name == "<init>" && renderedConstructorPlan != nil && renderedConstructorPlan.packCarrier && !bodylessMethod {
+		packCall, carrierFormalDecls := renderedConstructorPlan.packThisDelegationArgs(funcCtx)
+		typeParamsPrefix := ""
+		if methodTypeParams != "" {
+			typeParamsPrefix = methodTypeParams + " "
+		}
+		carrierCode := "private " + typeParamsPrefix + c.GetConstructorMethodName() + "(" + carrierFormalDecls + ")" + exceptions + " {" + code + strings.Repeat("\t", c.TabNumber()) + "}"
+		c.constructorBoundaryHelpers = append(c.constructorBoundaryHelpers, &dumpedMethods{
+			methodName:    name,
+			code:          carrierCode,
+			bodyCode:      code,
+			checkedEscape: dumped.checkedEscape,
+		})
+		code = "\n" + c.GetTabString() + "\tthis(" + packCall + ");\n"
 	}
 	writeArguments := func(buffer io.Writer) {
 		methodSourceBuffer.Write([]byte(fmt.Sprintf("(%s)%s", paramsNewStr, exceptions)))
