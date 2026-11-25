@@ -2,11 +2,7 @@ package rewriter
 
 import (
 	"github.com/yaklang/javajive/internal/jdecenv"
-	utils2 "github.com/yaklang/javajive/internal/utils"
-	"regexp"
-	"strings"
 
-	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
@@ -18,112 +14,12 @@ import (
 //
 // It widens a concrete numeric-typed declaration (Integer/Long/Double/...) to java.lang.Number when
 // that slot is ALSO assigned an incompatible numeric sub-type value (e.g. `Integer var11 = ...` with
-// a later `var11 = Long.valueOf(...)`), as long as every read of the variable is Number-safe
-// (.intValue()/.longValue()/.doubleValue(), instanceof, cast, assignment target, return, or
-// Object-accepting method arg). This is the slot-reuse repair for fastjson2
-// ObjectWriterCreatorASM.gwFieldName: the JVM reuses one slot for an Integer initializer and several
-// Long switch-case stores, but the post-switch read uses `.intValue()` / `.longValue()` (Number
-// methods in the bytecode). Declaring the variable as Number compiles cleanly while preserving the
-// method-dispatch semantics. See isNumberSafeWiden for the read-side gate.
+// a later `var11 = Long.valueOf(...)`), as long as every AST use of the variable is Number-safe.
 func WidenNumericMixedSlotDecl(sts *[]statements.Statement, funcCtx *class_context.ClassContext) {
 	if sts == nil || len(*sts) == 0 || jdecenv.Get("JDEC_WIDEN_NUMERIC_MIXED_OFF") == "1" {
 		return
 	}
-	if jdecenv.Get("JDEC_LEGACY_TEXT_WIDEN") == "" {
-		widenNumericMixedStructured(sts, funcCtx)
-		return
-	}
-	ctx := &class_context.ClassContext{}
-	objectNames := map[string]struct{}{}
-	// Collect (uid -> declRef) for every concrete-numeric-typed declaration. Keyed by VarUid (not
-	// rendered name) because multiple distinct variables in the same method can share a name after
-	// RewriteVar unifies a slot's disjoint live ranges under the same name token (fastjson2
-	// ObjectWriterCreatorASM.gwFieldName has several `var11`-named variables of different types).
-	uidToDeclRef := map[string]*values.JavaRef{}
-	var collectNumericDecls func(list []statements.Statement)
-	collectNumericDecls = func(list []statements.Statement) {
-		for _, st := range list {
-			if as, _ := unwrapAssignStatement(st); as != nil && (as.IsFirst || as.IsDeclare) && as.ArrayMember == nil {
-				if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil {
-					if ref.Type() != nil && isConcreteNumericType(ref.Type()) {
-						if _, exists := uidToDeclRef[ref.VarUid]; !exists {
-							uidToDeclRef[ref.VarUid] = ref
-						}
-					}
-					if ref.Type() != nil && isJavaLangObject(ref.Type()) {
-						objectNames[ref.String(ctx)] = struct{}{}
-					}
-				}
-			}
-			for _, cl := range childStatementLists(st) {
-				collectNumericDecls(*cl)
-			}
-		}
-	}
-	collectNumericDecls(*sts)
-	// reassignment carrying an incompatible numeric sub-type. Key by VarUid (identity) not name.
-	mixedUids := map[string]struct{}{}
-	var scan func(list []statements.Statement)
-	scan = func(list []statements.Statement) {
-		for _, st := range list {
-			if as, _ := unwrapAssignStatement(st); as != nil && !as.IsFirst && !as.IsDeclare && as.ArrayMember == nil {
-				if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil {
-					declRef := uidToDeclRef[ref.VarUid]
-					if declRef == nil || declRef.Type() == nil {
-						goto recurse
-					}
-					if !isConcreteNumericType(declRef.Type()) {
-						goto recurse
-					}
-					if as.JavaValue == nil {
-						goto recurse
-					}
-					rhsT := as.JavaValue.Type()
-					if rhsT == nil {
-						goto recurse
-					}
-					if !isConcreteNumericType(rhsT) {
-						goto recurse
-					}
-					if typeFQNEquals(declRef.Type(), rhsT) {
-						goto recurse
-					}
-					mixedUids[ref.VarUid] = struct{}{}
-				}
-			}
-		recurse:
-			for _, cl := range childStatementLists(st) {
-				scan(*cl)
-			}
-		}
-	}
-	scan(*sts)
-	if len(mixedUids) == 0 {
-		return
-	}
-	// Render the full method text once for the gate checks.
-	var sb strings.Builder
-	for _, st := range *sts {
-		t, ok := safeRenderStatement(st)
-		if !ok {
-			return
-		}
-		sb.WriteString(t)
-		sb.WriteByte('\n')
-	}
-	methodText := sb.String()
-	numberT := types.NewJavaClass("java.lang.Number")
-	for uid := range mixedUids {
-		declRef := uidToDeclRef[uid]
-		if declRef == nil {
-			continue
-		}
-		name := declRef.String(ctx)
-		if !isNumberSafeWiden(methodText, name, objectNames) {
-			continue
-		}
-		widenRefByVarUid(*sts, uid, numberT)
-	}
+	widenNumericMixedStructured(sts, funcCtx)
 }
 
 // WidenInstanceofReadRefs is a post-RewriteVar pass. Kill-switch:
@@ -132,129 +28,7 @@ func WidenInstanceofReadRefs(sts *[]statements.Statement, funcCtx *class_context
 	if sts == nil || len(*sts) == 0 || jdecenv.Get("JDEC_POST_RW_INSTANCEOF_WIDEN_OFF") == "1" {
 		return
 	}
-	if jdecenv.Get("JDEC_LEGACY_TEXT_WIDEN") == "" {
-		widenInstanceofStructured(sts, funcCtx)
-		return
-	}
-	ctx := &class_context.ClassContext{}
-	nameToDeclRef := map[string]*values.JavaRef{}
-	objectNames := map[string]struct{}{}
-	collectDeclRefs(*sts, ctx, nameToDeclRef, objectNames)
-	var sb strings.Builder
-	for _, st := range *sts {
-		t, ok := safeRenderStatement(st)
-		if !ok {
-			return
-		}
-		sb.WriteString(t)
-		sb.WriteByte('\n')
-	}
-	methodText := sb.String()
-	instanceofRe := regexp.MustCompile(`\b(var\d+(?:_\d+)?)\s+instanceof\s+(\w+)`)
-	widened := map[string]struct{}{}
-	objT := types.NewJavaClass("java.lang.Object")
-	// Scan the FULL method text (not individual conditions) for instanceof patterns. This avoids
-	// the statement-tree traversal issue where nested switch-case/do-while conditions may not be
-	// individually accessible as IfStatement/ConditionStatement at the top level.
-	for _, m := range instanceofRe.FindAllStringSubmatch(methodText, -1) {
-		varName := m[1]
-		if _, done := widened[varName]; done {
-			continue
-		}
-		declRef := nameToDeclRef[varName]
-		// A solved def-use web already accounts for every definition. An
-		// instanceof name scan cannot discard its member/array constraints.
-		if declRef == nil || declRef.Type() == nil || declRef.IsThis || declRef.IsParam || declRef.WebDeclType != nil {
-			continue
-		}
-		if _, isPrim := declRef.Type().RawType().(*types.JavaPrimer); isPrim {
-			continue
-		}
-		fqn, ok := types.ClassFQNOf(declRef.Type())
-		if !ok || fqn == "java.lang.Object" {
-			continue
-		}
-		if !nameOccurrencesAreObjectSafe(methodText, varName, objectNames) {
-			// Object-safe gate failed (some use is a bare member access like `.longValue()`).
-			// Try widening to java.lang.Number instead: Number supports `instanceof Integer`/`instanceof
-			// Long` AND `.longValue()` / `.intValue()` / etc. This handles the JSONPathParser:664 case
-			// where `var10` (Long) is read by `instanceof Integer` + `.longValue()`.
-			if !isNumberSafeWiden(methodText, varName, objectNames) {
-				continue
-			}
-			numberT := types.NewJavaClass("java.lang.Number")
-			widened[varName] = struct{}{}
-			widenRefByVarUid(*sts, declRef.VarUid, numberT)
-			continue
-		}
-		widened[varName] = struct{}{}
-		widenRefByVarUid(*sts, declRef.VarUid, objT)
-	}
-}
-
-func collectDeclRefs(list []statements.Statement, ctx *class_context.ClassContext,
-	out map[string]*values.JavaRef, objectNames map[string]struct{}) {
-	for _, st := range list {
-		if as, _ := unwrapAssignStatement(st); as != nil && (as.IsFirst || as.IsDeclare) && as.ArrayMember == nil {
-			if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil {
-				name := ref.String(ctx)
-				if _, exists := out[name]; !exists {
-					out[name] = ref
-				}
-				if ref.Type() != nil && isJavaLangObject(ref.Type()) {
-					objectNames[name] = struct{}{}
-				}
-			}
-		}
-		for _, cl := range childStatementLists(st) {
-			collectDeclRefs(*cl, ctx, out, objectNames)
-		}
-	}
-}
-
-func scanAndWiden(list []statements.Statement, ctx *class_context.ClassContext, re *regexp.Regexp,
-	nameToDeclRef map[string]*values.JavaRef, methodText string, objectNames map[string]struct{},
-	widened map[string]struct{}, objT types.JavaType) {
-	for _, st := range list {
-		condText := ""
-		switch s := st.(type) {
-		case *statements.ConditionStatement:
-			if s.Condition != nil {
-				condText = s.Condition.String(ctx)
-			}
-		case *statements.IfStatement:
-			if s.Condition != nil {
-				condText = s.Condition.String(ctx)
-			}
-		}
-		if condText != "" {
-			for _, m := range re.FindAllStringSubmatch(condText, -1) {
-				varName := m[1]
-				if _, done := widened[varName]; done {
-					continue
-				}
-				declRef := nameToDeclRef[varName]
-				if declRef == nil || declRef.Type() == nil || declRef.IsThis || declRef.IsParam {
-					continue
-				}
-				if _, isPrim := declRef.Type().RawType().(*types.JavaPrimer); isPrim {
-					continue
-				}
-				fqn, ok := types.ClassFQNOf(declRef.Type())
-				if !ok || fqn == "java.lang.Object" {
-					continue
-				}
-				if !nameOccurrencesAreObjectSafe(methodText, varName, objectNames) {
-					continue
-				}
-				widened[varName] = struct{}{}
-				widenRefByVarUid(list, declRef.VarUid, objT)
-			}
-		}
-		for _, cl := range childStatementLists(st) {
-			scanAndWiden(*cl, ctx, re, nameToDeclRef, methodText, objectNames, widened, objT)
-		}
-	}
+	widenInstanceofStructured(sts, funcCtx)
 }
 
 func widenRefByVarUid(list []statements.Statement, uid string, target types.JavaType) {
@@ -352,90 +126,6 @@ var numberMethodWhitelist = map[string]bool{
 	"floatValue": true, "shortValue": true, "byteValue": true,
 }
 
-// isNumberSafeWiden reports whether every textual occurrence of `name` in `text` is safe under a
-// java.lang.Number declaration: assignment target, instanceof, cast-wrapped, return/throw, bare
-// argument to an Object-accepting method (add/addAll/etc.), OR a member access to a Number method
-// (longValue/intValue/etc.). This is the Number-specific gate used when Object-safe fails (because
-// the variable has `.longValue()` member access that Object doesn't support but Number does).
-func isNumberSafeWiden(text, name string, objectNames map[string]struct{}) bool {
-	locs := utils2.WordSpans(text, name, nil)
-	if len(locs) == 0 {
-		return false
-	}
-	for _, loc := range locs {
-		before := text[:loc[0]]
-		after := text[loc[1]:]
-		// Assignment target.
-		if nullInitNarrowAssign.MatchString(after) {
-			continue
-		}
-		// Declaration.
-		at := strings.TrimLeft(after, " \t")
-		if (strings.HasPrefix(at, ";") || strings.HasPrefix(at, "\n") || strings.HasPrefix(at, "=")) && typeTokenPrecedes(before) {
-			continue
-		}
-		// instanceof.
-		if leadingWordIs(after, "instanceof") {
-			continue
-		}
-		// return/throw.
-		if trailingWordIs(before, "return") || trailingWordIs(before, "throw") {
-			continue
-		}
-		// Cast-wrapped receiver.
-		rt := strings.TrimRight(before, " \t")
-		if strings.HasSuffix(rt, "(") {
-			inner := strings.TrimRight(rt[:len(rt)-1], " \t")
-			if strings.HasSuffix(inner, ")") {
-				continue
-			}
-		}
-		if strings.HasSuffix(rt, ")") {
-			continue
-		}
-		// RHS into Object-typed local (accept only if LHS name is also in objectNames).
-		if m := lhsAssignedNameRe.FindStringSubmatch(before); m != nil {
-			if _, ok := objectNames[m[1]]; ok {
-				continue
-			}
-		}
-		// Object-accepting method arg.
-		if isObjectArgToWhitelistMethod(before, after) {
-			continue
-		}
-		// Number method member access: `.longValue()`, `.intValue()`, etc.
-		if isNumberMethodAccess(after) {
-			continue
-		}
-		return false
-	}
-	return true
-}
-
-// isNumberMethodAccess reports whether `after` (text following a name occurrence) starts with
-// `.methodName(` where methodName is a Number method (longValue, intValue, etc.).
-func isNumberMethodAccess(after string) bool {
-	at := strings.TrimLeft(after, " \t")
-	if !strings.HasPrefix(at, ".") {
-		return false
-	}
-	// Extract the method name after the dot.
-	rest := at[1:]
-	methodName := ""
-	for i := 0; i < len(rest); i++ {
-		c := rest[i]
-		if isJavaIdentByte(c) {
-			methodName += string(c)
-		} else {
-			break
-		}
-	}
-	return numberMethodWhitelist[methodName]
-}
-
-// concreteNumericFQNs lists the boxed primitive types that extend java.lang.Number. A local declared
-// as one of these may need widening to Number when its slot is reused for a different boxed numeric
-// sub-type (fastjson2 ObjectWriterCreatorASM.gwFieldName: Integer slot reused for Long stores).
 var concreteNumericFQNs = map[string]bool{
 	"java.lang.Integer": true, "java.lang.Long": true, "java.lang.Double": true,
 	"java.lang.Float": true, "java.lang.Short": true, "java.lang.Byte": true,

@@ -1966,7 +1966,23 @@ func renderRetainedPrefixStatements(sts []statements.Statement, ctx *class_conte
 				b.WriteString(s.Label + ":\n")
 			}
 			b.WriteString("do {\n" + bodyStr + "} while (" + values.SimplifyConditionValue(s.ConditionValue).String(ctx) + ");\n")
+		case *statements.WhileStatement:
+			bodyStr, okB := renderRetainedPrefixStatements(s.Body, ctx, cloneDeclaredMap(declared))
+			if !okB {
+				return "", false
+			}
+			b.WriteString("while (" + values.SimplifyConditionValue(s.ConditionValue).String(ctx) + ") {\n" + bodyStr + "}\n")
 		default:
+			if cs, ok := st.(*statements.CustomStatement); ok && cs != nil {
+				if kind, _, okT := cs.SourceTransferProtocol(); okT && (kind == "break" || kind == "continue") {
+					b.WriteString(st.String(ctx) + ";\n")
+					continue
+				}
+				if _, okTh := cs.SourceThrowOperand(); okTh {
+					b.WriteString(st.String(ctx) + ";\n")
+					continue
+				}
+			}
 			return "", false
 		}
 	}
@@ -2109,4 +2125,8 @@ func (c *ClassObjectDumper) planRetainedConstructorPrefixFallback(p *constructor
 		checkedEscape: true,
 	})
 	return true
+}
+
+func (c *ClassObjectDumper) fallbackOrPackCarrier(p *constructorSourceBoundary, method *MemberInfo, postSuper []statements.Statement) bool {
+	return c.planRetainedPackCarrier(p, method, postSuper)
 }

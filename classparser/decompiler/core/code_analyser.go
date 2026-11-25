@@ -4228,7 +4228,11 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 	case OP_ARRAYLENGTH:
 		ref := runtimeStackSimulation.Pop().(values.JavaValue)
 		if d.getenv("JDEC_ARRAYLENGTH_REPLACE_FWD_OFF") == "" {
-			runtimeStackSimulation.Push(&values.ArrayLengthExpression{Array: ref, OriginPC: int(opcode.CurrentOffset), HasOriginPC: true})
+			var expectedArr types.JavaType
+			if ref != nil && ref.Type() != nil && ref.Type().IsArray() {
+				expectedArr = ref.Type()
+			}
+			runtimeStackSimulation.Push(&values.ArrayLengthExpression{Array: ref, ExpectedArrayType: expectedArr, OriginPC: int(opcode.CurrentOffset), HasOriginPC: true})
 			break
 		}
 		arrayLenReplace := func(oldId *utils2.VariableId, newId *utils2.VariableId) {
@@ -4255,14 +4259,14 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 	case OP_AALOAD, OP_IALOAD, OP_BALOAD, OP_CALOAD, OP_FALOAD, OP_LALOAD, OP_DALOAD, OP_SALOAD:
 		index := runtimeStackSimulation.Pop().(values.JavaValue)
 		ref := runtimeStackSimulation.Pop().(values.JavaValue)
-		member := values.NewJavaArrayMember(ref, index)
+		member := values.NewTypedJavaArrayMember(ref, index, expectedArrayTypeForOpcode(opcode.Instr.OpCode, ref))
 		member.OriginPC, member.HasOriginPC = int(opcode.CurrentOffset), true
 		runtimeStackSimulation.Push(member)
 	case OP_AASTORE, OP_IASTORE, OP_BASTORE, OP_CASTORE, OP_FASTORE, OP_LASTORE, OP_DASTORE, OP_SASTORE:
 		value := runtimeStackSimulation.Pop().(values.JavaValue)
 		index := runtimeStackSimulation.Pop().(values.JavaValue)
 		ref := runtimeStackSimulation.Pop().(values.JavaValue)
-		member := values.NewJavaArrayMember(ref, index)
+		member := values.NewTypedJavaArrayMember(ref, index, expectedArrayTypeForOpcode(opcode.Instr.OpCode, ref))
 		member.OriginPC, member.HasOriginPC = int(opcode.CurrentOffset), true
 		statements.NewArrayMemberAssignStatement(member, value)
 	case OP_LCMP, OP_DCMPG, OP_DCMPL, OP_FCMPG, OP_FCMPL:
@@ -7191,7 +7195,7 @@ func (d *Decompiler) ParseStatement() error {
 			value := opcode.stackConsumed[0]
 			index := opcode.stackConsumed[1]
 			ref := opcode.stackConsumed[2]
-			member := values.NewJavaArrayMember(ref, index)
+			member := values.NewTypedJavaArrayMember(ref, index, expectedArrayTypeForOpcode(opcode.Instr.OpCode, ref))
 			member.OriginPC, member.HasOriginPC = int(opcode.CurrentOffset), true
 			st := statements.NewArrayMemberAssignStatement(member, value)
 			st.ReferenceArrayStore = opcode.Instr.OpCode == OP_AASTORE
@@ -8451,4 +8455,33 @@ func castAnonSubclassReceiverForOwnField(recv values.JavaValue, member *values.J
 		func() types.JavaType { return types.NewJavaClass(owner) },
 		func(oldId *utils2.VariableId, newId *utils2.VariableId) { inner.ReplaceVar(oldId, newId) },
 	)
+}
+
+func expectedArrayTypeForOpcode(opCode int, arr values.JavaValue) types.JavaType {
+	switch opCode {
+	case OP_IALOAD, OP_IASTORE:
+		return types.NewJavaArrayType(types.NewJavaPrimer(types.JavaInteger))
+	case OP_LALOAD, OP_LASTORE:
+		return types.NewJavaArrayType(types.NewJavaPrimer(types.JavaLong))
+	case OP_FALOAD, OP_FASTORE:
+		return types.NewJavaArrayType(types.NewJavaPrimer(types.JavaFloat))
+	case OP_DALOAD, OP_DASTORE:
+		return types.NewJavaArrayType(types.NewJavaPrimer(types.JavaDouble))
+	case OP_CALOAD, OP_CASTORE:
+		return types.NewJavaArrayType(types.NewJavaPrimer(types.JavaChar))
+	case OP_SALOAD, OP_SASTORE:
+		return types.NewJavaArrayType(types.NewJavaPrimer(types.JavaShort))
+	case OP_BALOAD, OP_BASTORE:
+		if arr != nil && arr.Type() != nil && arr.Type().IsArray() {
+			return arr.Type()
+		}
+		return types.NewJavaArrayType(types.NewJavaPrimer(types.JavaByte))
+	case OP_AALOAD, OP_AASTORE:
+		if arr != nil && arr.Type() != nil && arr.Type().IsArray() {
+			return arr.Type()
+		}
+		return types.NewJavaArrayType(types.NewJavaClass("java.lang.Object"))
+	default:
+		return nil
+	}
 }

@@ -5235,6 +5235,22 @@ func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext)
 	}
 }
 
+// CanCastObjectReceiver reports whether widening this call's receiver to java.lang.Object
+// will still emit a concrete owner cast via objectReceiverInvokeCast.
+func (f *FunctionCallExpression) CanCastObjectReceiver(funcCtx *class_context.ClassContext) bool {
+	if f == nil || f.IsStatic || f.FunctionName == "<init>" || f.ClassName == "" {
+		return false
+	}
+	if funcCtx != nil && funcCtx.Getenv("JDEC_OBJECT_RECV_INVOKE_CAST_OFF") != "" {
+		return false
+	}
+	ref, ok := UnpackSoltValue(f.Object).(*JavaRef)
+	if !ok || ref == nil || ref.IsThis || ref.IsParam {
+		return false
+	}
+	return f.ClassName != "java.lang.Object" && !strings.HasPrefix(f.ClassName, "[")
+}
+
 // objectReceiverInvokeCast reports the cast class to wrap an Object-typed invoke receiver in, when the
 // bytecode invoke target (f.ClassName) is a concrete reference type distinct from java.lang.Object. This
 // repairs member-access sites where the receiver local was null-initialized as Object (and never adopted

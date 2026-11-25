@@ -199,7 +199,10 @@ func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.Ja
 		narrowNullInitObjectDecl(sts)
 	}
 	if jdecenv.Get("JDEC_WIDEN_CONCRETE_TO_OBJECT_OFF") != "1" {
-		widenConcreteDeclToObject(sts)
+		widenConcreteDeclToObject(sts, ctx)
+	}
+	if jdecenv.Get("JDEC_NULLONLY_RECONCILE_OFF") != "1" {
+		reconcileNullOnlyConcreteLocals(sts, ctx)
 	}
 	// Irreducible-dispatch locals that placeCrossScopeDeclarations widened to
 	// the do-body are bare `T varN;` declarations. javac rejects a read in a
@@ -3135,9 +3138,13 @@ func narrowNullInitObjectDecl(sts *[]statements.Statement) {
 // widenConcreteDeclToObject collects reaching stores by declaration identity,
 // as does narrowNullInitObjectDecl. A provisional spelling never joins stores. Kill-switch:
 // JDEC_WIDEN_CONCRETE_TO_OBJECT_OFF=1.
-func widenConcreteDeclToObject(sts *[]statements.Statement) {
+func widenConcreteDeclToObject(sts *[]statements.Statement, traceCtx ...*class_context.ClassContext) {
 	if sts == nil || len(*sts) == 0 {
 		return
+	}
+	var funcCtx *class_context.ClassContext
+	if len(traceCtx) > 0 {
+		funcCtx = traceCtx[0]
 	}
 	type concreteInfo struct {
 		declRefs    []*values.JavaRef
@@ -3145,7 +3152,6 @@ func widenConcreteDeclToObject(sts *[]statements.Statement) {
 	}
 	infos := map[*utils.VariableId]*concreteInfo{}
 	var ids []*utils.VariableId
-	objectNames := map[string]struct{}{}
 	var collect func([]statements.Statement)
 	collect = func(list []statements.Statement) {
 		for _, st := range list {
@@ -3162,10 +3168,8 @@ func widenConcreteDeclToObject(sts *[]statements.Statement) {
 						switch {
 						case as.IsFirst || as.IsDeclare:
 							rt := ref.Type()
-							if rt != nil {
-								if isJavaLangObject(rt) {
-									objectNames[name] = struct{}{}
-								} else if _, isPrim := rt.RawType().(*types.JavaPrimer); !isPrim {
+							if rt != nil && !isJavaLangObject(rt) {
+								if _, isPrim := rt.RawType().(*types.JavaPrimer); !isPrim {
 									in.declRefs = append(in.declRefs, ref)
 								}
 							}
@@ -3195,189 +3199,27 @@ func widenConcreteDeclToObject(sts *[]statements.Statement) {
 	if !anyCandidate {
 		return
 	}
-	var sb strings.Builder
-	for _, st := range *sts {
-		t, ok := safeRenderStatement(st)
-		if !ok {
-			return
-		}
-		sb.WriteString(t)
-		sb.WriteByte('\n')
-	}
-	methodText := sb.String()
 	// Keep deterministic lexical discovery order for provisional-name ties.
 	sort.SliceStable(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
 	for _, id := range ids {
-		name := id.String()
 		in := infos[id]
 		if !in.hasObjectRe || len(in.declRefs) == 0 {
 			continue
 		}
-		if !nameOccurrencesAreObjectSafe(methodText, name, objectNames) {
+		if !identityUsesAreObjectSafe(*sts, id, funcCtx, false) {
 			continue
 		}
 		objT := types.NewJavaClass("java.lang.Object")
 		for _, ref := range in.declRefs {
 			if ref.WebDeclType != nil {
 				// A whole-web solution already includes every reaching RHS and
-				// descriptor constraint. This name-based fallback sees erased
+				// descriptor constraint. This fallback sees erased
 				// expression types and would discard recovered type variables.
 				continue
 			}
 			ref.ResetVarType(objT)
 		}
 	}
-}
-
-func nameOccurrencesAreObjectSafe(text, name string, objectNames map[string]struct{}) bool {
-	locs := utils2.WordSpans(text, name, nil)
-	if len(locs) == 0 {
-		return false
-	}
-	for _, loc := range locs {
-		before := text[:loc[0]]
-		after := text[loc[1]:]
-		if nullInitNarrowAssign.MatchString(after) {
-			continue
-		}
-		at := strings.TrimLeft(after, " \t")
-		if (strings.HasPrefix(at, ";") || strings.HasPrefix(at, "\n") || strings.HasPrefix(at, "=")) && typeTokenPrecedes(before) {
-			continue
-		}
-		if leadingWordIs(after, "instanceof") {
-			continue
-		}
-		if trailingWordIs(before, "return") || trailingWordIs(before, "throw") {
-			continue
-		}
-		rt := strings.TrimRight(before, " \t")
-		if strings.HasSuffix(rt, "(") {
-			inner := strings.TrimRight(rt[:len(rt)-1], " \t")
-			if strings.HasSuffix(inner, ")") {
-				continue
-			}
-		}
-		if strings.HasSuffix(rt, ")") {
-			continue
-		}
-		if m := lhsAssignedNameRe.FindStringSubmatch(before); m != nil {
-			if _, ok := objectNames[m[1]]; ok {
-				continue
-			}
-		}
-		// Accept `name` as a bare argument to an Object-accepting method (`.add(name)`,
-		// `.addAll(name)`, `.put(key,name)`, `.set(idx,name)`, `.offer(name)`, `.push(name)`).
-		// These methods accept Object, so widening the variable's type is safe.
-		if isObjectArgToWhitelistMethod(before, after) {
-			continue
-		}
-		return false
-	}
-	return true
-}
-
-// objectArgMethodWhitelist lists method names whose parameter accepts java.lang.Object, so passing a
-// widened-to-Object variable as an argument is behavior-preserving. Used by the instanceof-widen
-// Object-safe gate to accept `receiver.add(name)`, `receiver.addAll(name)`, etc.
-var objectArgMethodWhitelist = map[string]bool{
-	"add": true, "addAll": true, "put": true, "set": true,
-	"offer": true, "push": true, "addElement": true, "addFirst": true,
-	"addLast": true,
-}
-
-// isObjectArgToWhitelistMethod reports whether `name` (at the boundary of before/after) is passed
-// as an argument to a whitelisted Object-accepting method: the text before name ends with
-// `.methodName(` and the text after name starts with `)` or `,`.
-func isObjectArgToWhitelistMethod(before, after string) bool {
-	afterTrim := strings.TrimLeft(after, " \t")
-	if !strings.HasPrefix(afterTrim, ")") && !strings.HasPrefix(afterTrim, ",") {
-		return false
-	}
-	beforeTrim := strings.TrimRight(before, " \t")
-	if !strings.HasSuffix(beforeTrim, "(") {
-		return false
-	}
-	// Extract the method name: the identifier immediately before the `(`.
-	inner := strings.TrimRight(beforeTrim[:len(beforeTrim)-1], " \t")
-	methodName := ""
-	for i := len(inner) - 1; i >= 0; i-- {
-		c := inner[i]
-		if isJavaIdentByte(c) {
-			methodName = string(c) + methodName
-		} else {
-			break
-		}
-	}
-	return objectArgMethodWhitelist[methodName]
-}
-
-func leadingWordIs(s, w string) bool {
-	trimmed := strings.TrimLeft(s, " \t")
-	if !strings.HasPrefix(trimmed, w) {
-		return false
-	}
-	rest := trimmed[len(w):]
-	return rest == "" || !isJavaIdentByte(rest[0])
-}
-
-func trailingWordIs(s, w string) bool {
-	trimmed := strings.TrimRight(s, " \t")
-	if !strings.HasSuffix(trimmed, w) {
-		return false
-	}
-	prefix := trimmed[:len(trimmed)-len(w)]
-	return prefix == "" || !isJavaIdentByte(prefix[len(prefix)-1])
-}
-
-func isJavaIdentByte(b byte) bool {
-	return b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '$'
-}
-
-func typeTokenPrecedes(before string) bool {
-	trimmed := strings.TrimRight(before, " \t")
-	if trimmed == "" {
-		return false
-	}
-	last := ""
-	for i := len(trimmed) - 1; i >= 0; i-- {
-		c := trimmed[i]
-		if isJavaIdentByte(c) || c == '.' || c == '<' || c == '>' {
-			last = string(c) + last
-			continue
-		}
-		break
-	}
-	if last == "" {
-		return false
-	}
-	simple := last
-	if i := strings.LastIndexByte(simple, '>'); i >= 0 {
-		if j := strings.LastIndexByte(simple[:i], '<'); j >= 0 {
-			simple = simple[:j]
-		}
-	}
-	for strings.HasSuffix(simple, "[]") {
-		simple = simple[:len(simple)-2]
-	}
-	if simple == "" {
-		return false
-	}
-	if i := strings.LastIndexByte(simple, '.'); i >= 0 {
-		simple = simple[i+1:]
-	}
-	if simple == "" {
-		return false
-	}
-	c := simple[0]
-	if !(c == '_' || c == '$' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
-		return false
-	}
-	for i := 0; i < len(simple); i++ {
-		if !isJavaIdentByte(simple[i]) {
-			return false
-		}
-	}
-	return true
 }
 
 // PlaceConstructorCallFirst moves only inert, uninitialized declarations past an

@@ -85,11 +85,17 @@ func (v *CustomValue) ReplaceVar(oldId *utils.VariableId, newId *utils.VariableI
 }
 
 func (v *CustomValue) Type() types.JavaType {
+	if v == nil {
+		return nil
+	}
 	if v.sourceInstanceOf != nil {
 		return types.NewJavaPrimer(types.JavaBoolean)
 	}
 	if v.sourcePrimitive != nil {
 		return types.NewJavaPrimer(v.sourcePrimitive.target)
+	}
+	if v.TypeFunc == nil {
+		return nil
 	}
 	return v.TypeFunc()
 }
