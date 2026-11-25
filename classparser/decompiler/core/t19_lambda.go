@@ -33,7 +33,8 @@ func t19LambdaAdapter(req CallSiteRequest, d *Decompiler, sim StackSimulation, r
 		if serializable && d != nil && d.SerializableLambdaSource != nil {
 			serializedSource, qualified = d.SerializableLambdaSource(req)
 		}
-		res, handled := inspectAltMetafactoryFlagsWithSerializableSource(req, resultType, qualified)
+		retainedSerializable := serializable && !qualified && d != nil && d.RetainUnprovedSource && d.FunctionContext != nil && d.FunctionContext.Getenv("JDEC_RETAIN_SERIALIZABLE_LAMBDA_OFF") == ""
+		res, handled := inspectAltMetafactoryFlagsWithSerializableSource(req, resultType, qualified || retainedSerializable)
 		if handled {
 			return res
 		}
@@ -60,6 +61,13 @@ func t19LambdaAdapter(req CallSiteRequest, d *Decompiler, sim StackSimulation, r
 			return invalidDispatch(req, FamilyLambda, DiagBootstrapArgMismatch, "altMetafactory missing sam/impl/instantiated", resultType)
 		}
 		static = static[:3]
+
+		// Keep qualified serializable lambda check after static/impl unpacking below.
+		if serializable && qualified {
+			if len(static) < 2 {
+				return invalidDispatch(req, FamilyLambda, DiagBootstrapArgMismatch, "lambda metafactory requires impl method handle", resultType)
+			}
+		}
 	}
 	if len(static) < 2 {
 		return invalidDispatch(req, FamilyLambda, DiagBootstrapArgMismatch, "lambda metafactory requires impl method handle", resultType)
@@ -78,24 +86,30 @@ func t19LambdaAdapter(req CallSiteRequest, d *Decompiler, sim StackSimulation, r
 	if d == nil || d.FunctionContext == nil {
 		return unsupportedDispatch(req, FamilyLambda, DiagBootstrapUnknown, "lambda reconstruction requires decompiler context", resultType)
 	}
-	if serializable {
+	qualifiedSerializable := false
+	if serializable && d.SerializableLambdaSource != nil {
+		_, qualifiedSerializable = d.SerializableLambdaSource(req)
+	}
+	if serializable && qualifiedSerializable {
 		return t19SerializableReference(req, d, static, impl, resultType, serializedSource)
 	}
 	// A typed Serializable ancestor does not set the original bootstrap's
 	// serialization flag. Source lambda syntax cannot preserve that distinction.
-	if name, known := types.RawClassFQN(resultType); known {
-		if inherited, _ := LambdaInterfaceSerializable(d.FunctionContext.InvocationMetadata, name, d.Work); inherited {
-			return unsupportedLambdaSource(req, "original factory disables serialization on a Serializable target")
+	if !serializable {
+		if name, known := types.RawClassFQN(resultType); known {
+			if inherited, _ := LambdaInterfaceSerializable(d.FunctionContext.InvocationMetadata, name, d.Work); inherited {
+				return unsupportedLambdaSource(req, "original factory disables serialization on a Serializable target")
+			}
 		}
-	}
-	if req.Identity.Name == "altMetafactory" {
-		flags, _ := intFromLiteral(req.StaticArgs[3])
-		if flags&lambdaFlagMarkers != 0 {
-			count, _ := intFromLiteral(req.StaticArgs[4])
-			for _, marker := range req.StaticArgs[5 : 5+count] {
-				if name, known := types.RawClassFQN(marker.Type()); known {
-					if inherited, _ := LambdaInterfaceSerializable(d.FunctionContext.InvocationMetadata, name, d.Work); inherited {
-						return unsupportedLambdaSource(req, "original factory disables serialization on a Serializable marker")
+		if req.Identity.Name == "altMetafactory" {
+			flags, _ := intFromLiteral(req.StaticArgs[3])
+			if flags&lambdaFlagMarkers != 0 {
+				count, _ := intFromLiteral(req.StaticArgs[4])
+				for _, marker := range req.StaticArgs[5 : 5+count] {
+					if name, known := types.RawClassFQN(marker.Type()); known {
+						if inherited, _ := LambdaInterfaceSerializable(d.FunctionContext.InvocationMetadata, name, d.Work); inherited {
+							return unsupportedLambdaSource(req, "original factory disables serialization on a Serializable marker")
+						}
 					}
 				}
 			}
@@ -109,10 +123,14 @@ func t19LambdaAdapter(req CallSiteRequest, d *Decompiler, sim StackSimulation, r
 	// losing the marker at its creation site. Preserve the existing poly form.
 	priorPartialBlock := d.blockPartialFunctionalTarget
 	d.blockPartialFunctionalTarget = false
-	if req.Identity.Name == "altMetafactory" && len(req.StaticArgs) >= 5 {
+	if req.Identity.Name == "altMetafactory" && len(req.StaticArgs) >= 4 {
 		flags, _ := intFromLiteral(req.StaticArgs[3])
-		count, _ := intFromLiteral(req.StaticArgs[4])
-		d.blockPartialFunctionalTarget = flags&lambdaFlagMarkers != 0 && count > 0
+		hasMarkers := false
+		if flags&lambdaFlagMarkers != 0 && len(req.StaticArgs) >= 5 {
+			count, _ := intFromLiteral(req.StaticArgs[4])
+			hasMarkers = count > 0
+		}
+		d.blockPartialFunctionalTarget = hasMarkers || flags&lambdaFlagSerializable != 0
 	}
 	defer func() { d.blockPartialFunctionalTarget = priorPartialBlock }()
 	if d.getenv("JDEC_METHODREF_INSTANTIATED_TYPE_OFF") == "" && len(static) >= 3 {
@@ -149,7 +167,7 @@ func t19LambdaAdapter(req CallSiteRequest, d *Decompiler, sim StackSimulation, r
 				}
 				return invalidDispatch(req, FamilyLambda, DiagBootstrapArgMismatch, err.Error(), resultType)
 			}
-			return okDispatch(req, FamilyLambda, t19PreserveMarkers(req, val, resultType), values.EffectCall|values.EffectAllocate)
+			return okDispatch(req, FamilyLambda, t19PreserveMarkersWithDecompiler(d, req, val, resultType), values.EffectCall|values.EffectAllocate)
 		}
 		val, err := t19InlineLambda(req, d, static, impl, capturedEval, resultType)
 		if err != nil {
@@ -161,14 +179,14 @@ func t19LambdaAdapter(req CallSiteRequest, d *Decompiler, sim StackSimulation, r
 			}
 			return invalidDispatch(req, FamilyLambda, DiagBootstrapArgMismatch, err.Error(), resultType)
 		}
-		return okDispatch(req, FamilyLambda, t19PreserveMarkers(req, val, resultType), values.EffectCall|values.EffectAllocate)
+		return okDispatch(req, FamilyLambda, t19PreserveMarkersWithDecompiler(d, req, val, resultType), values.EffectCall|values.EffectAllocate)
 	}
 
 	if val := methodRefCheckedInput(d, req, static, impl, resultType); val != nil {
-		return okDispatch(req, FamilyLambda, t19PreserveMarkers(req, val, resultType), values.EffectCall|values.EffectAllocate)
+		return okDispatch(req, FamilyLambda, t19PreserveMarkersWithDecompiler(d, req, val, resultType), values.EffectCall|values.EffectAllocate)
 	}
 	val := t19MethodRef(req, d, static, impl, req.DynamicArgs, resultType)
-	return okDispatch(req, FamilyLambda, t19PreserveMarkers(req, val, resultType), values.EffectCall|values.EffectAllocate)
+	return okDispatch(req, FamilyLambda, t19PreserveMarkersWithDecompiler(d, req, val, resultType), values.EffectCall|values.EffectAllocate)
 }
 
 func t19EvalOrder(pop []values.JavaValue) []values.JavaValue {
@@ -622,6 +640,10 @@ func t19OwnerSource(owner string, funcCtx *class_context.ClassContext) string {
 
 // Marker interfaces are part of lambda identity, not a later runtime cast.
 func t19PreserveMarkers(req CallSiteRequest, value values.JavaValue, resultType types.JavaType) values.JavaValue {
+	return t19PreserveMarkersWithDecompiler(nil, req, value, resultType)
+}
+
+func t19PreserveMarkersWithDecompiler(d *Decompiler, req CallSiteRequest, value values.JavaValue, resultType types.JavaType) values.JavaValue {
 	if cv, ok := values.UnpackSoltValue(value).(*values.CustomValue); ok && cv.Flag == "lambda" {
 		cv.OriginPC, cv.HasOriginPC = req.OriginPC, true
 		cv.MarkOriginalLambdaFactory(req.OriginPC)
@@ -629,20 +651,50 @@ func t19PreserveMarkers(req CallSiteRequest, value values.JavaValue, resultType 
 			cv.BindOriginalLambdaFactorySignature(req.CallSiteName, req.CallSiteDescriptor, t19MethodTypeDesc(req.StaticArgs[0]))
 		}
 	}
-	if req.Identity.Name != "altMetafactory" || len(req.StaticArgs) < 5 {
+	if req.Identity.Name != "altMetafactory" || len(req.StaticArgs) < 4 {
 		return value
 	}
 	flags, _ := intFromLiteral(req.StaticArgs[3])
-	if flags&lambdaFlagMarkers == 0 {
-		return value
+	var markers []types.JavaType
+	if flags&lambdaFlagMarkers != 0 && len(req.StaticArgs) >= 5 {
+		n, _ := intFromLiteral(req.StaticArgs[4])
+		if n > 0 && 5+n <= len(req.StaticArgs) {
+			markers = make([]types.JavaType, 0, n+1)
+			for _, m := range req.StaticArgs[5 : 5+n] {
+				markers = append(markers, m.Type().Copy())
+			}
+		}
 	}
-	n, _ := intFromLiteral(req.StaticArgs[4])
-	if n <= 0 {
-		return value
+	if flags&lambdaFlagSerializable != 0 {
+		isSer := func(t types.JavaType) bool {
+			raw, known := types.RawClassFQN(t)
+			if !known {
+				return false
+			}
+			if raw == "java.io.Serializable" {
+				return true
+			}
+			if d != nil && d.FunctionContext != nil && d.FunctionContext.InvocationMetadata != nil {
+				inherited, _ := LambdaInterfaceSerializable(d.FunctionContext.InvocationMetadata, raw, d.Work)
+				return inherited
+			}
+			return false
+		}
+		alreadySerializable := isSer(resultType)
+		if !alreadySerializable {
+			for _, m := range markers {
+				if isSer(m) {
+					alreadySerializable = true
+					break
+				}
+			}
+		}
+		if !alreadySerializable {
+			markers = append(markers, types.NewJavaClass("java.io.Serializable"))
+		}
 	}
-	markers := make([]types.JavaType, 0, n)
-	for _, m := range req.StaticArgs[5 : 5+n] {
-		markers = append(markers, m.Type().Copy())
+	if len(markers) == 0 {
+		return value
 	}
 	primary := resultType.Copy()
 	// The bootstrap return descriptor gives only the interface erasure. Its

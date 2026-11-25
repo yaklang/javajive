@@ -40,6 +40,19 @@ func (c *ClassObjectDumper) lambdaOriginalNestUsesClosed(method *MemberInfo, wor
 	return true
 }
 
+func (c *ClassObjectDumper) allowRetainedSerializableLambda(work *workbudget.Budget) bool {
+	if c == nil || !c.options.RetainUnprovedSource || c.getenv("JDEC_RETAIN_SERIALIZABLE_LAMBDA_OFF") != "" {
+		return false
+	}
+	if work != nil && work.Err() != nil {
+		return false
+	}
+	if c.Work != nil && c.Work.Err() != nil {
+		return false
+	}
+	return true
+}
+
 // Declaration ownership is independent of an arrow or compiler-reference
 // source representation. Each renderer must still close its own port, compiler
 // metadata and final source consumption obligations.
@@ -48,7 +61,14 @@ func (c *ClassObjectDumper) lambdaOriginalDeclarationUsesClosed(method *MemberIn
 		return false
 	}
 	parameters, known := nativeLambdaBodyDeclarationSchema(c.obj, method, work)
-	return known || parameters != nil && nativeLambdaBodyUseProjection(c.obj, method, work, parameters, nil, true)
+	if known || parameters != nil && nativeLambdaBodyUseProjection(c.obj, method, work, parameters, nil, true) {
+		return true
+	}
+	if !c.allowRetainedSerializableLambda(work) {
+		return false
+	}
+	parameters, known = nativeLambdaBodyDeclarationSchemaWithOptions(c.obj, method, work, true)
+	return known || parameters != nil && nativeLambdaBodyUseProjectionWithOptions(c.obj, method, work, parameters, nil, true, true)
 }
 
 func (c *ClassObjectDumper) lambdaBodyOriginalUseClosed(method *MemberInfo, work *workbudget.Budget) bool {
@@ -63,7 +83,10 @@ func (c *ClassObjectDumper) lambdaBodyOriginalUseClosedAtFactory(method *MemberI
 	if !known {
 		return false
 	}
-	return parameters != nil || nativeLambdaBodyOriginalUseClosed(c.obj, method, work)
+	if parameters != nil || nativeLambdaBodyOriginalUseClosed(c.obj, method, work) {
+		return true
+	}
+	return c.allowRetainedSerializableLambda(work) && nativeLambdaBodyOriginalUseClosedWithOptions(c.obj, method, work, true)
 }
 
 // A private implementation is visible to its entire original modern nest.

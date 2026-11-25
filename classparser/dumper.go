@@ -136,8 +136,9 @@ type ClassObjectDumper struct {
 	Work                        *workbudget.Budget
 	diagTruncated               bool
 	// Set by actual degraded output, never by scanning user literals/comments.
-	sourceDegraded         bool
-	overloadFamilyUnproven bool
+	sourceDegraded                  bool
+	overloadFamilyUnproven          bool
+	reconciledGenericSuperInterface bool
 	overloadUnknownSeen    map[string]bool
 	// Set only inside one constructor effect proof after checking the exact
 	// final receiver and its complete original finalizer ancestry.
@@ -1045,6 +1046,7 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 	// symbol". Kill-switch JDEC_EXTERNAL_NESTED_DOT_OFF still applies inside nestedTypeShouldDot.
 	funcCtx.SiblingSuperTypes = c.buildSiblingSuperTypes()
 	funcCtx.SiblingClassAccessible = c.buildSiblingClassAccessible()
+	funcCtx.SiblingClassSig = c.buildSiblingClassSig()
 	// Precompute the same-package simple names that must be rendered fully-qualified because the class
 	// also references a different-package type of the same simple name (whose import would shadow the
 	// same-package one). Constant-pool based, so it is independent of body render order. See
@@ -1091,6 +1093,7 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 	origSuperClassName := supperClassName
 	buildSuperHeader := func(superName string) (string, bool) {
 		genericSuperByRaw := map[string]string{}
+		genericSuperTypeByRaw := map[string]types.JavaType{}
 		hadGeneric := false
 		if c.getenv("JDEC_GENERIC_SUPERS_OFF") == "" {
 			for _, attr := range c.obj.Attributes {
@@ -1113,6 +1116,7 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 					// supertype in the signature adds nothing and must not shadow the erased name.
 					if strings.Contains(rendered, "<") {
 						genericSuperByRaw[raw] = rendered
+						genericSuperTypeByRaw[raw] = t
 						hadGeneric = true
 					}
 				}
@@ -1126,30 +1130,12 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 			}
 		}
 
-		renderedSuper := ""
-		ifaces := c.obj.Interfaces
-		interfaceLists := make([]string, 0, len(ifaces)+1)
-		if superName != "" && superName != "java.lang.Object" {
-			if isEnum && (superName == "java.lang.Enum" || superName == "Enum") {
-				superName = ""
-				renderedSuper = ""
-			} else {
-				funcCtx.Import(superName)
-				rawSuper := superName
-				superName = funcCtx.ShortTypeName(superName)
-				if generic, ok := genericSuperByRaw[rawSuper]; ok {
-					superName = generic
-				}
-				if superName != "" {
-					if !isEnum {
-						renderedSuper += fmt.Sprintf(" extends %s", superName)
-					} else {
-						interfaceLists = append(interfaceLists, superName)
-					}
-				}
-			}
+		rawSuper := ""
+		if superName != "" && superName != "java.lang.Object" && !(isEnum && (superName == "java.lang.Enum" || superName == "Enum")) {
+			rawSuper = superName
 		}
-
+		ifaces := c.obj.Interfaces
+		rawIfaceNames := make([]string, 0, len(ifaces))
 		for _, u := range ifaces {
 			info, err := c.obj.getConstantInfo(u)
 			if err != nil {
@@ -1166,7 +1152,39 @@ func (c *ClassObjectDumper) DumpClass() (rendered string, dumpError error) {
 			if isAnnotation && rawIfaceName == "java.lang.annotation.Annotation" {
 				continue
 			}
-			name = funcCtx.ShortTypeName(rawIfaceName)
+			rawIfaceNames = append(rawIfaceNames, rawIfaceName)
+		}
+		if c.options.RetainUnprovedSource && c.getenv("JDEC_GENERIC_IFACE_RECONCILE_OFF") == "" {
+			if c.reconcileGenericSuperInterfaces(funcCtx, rawSuper, rawIfaceNames, genericSuperByRaw, genericSuperTypeByRaw) {
+				c.reconciledGenericSuperInterface = true
+				hadGeneric = len(genericSuperByRaw) > 0
+			}
+		}
+
+		renderedSuper := ""
+		interfaceLists := make([]string, 0, len(rawIfaceNames)+1)
+		if superName != "" && superName != "java.lang.Object" {
+			if isEnum && (superName == "java.lang.Enum" || superName == "Enum") {
+				superName = ""
+				renderedSuper = ""
+			} else {
+				funcCtx.Import(superName)
+				superName = funcCtx.ShortTypeName(rawSuper)
+				if generic, ok := genericSuperByRaw[rawSuper]; ok {
+					superName = generic
+				}
+				if superName != "" {
+					if !isEnum {
+						renderedSuper += fmt.Sprintf(" extends %s", superName)
+					} else {
+						interfaceLists = append(interfaceLists, superName)
+					}
+				}
+			}
+		}
+
+		for _, rawIfaceName := range rawIfaceNames {
+			name := funcCtx.ShortTypeName(rawIfaceName)
 			if generic, ok := genericSuperByRaw[rawIfaceName]; ok {
 				name = generic
 			}
@@ -13227,6 +13245,9 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 			if c.serializableReferencePlan != nil && c.serializableReferencePlan.helper == method {
 				// Final publication still requires every original factory's
 				// retained graph and emitted source before regeneration is accepted.
+				continue
+			}
+			if c.allowRetainedSerializableLambda(c.Work) && isSyntheticDeserializeLambdaMethod(c.obj, method) {
 				continue
 			}
 		}

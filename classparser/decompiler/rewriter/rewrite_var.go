@@ -188,6 +188,7 @@ func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.Ja
 		coverUndeclaredGeneratedLocals(sts)
 		dropDuplicateDeclarations(sts)
 	}
+	declareUncoveredMultiDefGeneratedLocals(sts)
 	// Narrow a generated local declared `Object varN = null` to the single concrete reference type
 	// that ALL of its non-null reassignments store, when varN is used only as a receiver or
 	// assignment target. The slot renamer can fuse a null-initialized Object slot with a
