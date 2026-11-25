@@ -45,3 +45,42 @@ func (f *RefMember) sourceFieldReceiver(ctx *class_context.ClassContext) JavaVal
 	}
 	return &CastExpression{Value: f.Object, TargetType: types.NewJavaClass(strings.ReplaceAll(cast, "/", ".")), Binding: true}
 }
+
+// objectReceiverFieldCast returns the ShortTypeName cast target when a
+// GETFIELD or PUTFIELD accesses a member on a plain local variable whose
+// static type is java.lang.Object and whose decoded fieldref owner is a
+// distinct concrete reference class (mirroring objectReceiverInvokeCast).
+func (f *RefMember) objectReceiverFieldCast(ctx *class_context.ClassContext) string {
+	if f == nil || ctx == nil || !f.HasOriginPC || f.OriginPC < 0 || f.OriginPC > 65535 || class_context.SafeIdentifier(f.Member) != f.Member {
+		return ""
+	}
+	if isNilJavaValue(f.Object) || ctx.Getenv("JDEC_OBJECT_RECV_FIELD_CAST_OFF") != "" {
+		return ""
+	}
+	w := f.originalFieldRead
+	if w == nil {
+		w = f.originalFieldWrite
+	}
+	if w == nil || w.pc != f.OriginPC || w.name != f.Member || w.owner == "" {
+		return ""
+	}
+	ref, ok := UnpackSoltValue(f.Object).(*JavaRef)
+	if !ok || ref == nil || ref.IsThis || ref.IsParam || ref.CustomValue != nil || ref.StackVar != nil {
+		return ""
+	}
+	rt := ref.Type()
+	if rt == nil {
+		return ""
+	}
+	if jc, ok := rt.RawType().(*types.JavaClass); !ok || jc == nil || jc.Name != "java.lang.Object" {
+		return ""
+	}
+	owner := strings.ReplaceAll(w.owner, "/", ".")
+	if owner == "java.lang.Object" || strings.HasPrefix(owner, "[") {
+		return ""
+	}
+	if !strings.Contains(owner, ".") && ctx.IsTypeParam(owner) {
+		return ""
+	}
+	return ctx.ShortTypeName(owner)
+}

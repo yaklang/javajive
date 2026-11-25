@@ -186,7 +186,7 @@ func (c *ClassObjectDumper) lambdaParameterMetadataInFactoryScope(method *Member
 		return nil, true
 	}
 	compilerClosed := c.options.SourceCompiler == NativeJavac8 && c.options.TargetSourceVersion == 8 || c.artifactLambdaMetadataAllowed() && sourceLambdaImplementationFlags(method.AccessFlags)
-	if !compilerClosed || !native8LambdaParameterCompilerFlagClosed(c.obj, work) || !nativeLambdaBodyUseProjection(c.obj, method, work, projection, factory, false) || projection.factory == nil {
+	if !compilerClosed || !native8LambdaParameterCompilerFlagClosed(c.obj, work) || !nativeLambdaBodyUseProjectionWithOptions(c.obj, method, work, projection, factory, false, c.allowRetainedSerializableLambda(work)) || projection.factory == nil {
 		return nil, false
 	}
 	factoryName, named := lambdaFactoryNameComponent(projection.factory)

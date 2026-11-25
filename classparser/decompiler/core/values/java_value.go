@@ -627,6 +627,9 @@ func (j *RefMember) String(funcCtx *class_context.ClassContext) string {
 	if receiver := j.sourceFieldReceiver(funcCtx); receiver != nil {
 		return fmt.Sprintf("%s.%s", receiver.String(funcCtx), class_context.SafeIdentifier(j.Member))
 	}
+	if castCls := j.objectReceiverFieldCast(funcCtx); castCls != "" {
+		return fmt.Sprintf("((%s)(%s)).%s", castCls, AssignmentOperand(j.Object, funcCtx), class_context.SafeIdentifier(j.Member))
+	}
 	obj := AssignmentOperand(j.Object, funcCtx)
 	// A ternary used as a field receiver MUST be parenthesized: `?:` binds looser than `.`,
 	// so `(cond) ? (a) : (b).field` parses as `(cond) ? (a) : ((b).field)` (Range vs Cut →

@@ -1,6 +1,7 @@
 package javaclassparser
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
@@ -138,6 +139,83 @@ func collectStmtVars(sts []statements.Statement, ctx *class_context.ClassContext
 			}
 			if assign, ok := s.SourceAssignmentForward(); ok && assign != nil {
 				collectStmtVars([]statements.Statement{assign}, ctx, ids, writtenIDs, names, usesThis, depth+1)
+			}
+		}
+	}
+}
+
+func collectStmtVarReads(sts []statements.Statement, ctx *class_context.ClassContext, reads map[*coreutils.VariableId]bool, depth int) {
+	if depth > 64 || reads == nil {
+		return
+	}
+	for _, st := range sts {
+		if st == nil {
+			continue
+		}
+		switch s := st.(type) {
+		case *statements.ReturnStatement:
+			if s.JavaValue != nil {
+				collectValueVarReads(s.JavaValue, ctx, reads, nil, nil, 0)
+			}
+		case *statements.AssignStatement:
+			if s.ArrayMember != nil {
+				collectValueVarReads(s.ArrayMember, ctx, reads, nil, nil, 0)
+			}
+			if s.LeftValue != nil {
+				ref, ok := values.UnpackSoltValue(s.LeftValue).(*values.JavaRef)
+				if !ok || ref == nil || ref.CustomValue != nil || ref.StackVar != nil {
+					collectValueVarReads(s.LeftValue, ctx, reads, nil, nil, 0)
+				}
+			}
+			if s.JavaValue != nil {
+				collectValueVarReads(s.JavaValue, ctx, reads, nil, nil, 0)
+			}
+		case *statements.ExpressionStatement:
+			if s.Expression != nil {
+				collectValueVarReads(s.Expression, ctx, reads, nil, nil, 0)
+			}
+		case *statements.IfStatement:
+			collectValueVarReads(s.Condition, ctx, reads, nil, nil, 0)
+			collectStmtVarReads(s.IfBody, ctx, reads, depth+1)
+			collectStmtVarReads(s.ElseBody, ctx, reads, depth+1)
+		case *statements.WhileStatement:
+			collectValueVarReads(s.ConditionValue, ctx, reads, nil, nil, 0)
+			collectStmtVarReads(s.Body, ctx, reads, depth+1)
+		case *statements.DoWhileStatement:
+			collectValueVarReads(s.ConditionValue, ctx, reads, nil, nil, 0)
+			collectStmtVarReads(s.Body, ctx, reads, depth+1)
+		case *statements.ForStatement:
+			if s.InitVar != nil {
+				collectStmtVarReads([]statements.Statement{s.InitVar}, ctx, reads, depth+1)
+			}
+			if s.Condition != nil {
+				collectValueVarReads(s.Condition.Condition, ctx, reads, nil, nil, 0)
+			}
+			if s.EndExp != nil {
+				collectStmtVarReads([]statements.Statement{s.EndExp}, ctx, reads, depth+1)
+			}
+			collectStmtVarReads(s.SubStatements, ctx, reads, depth+1)
+		case *statements.SwitchStatement:
+			collectValueVarReads(s.Value, ctx, reads, nil, nil, 0)
+			for _, item := range s.Cases {
+				if item != nil {
+					collectStmtVarReads(item.Body, ctx, reads, depth+1)
+				}
+			}
+		case *statements.SynchronizedStatement:
+			collectValueVarReads(s.Argument, ctx, reads, nil, nil, 0)
+			collectStmtVarReads(s.Body, ctx, reads, depth+1)
+		case *statements.TryCatchStatement:
+			collectStmtVarReads(s.TryBody, ctx, reads, depth+1)
+			for _, body := range s.CatchBodies {
+				collectStmtVarReads(body, ctx, reads, depth+1)
+			}
+		case *statements.CustomStatement:
+			if v, ok := s.SourceThrowOperand(); ok && v != nil {
+				collectValueVarReads(v, ctx, reads, nil, nil, 0)
+			}
+			if assign, ok := s.SourceAssignmentForward(); ok && assign != nil {
+				collectStmtVarReads([]statements.Statement{assign}, ctx, reads, depth+1)
 			}
 		}
 	}
@@ -1104,6 +1182,12 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 	}
 	var remRewrites []remainingAssignRewrite
 	remRewriteByAssign := map[*statements.AssignStatement]values.JavaValue{}
+	type remainingExprRewrite struct {
+		exprStmt *statements.ExpressionStatement
+		newExpr  values.JavaValue
+	}
+	var remExprRewrites []remainingExprRewrite
+	remExprByStmt := map[*statements.ExpressionStatement]values.JavaValue{}
 	type deferredEntry struct {
 		prefixIdx int
 		st        statements.Statement
@@ -1404,9 +1488,12 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 			continue
 
 		case *statements.ExpressionStatement:
+			var pendingExpr values.JavaValue
 			if s != nil && s.Expression != nil && len(env) > 0 {
 				if sub, ok := substCtorValue(s.Expression, env, c.FuncCtx, 0); ok {
-					s.Expression = sub
+					if sub != s.Expression {
+						pendingExpr = sub
+					}
 				} else {
 					written := map[*coreutils.VariableId]bool{}
 					collectStmtVars([]statements.Statement{st}, c.FuncCtx, nil, written, nil, nil, 0)
@@ -1423,6 +1510,10 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 				delete(env, id)
 			}
 			appendRemaining(idx, st)
+			if s != nil && pendingExpr != nil {
+				remExprRewrites = append(remExprRewrites, remainingExprRewrite{exprStmt: s, newExpr: pendingExpr})
+				remExprByStmt[s] = pendingExpr
+			}
 			continue
 		default:
 			written := map[*coreutils.VariableId]bool{}
@@ -1467,7 +1558,7 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 		}
 	}
 
-	if len(folded) == 0 && !mutatedDelegate && len(deferred) == 0 && len(remRewrites) == 0 {
+	if len(folded) == 0 && !mutatedDelegate && len(deferred) == 0 && len(remRewrites) == 0 && len(remExprRewrites) == 0 {
 		return
 	}
 	newArgs := make([]values.JavaValue, len(delegateArgs))
@@ -1478,12 +1569,67 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 		}
 		newArgs[i] = sub
 	}
+	if len(folded) > 0 {
+		foldedList := make([]statements.Statement, 0, len(folded))
+		for st := range folded {
+			foldedList = append(foldedList, st)
+		}
+		foldedWritten := map[*coreutils.VariableId]bool{}
+		collectStmtVars(foldedList, c.FuncCtx, nil, foldedWritten, nil, nil, 0)
+		// Abort folding if any remaining/deferred statement or rewritten delegate
+		// argument still reads a non-parameter variable written in folded statements.
+		postFoldReads := map[*coreutils.VariableId]bool{}
+		for _, arg := range newArgs {
+			collectValueVarReads(arg, c.FuncCtx, postFoldReads, nil, nil, 0)
+		}
+		if len(remaining) > 0 {
+			for _, st := range remaining {
+				switch s := st.(type) {
+				case *statements.AssignStatement:
+					if newRHS, ok := remRewriteByAssign[s]; ok && newRHS != nil {
+						cp := *s
+						cp.JavaValue = newRHS
+						collectStmtVarReads([]statements.Statement{&cp}, c.FuncCtx, postFoldReads, 0)
+					} else {
+						collectStmtVarReads([]statements.Statement{st}, c.FuncCtx, postFoldReads, 0)
+					}
+				case *statements.ExpressionStatement:
+					if newExpr, ok := remExprByStmt[s]; ok && newExpr != nil {
+						collectValueVarReads(newExpr, c.FuncCtx, postFoldReads, nil, nil, 0)
+					} else {
+						collectStmtVarReads([]statements.Statement{st}, c.FuncCtx, postFoldReads, 0)
+					}
+				default:
+					collectStmtVarReads([]statements.Statement{st}, c.FuncCtx, postFoldReads, 0)
+				}
+			}
+		}
+		for _, d := range deferred {
+			if d.newRHS != nil && d.assign != nil {
+				cp := *d.assign
+				cp.JavaValue = d.newRHS
+				collectStmtVarReads([]statements.Statement{&cp}, c.FuncCtx, postFoldReads, 0)
+			} else if d.st != nil {
+				collectStmtVarReads([]statements.Statement{d.st}, c.FuncCtx, postFoldReads, 0)
+			}
+		}
+		for id := range foldedWritten {
+			if paramByID[id] == nil && postFoldReads[id] {
+				return
+			}
+		}
+	}
 	if hasRemainingBarrier && inlinedAnyBarrier && !canCommitWithRemainingThisFieldStores(remaining, remRewriteByAssign, env, newArgs, p.delegate, c.obj.GetSupperClassName(), c.FuncCtx) {
 		return
 	}
 	for _, rw := range remRewrites {
 		if rw.assign != nil && rw.newRHS != nil {
 			rw.assign.JavaValue = rw.newRHS
+		}
+	}
+	for _, rw := range remExprRewrites {
+		if rw.exprStmt != nil && rw.newExpr != nil {
+			rw.exprStmt.Expression = rw.newExpr
 		}
 	}
 	for _, d := range deferred {
@@ -1496,27 +1642,286 @@ func (c *ClassObjectDumper) foldRetainedConstructorPrefix(p *constructorSourceBo
 	p.foldedStatements = folded
 }
 
+func ctorDefaultInitializer(t types.JavaType) string {
+	if t == nil {
+		return ""
+	}
+	if t.IsArray() {
+		return "null"
+	}
+	if primer, ok := t.RawType().(*types.JavaPrimer); ok && primer != nil {
+		switch primer.Name {
+		case types.JavaBoolean:
+			return "false"
+		case types.JavaByte, types.JavaShort, types.JavaChar, types.JavaInteger:
+			return "0"
+		case types.JavaLong:
+			return "0L"
+		case types.JavaFloat:
+			return "0.0f"
+		case types.JavaDouble:
+			return "0.0d"
+		case types.JavaVoid:
+			return ""
+		}
+	}
+	return "null"
+}
+
+func cloneDeclaredMap(declared map[string]bool) map[string]bool {
+	cloned := make(map[string]bool, len(declared))
+	for k, v := range declared {
+		if v {
+			cloned[k] = true
+		}
+	}
+	return cloned
+}
+
+// collectRetainedPrefixHoistedDecls hoists declarations for non-parameter locals
+// written inside nested branches/loops whose live range reaches sibling/outer
+// scopes (or delegate target argument) before any prior top-level declaration.
+func collectRetainedPrefixHoistedDecls(prefix []statements.Statement, targetArg values.JavaValue, ctx *class_context.ClassContext, declared map[string]bool) (string, bool) {
+	if ctx == nil || len(prefix) == 0 {
+		return "", true
+	}
+	type localWriteInfo struct {
+		firstTopWriteIdx int
+		firstNestedIdx   int
+		scopeCount       int
+		escapedTopOrArg  bool
+		typ              types.JavaType
+		typStr           string
+		conflict         bool
+	}
+	infos := map[string]*localWriteInfo{}
+	ensureInfo := func(name string) *localWriteInfo {
+		if info, ok := infos[name]; ok {
+			return info
+		}
+		info := &localWriteInfo{firstTopWriteIdx: -1, firstNestedIdx: -1}
+		infos[name] = info
+		return info
+	}
+	recordWriteType := func(info *localWriteInfo, typ types.JavaType) {
+		if typ == nil {
+			info.conflict = true
+			return
+		}
+		ts := typ.String(ctx)
+		if ts == "" || ctorDefaultInitializer(typ) == "" {
+			info.conflict = true
+			return
+		}
+		if info.typStr == "" {
+			info.typ = typ
+			info.typStr = ts
+			return
+		}
+		if info.typStr != ts {
+			info.conflict = true
+		}
+	}
+	seenNamesInTargetArg := map[string]bool{}
+	collectValueVarReads(targetArg, ctx, nil, seenNamesInTargetArg, nil, 0)
+	for name := range seenNamesInTargetArg {
+		ensureInfo(name).escapedTopOrArg = true
+	}
+
+	var walkNested func(sts []statements.Statement, topIdx int, scopeHits map[string]bool)
+	walkNested = func(sts []statements.Statement, topIdx int, scopeHits map[string]bool) {
+		for _, st := range sts {
+			if st == nil {
+				continue
+			}
+			var assign *statements.AssignStatement
+			switch s := st.(type) {
+			case *statements.AssignStatement:
+				assign = s
+			case *statements.CustomStatement:
+				if a, ok := s.SourceAssignmentForward(); ok {
+					assign = a
+				}
+			}
+			if assign != nil && assign.ArrayMember == nil {
+				if ref, ok := values.UnpackSoltValue(assign.LeftValue).(*values.JavaRef); ok && ref != nil && !ref.IsThis && ref.CustomValue == nil && ref.StackVar == nil {
+					if name := ref.String(ctx); name != "" {
+						info := ensureInfo(name)
+						if info.firstNestedIdx < 0 || topIdx < info.firstNestedIdx {
+							info.firstNestedIdx = topIdx
+						}
+						scopeHits[name] = true
+						recordWriteType(info, ref.Type())
+					}
+				}
+			}
+			readNames := map[string]bool{}
+			collectStmtVars([]statements.Statement{st}, ctx, nil, nil, readNames, nil, 0)
+			for name := range readNames {
+				scopeHits[name] = true
+			}
+			switch s := st.(type) {
+			case *statements.IfStatement:
+				walkNested(s.IfBody, topIdx, scopeHits)
+				if len(s.ElseBody) > 0 {
+					walkNested(s.ElseBody, topIdx, scopeHits)
+				}
+			case *statements.DoWhileStatement:
+				bodyHits := map[string]bool{}
+				walkNested(s.Body, topIdx, bodyHits)
+				condNames := map[string]bool{}
+				collectValueVarReads(s.ConditionValue, ctx, nil, condNames, nil, 0)
+				for n := range bodyHits {
+					if condNames[n] {
+						ensureInfo(n).escapedTopOrArg = true
+					}
+					scopeHits[n] = true
+				}
+			}
+		}
+	}
+
+	for idx, st := range prefix {
+		if st == nil {
+			continue
+		}
+		var assign *statements.AssignStatement
+		switch s := st.(type) {
+		case *statements.AssignStatement:
+			assign = s
+		case *statements.CustomStatement:
+			if a, ok := s.SourceAssignmentForward(); ok {
+				assign = a
+			}
+		}
+		if assign != nil {
+			if assign.ArrayMember == nil {
+				if ref, ok := values.UnpackSoltValue(assign.LeftValue).(*values.JavaRef); ok && ref != nil && !ref.IsThis && ref.CustomValue == nil && ref.StackVar == nil {
+					if name := ref.String(ctx); name != "" {
+						info := ensureInfo(name)
+						if info.firstTopWriteIdx < 0 {
+							info.firstTopWriteIdx = idx
+						}
+						if info.firstNestedIdx >= 0 && idx > info.firstNestedIdx {
+							info.escapedTopOrArg = true
+						}
+						info.scopeCount++
+						recordWriteType(info, ref.Type())
+					}
+				}
+			}
+			rhsNames := map[string]bool{}
+			collectStmtVars([]statements.Statement{assign}, ctx, nil, nil, rhsNames, nil, 0)
+			for name := range rhsNames {
+				if info, ok := infos[name]; ok && info.firstNestedIdx >= 0 && idx > info.firstNestedIdx {
+					info.escapedTopOrArg = true
+				}
+			}
+			continue
+		}
+		switch s := st.(type) {
+		case *statements.ExpressionStatement, *statements.ReturnStatement:
+			names := map[string]bool{}
+			collectStmtVars([]statements.Statement{st}, ctx, nil, nil, names, nil, 0)
+			for name := range names {
+				if info, ok := infos[name]; ok && info.firstNestedIdx >= 0 && idx > info.firstNestedIdx {
+					info.escapedTopOrArg = true
+				}
+			}
+		case *statements.IfStatement:
+			condNames := map[string]bool{}
+			collectValueVarReads(s.Condition, ctx, nil, condNames, nil, 0)
+			for name := range condNames {
+				if info, ok := infos[name]; ok && info.firstNestedIdx >= 0 && idx > info.firstNestedIdx {
+					info.escapedTopOrArg = true
+				}
+			}
+			stmtHits := map[string]bool{}
+			walkNested(s.IfBody, idx, stmtHits)
+			if len(s.ElseBody) > 0 {
+				walkNested(s.ElseBody, idx, stmtHits)
+			}
+			for n := range stmtHits {
+				ensureInfo(n).scopeCount++
+			}
+		case *statements.DoWhileStatement:
+			bodyHits := map[string]bool{}
+			walkNested(s.Body, idx, bodyHits)
+			condNames := map[string]bool{}
+			collectValueVarReads(s.ConditionValue, ctx, nil, condNames, nil, 0)
+			for n := range bodyHits {
+				info := ensureInfo(n)
+				info.scopeCount++
+				if condNames[n] {
+					info.escapedTopOrArg = true
+				}
+			}
+		}
+	}
+
+	var hoistNames []string
+	for name, info := range infos {
+		if declared[name] || info.firstNestedIdx < 0 {
+			continue
+		}
+		if info.firstTopWriteIdx >= 0 && info.firstTopWriteIdx < info.firstNestedIdx {
+			continue
+		}
+		if !info.escapedTopOrArg && info.scopeCount < 2 {
+			continue
+		}
+		if info.conflict || info.typ == nil || info.typStr == "" {
+			return "", false
+		}
+		hoistNames = append(hoistNames, name)
+	}
+	sort.Strings(hoistNames)
+	var b strings.Builder
+	for _, name := range hoistNames {
+		info := infos[name]
+		init := ctorDefaultInitializer(info.typ)
+		if init == "" {
+			return "", false
+		}
+		declared[name] = true
+		b.WriteString(info.typStr)
+		b.WriteByte(' ')
+		b.WriteString(name)
+		b.WriteString(" = ")
+		b.WriteString(init)
+		b.WriteString(";\n")
+	}
+	return b.String(), true
+}
+
 func renderRetainedPrefixStatements(sts []statements.Statement, ctx *class_context.ClassContext, declared map[string]bool) (string, bool) {
 	var b strings.Builder
 	writeAssign := func(s *statements.AssignStatement) {
 		prefix := ""
-		if s.ArrayMember == nil && (s.IsFirst || s.IsDeclare) {
-			if ref, ok := values.UnpackSoltValue(s.LeftValue).(*values.JavaRef); ok && ref != nil && ctx != nil {
-				if name := ref.String(ctx); name != "" {
-					declared[name] = true
-				}
-			}
-		} else if s.ArrayMember == nil {
+		renderStmt := s
+		if s.ArrayMember == nil {
 			if ref, ok := values.UnpackSoltValue(s.LeftValue).(*values.JavaRef); ok && ref != nil && !ref.IsThis && ref.CustomValue == nil && ref.StackVar == nil && ctx != nil {
 				name := ref.String(ctx)
-				if name != "" && !declared[name] && ref.Type() != nil {
+				if name != "" && declared[name] {
+					if s.IsDeclare && s.JavaValue == nil {
+						return
+					}
+					if s.IsFirst || s.IsDeclare {
+						cp := *s
+						cp.IsFirst = false
+						cp.IsDeclare = false
+						renderStmt = &cp
+					}
+				} else if name != "" && (s.IsFirst || s.IsDeclare) {
+					declared[name] = true
+				} else if name != "" && ref.Type() != nil {
 					declared[name] = true
 					prefix = ref.Type().String(ctx) + " "
 				}
 			}
 		}
 		b.WriteString(prefix)
-		b.WriteString(s.String(ctx))
+		b.WriteString(renderStmt.String(ctx))
 		b.WriteString(";\n")
 	}
 	for _, st := range sts {
@@ -1539,13 +1944,13 @@ func renderRetainedPrefixStatements(sts []statements.Statement, ctx *class_conte
 			b.WriteString(";\n")
 		case *statements.IfStatement:
 			cond := values.SimplifyConditionValue(s.Condition).String(ctx)
-			thenStr, ok1 := renderRetainedPrefixStatements(s.IfBody, ctx, declared)
+			thenStr, ok1 := renderRetainedPrefixStatements(s.IfBody, ctx, cloneDeclaredMap(declared))
 			if !ok1 {
 				return "", false
 			}
 			b.WriteString("if (" + cond + ") {\n" + thenStr + "}")
 			if len(s.ElseBody) > 0 {
-				elseStr, ok2 := renderRetainedPrefixStatements(s.ElseBody, ctx, declared)
+				elseStr, ok2 := renderRetainedPrefixStatements(s.ElseBody, ctx, cloneDeclaredMap(declared))
 				if !ok2 {
 					return "", false
 				}
@@ -1553,7 +1958,7 @@ func renderRetainedPrefixStatements(sts []statements.Statement, ctx *class_conte
 			}
 			b.WriteString("\n")
 		case *statements.DoWhileStatement:
-			bodyStr, okB := renderRetainedPrefixStatements(s.Body, ctx, declared)
+			bodyStr, okB := renderRetainedPrefixStatements(s.Body, ctx, cloneDeclaredMap(declared))
 			if !okB {
 				return "", false
 			}
@@ -1654,6 +2059,7 @@ func (c *ClassObjectDumper) planRetainedConstructorPrefixFallback(p *constructor
 		return false
 	}
 	declared := map[string]bool{}
+	paramIDs := map[*coreutils.VariableId]bool{}
 	declarations := make([]string, 0, len(p.params))
 	for i, param := range p.params {
 		ref, ok := param.(*values.JavaRef)
@@ -1662,12 +2068,26 @@ func (c *ClassObjectDumper) planRetainedConstructorPrefixFallback(p *constructor
 		}
 		name := ref.String(c.FuncCtx)
 		declared[name] = true
+		paramIDs[ref.Id] = true
 		declarations = append(declarations, mt.FunctionType().ParamTypes[i].String(c.FuncCtx)+" "+name)
+	}
+	helperReads := map[*coreutils.VariableId]bool{}
+	collectStmtVarReads(p.prefix, c.FuncCtx, helperReads, 0)
+	collectValueVarReads(p.delegate.Arguments[targetArgIdx], c.FuncCtx, helperReads, nil, nil, 0)
+	for id := range helperReads {
+		if !paramIDs[id] && !prefixWrittenIDs[id] {
+			return false
+		}
+	}
+	hoistedDecls, ok := collectRetainedPrefixHoistedDecls(p.prefix, p.delegate.Arguments[targetArgIdx], c.FuncCtx, declared)
+	if !ok {
+		return false
 	}
 	prefixCode, ok := renderRetainedPrefixStatements(p.prefix, c.FuncCtx, declared)
 	if !ok {
 		return false
 	}
+	prefixCode = hoistedDecls + prefixCode
 	helperName, err := c.constructorBoundaryHelperName("prefix", p.pc)
 	if err != nil {
 		return false

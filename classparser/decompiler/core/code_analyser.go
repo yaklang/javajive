@@ -180,6 +180,7 @@ type Decompiler struct {
 	// request or a method-name convention cannot provide that permission.
 	OriginalLambdaDeclaration        func(owner, name, descriptor string) LambdaOriginalDeclaration
 	SerializableLambdaSource         func(CallSiteRequest) (SerializableReferenceSource, bool)
+	RetainUnprovedSource             bool
 	DumpClassLambdaMethod            func(name, desc string, id *utils2.VariableId, captured []values.JavaValue) (string, error)
 	DumpClassLambdaMethodWithAdapter func(name, desc string, id *utils2.VariableId, captured []values.JavaValue, adapter *LambdaReferenceAdapter) (string, error)
 	// The PC is supplied by the original invokedynamic request, never inferred
@@ -4710,8 +4711,10 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		index := Convert2bytesToInt(opcode.Data)
 		staticVal := d.constantPoolGetter(int(index))
 		value := runtimeStackSimulation.Pop().(values.JavaValue)
-		field := values.NewRefMember(runtimeStackSimulation.Pop().(values.JavaValue), staticVal.(*values.JavaClassMember).Member, staticVal.(*values.JavaClassMember).JavaType)
-		if selfOp, ok := d.tryFoldPostIncDec(runtimeStackSimulation, value, field, staticVal.(*values.JavaClassMember)); ok {
+		cm := staticVal.(*values.JavaClassMember)
+		field := values.NewRefMember(runtimeStackSimulation.Pop().(values.JavaValue), cm.Member, cm.JavaType)
+		field.MarkOriginalFieldWrite(cm, int(opcode.CurrentOffset))
+		if selfOp, ok := d.tryFoldPostIncDec(runtimeStackSimulation, value, field, cm); ok {
 			// instance field post-increment/decrement reused as a value (dup_x1 idiom): drop
 			// the bare old value and push `field++` / `field--` so the surrounding ternary or
 			// expression branch stays side-effect-free and can be structured.
@@ -5749,6 +5752,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 				return nil
 			}
 			field := values.NewRefMember(cur.stackConsumed[1], staticVal.Member, staticVal.JavaType)
+			field.MarkOriginalFieldWrite(staticVal, int(cur.CurrentOffset))
 			adoptedFieldStores[cur] = true
 			// Keep the field store enumerable and use the same assignment
 			// lowering as a standalone putfield. A CustomValue string hid its
@@ -7274,8 +7278,10 @@ func (d *Decompiler) ParseStatement() error {
 				index := Convert2bytesToInt(opcode.Data)
 				staticVal := d.constantPoolGetter(int(index))
 				value := opcode.stackConsumed[0]
+				cm, _ := staticVal.(*values.JavaClassMember)
 				field := values.NewRefMember(opcode.stackConsumed[1], staticVal.(*values.JavaClassMember).Member, staticVal.(*values.JavaClassMember).JavaType)
-				if cm, ok := staticVal.(*values.JavaClassMember); ok && cm != nil {
+				field.MarkOriginalFieldWrite(cm, int(opcode.CurrentOffset))
+				if cm != nil {
 					value = d.rebindIncompatibleLoadForSink(opcode, value, cm.JavaType)
 				}
 				var assignSt *statements.AssignStatement

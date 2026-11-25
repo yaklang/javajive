@@ -12,7 +12,20 @@ import (
 // source-publication permission. Native scopes retain their separate producer
 // and ownership proofs. In particular, a request role or ACC_SYNTHETIC alone
 // cannot authorize dropping an observable original declaration.
+func isSyntheticDeserializeLambdaMethod(object *ClassObject, method *MemberInfo) bool {
+	if object == nil || method == nil || !isSyntheticMethod(method.AccessFlags) {
+		return false
+	}
+	name, nk := sourceBridgeUTF8(object, method.NameIndex)
+	descriptor, dk := sourceBridgeUTF8(object, method.DescriptorIndex)
+	return nk && dk && name == "$deserializeLambda$" && descriptor == "(Ljava/lang/invoke/SerializedLambda;)Ljava/lang/Object;"
+}
+
 func nativeLambdaBodyOriginalUseClosed(object *ClassObject, implementation *MemberInfo, work *workbudget.Budget, metadata ...*lambdaParameterMetadata) bool {
+	return nativeLambdaBodyOriginalUseClosedWithOptions(object, implementation, work, false, metadata...)
+}
+
+func nativeLambdaBodyOriginalUseClosedWithOptions(object *ClassObject, implementation *MemberInfo, work *workbudget.Budget, allowSerializable bool, metadata ...*lambdaParameterMetadata) bool {
 	if len(metadata) > 1 {
 		return false
 	}
@@ -23,7 +36,11 @@ func nativeLambdaBodyOriginalUseClosed(object *ClassObject, implementation *Memb
 			return false
 		}
 	}
-	return nativeLambdaBodyUseProjection(object, implementation, work, parameters, nil, false)
+	return nativeLambdaBodyUseProjectionWithOptions(object, implementation, work, parameters, nil, false, allowSerializable)
+}
+
+func nativeLambdaBodyUseProjection(object *ClassObject, implementation *MemberInfo, work *workbudget.Budget, parameters *lambdaParameterMetadata, selected *lambdaSourceFactory, declarationOnly bool) bool {
+	return nativeLambdaBodyUseProjectionWithOptions(object, implementation, work, parameters, selected, declarationOnly, false)
 }
 
 // Classification may inspect a shared declaration without binding a source
@@ -31,7 +48,7 @@ func nativeLambdaBodyOriginalUseClosed(object *ClassObject, implementation *Memb
 // Multiple occurrences in that domain must be copies of the same CP protocol
 // in the same original Code attribute; ordinary callers retain the single-site
 // rule. No table name, implementation name or capture arity picks an origin.
-func nativeLambdaBodyUseProjection(object *ClassObject, implementation *MemberInfo, work *workbudget.Budget, parameters *lambdaParameterMetadata, selected *lambdaSourceFactory, declarationOnly bool) bool {
+func nativeLambdaBodyUseProjectionWithOptions(object *ClassObject, implementation *MemberInfo, work *workbudget.Budget, parameters *lambdaParameterMetadata, selected *lambdaSourceFactory, declarationOnly bool, allowSerializable bool) bool {
 	if declarationOnly && selected != nil {
 		return false
 	}
@@ -189,7 +206,7 @@ func nativeLambdaBodyUseProjection(object *ClassObject, implementation *MemberIn
 				return false
 			}
 		} else if n == "altMetafactory" {
-			if d != "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;" || !nativeLambdaBodyMarkerArguments(row.BootstrapArguments, constant) {
+			if d != "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;" || !nativeLambdaBodyMarkerArgumentsWithOptions(row.BootstrapArguments, constant, allowSerializable) {
 				return false
 			}
 		} else {
@@ -218,6 +235,9 @@ func nativeLambdaBodyUseProjection(object *ClassObject, implementation *MemberIn
 	usedRows := map[int]bool{}
 	var factory *lambdaSourceFactory
 	for _, method := range object.Methods {
+		if allowSerializable && isSyntheticDeserializeLambdaMethod(object, method) {
+			continue
+		}
 		for _, attribute := range method.Attributes {
 			code, ok := attribute.(*CodeAttribute)
 			if !ok {
@@ -311,19 +331,28 @@ func nativeLambdaBodyUseProjection(object *ClassObject, implementation *MemberIn
 // present parameter table must be its exact bounded original schema; the body
 // emitter still owns capture binding, lexical registration and publication.
 func nativeLambdaBodyDeclarationSchema(object *ClassObject, method *MemberInfo, work *workbudget.Budget) (*lambdaParameterMetadata, bool) {
+	return nativeLambdaBodyDeclarationSchemaWithOptions(object, method, work, false)
+}
+
+func nativeLambdaBodyDeclarationSchemaWithOptions(object *ClassObject, method *MemberInfo, work *workbudget.Budget, allowSerializable bool) (*lambdaParameterMetadata, bool) {
 	parameters, known := readLambdaParameterMetadata(object, method, work)
 	if !known {
 		return nil, false
 	}
 	if parameters != nil {
-		return parameters, nativeLambdaBodyOriginalUseClosed(object, method, work, parameters)
+		return parameters, nativeLambdaBodyOriginalUseClosedWithOptions(object, method, work, allowSerializable, parameters)
 	}
-	return nil, nativeLambdaBodyOriginalUseClosed(object, method, work)
+	return nil, nativeLambdaBodyOriginalUseClosedWithOptions(object, method, work, allowSerializable)
 }
 
-// altMetafactory's existing marker-only source domain. Serializable lambdas and
-// explicit bridges retain the core's refusal; this is no new lambda capability.
 func nativeLambdaBodyMarkerArguments(args []uint16, constant func(uint16) ConstantInfo) bool {
+	return nativeLambdaBodyMarkerArgumentsWithOptions(args, constant, false)
+}
+
+// altMetafactory's marker-only strict domain permits flags&^6==0. Under
+// RetainUnprovedSource (allowSerializable=true), FLAG_SERIALIZABLE (bit 0) is
+// also accepted so lambda declarations render as `(T & Serializable) (...)`.
+func nativeLambdaBodyMarkerArgumentsWithOptions(args []uint16, constant func(uint16) ConstantInfo, allowSerializable bool) bool {
 	integer := func(index int) (int, bool) {
 		if index >= len(args) {
 			return 0, false
@@ -335,7 +364,11 @@ func nativeLambdaBodyMarkerArguments(args []uint16, constant func(uint16) Consta
 		return int(value.Value), true
 	}
 	flags, valid := integer(3)
-	if !valid || flags&^6 != 0 {
+	allowedMask := 6
+	if allowSerializable {
+		allowedMask = 7
+	}
+	if !valid || flags&^allowedMask != 0 {
 		return false
 	}
 	index := 4
